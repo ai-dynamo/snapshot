@@ -36,7 +36,7 @@ See the [Workload Contract](../reference/workload-contract.md#pod-requirements) 
 you use your own pod.
 
 Eight-GPU recipes need nothing different here. Their source Deployment also carries
-the multi-GPU annotation that
+the multi-GPU annotation, init container and launcher that
 [Multi-GPU Workloads](../reference/workload-contract.md#multi-gpu-workloads)
 describes.
 
@@ -129,9 +129,9 @@ spec:
 ### Eight-GPU Recipes
 
 The recipe's `SnapshotJob` carries the `nvidia.com/snapshot-multi-gpu: enabled`
-annotation on `spec.podTemplate`, and the Snapshot agent prepares the source pod
-for multi-GPU checkpoints. If you write your own `SnapshotJob`, add the
-annotation the same way:
+annotation on `spec.podTemplate`, and the controller prepares the source pod for
+multi-GPU checkpoints. If you write your own `SnapshotJob`, add the annotation the same
+way:
 
 ```yaml
 spec:

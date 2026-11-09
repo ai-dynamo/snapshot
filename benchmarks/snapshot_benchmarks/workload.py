@@ -41,12 +41,16 @@ def instrument_pod(pod, cfg, engine, model, run_id, *, restore=False):
     main["resources"]["limits"]["nvidia.com/gpu"] = str(model.tp)
     if "nvidia.com/gpu" in main["resources"].get("requests", {}):
         main["resources"]["requests"]["nvidia.com/gpu"] = str(model.tp)
+    prefix = []
+    if not restore and model.tp > 1:
+        command = main["command"]
+        prefix = command[: command.index("--") + 1]
     # Older operators do not replace the entrypoint with a restore proxy.
     # Keep the destination idle while the agent restores the saved process.
     main["command"] = (
         ["sleep", "infinity"]
         if restore
-        else [
+        else prefix + [
             "python3",
             "/snapshot-app/launch.py" if cfg.detailed_timing else "/snapshot-app/bench.py",
         ]

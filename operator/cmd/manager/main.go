@@ -83,7 +83,7 @@ func main() {
 		os.Exit(1)
 	}
 	if err := cuInterposeConfig.Validate(); err != nil {
-		ctrl.Log.Error(err, "invalid multi-GPU preparation configuration")
+		ctrl.Log.Error(err, "invalid cuinterpose configuration")
 		os.Exit(1)
 	}
 

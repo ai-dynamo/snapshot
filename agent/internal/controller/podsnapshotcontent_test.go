@@ -71,9 +71,9 @@ func TestPreflightCuInterpose(t *testing.T) {
 	}
 }
 
-// TestReconcileCapture_CuInterposeWithoutDeliveryFails proves a misconfigured opt-in
+// TestReconcileCapture_CuInterposeWithoutLauncherFails proves a misconfigured opt-in
 // fails without waiting for readiness and without touching the source.
-func TestReconcileCapture_CuInterposeWithoutDeliveryFails(t *testing.T) {
+func TestReconcileCapture_CuInterposeWithoutLauncherFails(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	pod := makeSourcePod()
 	pod.Annotations = map[string]string{podcontract.CuInterposeAnnotation: "enabled"}

@@ -36,8 +36,9 @@ for vLLM. Each framework page lists its own under After the Restore:
 
 A restore profile is a Deployment manifest that creates the restored pod. It keeps
 the source pod's image, resources, node selection, volumes and security settings. It
-leaves out what only the source pod needs: the model download init container,
-the container arguments and engine settings, and the multi-GPU annotation.
+leaves out what only the source pod needs: the init containers (the model download
+and, for eight GPUs, the copy of Snapshot's multi-GPU libraries), the container
+arguments and engine settings, and the multi-GPU launcher and annotation.
 
 Each framework ships two profiles under `restore/`, one for each GPU count. Your
 recipe already chose one: `$RESTORE_MANIFEST`, set in

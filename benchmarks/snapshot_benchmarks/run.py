@@ -144,8 +144,8 @@ def _container_started_at(pod, container_name: str) -> datetime.datetime | None:
     return None
 
 
-def _validate_snapshot_agent_present(cfg: BenchmarkConfig) -> None:
-    """Check that the selected node runs the agent before deploying the workload."""
+def _validate_snapshot_agent_present(cfg: BenchmarkConfig) -> str:
+    """Find the selected node's agent image before deploying the workload."""
     snapshot_cfg = cfg.snapshot_e2e_config()
     agents = k8s.list_snapshot_pods(
         snapshot_cfg.namespace, snapshot_cfg.release, "snapshot-agent"
@@ -155,8 +155,9 @@ def _validate_snapshot_agent_present(cfg: BenchmarkConfig) -> None:
             f"no snapshot-agent pod found in namespace {snapshot_cfg.namespace!r} for "
             f"release {snapshot_cfg.release!r} -- check --snapshot-namespace and --release"
         )
-    if any(pod.spec.node_name == cfg.node for pod in agents):
-        return
+    for pod in agents:
+        if pod.spec.node_name == cfg.node:
+            return next(c.image for c in pod.spec.containers if c.name == "agent")
     raise RuntimeError("No snapshot-agent on selected node: " + cfg.node)
 
 
@@ -206,9 +207,9 @@ def run_benchmark(
     folder = evidence_dir / run_id
     folder.mkdir(parents=True, exist_ok=False)
     measurement.save(folder / "settings.json", dataclasses.asdict(cfg))
+    agent_image = None
     if mode == "both" or model.tp > 1:
-        # Checkpointing needs the agent on the selected node.
-        _validate_snapshot_agent_present(cfg)
+        agent_image = _validate_snapshot_agent_present(cfg)
 
     source_name = f"bench-source-{run_id}"
 
@@ -253,6 +254,9 @@ def run_benchmark(
             tolerations=tolerations,
         )
         source_manifest = instrument_pod(source_manifest, cfg, engine, model, run_id)
+        for container in source_manifest["spec"].get("initContainers", []):
+            if container["name"] == "snapshot-cuda-install":
+                container["image"] = agent_image
         app = app_configmap(engine, cfg.workload_namespace, "bench-app-" + run_id)
         measurement.save(folder / "app.json", app)
         measurement.save(folder / "source-manifest.json", source_manifest)
@@ -269,6 +273,12 @@ def run_benchmark(
             cfg.workload_namespace, source_name, "Ready", timeout=timeout
         )
         measurement.save(folder / "source-pod.json", source_pod)
+        if model.tp > 1:
+            main = next(
+                c for c in source_pod.spec.containers if c.name == engine.container_name
+            )
+            if not main.command or Path(main.command[0]).name != "cuinterpose-launch":
+                raise ValueError("Multi-GPU source did not use cuinterpose-launch")
         cold_measurement, source_token = measurement.source_measurement(
             cfg, source_pod, folder
         )

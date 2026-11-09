@@ -107,7 +107,7 @@ def cluster():
     )
     boundaries = {
         "load_config": None,
-        "_validate_snapshot_agent_present": None,
+        "_validate_snapshot_agent_present": "snapshot-agent:test",
         "_collect_agent_log_phases": AgentLogPhases(),
         "_wait_for_pod_condition": lambda namespace, name, condition, **kwargs: pods[
             name
@@ -492,6 +492,9 @@ class BenchmarkTests(unittest.TestCase):
                     self.assertEqual(
                         env["BENCHMARK_DETAILED_TIMING"], "1" if enabled else "0"
                     )
+                    self.assertEqual(
+                        Path(main["command"][0]).name, "cuinterpose-launch"
+                    )
 
     def test_cold_phases_preserve_measured_times_without_scaling(self):
         measured = cold_measurement()
@@ -665,20 +668,25 @@ class BenchmarkTests(unittest.TestCase):
                                 ],
                                 "enabled",
                             )
-                    # The agent delivers the multi-GPU launcher, so the source
-                    # keeps the engine's own command and carries no installer.
-                    self.assertNotEqual(
-                        Path(source["spec"]["containers"][0]["command"][0]).name,
-                        "cuinterpose-launch",
-                    )
-                    self.assertFalse(
-                        any(
-                            c["name"] == "snapshot-cuda-install"
-                            for c in source["spec"].get("initContainers", [])
+                    if tp > 1:
+                        self.assertEqual(
+                            Path(source["spec"]["containers"][0]["command"][0]).name,
+                            "cuinterpose-launch",
                         )
-                    )
+                        installer = next(
+                            c
+                            for c in source["spec"]["initContainers"]
+                            if c["name"] == "snapshot-cuda-install"
+                        )
+                        self.assertIn(
+                            "/usr/local/bin/cuinterpose-launch", installer["args"]
+                        )
                     self.assertEqual(
-                        source["spec"]["containers"][0]["volumeMounts"],
+                        [
+                            m
+                            for m in source["spec"]["containers"][0]["volumeMounts"]
+                            if m["name"] != "snapshot-cuda"
+                        ],
                         restore["spec"]["containers"][0]["volumeMounts"],
                     )
                     self.assertFalse(

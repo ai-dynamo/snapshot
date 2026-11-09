@@ -37,6 +37,7 @@ from snapshot_e2e.frameworks import framework_image_overridden
 from snapshot_e2e.workloads import INERT_COMMAND
 from snapshot_e2e.workloads import TestRun
 from snapshot_e2e.workloads import same_node_affinity
+from snapshot_e2e.workloads import workload_image
 from snapshot_e2e.workloads import workload_scheduling
 
 RESTORE_FROM_ANNOTATION = "nvidia.com/restore-from"
@@ -256,7 +257,14 @@ def pod_from_deployment(
     pull_policy = "Always" if framework_image_overridden() else "IfNotPresent"
     original_image = main["image"]
     for container in pod_spec.get("initContainers", []) + pod_spec["containers"]:
-        if container["image"] == original_image:
+        if container["image"] == "${SNAPSHOT_AGENT_IMAGE}":
+            # Resolve only the guide's installer placeholder. Its image supplies
+            # the same bundle as the installed Snapshot agent, not the engine.
+            container["image"] = workload_image()
+            container["imagePullPolicy"] = (
+                "IfNotPresent" if "@sha256:" in container["image"] else "Always"
+            )
+        elif container["image"] == original_image:
             container["image"] = image
             container["imagePullPolicy"] = pull_policy
 
