@@ -87,7 +87,7 @@ func Start(t testing.TB, modify ...func(*server.Config)) *Coordinator {
 func (c *Coordinator) Config(uid types.UID, member string) coordinator.Config {
 	return coordinator.Config{
 		URLs:       []string{"tls://" + c.Addr().String()},
-		RootCAs:    c.RootCAs,
+		RootCAs:    func() (*x509.CertPool, error) { return c.RootCAs, nil },
 		ServerName: "localhost",
 		Attempt:    string(uid),
 		Member:     member,

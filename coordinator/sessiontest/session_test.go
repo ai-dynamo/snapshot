@@ -5,8 +5,10 @@ package sessiontest
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -343,7 +345,8 @@ func TestSessionFail(t *testing.T) {
 }
 
 // TestConnect covers Connect: it waits while the coordinator refuses it, reads
-// Meta, and refuses a member the session does not have.
+// Meta, refuses a member the session does not have, and retries a handshake
+// whose CAs it could not read.
 func TestConnect(t *testing.T) {
 	h := newHarness(t)
 
@@ -392,6 +395,20 @@ func TestConnect(t *testing.T) {
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 	})
 
+	t.Run("connects again once it can read its CAs", func(t *testing.T) {
+		ses := h.session(t, 1)
+		tr := newTrust(h.ca)
+		s := ses.connectTrusting(t, 0, tr)
+		tr.unreadable.Store(true)
+		ses.cutUntilRefused(t, 0, tr)
+		assert.True(t, slices.ContainsFunc(h.logs.all(), func(line string) bool {
+			return strings.Contains(line, "Reading the coordinator's CA failed")
+		}), "the failed read must be logged")
+		tr.unreadable.Store(false)
+		require.NoError(t, s.Snapshot().Insert(within(t), "k", []byte("v")))
+		require.NoError(t, s.Err())
+	})
+
 	t.Run("refuses a member the session does not have", func(t *testing.T) {
 		cfg := h.session(t, 1).config(0)
 		cfg.Member = "stranger"
@@ -415,7 +432,10 @@ func TestConnect(t *testing.T) {
 		modify func(*coordinator.Config)
 	}{
 		{"no URL", func(c *coordinator.Config) { c.URLs = nil }},
-		{"no CA pool", func(c *coordinator.Config) { c.RootCAs = nil }},
+		{"no CA source", func(c *coordinator.Config) { c.RootCAs = nil }},
+		{"a CA source that returns no pool", func(c *coordinator.Config) {
+			c.RootCAs = func() (*x509.CertPool, error) { return nil, nil }
+		}},
 		{"no token source", func(c *coordinator.Config) { c.Token = nil }},
 		{"an attempt too long for its buckets", func(c *coordinator.Config) {
 			c.Attempt = strings.Repeat("u", session.MaxAttemptLength+1)

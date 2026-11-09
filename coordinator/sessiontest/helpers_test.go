@@ -16,11 +16,13 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -165,7 +167,7 @@ func (h *harness) sessionUntil(t *testing.T, n int, deadline time.Time) *testSes
 func (ses *testSession) config(member int) coordinator.Config {
 	return coordinator.Config{
 		URLs:       []string{"tls://" + ses.proxies[member].addr()},
-		RootCAs:    ses.h.ca,
+		RootCAs:    func() (*x509.CertPool, error) { return ses.h.ca, nil },
 		ServerName: "localhost",
 		Attempt:    string(ses.spec.UID),
 		Member:     ses.spec.Members[member].ID,
@@ -173,6 +175,52 @@ func (ses *testSession) config(member int) coordinator.Config {
 		Clock:      ses.h.clock,
 		Log:        ses.h.logs.logger(),
 	}
+}
+
+// trust is the CAs a member's client reads on every handshake, which a test
+// replaces, as the kubelet refreshes a mounted ca.crt, or makes unreadable.
+type trust struct {
+	pool       atomic.Pointer[x509.CertPool]
+	unreadable atomic.Bool
+	reads      atomic.Int64
+}
+
+func newTrust(pool *x509.CertPool) *trust {
+	tr := &trust{}
+	tr.pool.Store(pool)
+	return tr
+}
+
+// RootCAs implements coordinator.Config's RootCAs.
+func (tr *trust) RootCAs() (*x509.CertPool, error) {
+	tr.reads.Add(1)
+	if tr.unreadable.Load() {
+		return nil, errors.New("ca.crt is being replaced")
+	}
+	return tr.pool.Load(), nil
+}
+
+// connectTrusting connects one member, which reads its CAs from tr, and
+// closes its session when the test t ends.
+func (ses *testSession) connectTrusting(t *testing.T, member int, tr *trust) coordinator.Session {
+	t.Helper()
+	cfg := ses.config(member)
+	cfg.RootCAs = tr.RootCAs
+	s, err := coordinator.Connect(within(t), cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	return s
+}
+
+// cutUntilRefused cuts a member's connections, and waits until its client,
+// which reads its CAs from tr, has read them twice since: the handshake that
+// read them first failed, and the client is trying again.
+func (ses *testSession) cutUntilRefused(t *testing.T, member int, tr *trust) {
+	t.Helper()
+	reads := tr.reads.Load()
+	ses.cut(member)
+	require.Eventually(t, func() bool { return tr.reads.Load() >= reads+2 }, 10*time.Second, 5*time.Millisecond,
+		"member-%d did not read its CAs again", member)
 }
 
 // connect connects one member, and closes its session when the test t ends.

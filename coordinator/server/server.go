@@ -102,8 +102,9 @@ const (
 type Config struct {
 	// Host and Port are where the client listener listens. Port defaults to
 	// 4222, and natsserver.RANDOM_PORT picks a free one. Only the agents need
-	// to reach it, so the host should let only the agents' Pods connect, for
-	// example with a NetworkPolicy.
+	// to reach it, so the host must restrict who reaches the port where it
+	// can, for example with a NetworkPolicy, or with a host firewall when it
+	// uses the host's network.
 	Host string
 	Port int
 

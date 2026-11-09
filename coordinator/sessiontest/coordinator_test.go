@@ -6,7 +6,6 @@ package sessiontest
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -230,8 +229,10 @@ func TestShutdown(t *testing.T) {
 	require.Error(t, err, "the listener must be closed")
 }
 
-// TestTLSRotation serves a rotated certificate to new connections without
-// restarting anything.
+// TestTLSRotation replaces the coordinator's CA without restarting anything:
+// the coordinator serves the certificate the new CA signed to new connections,
+// and a member, which reads its CAs on every handshake, connects again once it
+// trusts the new CA, and keeps its session.
 func TestTLSRotation(t *testing.T) {
 	oldCA, oldCert := testcert.New(t)
 	newCA, newCert := testcert.New(t)
@@ -246,19 +247,22 @@ func TestTLSRotation(t *testing.T) {
 		}
 	})
 	ses := h.session(t, 2)
-	connect := func(member int, ca *x509.CertPool) coordinator.Session {
-		cfg := ses.config(member)
-		cfg.RootCAs = ca
-		s, err := coordinator.Connect(within(t), cfg)
-		require.NoError(t, err)
-		t.Cleanup(func() { require.NoError(t, s.Close()) })
-		return s
-	}
-	before := connect(0, oldCA)
+	rotated := newTrust(oldCA)
+	before := ses.connectTrusting(t, 0, rotated)
 	current.Store(&newCert)
-	after := connect(1, newCA)
+	after := ses.connectTrusting(t, 1, newTrust(newCA))
 	require.NoError(t, before.Snapshot().Insert(within(t), "k", []byte("v")))
 	got, err := after.Snapshot().Get(within(t), "k", 0)
 	require.NoError(t, err)
 	assert.Equal(t, "v", string(got))
+
+	// The member that trusts only the old CA is refused once its connection
+	// breaks, until it reads the new CA.
+	ses.cutUntilRefused(t, 0, rotated)
+	rotated.pool.Store(newCA)
+	require.NoError(t, before.Snapshot().Insert(within(t), "k2", []byte("v2")))
+	got, err = after.Snapshot().Get(within(t), "k2", 0)
+	require.NoError(t, err)
+	assert.Equal(t, "v2", string(got))
+	require.NoError(t, before.Err())
 }

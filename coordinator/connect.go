@@ -24,14 +24,17 @@ import (
 
 // Config is what a member needs to connect to its session.
 type Config struct {
-	// URLs are the coordinator's client URLs, such as
-	// tls://snapshot-coordinator.snapshot-system.svc:4222. The client
-	// connects to any of them, and reconnects to any of them.
+	// URLs are the coordinator's client URLs, such as tls://10.0.0.12:4224, a
+	// node's IP. The client connects to any of them, and reconnects to any of
+	// them.
 	URLs []string
 
-	// RootCAs verifies the coordinator's serving certificate. The connection
-	// always uses TLS.
-	RootCAs *x509.CertPool
+	// RootCAs returns the CAs that verify the coordinator's serving
+	// certificate; the connection always uses TLS 1.3. It is called on every
+	// connect and reconnect, so a replaced CA is trusted once the file it is
+	// read from is refreshed. An error, or a nil pool, fails that handshake,
+	// and the client retries it as any other failed connect.
+	RootCAs func() (*x509.CertPool, error)
 
 	// ServerName is the name the coordinator's certificate must carry. It
 	// defaults to each URL's host.
@@ -64,7 +67,7 @@ func (c Config) validate() error {
 	case len(c.URLs) == 0:
 		return fmt.Errorf("no coordinator URL: %w", session.ErrInvalid)
 	case c.RootCAs == nil:
-		return fmt.Errorf("no CA pool for the coordinator's certificate: %w", session.ErrInvalid)
+		return fmt.Errorf("no CA source for the coordinator's certificate: %w", session.ErrInvalid)
 	case c.Token == nil:
 		return fmt.Errorf("no token source: %w", session.ErrInvalid)
 	}
@@ -94,12 +97,17 @@ const (
 
 // Connect connects to the coordinator as cfg.Member of the attempt cfg.Attempt,
 // and reads the session's Meta. An agent connects once for each member it
-// hosts. It waits while the coordinator refuses the
-// connection, which it does until it holds the session and has checked the
-// token, and reports session.ErrForbidden, together with ctx's error, if ctx
-// is done before it is admitted. Since the coordinator admits a joining member
-// only once the session exists, it reports session.ErrNotFound only if the
-// session is removed while the member joins.
+// hosts. It waits while the coordinator refuses the connection, which it does
+// until it holds the session and has checked the token, and reports
+// session.ErrForbidden, together with ctx's error, if ctx is done before it is
+// admitted. Since the coordinator admits a joining member only once the
+// session exists, it reports session.ErrNotFound only if the session is
+// removed while the member joins.
+//
+// Connect reads cfg.RootCAs once before it first connects, and returns at once
+// if that fails: a CA that cannot be read when the agent starts is not waited
+// for. Once Connect has read it, a failed read fails only the handshake that
+// needed it, which the client retries.
 func Connect(ctx context.Context, cfg Config) (Session, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -136,7 +144,20 @@ func Connect(ctx context.Context, cfg Config) (Session, error) {
 // and its connect, reconnection, and keepalive settings.
 func (s *client) options(cfg Config) []nats.Option {
 	return []nats.Option{
-		nats.Secure(&tls.Config{RootCAs: cfg.RootCAs, ServerName: cfg.ServerName, MinVersion: tls.VersionTLS12}),
+		// Both ends are ours, so neither needs anything older than TLS 1.3.
+		nats.Secure(&tls.Config{ServerName: cfg.ServerName, MinVersion: tls.VersionTLS13}),
+		// nats.go retries a handshake that fails here without reporting why, so
+		// the client logs it. A nil pool would trust the host's CAs instead.
+		nats.ClientTLSConfig(nil, func() (*x509.CertPool, error) {
+			pool, err := cfg.RootCAs()
+			if err == nil && pool == nil {
+				err = fmt.Errorf("no CA pool for the coordinator's certificate: %w", session.ErrInvalid)
+			}
+			if err != nil {
+				s.log.Error(err, "Reading the coordinator's CA failed; this connection attempt fails")
+			}
+			return pool, err
+		}),
 		nats.UserInfoHandler(func() (string, string) {
 			if epoch := s.epoch.Load(); epoch != 0 {
 				return session.UserName(s.attempt, s.member), strconv.FormatUint(epoch, 10)
