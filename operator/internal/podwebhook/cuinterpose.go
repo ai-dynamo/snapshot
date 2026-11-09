@@ -63,6 +63,7 @@ func (i *CuInterposeInjector) Handle(ctx context.Context, req admission.Request)
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 	ctx = log.IntoContext(ctx, log.FromContext(ctx).WithValues("namespace", req.Namespace, "pod", pod.Name, "generateName", pod.GenerateName))
+	original := pod.Spec.DeepCopy()
 	outcome, err := i.shape(ctx, pod)
 	if err != nil {
 		return admission.Denied(err.Error())
@@ -74,7 +75,7 @@ func (i *CuInterposeInjector) Handle(ctx context.Context, req admission.Request)
 		}
 		return response
 	}
-	shaped, err := replaceSpec(req.Object.Raw, &pod.Spec)
+	shaped, err := applyShaping(req.Object.Raw, original, &pod.Spec, outcome.targets)
 	if err != nil {
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
@@ -82,20 +83,105 @@ func (i *CuInterposeInjector) Handle(ctx context.Context, req admission.Request)
 	return admission.PatchResponseFromRaw(req.Object.Raw, shaped)
 }
 
-// replaceSpec puts spec into the Pod as the API server serialized it, so the
-// patch touches nothing but the spec: re-encoding the whole Go struct would also
-// rewrite fields the struct renders differently, such as a null creationTimestamp.
-func replaceSpec(raw []byte, spec *corev1.PodSpec) ([]byte, error) {
+// applyShaping carries the difference between original and shaped over to the
+// Pod as the API server serialized it, and returns that document. Re-encoding
+// the decoded Go struct instead would drop every field the operator's API types
+// do not know, such as one a newer API server adds, and the patch would remove it
+// from the Pod. So the raw document is edited in place: the new volume, init
+// container and volume mounts are appended to the existing arrays, and only the
+// targets' command is replaced. Shaping appends and never reorders, so the new
+// entries are the suffix of each shaped slice.
+func applyShaping(raw []byte, original, shaped *corev1.PodSpec, targets []string) ([]byte, error) {
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &object); err != nil {
 		return nil, fmt.Errorf("decode admitted Pod: %w", err)
 	}
-	encoded, err := json.Marshal(spec)
-	if err != nil {
-		return nil, fmt.Errorf("encode shaped Pod spec: %w", err)
+	var spec map[string]json.RawMessage
+	if err := json.Unmarshal(object["spec"], &spec); err != nil {
+		return nil, fmt.Errorf("decode admitted Pod spec: %w", err)
 	}
-	object["spec"] = encoded
+	if err := appendRaw(spec, "volumes", shaped.Volumes[len(original.Volumes):]); err != nil {
+		return nil, err
+	}
+	if err := appendRaw(spec, "initContainers", shaped.InitContainers[len(original.InitContainers):]); err != nil {
+		return nil, err
+	}
+	var containers []json.RawMessage
+	if err := json.Unmarshal(spec["containers"], &containers); err != nil {
+		return nil, fmt.Errorf("decode admitted containers: %w", err)
+	}
+	for index, rawContainer := range containers {
+		var named struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(rawContainer, &named); err != nil {
+			return nil, fmt.Errorf("decode admitted container: %w", err)
+		}
+		if !slices.Contains(targets, named.Name) {
+			continue
+		}
+		var container map[string]json.RawMessage
+		if err := json.Unmarshal(rawContainer, &container); err != nil {
+			return nil, fmt.Errorf("decode admitted container %q: %w", named.Name, err)
+		}
+		before, after := containerByName(original, named.Name), containerByName(shaped, named.Name)
+		command, err := json.Marshal(after.Command)
+		if err != nil {
+			return nil, err
+		}
+		container["command"] = command
+		if err := appendRaw(container, "volumeMounts", after.VolumeMounts[len(before.VolumeMounts):]); err != nil {
+			return nil, err
+		}
+		if containers[index], err = json.Marshal(container); err != nil {
+			return nil, err
+		}
+	}
+	encoded, err := json.Marshal(containers)
+	if err != nil {
+		return nil, err
+	}
+	spec["containers"] = encoded
+	if object["spec"], err = json.Marshal(spec); err != nil {
+		return nil, err
+	}
 	return json.Marshal(object)
+}
+
+// appendRaw appends items to the JSON array at object[key], creating it when
+// absent, without re-encoding the existing elements.
+func appendRaw[T any](object map[string]json.RawMessage, key string, items []T) error {
+	if len(items) == 0 {
+		return nil
+	}
+	var array []json.RawMessage
+	if existing, ok := object[key]; ok {
+		if err := json.Unmarshal(existing, &array); err != nil {
+			return fmt.Errorf("decode admitted %s: %w", key, err)
+		}
+	}
+	for _, item := range items {
+		encoded, err := json.Marshal(item)
+		if err != nil {
+			return err
+		}
+		array = append(array, encoded)
+	}
+	encoded, err := json.Marshal(array)
+	if err != nil {
+		return err
+	}
+	object[key] = encoded
+	return nil
+}
+
+func containerByName(spec *corev1.PodSpec, name string) *corev1.Container {
+	for i := range spec.Containers {
+		if spec.Containers[i].Name == name {
+			return &spec.Containers[i]
+		}
+	}
+	return nil
 }
 
 // shapeOutcome says what shape did to the Pod, and why when it did nothing.

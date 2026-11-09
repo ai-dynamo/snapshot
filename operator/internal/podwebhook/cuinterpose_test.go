@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
+	"github.com/ai-dynamo/snapshot/operator/internal/protocol"
 	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 )
 
@@ -206,6 +207,66 @@ func TestHandlePatchesOptedInPods(t *testing.T) {
 		assert.NotContains(t, path, "/spec/containers/1", "the sidecar is untouched")
 		assert.NotContains(t, path, "/metadata")
 	}
+}
+
+func TestHandleKeepsFieldsTheOperatorDoesNotKnow(t *testing.T) {
+	// A newer API server can send spec fields this operator's API types lack.
+	// They must survive in the spec, in a target container, and in the existing
+	// volumes and init containers the shaping appends to.
+	raw := []byte(`{"apiVersion":"v1","kind":"Pod","metadata":{"name":"worker","namespace":"team",` +
+		`"annotations":{"nvidia.com/snapshot-multi-gpu":"enabled"}},"spec":{"futureSpecField":{"on":true},` +
+		`"initContainers":[{"name":"setup","image":"registry.example/setup:v1","futureContainerField":"kept"}],` +
+		`"volumes":[{"name":"data","emptyDir":{},"futureVolumeField":1}],` +
+		`"containers":[{"name":"main","image":"registry.example/vllm:v1","command":["python3"],"args":["app.py"],` +
+		`"futureContainerField":"kept","volumeMounts":[{"name":"data","mountPath":"/data","futureMountField":true}],` +
+		`"resources":{"limits":{"nvidia.com/gpu":"1"}}}]}}`)
+	request := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+		Operation: admissionv1.Create, Namespace: "team", Object: runtime.RawExtension{Raw: raw},
+	}}
+	response := newInjector().Handle(context.Background(), request)
+	require.True(t, response.Allowed, response.Result)
+	require.NotEmpty(t, response.Patches)
+	for _, patch := range response.Patches {
+		assert.NotEqual(t, "remove", patch.Operation, patch.Path)
+		assert.NotContains(t, patch.Path, "future", "unknown fields are never touched")
+	}
+	paths := patchPaths(response)
+	assert.Contains(t, paths, "/spec/volumes/1")
+	assert.Contains(t, paths, "/spec/initContainers/1")
+	assert.Contains(t, paths, "/spec/containers/0/volumeMounts/1")
+	assert.True(t, slices.ContainsFunc(paths, func(path string) bool {
+		return strings.HasPrefix(path, "/spec/containers/0/command")
+	}), paths)
+	for _, path := range paths {
+		assert.NotContains(t, path, "/spec/containers/0/args")
+	}
+}
+
+func TestApplyShapingAppendsOnly(t *testing.T) {
+	raw := []byte(`{"spec":{"containers":[{"name":"main","command":["python3"],"unknown":1}]}}`)
+	original := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Command: []string{"python3"}}}}
+	shaped := original.DeepCopy()
+	require.NoError(t, protocol.ShapeCuInterposeCapture(shaped, []string{"main"}, testInstaller()))
+
+	out, err := applyShaping(raw, original, shaped, []string{"main"})
+	require.NoError(t, err)
+	var decoded struct {
+		Spec struct {
+			Volumes        []map[string]any `json:"volumes"`
+			InitContainers []map[string]any `json:"initContainers"`
+			Containers     []map[string]any `json:"containers"`
+		} `json:"spec"`
+	}
+	require.NoError(t, json.Unmarshal(out, &decoded))
+	require.Len(t, decoded.Spec.Volumes, 1)
+	require.Len(t, decoded.Spec.InitContainers, 1)
+	require.Len(t, decoded.Spec.Containers, 1)
+	main := decoded.Spec.Containers[0]
+	assert.EqualValues(t, 1, main["unknown"])
+	assert.Len(t, main["command"], len(podcontract.CuInterposeLauncherPrefix())+1)
+	assert.Len(t, main["volumeMounts"], 1)
+	_, hasArgs := main["args"]
+	assert.False(t, hasArgs, "args are never written when the Pod set none")
 }
 
 func TestHandlePatchesOnlyTheSpecOfServerShapedObjects(t *testing.T) {
