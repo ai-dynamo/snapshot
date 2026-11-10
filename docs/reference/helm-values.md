@@ -123,6 +123,40 @@ payload checksums.
 | `rbac.create`                  | `true`                                  | Create agent and operator RBAC.                                                                                                           |
 | `serviceAccount.create`        | `true`                                  | Create the agent service account.                                                                                                         |
 
+## Pod Groups
+
+Pod groups are alpha. With `podGroups.enabled`, each agent pod runs the pod
+group coordinator in an unprivileged container of its own, `coordinator`, which
+listens on the node's IP. It runs as a non-root user with no capabilities, on
+the host's network, so it cannot bind a port below 1024. Pod groups need a
+newer Kubernetes than the baseline; see
+[Prerequisites](../get-started/prerequisites.md#pod-groups).
+
+| Value                                 | Default                             | Description                                                                                                                        |
+|---------------------------------------|-------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
+| `podGroups.enabled`                   | `false`                             | Install what pod groups need: the coordinator, its RBAC, and the operator's issuer of its TLS certificate.                         |
+| `coordinator.port`                    | `4224`                              | Port agents connect to over TLS, on the node's IP. 1024 to 65535.                                                                  |
+| `coordinator.healthPort`              | `4225`                              | Port of the coordinator's health endpoint, on the node's IP. 1024 to 65535. The agent pod is ready only once the coordinator is.   |
+| `coordinator.maxMemoryBytes`          | `1073741824`                        | Memory, in bytes, that every group's session shares. A group's writes fail once it is full.                                        |
+| `coordinator.resources`               | 100m CPU / 128Mi request, 2Gi limit | Coordinator resources. Keep the memory limit at about twice `coordinator.maxMemoryBytes`.                                          |
+| `coordinator.tls.serving.secretName`  | `""`                                | Your own `kubernetes.io/tls` Secret with `tls.crt` and `tls.key`, in the release namespace. Empty: the operator issues one.        |
+| `coordinator.tls.trust.configMapName` | `""`                                | Your own ConfigMap holding the CA bundle agents trust, in the release namespace.                                                   |
+| `coordinator.tls.trust.secretName`    | `""`                                | Your own Secret holding that CA bundle, in the release namespace.                                                                  |
+| `coordinator.tls.trust.key`           | `ca.crt`                            | Key holding the CA bundle in your ConfigMap or Secret.                                                                             |
+| `coordinator.tls.serverName`          | `""`                                | DNS name your serving certificate carries, which agents verify. It is never resolved. Empty: `<fullname>-coordinator.<namespace>`. |
+
+By default, the operator issues the coordinator's certificate under a private
+CA, and writes three resources in the release namespace:
+`<fullname>-coordinator-ca`, `<fullname>-coordinator-tls`, and
+`<fullname>-coordinator-ca-bundle`. To bring your own instead, for example from
+cert-manager and trust-manager, set `coordinator.tls.serving.secretName` and
+exactly one of `coordinator.tls.trust.configMapName` and
+`coordinator.tls.trust.secretName`. The operator then issues nothing. The chart
+refuses one without the other, `coordinator.tls.serverName` or
+`coordinator.tls.trust.key` without your own resources, and a name the operator
+writes. See
+[Security Boundaries](../overview/architecture-overview.md#security-boundaries).
+
 ## Agent Config (`config.*`)
 
 `config.*` renders into the agent ConfigMap.

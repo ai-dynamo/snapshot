@@ -16,6 +16,11 @@ Review the [Prerequisites](prerequisites.md) before installing.
 - The snapshot volume claim, `snapshot-pvc`, or the wiring to an existing claim.
 - Cluster-scoped RBAC for the agent and the operator.
 - The seccomp profile that CRIU needs.
+- With `podGroups.enabled` (alpha), the pod group coordinator: an unprivileged
+  container in each agent pod that listens on the node's IP, on ports `4224`
+  and `4225` by default, and its RBAC. By default, the operator also issues the
+  coordinator's TLS certificate. See
+  [Security Boundaries](../overview/architecture-overview.md#security-boundaries).
 
 ## Allow the Privileged Node Agent
 
@@ -170,7 +175,8 @@ kubectl rollout status daemonset/snapshot-agent --namespace snapshot
 
 The operator and the `snapshot-agent` DaemonSet become ready once the node agent
 and its PageBroker sidecar are running on each GPU node. Each agent pod reports
-`2/2` containers ready. The snapshot volume claim reports `Bound`.
+`2/2` containers ready, or `3/3` with `podGroups.enabled`. The snapshot volume
+claim reports `Bound`.
 
 ## Uninstall
 

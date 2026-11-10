@@ -8,7 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 Use this page when the node agent or a component it runs fails. It covers an
 agent or restore pod that will not start, a GPU that fails with
 `target GPU is unavailable`, PageBroker that does not start after an S3 settings
-change, and CRIU reporting `Unable to create tun`.
+change, CRIU reporting `Unable to create tun`, and an agent pod that stays
+unready with pod groups enabled.
 
 ## The Agent or a Restore Pod Will Not Start
 
@@ -54,3 +55,34 @@ comes from a nonfatal TUN capability probe and can appear on successful
 restores. Workloads that do not use TUN devices do not need a `/dev/net/tun`
 mount. For a failed restore, look past this line to the final CRIU errors and
 the agent's `CRIU restore tail` diagnostics.
+
+## An Agent Pod Stays Unready with Pod Groups Enabled
+
+With `podGroups.enabled`, an agent pod is ready only once its `coordinator`
+container is. Until then, new pod groups with a member on that node wait at
+`AgentNotReady`, and a rollout of the agent DaemonSet pauses at that pod. Check
+these in order. `<fullname>` is `snapshot` for a release named `snapshot`.
+
+1. The serving Secret, `<fullname>-coordinator-tls` or
+   `coordinator.tls.serving.secretName`. The coordinator restarts until it
+   exists. With the operator's issuer, the operator log says why it is missing:
+
+   ```bash
+   kubectl get secret <fullname>-coordinator-tls -n <namespace>
+   kubectl logs deployment/<fullname>-operator -n <namespace> | grep coordinator-tls
+   ```
+
+2. RBAC. The agents' ServiceAccount, `<fullname>` by default, must be able to
+   list pod groups and create TokenReviews. With `rbac.create=false`, grant
+   both yourself:
+
+   ```bash
+   kubectl auth can-i list podgroupsnapshots.nvidia.com -n <namespace> --as system:serviceaccount:<namespace>:<fullname>
+   kubectl auth can-i create tokenreviews.authentication.k8s.io --as system:serviceaccount:<namespace>:<fullname>
+   ```
+
+3. The coordinator's log, which names what it failed to do:
+
+   ```bash
+   kubectl logs <agent-pod> -n <namespace> -c coordinator
+   ```
