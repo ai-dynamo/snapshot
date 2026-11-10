@@ -88,13 +88,15 @@ data:
       controlSocketPath: {{ printf "%s/pagebroker.sock" (include "snapshot.pageBrokerControlPath" .) | quote }}
       stagingPath: {{ include "snapshot.pageBrokerStagingPath" . | quote }}
 
-    # DEPRECATED keys, remove in v0.3.0+. The ConfigMap updates at once but the
-    # DaemonSet rolls node by node, and an agent reads its config only at startup:
-    # a v0.2.0 pod that restarts before the roll reaches it would read this file
-    # and find no restoreTimeoutSeconds, which is fatal at validation.
+    # checkpointTimeoutSeconds and restoreTimeoutSeconds below are DEPRECATED,
+    # remove in v0.3.0+. The ConfigMap updates at once but the DaemonSet rolls
+    # node by node, and an agent reads its config only at startup: a v0.2.0 pod
+    # that restarts before the roll reaches it would read this file and find no
+    # restoreTimeoutSeconds, which is fatal at validation.
     checkpoint:
       timeoutSeconds: {{ .Values.config.checkpoint.timeoutSeconds }}
       checkpointTimeoutSeconds: {{ .Values.config.checkpoint.timeoutSeconds }}
+      retryLimit: {{ .Values.config.checkpoint.retryLimit | default 0 }}
 
     restore:
       timeoutSeconds: {{ .Values.config.restore.timeoutSeconds }}
