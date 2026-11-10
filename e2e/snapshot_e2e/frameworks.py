@@ -3,7 +3,7 @@
 
 """Inference framework workloads under e2e test.
 
-Each framework's program and manifests live under docs/guides/<name>/ in the
+Each framework's program and manifests live under docs/using-snapshot/<name>/ in the
 repository root. This module pins what the tests need to know about each one:
 which control-dir files it writes, how long each phase may take, and which
 model it serves.
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import yaml
 
-FRAMEWORKS_DIR = Path(__file__).resolve().parent.parent.parent / "docs" / "guides"
+FRAMEWORKS_DIR = Path(__file__).resolve().parent.parent.parent / "docs" / "using-snapshot"
 
 CONTAINER = "main"
 API_PORT = 8000

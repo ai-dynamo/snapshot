@@ -185,7 +185,7 @@ class BenchmarkTests(unittest.TestCase):
                 self.assertTrue(methods["load_weights"].decorator_list)
 
     def test_trt_guide_serializes_compilation_without_benchmark_hooks(self):
-        path = Path(__file__).parents[2] / "docs/guides/tensorrt-llm/app.py"
+        path = Path(__file__).parents[2] / "docs/using-snapshot/tensorrt-llm/app.py"
         nodes = ast.parse(path.read_text()).body
         stop = next(
             i
@@ -205,7 +205,7 @@ class BenchmarkTests(unittest.TestCase):
                 self.assertEqual(os.environ["TORCHINDUCTOR_COMPILE_THREADS"], "1")
 
     def test_sglang_guide_keeps_kv_only_policy(self):
-        path = Path(__file__).parents[2] / "docs/guides/sglang/app.py"
+        path = Path(__file__).parents[2] / "docs/using-snapshot/sglang/app.py"
         fn = next(
             n
             for n in ast.parse(path.read_text()).body
@@ -228,7 +228,7 @@ class BenchmarkTests(unittest.TestCase):
             )
 
     def test_trt_guide_keeps_kv_sleep_policy(self):
-        path = Path(__file__).parents[2] / "docs/guides/tensorrt-llm/app.py"
+        path = Path(__file__).parents[2] / "docs/using-snapshot/tensorrt-llm/app.py"
         fn = next(
             n
             for n in ast.parse(path.read_text()).body

@@ -48,6 +48,9 @@ type CheckpointParams struct {
 	StartedAt time.Time
 	// CuInterposeRequested is the source Pod's explicit opt-in, already preflighted.
 	CuInterposeRequested bool
+	// DumpRetriesRemaining is what is left of the capture's retry budget; a repeat of
+	// the dump spends it like any other retry.
+	DumpRetriesRemaining int
 	// StoreID binds this capture to a configured store; empty means legacy.
 	StoreID string
 }
@@ -304,6 +307,8 @@ func (w *NodeController) attemptCheckpoint(
 		StartedAt:            time.Now(),
 		CuInterposeRequested: cuInterposeRequested,
 		StoreID:              storeID,
+		// Read only once a dump has failed, so a capture that succeeds never reads it.
+		DumpRetriesRemaining: w.config.Checkpoint.ResolveRetryLimit(),
 	}
 	// Success is success even past the deadline: executorCheckpoint returns nil only after it has
 	// stat'd the committed artifact, and the dump has already killed the source. Failing it here
@@ -625,6 +630,7 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		Clientset:            w.clientset,
 		CuInterposeRequested: params.CuInterposeRequested,
 		StoreID:              params.StoreID,
+		DumpRetriesRemaining: params.DumpRetriesRemaining,
 	}
 	artifact, err := executor.Checkpoint(ctx, w.runtime, log, req, w.config)
 	if err != nil {

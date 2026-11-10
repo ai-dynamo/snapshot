@@ -32,7 +32,7 @@ class GuideEngine:
         image_pull_policy=None,
         tolerations=None,
     ):
-        path = ROOT / "docs/guides" / self.guide / filename
+        path = ROOT / "docs/using-snapshot" / self.guide / filename
         template = yaml.safe_load(path.read_text())["spec"]["template"]
         spec = template["spec"]
         container = next(
@@ -60,7 +60,7 @@ class GuideEngine:
         pod = self._build("capture/qwen3-0.6b.yaml", **kwargs)
         if kwargs["model"].tp > 1:
             # Reuse the guide's launcher delivery without its large-model sizing.
-            path = ROOT / "docs/guides" / self.guide / "capture/glm-5.3.yaml"
+            path = ROOT / "docs/using-snapshot" / self.guide / "capture/glm-5.3.yaml"
             multi = yaml.safe_load(path.read_text())["spec"]["template"]["spec"]
             spec = pod["spec"]
             spec.setdefault("initContainers", []).extend(
