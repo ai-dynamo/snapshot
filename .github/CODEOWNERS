@@ -5,4 +5,4 @@
 
 # Proposal design documents are reviewed by the repository owners responsible
 # for the proposed change, rather than the documentation owners.
-/docs/proposals/** @ai-dynamo/snapshot-codeowners
+/docs/design/** @ai-dynamo/snapshot-codeowners

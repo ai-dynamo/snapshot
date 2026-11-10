@@ -43,7 +43,7 @@ func recoverPanic(log logr.Logger, operation string, onPanic func(error), keysAn
 }
 
 // failCaptureAfterPanic fails the work order, so a capture whose goroutine
-// died does not sit pending until its lease expires.
+// died does not sit pending on a reconcile that will never finish it.
 //
 // A panic can land after the capture committed but before Ready is written, so
 // a committed artifact is promoted first: AgentPanic is terminal, and a

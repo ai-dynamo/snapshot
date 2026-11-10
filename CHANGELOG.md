@@ -67,13 +67,13 @@ commit-level history for each release is on its
   (`storage.s3.caBundleConfigMapRef`), `pageBroker.s3.limits` and
   `pageBroker.transferEngine.modelStreamer`. Changing one restarts PageBroker.
   An install that sets none of them is unchanged. See
-  [Storage](docs/operations/storage.md#other-backends).
+  [Storage](docs/operate/configure-storage.md#other-backends).
 - `daemonset.affinity` accepts `nodeAffinity` instead of failing the install.
   The chart adds the agent's supported architectures to every non-empty
   required node selector term, so a term such as
   `example.com/pool DoesNotExist` keeps the agent off those nodes. An install
   that sets none is unchanged. See
-  [Agent DaemonSet and access](docs/reference/api.md#agent-daemonset-and-access).
+  [Agent DaemonSet and Access](docs/reference/helm-values.md#agent-daemonset-and-access).
 
 ### Changed
 
@@ -185,7 +185,7 @@ node, cutting cold-start time for large inference workloads.
 ### Known limitations
 
 Checkpoint and restore require compatible GPU and driver versions between the
-source and target node. See [Limitations](docs/limitations.md) for the current
+source and target node. See [Limitations](docs/overview/limitations.md) for the current
 boundaries.
 
 ## [0.1.0-rc2] - 2026-09-03
