@@ -446,3 +446,55 @@ func TestRunCheckpointDoesNotRetryAfterTheCommitFailed(t *testing.T) {
 
 	assert.Equal(t, 1, attempts, "a commit failure leaves no source for a second attempt")
 }
+
+// An attempt whose abort failed may still hold its transaction. Retrying would
+// prepare the same destination against it, which SNEP-394 forbids: a re-stage
+// must confirm release first.
+func TestClassifyAttemptDoesNotRetryAFailedAbort(t *testing.T) {
+	retryable := pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting")
+
+	clean := classifyAttempt(retryable)
+	require.True(t, clean.failure.retryable, "a retryable failure with a clean abort is retried")
+
+	withFailedAbort := classifyAttempt(errors.Join(retryable,
+		executor.CleanupFailure(errors.New("abort: transaction not released"))))
+	assert.False(t, withFailedAbort.failure.retryable,
+		"an unconfirmed release must not be re-staged over")
+	assert.Equal(t, clean.failure.reason, withFailedAbort.failure.reason,
+		"the cleanup failure must not become the reported cause")
+}
+
+// Recovery only hears about the attempt that suspended a workload. A source an
+// earlier attempt revived would otherwise be left running, holding its GPUs,
+// when a later attempt failed before suspending anything — the stuck Pod that
+// terminating on the first failure avoids.
+func TestRunCheckpointEndsASourceRevivedForARetryThatDidNotCome(t *testing.T) {
+	attemptRetryInitialDelayOriginal := attemptRetryInitialDelay
+	t.Cleanup(func() { attemptRetryInitialDelay = attemptRetryInitialDelayOriginal })
+	attemptRetryInitialDelay = time.Millisecond
+
+	content := makeWorkOrder("content-a", "node-a", "a")
+	w := makeNodeController(t, &fakeCheckpointer{}, content)
+	w.config.Checkpoint.RetryLimit = ptr.To(1)
+	retryable := pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting")
+
+	attempts := 0
+	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		attempts++
+		if attempts == 1 {
+			// Suspended the workload, so recovery revives it for the retry.
+			return nil, executor.SuspendedSourceFailure(retryable, executor.SuspendedSource{})
+		}
+		// Refused before anything was suspended, with the budget now spent.
+		return nil, retryable
+	}
+
+	require.NoError(t, w.runCheckpoint(context.Background(), content, makeSourcePod(),
+		"main", "cid", os.Getpid(), false, string(content.UID), t.TempDir()))
+
+	require.Equal(t, 2, attempts)
+	cs := w.clientset.(*fake.Clientset)
+	assert.True(t, sawEventReason(cs, reasonSourcePodResumed), "the first failure revived the source")
+	assert.True(t, sawEventReason(cs, reasonSourcePodTerminated),
+		"the revived source must not be left running once no attempt is coming")
+}
