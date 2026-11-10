@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/go-logr/logr"
 
@@ -53,25 +54,43 @@ func (w *NodeController) checkStagingCapacity(ctx context.Context, containerPID 
 	return nil
 }
 
-// refineFullStaging tells a staging volume that is momentarily occupied from one
-// this image can never fit, for a dump that ran out of room part-written.
+// refineFullStaging separates the storage conditions a part-written dump can hit.
 //
-// The preflight only ever establishes "too big", never "fits", so only
-// measuring says whether retrying this one is worth anything.
+// The preflight only ever establishes "too big", never "fits", so only measuring
+// says whether retrying this one is worth anything. Which volume filled matters
+// as much as how full it is: staging is transient and frees up between attempts,
+// while the artifact store holds committed checkpoints and does not.
 func (w *NodeController) refineFullStaging(ctx context.Context, failure captureFailure, err error, containerPID int) (captureFailure, error) {
 	var spaceErr *executor.DumpSpaceError
 	if !errors.As(err, &spaceErr) || spaceErr.Dir == "" {
 		return failure, err
 	}
 	logger := logr.FromContextOrDiscard(ctx)
+	// A dump that reached the store rather than staging filled a volume no retry
+	// on this node frees: the room there is taken by committed checkpoints.
+	if !w.isStagingDir(spaceErr.Dir) {
+		return captureFailure{reason: reasonStoreExhausted}, err
+	}
 	// The dump's directory is usually released before the failure is classified;
 	// its nearest surviving ancestor reports the same capacity.
-	total, capacityErr := w.stagingCapacityFn(nearestExistingDir(spaceErr.Dir))
+	measured, ok := stagingAncestor(spaceErr.Dir, w.config.PageBroker.StagingPath)
+	if !ok {
+		logger.V(1).Info("The dump's volume is gone; reporting the failure unrefined", "dir", spaceErr.Dir)
+		return failure, err
+	}
+	total, capacityErr := w.stagingCapacityFn(measured)
 	if capacityErr != nil {
 		logger.V(1).Info("Cannot measure staging; reporting the dump failure unrefined", "error", capacityErr.Error())
 		return failure, err
 	}
-	minimum, sizeErr := w.minimumImageSizeFn(snapshotruntime.HostProcPath, snapshotruntime.ProcessTreePIDs(containerPID))
+	pids := snapshotruntime.ProcessTreePIDs(containerPID)
+	if len(pids) == 0 {
+		// The dump already terminated the tree, so there is nothing left to size
+		// and a zero would read as "it fits".
+		logger.V(1).Info("The source is gone; reporting the dump failure unrefined")
+		return failure, err
+	}
+	minimum, sizeErr := w.minimumImageSizeFn(snapshotruntime.HostProcPath, pids)
 	if sizeErr != nil {
 		logger.V(1).Info("Cannot size the image; reporting the dump failure unrefined", "error", sizeErr.Error())
 		return failure, err
@@ -81,18 +100,40 @@ func (w *NodeController) refineFullStaging(ctx context.Context, failure captureF
 			"%w: image needs at least %d bytes but %s holds %d, short by %d",
 			err, minimum, spaceErr.Dir, total, shortfall)
 	}
-	// It fits, so the volume was occupied rather than too small — which frees up.
+	// minimum is a floor, so this says the image was not provably too big — not
+	// that it fits. Staging being merely occupied is the condition a retry can
+	// clear, and the numbers go in the log so the guess is auditable.
+	logger.V(1).Info("The image did not provably exceed its volume; treating the shortage as contention",
+		"minimum_bytes", minimum, "volume_bytes", total, "dir", spaceErr.Dir)
 	return captureFailure{reason: reasonStagingUnavailable, retryable: true}, err
 }
 
-func nearestExistingDir(dir string) string {
+// isStagingDir reports whether a dump wrote to the node's staging volume. An
+// unset staging path means the agent has none, so nothing it dumped was staged.
+func (w *NodeController) isStagingDir(dir string) bool {
+	staging := w.config.PageBroker.StagingPath
+	if staging == "" {
+		return false
+	}
+	rel, err := filepath.Rel(staging, dir)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
+}
+
+// stagingAncestor walks up to the first directory that is still there, stopping
+// at the staging root. Going past it would measure an unrelated filesystem —
+// eventually the agent's own rootfs — and report a capacity that was never the
+// dump's.
+func stagingAncestor(dir, staging string) (string, bool) {
 	for current := dir; ; {
 		if _, err := os.Stat(current); err == nil {
-			return current
+			return current, true
+		}
+		if current == staging {
+			return "", false
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
-			return current
+			return "", false
 		}
 		current = parent
 	}

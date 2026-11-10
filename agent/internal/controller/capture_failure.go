@@ -75,7 +75,7 @@ func classifyCaptureFailure(err error) captureFailure {
 		pagebroker.Failure_UNAVAILABLE, pagebroker.Failure_STORAGE_UNAVAILABLE:
 		// A destination that filled mid-write reports a generic storage error, so
 		// the message is all that separates it from a store that is merely unwell.
-		if executor.StepOf(err) == executor.StepCommitCheckpoint && isOutOfSpace(err) {
+		if executor.StepOf(err) == executor.StepCommitCheckpoint && isOutOfSpace(cause) {
 			return captureFailure{reason: reasonStoreExhausted}
 		}
 		return captureFailure{reason: reasonCheckpointFailed, retryable: true}
@@ -114,8 +114,10 @@ func captureCause(err error) error {
 }
 
 // isOutOfSpace reports a full filesystem. PageBroker gives a full destination no
-// code of its own, so for its errors the message text is all there is.
+// code of its own, so for its errors the message text is all there is. Give it
+// the cause rather than the whole error: a joined cleanup failure carrying the
+// same words would otherwise make a transient failure read as a full store.
 func isOutOfSpace(err error) bool {
 	return errors.Is(err, unix.ENOSPC) ||
-		strings.Contains(strings.ToLower(err.Error()), unix.ENOSPC.Error())
+		strings.Contains(strings.ToLower(err.Error()), strings.ToLower(unix.ENOSPC.Error()))
 }
