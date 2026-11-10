@@ -11,5 +11,13 @@
     9,
     10
   ],
-  "protocol_total_cells": 80
+  "protocol_total_cells": 80,
+  "continuation": {
+    "directory": "io-uring-benchmark-tail-20261028-cont2",
+    "completed_cells": 40,
+    "completed_pairs": 5,
+    "progress_sha256": null,
+    "progress_status": "unavailable",
+    "note": "Original formal-progress.json is unavailable; its SHA-256 was not retained in this package. The continuation cannot be independently verified from the packaged artifacts."
+  }
 }

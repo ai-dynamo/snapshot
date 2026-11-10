@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 [Read the independent benchmark report](REPORT.md).
 
-This folder packages the report and derived analysis for the three model sweeps and the targeted Dynamo restore follow-up. It contains no raw request exports, live cluster credentials or runnable cluster-control environment. Original experiment archives remain in their existing locations.
+This folder packages the report and derived analysis for the three model sweeps and the targeted Dynamo restore follow-up. It contains no raw request exports, live cluster credentials or runnable cluster-control environment.
 
 ## Contents
 
@@ -51,8 +51,13 @@ recorded in [the continuation source](analysis/tail/continuation-source.json).
 The frozen plan is preserved byte for byte so its hash still matches
 `plan_sha256` in the freeze record.
 
-The source record hashes the earlier segment's progress, not the continuation's
-own progress. Both `formal-progress.json` files and the raw request exports
-remain outside this package. No continuation progress hash is available here;
-the package manifest verifies the packaged files only. Recomputing the follow-up
-and verifying that continuation require the original archives.
+The source record's top-level hashes identify the earlier segment. Its
+`continuation` entry identifies the second segment and explicitly records
+`progress_status: "unavailable"` and `progress_sha256: null`: the original
+continuation progress file is unavailable, and its hash was not retained in the
+package. Renaming or reconstructing a file cannot restore that evidence.
+
+Both segments' `formal-progress.json` files and the raw request exports are
+absent from this package. The manifest verifies the packaged files only; the
+continuation cannot be independently verified from them. Recomputing the
+follow-up requires recovering the original archives.

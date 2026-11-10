@@ -195,7 +195,8 @@ The evidence supports limited throughput and average-performance impact for thes
 
 ## Reproducibility artifacts
 
-The report package includes per-model analysis, consolidated secondary-metric comparisons, follow-up results, validation receipts and a file-integrity manifest. Detailed CPU provenance and per-run values are preserved in the analysis JSON files. Raw request exports and complete run directories remain in the original benchmark archives unless separately included in the package.
+The report package includes per-model analysis, consolidated secondary-metric comparisons, follow-up results, validation receipts and a file-integrity manifest. Detailed CPU provenance and per-run values are preserved in the analysis JSON files. Raw request exports and complete run directories are not included in the
+package. The original continuation progress file is unavailable.
 
 - Main sweeps: 540 accepted cells per model; five paired repetitions per comparison.
 - Consolidated metrics: [CSV](analysis/all-model-paired-metrics.csv) and [JSON](analysis/all-model-paired-metrics.json).
@@ -203,9 +204,10 @@ The report package includes per-model analysis, consolidated secondary-metric co
   [receipt of validation in the original archive](analysis/final-analysis-validation.json).
   The package omits both segments' `formal-progress.json` records and raw
   request exports, so it cannot regenerate the follow-up results or sensitivity
-  tables. The earlier segment has a recorded progress hash; the continuation's
-  progress hash is not packaged, so its source integrity cannot be independently
-  verified here.
+  tables. The [source record](analysis/tail/continuation-source.json) retains
+  the earlier segment's progress hash and marks the continuation's original
+  progress file and hash as unavailable. Its source integrity cannot be
+  independently verified from this package.
 - Model revisions and frozen execution versions:
   [0.6B](analysis/0.6b/formal-freeze.json),
   [8B](analysis/8b/formal-freeze.json),
