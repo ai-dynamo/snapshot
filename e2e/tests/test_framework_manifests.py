@@ -340,8 +340,13 @@ def test_multi_gpu_recipe_preserves_capture_restore_contract(
         config=CONFIG, run=run, spec=spec, source_node="n0", image=IMAGE, model_cache=CACHE,
     )
     assert source["metadata"]["annotations"][fw.MULTI_GPU_ANNOTATION] == "enabled"
-    installer = next(c for c in source["spec"]["initContainers"] if c["name"] == "snapshot-cuda-install")
-    assert installer["image"] == AGENT_IMAGE
+    # The agent delivers the multi-GPU libraries to a target that mounts the
+    # control directory, so the recipe carries no installer or launcher.
+    source_main = fw.main_container(source)
+    assert all(c["name"] != "snapshot-cuda-install" for c in source["spec"].get("initContainers", []))
+    assert any(m["mountPath"] == workloads.CONTROL_DIR for m in source_main["volumeMounts"])
+    assert not any(m["mountPath"].startswith("/tmp/snapshot-cuda") for m in source_main["volumeMounts"])
+    assert not any("cuinterpose-launch" in part for part in source_main.get("command", []))
     model, revision, parallelism = frameworks.guide_model(fw.main_container(source)["args"])
     assert (model, parallelism) == (spec.model, 8)
     assert revision
@@ -351,8 +356,8 @@ def test_multi_gpu_recipe_preserves_capture_restore_contract(
         assert main["resources"]["limits"]["nvidia.com/gpu"] == "8"
     restore_main = fw.main_container(restore)
     assert fw.env_value(restore_main, "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
-    # The restore profile keeps the workload command the source runs under the
-    # launcher. Snapshot replaces it with the restore proxy.
+    # The restore profile keeps the source's workload command. Snapshot
+    # replaces it with the restore proxy.
     restore_command = restore_main["command"]
     assert fw.main_container(source)["command"][-len(restore_command):] == restore_command
     assert restore["metadata"]["annotations"][fw.RESTORE_FROM_ANNOTATION] == run.snapshot_name

@@ -32,38 +32,6 @@ spec:
       nodeSelector:
         nvidia.com/gpu.product: NVIDIA-B200
       initContainers:
-        - name: snapshot-cuda-install
-          image: ${SNAPSHOT_AGENT_IMAGE}
-          imagePullPolicy: IfNotPresent
-          command:
-            - /bin/cp
-          args:
-            - --preserve=mode
-            - --
-            - /usr/local/lib/snapshot/libcuinterpose.so
-            - /usr/local/lib/snapshot/libcuinterpose_core.so
-            - /usr/local/bin/cuinterpose-launch
-            - /tmp/snapshot-cuda/
-          volumeMounts:
-            - name: snapshot-cuda
-              mountPath: /tmp/snapshot-cuda
-          resources:
-            requests:
-              cpu: 100m
-              memory: 64Mi
-            limits:
-              cpu: 100m
-              memory: 64Mi
-          securityContext:
-            runAsUser: 65532
-            runAsNonRoot: true
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop:
-                - ALL
-            seccompProfile:
-              type: RuntimeDefault
         - name: model-cache
           image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
           imagePullPolicy: IfNotPresent
@@ -90,10 +58,6 @@ spec:
           image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
           imagePullPolicy: IfNotPresent
           command:
-            - /tmp/snapshot-cuda/cuinterpose-launch
-            - --library
-            - /tmp/snapshot-cuda/libcuinterpose.so
-            - --
             - python3
             - /snapshot-app/app.py
           args:
@@ -144,9 +108,6 @@ spec:
               mountPath: /dev/shm
             - name: model-cache
               mountPath: /hf-cache
-            - name: snapshot-cuda
-              mountPath: /tmp/snapshot-cuda
-              readOnly: true
             - name: snapshot-control
               mountPath: /snapshot-control
               subPath: main
@@ -161,8 +122,6 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 64Gi
-        - name: snapshot-cuda
-          emptyDir: {}
         - name: snapshot-control
           emptyDir: {}
         - name: app

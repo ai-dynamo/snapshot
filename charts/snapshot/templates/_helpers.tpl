@@ -72,7 +72,7 @@ Name of the operator service account.
 {{- end }}
 
 {{/*
-Use the same agent image for the DaemonSet and cuinterpose installer.
+Use the same agent image for the DaemonSet and the multi-GPU init container.
 */}}
 {{- define "snapshot.agentImage" -}}
 {{- printf "%s:%s" .Values.image.agent.repository (.Values.image.agent.tag | default .Chart.AppVersion) -}}

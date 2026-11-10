@@ -161,10 +161,8 @@ source replica itself. Continue with
    The init container reuses cached model files and downloads missing files. The
    main container then starts SGLang from the offline cache.
 
-   **Eight-GPU recipes.** First set the agent image in the manifest, as
-   [Eight-GPU Recipes](../README.md#eight-gpu-recipes) describes: replace
-   `${SNAPSHOT_AGENT_IMAGE}` in the `snapshot-cuda-install` init container. Then
-   apply that manifest instead of the one above. For example, GLM 5.3:
+   **Eight-GPU recipes.** Apply the recipe manifest instead of the one above.
+   For example, GLM 5.3:
 
    ```bash
    kubectl apply \

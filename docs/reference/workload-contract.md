@@ -199,16 +199,37 @@ A workload that uses several GPUs meets the same contract, with its GPUs on a
 single node; multi-node workloads are not supported. Which multi-GPU workloads
 can be restored depends on the CUDA user-mode driver version; see
 [Compatibility](../get-started/prerequisites.md#multi-gpu-workloads). The source Pod also enables multi-GPU support
-with the `nvidia.com/snapshot-multi-gpu: enabled` annotation. What else it
-carries depends on what creates it:
+with the `nvidia.com/snapshot-multi-gpu: enabled` annotation. On a
+`SnapshotJob`, set it on `spec.podTemplate.metadata.annotations`.
 
-- **A `SnapshotJob`** needs only the annotation, on
-  `spec.podTemplate.metadata.annotations`. The controller prepares the source Pod
-  for multi-GPU checkpoints.
-- **A pod that Snapshot does not create**, such as a Deployment checkpointed
-  through a `PodSnapshot`, must prepare itself. It copies the multi-GPU
-  libraries from the Snapshot agent image with an init container, and starts the
-  workload through the launcher those libraries include:
+The annotation is the only addition. When an opted-in Pod starts, the Snapshot
+agent prepares each container that mounts `/snapshot-control`:
+
+- It mounts Snapshot's multi-GPU libraries read-only at `/tmp/snapshot-cuda`.
+- It starts the container's process, from `command` and `args` or from the
+  image's entrypoint, through the launcher in that directory. The arguments and
+  environment are unchanged.
+
+Containers without the `/snapshot-control` mount, such as helpers, start
+unchanged. The agent also leaves alone a container that mounts a volume at
+`/tmp/snapshot-cuda` or whose `command` already starts with
+`/tmp/snapshot-cuda/cuinterpose-launch`. A Pod that delivers the libraries
+itself keeps working. If the agent cannot prepare a container, the container
+does not start, and kubelet retries it.
+
+### Without NRI
+
+The agent prepares containers through NRI, which needs the runtime in
+[Prerequisites](../get-started/prerequisites.md#multi-gpu-workloads). On nodes
+without it, the source Pod installs the libraries with an init container:
+
+- **A `SnapshotJob`** - Set `config.checkpoint.multiGpuPreparation` to
+  `initContainer` in the Helm values. The operator adds the init container and
+  starts the target through the launcher. The target container must set
+  `command`.
+- **A Pod that Snapshot does not create** - Add the init container, the volume,
+  and the launcher prefix yourself. The init container uses the image of the
+  `snapshot-agent` DaemonSet's `agent` container:
 
   ```yaml
   template:
@@ -250,7 +271,7 @@ carries depends on what creates it:
   ```
 
 The eight-GPU recipes in [Using Snapshot](../using-snapshot/README.md#choose-your-recipe)
-are complete examples of both.
+are complete examples.
 
 ## Runtime Compatibility
 

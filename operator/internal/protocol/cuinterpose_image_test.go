@@ -34,7 +34,7 @@ printf 'frontend-loaded\n'
 `}
 	installerConfig := testCuInterposeInstaller()
 	installerConfig.Image = image
-	require.NoError(t, ShapeCuInterposeCapture(template, "worker", installerConfig))
+	require.NoError(t, ShapeCuInterposeCapture(&template.Spec, []string{"worker"}, installerConfig))
 	installer := template.Spec.InitContainers[0]
 	worker := template.Spec.Containers[0]
 	require.Len(t, installer.VolumeMounts, 1)

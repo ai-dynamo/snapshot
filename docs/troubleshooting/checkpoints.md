@@ -110,6 +110,8 @@ answer before the checkpoint becomes destructive.
 **Likely causes:**
 
 - A CUDA process started without the shim
+- The source node has no NRI; see
+  [Without NRI](../reference/workload-contract.md#without-nri)
 - The delivery mount is writable
 - The coordinator is not running
 

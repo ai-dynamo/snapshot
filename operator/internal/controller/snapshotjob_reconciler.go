@@ -169,10 +169,12 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 		if buildErr != nil {
 			return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, buildErr), ctrl.Result{}, nil
 		}
-		if cuInterposeEnabled {
+		// In agent mode the agent's NRI plugin prepares the target when it starts.
+		// The init container is the fallback for nodes without NRI.
+		if cuInterposeEnabled && r.CuInterposeContainer.AddsInitContainer() {
 			// buildSourceJob has already validated the single target.
 			target := sj.Spec.PodSnapshotTemplate.TargetContainers[0]
-			if err := protocol.ShapeCuInterposeCapture(&desiredJob.Spec.Template, target, r.CuInterposeContainer); err != nil {
+			if err := protocol.ShapeCuInterposeCapture(&desiredJob.Spec.Template.Spec, []string{target}, r.CuInterposeContainer); err != nil {
 				return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, err), ctrl.Result{}, nil
 			}
 		}

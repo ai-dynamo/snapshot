@@ -70,12 +70,16 @@ func openContainerControlDir(procRoot string, hostPID int) (*os.File, error) {
 	return os.NewFile(uintptr(fd), filepath.Join(rootPath, rel)), nil
 }
 
+// NodeRootPath is the node's root filesystem as the agent sees it: the agent
+// runs with hostPID, so /host/proc/1 is the node's init. A path under it,
+// with this prefix removed, is the same path on the node.
+const NodeRootPath = HostProcPath + "/1/root"
+
 // KubeletPodsDir is kubelet's per-Pod directory, seen through the node's root
-// filesystem: the agent runs with hostPID, so /host/proc/1 is the node's init.
-// Unlike a hostPath mount it is not rewritten by vCluster, and it sees
-// emptyDirs that kubelet mounts after the agent started, such as
+// filesystem. Unlike a hostPath mount it is not rewritten by vCluster, and it
+// sees emptyDirs that kubelet mounts after the agent started, such as
 // medium: Memory.
-const KubeletPodsDir = HostProcPath + "/1/root/var/lib/kubelet/pods"
+const KubeletPodsDir = NodeRootPath + "/var/lib/kubelet/pods"
 
 // podControlVolumeDir is the Pod's snapshot-control emptyDir under podsDir. It
 // also checks containerName, which callers open inside it.

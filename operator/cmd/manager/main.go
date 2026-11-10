@@ -17,10 +17,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	"github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/controller"
 	"github.com/ai-dynamo/snapshot/operator/internal/maintenance"
+	"github.com/ai-dynamo/snapshot/operator/internal/podwebhook"
 	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 )
 
@@ -34,6 +36,7 @@ func main() {
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
 	artifactCleanupS3CredentialsPath, artifactCleanupS3CABundlePath := bindArtifactCleanupS3Flags(flag.CommandLine)
 	cuInterposeConfig := bindCuInterposeFlags(flag.CommandLine)
+	cuInterposeWebhookConfig := bindCuInterposeWebhookFlags(flag.CommandLine)
 	testFailureAnnotation, err := bindTestHookFlags(flag.CommandLine)
 	if err != nil {
 		ctrl.Log.Error(err, "invalid E2E test hook configuration")
@@ -83,7 +86,11 @@ func main() {
 		os.Exit(1)
 	}
 	if err := cuInterposeConfig.Validate(); err != nil {
-		ctrl.Log.Error(err, "invalid cuinterpose configuration")
+		ctrl.Log.Error(err, "invalid multi-GPU preparation configuration")
+		os.Exit(1)
+	}
+	if err := cuInterposeWebhookConfig.Validate(*cuInterposeConfig); err != nil {
+		ctrl.Log.Error(err, "invalid cuinterpose webhook configuration")
 		os.Exit(1)
 	}
 
@@ -102,7 +109,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	managerOptions := ctrl.Options{
 		Scheme:                        scheme,
 		HealthProbeBindAddress:        ":8081",
 		LeaderElection:                true,
@@ -111,7 +118,14 @@ func main() {
 		Cache: cache.Options{ByObject: map[client.Object]cache.ByObject{
 			&corev1.Pod{}: {Transform: controller.TrimPodForCache},
 		}},
-	})
+	}
+	if cuInterposeWebhookConfig.Enabled {
+		managerOptions.WebhookServer = webhook.NewServer(webhook.Options{
+			Port:    cuInterposeWebhookConfig.Port,
+			CertDir: cuInterposeWebhookConfig.CertDir,
+		})
+	}
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), managerOptions)
 	if err != nil {
 		ctrl.Log.Error(err, "unable to start manager")
 		os.Exit(1)
@@ -124,6 +138,16 @@ func main() {
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		ctrl.Log.Error(err, "unable to set up ready check")
 		os.Exit(1)
+	}
+	if cuInterposeWebhookConfig.Enabled {
+		// The webhook serves on every replica, leader or not.
+		mgr.GetWebhookServer().Register(podwebhook.CuInterposePath, &webhook.Admission{
+			Handler: podwebhook.NewCuInterposeInjector(scheme, *cuInterposeConfig),
+		})
+		if err := mgr.AddReadyzCheck("webhook", mgr.GetWebhookServer().StartedChecker()); err != nil {
+			ctrl.Log.Error(err, "unable to set up webhook ready check")
+			os.Exit(1)
+		}
 	}
 
 	if storageCfg.S3 != nil {

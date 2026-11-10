@@ -151,24 +151,8 @@ Before you use an eight-GPU recipe:
   [TensorRT-LLM](supported-frameworks/tensorrt-llm.md#eight-gpu-recipes).
 - **Driver** - Multi-GPU restore needs a minimum CUDA user-mode driver version.
   See [Prerequisites](../get-started/prerequisites.md#multi-gpu-workloads).
-- **Agent image** - If you checkpoint with a `PodSnapshot`, the source manifest
-  needs the image of your installed Snapshot agent: an init container copies
-  Snapshot's multi-GPU libraries from it. You set it when you deploy the source
-  replica, under Deploy the Source Pod on the page for your framework
-  ([vLLM](supported-frameworks/vllm.md#deploy-the-source-pod),
-  [SGLang](supported-frameworks/sglang.md#deploy-the-source-pod),
-  [TensorRT-LLM](supported-frameworks/tensorrt-llm.md#deploy-the-source-pod)). A
-  `SnapshotJob` creates the source replica itself, so you can skip this.
-
-To get the agent image, read it from the `snapshot-agent` DaemonSet in the
-namespace where you installed Snapshot (`snapshot` in the
-[Installation](../get-started/installation.md) command):
-
-```bash
-export SNAPSHOT_AGENT_IMAGE=$(kubectl get daemonset snapshot-agent \
-  --namespace snapshot \
-  --output jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].image}')
-```
+- **Container runtime** - Multi-GPU checkpoints need NRI on the node. See
+  [Prerequisites](../get-started/prerequisites.md#multi-gpu-workloads).
 
 ## Next Steps
 

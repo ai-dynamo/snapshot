@@ -26,7 +26,11 @@ func cuInterposeTemplate() *corev1.PodTemplateSpec {
 }
 
 func testCuInterposeInstaller() operatortypes.CuInterposeContainerConfiguration {
-	return operatortypes.CuInterposeContainerConfiguration{Image: "registry.example/snapshot-agent:v1", PullPolicy: corev1.PullNever}
+	return operatortypes.CuInterposeContainerConfiguration{
+		Preparation: operatortypes.MultiGPUPreparationInitContainer,
+		Image:       "registry.example/snapshot-agent:v1",
+		PullPolicy:  corev1.PullNever,
+	}
 }
 
 func TestShapeCuInterposeCapture(t *testing.T) {
@@ -43,11 +47,11 @@ func TestShapeCuInterposeCapture(t *testing.T) {
 	}
 	template.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "existing"}}
 	before := template.DeepCopy()
-	require.NoError(t, ShapeCuInterposeCapture(template, "worker", testCuInterposeInstaller()))
+	require.NoError(t, ShapeCuInterposeCapture(&template.Spec, []string{"worker"}, testCuInterposeInstaller()))
 
 	worker := template.Spec.Containers[0]
 	assert.Equal(t, append(podcontract.CuInterposeLauncherPrefix(), before.Spec.Containers[0].Command...), worker.Command)
-	require.NoError(t, podcontract.ValidateCuInterposeLauncher(&worker))
+	require.NoError(t, podcontract.ValidateCuInterposeTarget(&worker))
 	assert.Equal(t, before.Spec.Containers[0].Args, worker.Args)
 	assert.Equal(t, before.Spec.Containers[0].Env, worker.Env)
 	assert.Equal(t, before.Spec.Containers[0].EnvFrom, worker.EnvFrom)
@@ -77,7 +81,7 @@ func TestShapeCuInterposeCapture(t *testing.T) {
 
 	// Add delivery only once. Reject an existing injection even if it is identical.
 	injected := template.DeepCopy()
-	require.ErrorContains(t, ShapeCuInterposeCapture(template, "worker", testCuInterposeInstaller()), "reserved")
+	require.ErrorContains(t, ShapeCuInterposeCapture(&template.Spec, []string{"worker"}, testCuInterposeInstaller()), "reserved")
 	assert.Equal(t, injected, template)
 }
 
@@ -119,7 +123,7 @@ func TestShapeCuInterposeCaptureRejectsWithoutMutation(t *testing.T) {
 			template := cuInterposeTemplate()
 			tc.change(template)
 			before := template.DeepCopy()
-			require.ErrorContains(t, ShapeCuInterposeCapture(template, "worker", testCuInterposeInstaller()), tc.want)
+			require.ErrorContains(t, ShapeCuInterposeCapture(&template.Spec, []string{"worker"}, testCuInterposeInstaller()), tc.want)
 			assert.Equal(t, before, template)
 		})
 	}
@@ -133,7 +137,7 @@ func TestShapeCuInterposeCapturePreservesParentMount(t *testing.T) {
 	template.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "tmp", MountPath: "/tmp"}}
 	before := template.DeepCopy()
 
-	require.NoError(t, ShapeCuInterposeCapture(template, "worker", testCuInterposeInstaller()))
+	require.NoError(t, ShapeCuInterposeCapture(&template.Spec, []string{"worker"}, testCuInterposeInstaller()))
 	assert.Equal(t, append(before.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
 		Name: cuInterposeVolumeName, MountPath: podcontract.CuInterposeMountPath, ReadOnly: true,
 	}), template.Spec.Containers[0].VolumeMounts)
@@ -157,7 +161,7 @@ func TestCuInterposeInstallerSecurityContext(t *testing.T) {
 			template.Spec.SecurityContext = tc.security
 			template.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{RunAsUser: ptr.To[int64](2000)}
 			before := template.DeepCopy()
-			require.NoError(t, ShapeCuInterposeCapture(template, "worker", testCuInterposeInstaller()))
+			require.NoError(t, ShapeCuInterposeCapture(&template.Spec, []string{"worker"}, testCuInterposeInstaller()))
 			assert.Equal(t, &corev1.SecurityContext{
 				RunAsUser: ptr.To(tc.wantUID), RunAsNonRoot: ptr.To(true),
 				AllowPrivilegeEscalation: ptr.To(false), ReadOnlyRootFilesystem: ptr.To(true),
@@ -168,4 +172,53 @@ func TestCuInterposeInstallerSecurityContext(t *testing.T) {
 			assert.Equal(t, before.Spec.Containers[0].SecurityContext, template.Spec.Containers[0].SecurityContext)
 		})
 	}
+}
+
+func TestShapeCuInterposeCaptureSeveralTargets(t *testing.T) {
+	template := cuInterposeTemplate()
+	template.Spec.Containers[1].Command = []string{"/bin/helper"}
+	before := template.DeepCopy()
+	require.NoError(t, ShapeCuInterposeCapture(&template.Spec, []string{"worker", "helper"}, testCuInterposeInstaller()))
+
+	for i, name := range []string{"worker", "helper"} {
+		container := template.Spec.Containers[i]
+		assert.Equal(t, name, container.Name)
+		assert.Equal(t, append(podcontract.CuInterposeLauncherPrefix(), before.Spec.Containers[i].Command...), container.Command)
+		assert.Equal(t, []corev1.VolumeMount{{Name: cuInterposeVolumeName, MountPath: podcontract.CuInterposeMountPath, ReadOnly: true}}, container.VolumeMounts)
+	}
+	// One delivery serves every target.
+	require.Len(t, template.Spec.Volumes, 1)
+	require.Len(t, template.Spec.InitContainers, 1)
+	assert.True(t, CuInterposePrepared(&template.Spec))
+}
+
+func TestShapeCuInterposeCaptureSeveralTargetsRejectsWithoutMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		targets []string
+		want    string
+	}{
+		{"no targets", nil, "at least one target"},
+		{"second target without command", []string{"worker", "helper"}, `container "helper": cuinterpose requires container.command`},
+		{"second target missing", []string{"worker", "absent"}, `container "absent" not found`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			template := cuInterposeTemplate()
+			before := template.DeepCopy()
+			require.ErrorContains(t, ShapeCuInterposeCapture(&template.Spec, tc.targets, testCuInterposeInstaller()), tc.want)
+			assert.Equal(t, before, template)
+		})
+	}
+}
+
+func TestCuInterposePrepared(t *testing.T) {
+	assert.False(t, CuInterposePrepared(&cuInterposeTemplate().Spec))
+
+	withVolume := cuInterposeTemplate()
+	withVolume.Spec.Volumes = []corev1.Volume{{Name: cuInterposeVolumeName}}
+	assert.True(t, CuInterposePrepared(&withVolume.Spec))
+
+	withInstaller := cuInterposeTemplate()
+	withInstaller.Spec.InitContainers = []corev1.Container{{Name: cuInterposeInitContainerName}}
+	assert.True(t, CuInterposePrepared(&withInstaller.Spec))
 }
