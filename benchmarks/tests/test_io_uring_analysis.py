@@ -17,6 +17,18 @@ SPEC.loader.exec_module(tail_report)
 
 
 class TailAnalysisTests(unittest.TestCase):
+    def test_missing_archive_explains_required_layout(self):
+        """Identify the missing input and archive layout before reading exports."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(tail_report, "ROOT", root):
+                with self.assertRaises(FileNotFoundError) as raised:
+                    tail_report.generate()
+            message = str(raised.exception)
+            self.assertIn(str(root / "formal-progress.json"), message)
+            self.assertIn("results/<cell>/profile_export.jsonl", message)
+            self.assertIn("sibling directory", message)
+
     @staticmethod
     def request_record(start_seconds, latency):
         """Build a synthetic request with no observed chunk gaps."""
@@ -132,6 +144,7 @@ class TailAnalysisTests(unittest.TestCase):
                 "progress_sha256": hashlib.sha256(
                     (previous / "formal-progress.json").read_bytes()
                 ).hexdigest(),
+                "continuation": {"directory": current.name, "progress_sha256": None},
             }
             (current / "continuation-source.json").write_text(
                 json.dumps(source), encoding="utf-8"
@@ -149,6 +162,11 @@ class TailAnalysisTests(unittest.TestCase):
                 tail_report, "window_metrics", precomputed_windows
             ):
                 actual = tail_report.generate()
+                # A null continuation hash must not bypass the earlier hash.
+                with (previous / "formal-progress.json").open("ab") as stream:
+                    stream.write(b" ")
+                with self.assertRaisesRegex(RuntimeError, "Historical accepted measurements changed"):
+                    tail_report.generate()
             self.assertEqual(actual, saved)
 
         idle_repeats = {

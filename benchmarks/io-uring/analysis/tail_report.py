@@ -78,8 +78,28 @@ def window_metrics(records, low, high):
 
 
 def generate():
-    """Recompute follow-up results from original progress and request archives."""
-    progress = json.loads((ROOT / 'formal-progress.json').read_text(encoding='utf-8'))
+    """Recompute results using the original archive layout rooted at ROOT.
+
+    ROOT is the directory containing this script. It must also contain
+    formal-progress.json and results/<cell>/profile_export.jsonl. When present,
+    continuation-source.json names an earlier sibling archive directory with
+    the same progress/export layout; its top-level progress_sha256 is checked
+    before those measurements are loaded. The nested continuation record's
+    progress_sha256: null means there is no integrity check for ROOT's progress
+    file. It does not disable validation of the earlier segment's recorded hash.
+    The report package omits these progress files and raw exports.
+    """
+    progress_file = ROOT / 'formal-progress.json'
+    try:
+        progress = json.loads(progress_file.read_text(encoding='utf-8'))
+    except FileNotFoundError as error:
+        raise FileNotFoundError(
+            f'Missing archive input: {progress_file}. Place this script in the '
+            'original continuation archive alongside formal-progress.json and '
+            'results/<cell>/profile_export.jsonl; keep the earlier archive as '
+            'the sibling directory named by continuation-source.json. '
+            'The packaged report does not include these inputs.'
+        ) from error
     segments = [(ROOT, progress)]
     source_file = ROOT / 'continuation-source.json'
     if source_file.exists():
