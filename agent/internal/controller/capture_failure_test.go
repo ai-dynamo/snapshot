@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 )
@@ -150,4 +152,18 @@ func TestCaptureCauseLeavesAPlainErrorIntact(t *testing.T) {
 	if got := captureCause(fmt.Errorf("checkpoint: %w", plain)); !errors.Is(got, error(plain)) {
 		t.Errorf("captureCause() dropped the chain of an unjoined error: %v", got)
 	}
+}
+
+// The cleanup an executor joins onto a failure is not the failure. A full-disk
+// message coming from a failed abort would otherwise turn a transient commit
+// error into a terminal full store, and skip the retries it should have had.
+func TestClassifyCaptureFailureIgnoresCleanupText(t *testing.T) {
+	transient := &executor.StepError{Step: executor.StepCommitCheckpoint,
+		Err: pagebroker.NewFailureError(pagebroker.Failure_STORAGE_ERROR, "transient read error")}
+	withNoisyCleanup := errors.Join(transient,
+		executor.CleanupFailure(errors.New("abort: no space left on device")))
+
+	got := classifyCaptureFailure(withNoisyCleanup)
+	assert.Equal(t, reasonCheckpointFailed, got.reason, "the cleanup text must not set the reason")
+	assert.True(t, got.retryable, "a transient commit failure keeps its retries")
 }
