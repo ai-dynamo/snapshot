@@ -20,6 +20,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/controller"
+	"github.com/ai-dynamo/snapshot/agent/internal/criu"
 	"github.com/ai-dynamo/snapshot/agent/internal/logging"
 	"github.com/ai-dynamo/snapshot/agent/internal/nri"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
@@ -77,9 +78,17 @@ func main() {
 	}
 	cfg.CustomStorageAvailable = capabilities.CustomStorageAvailable
 
+	// CRIU is pinned by the agent image rather than by this repository, so the
+	// version that ran is recorded once here and named again on a failed dump.
+	criuVersion, err := criu.Version(&cfg.CRIU)
+	if err != nil {
+		agentLog.Error(err, "Failed to read the CRIU version; dumps taken here will not record it")
+		criuVersion = "unknown"
+	}
 	agentLog.Info("Starting snapshot agent",
 		"node", cfg.NodeName,
 		"runtime", *runtimeType,
+		"criu_version", criuVersion,
 	)
 
 	// The node controller handles both restore and capture paths.

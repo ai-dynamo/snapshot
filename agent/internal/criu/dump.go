@@ -27,6 +27,64 @@ const (
 	dumpLogTailMaxSize = 16 * 1024
 )
 
+// buildRefPath is where the agent image records the CRIU commit it was built
+// from. Overridden in tests.
+var buildRefPath = "/usr/local/share/snapshot/criu-build-ref"
+
+// Version reports the CRIU that will run, formatted major.minor.sublevel and,
+// where the image recorded one, the commit it was built from.
+//
+// CRIU moves under the agent — the reference is pinned by image, not by this
+// repository — so a dump failure is otherwise impossible to attribute to a
+// version from a bug report alone. The default reference is a development
+// branch, where every commit reports the same version number, so the number on
+// its own does not identify the build either.
+func Version(settings *types.CRIUSettings) (string, error) {
+	client := criulib.MakeCriu()
+	if settings != nil && strings.TrimSpace(settings.BinaryPath) != "" {
+		client.SetCriuPath(settings.BinaryPath)
+	}
+	return versionOf(client)
+}
+
+func versionOf(client *criulib.Criu) (string, error) {
+	encoded, err := client.GetCriuVersion()
+	if err != nil {
+		return "", err
+	}
+	return withBuildRef(formatCriuVersion(encoded), buildRefPath), nil
+}
+
+// withBuildRef names the commit the image was built from, when it recorded one.
+// A release build is identified by its version alone, so an absent file is not
+// a failure and reports nothing extra.
+func withBuildRef(version, path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return version
+	}
+	ref := strings.TrimSpace(string(raw))
+	if ref == "" {
+		return version
+	}
+	return fmt.Sprintf("%s (%s)", version, ref)
+}
+
+// CRIU encodes its version as major*10000 + minor*100 + sublevel.
+func formatCriuVersion(encoded int) string {
+	return fmt.Sprintf("%d.%d.%d", encoded/10000, (encoded/100)%100, encoded%100)
+}
+
+// versionOrUnknown never fails the caller: a dump that already failed is not
+// made worse by being unable to name the CRIU that failed it.
+func versionOrUnknown(client *criulib.Criu) string {
+	version, err := versionOf(client)
+	if err != nil {
+		return "unknown"
+	}
+	return version
+}
+
 // withFullDiskErrno re-reports a full staging volume as the errno for it.
 //
 // CRIU surfaces ENOSPC only as message text, so the string is matched here
@@ -134,6 +192,9 @@ func ExecuteDump(
 		dumpLogPath := filepath.Join(checkpointDir, dumpLogFilename)
 		log.Error(err, "CRIU dump failed",
 			"duration", dumpDuration,
+			// Asked only here: the round trip costs nothing against a dump that
+			// has already failed, and this is the line a bug report quotes.
+			"criu_version", versionOrUnknown(criuClient),
 			"checkpoint_dir", checkpointDir,
 			"dump_log_path", dumpLogPath,
 			"skip_mnt", criuOpts.GetSkipMnt(),
