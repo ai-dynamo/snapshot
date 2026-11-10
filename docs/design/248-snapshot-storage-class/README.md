@@ -262,8 +262,15 @@ reconciler runs these checks in order:
    `O_EXCL` on PVC). A marker for another class is `DuplicateStore`. The
    storage arbitrates, so two classes created at once, in this cluster or
    another, cannot both win, and a bucket reached through two hostnames is
-   caught. The marker goes with the finalizer; one left by a vanished class is
-   reported, not overwritten. Sweeps read it again before they delete.
+   caught. Sweeps read it again before they delete.
+
+When a class is deleted, the operator removes its marker before it removes the
+finalizer, and only if the marker names this class and `storeID`; a marker that
+is already gone counts as removed. A failed delete is retried on a backoff while
+the class stays terminating, with reason `StoreUnreachable`, or
+`CredentialsUnavailable` when the credentials are the cause. An administrator
+can force-remove the finalizer; the marker then stays, is reported, and is
+never overwritten, so it must be deleted by hand before the location is reused.
 
 Descendants are not checked: a class registered above an existing store in
 another cluster cannot be found without listing the whole prefix, so it reaches
@@ -438,14 +445,8 @@ the old operator ignores both and reads `storage.yaml`.
 
 ## Alternatives
 
-- **Pod annotation instead of a spec field.** Hides the choice from the
-  `PodSnapshot` a user reads and from `SnapshotJob` validation. Rejected.
 - **PageBroker with its own Kubernetes client.** Keeps credentials out of the
   agent, but adds an API dependency, RBAC and a watch to a component driven
-  over a local socket. Rejected for this iteration.
-- **Namespaced classes.** A store is a cluster-wide location served by a
-  cluster-wide agent; namespacing only moves the authorization question.
+  over a local socket. Rejected.
 - **Mounting arbitrary PVCs at runtime.** Needs the agent to mount claims or a
   restart per claim; deferred and recorded as the limitation.
-- **Helm list of stores instead of a CRD.** Every change becomes a Helm
-  upgrade and a restart, which is the problem being solved. Rejected.
