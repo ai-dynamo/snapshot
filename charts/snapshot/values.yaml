@@ -26,7 +26,7 @@ operator:
   # annotation key to request a deterministic checkpoint failure for a test pod.
   testFailCaptureSourceAnnotation: ""
 
-  # Enable only after the compatible agent/PageBroker rollout completes; see docs/operations/storage.md.
+  # Enable only after the compatible agent/PageBroker rollout completes; see docs/operate/configure-storage.md.
   bindNewContents: false
   resources:
     limits:
@@ -115,7 +115,7 @@ storage:
     basePath: /checkpoints
 
   # S3-compatible object storage (when type=s3). Requires a Snapshot release
-  # newer than v0.2.0; see docs/reference/compatibility.md. Endpoint, region,
+  # newer than v0.2.0; see docs/get-started/prerequisites.md. Endpoint, region,
   # bucket and prefix are identity inputs: see api/storage.S3.StoreID.
   s3:
     # S3-compatible endpoint, an absolute http(s) URL with no path, query or
@@ -158,7 +158,7 @@ storage:
     uri: ""
 
 # PageBroker sidecar: stages CRIU images in memory and publishes them to
-# the snapshot volume it shares with the agent. See docs/operations/storage.md.
+# the snapshot volume it shares with the agent. See docs/operate/configure-storage.md.
 pageBroker:
   # Requires a PageBroker image implementing the PVC artifact backend. Roll this out before binding new contents.
   artifactAddressing: false
@@ -167,7 +167,7 @@ pageBroker:
   maxConcurrentRequests: 16
   staging:
     # RAM on the node, unbounded without this cap. Lowered to fit when it does
-    # not leave the writing container room; see docs/operations/storage.md.
+    # not leave the writing container room; see docs/operate/configure-storage.md.
     sizeLimit: 56Gi
   # Allocate and register the full ring before accepting GPU work.
   # Defaults reserve 4 GiB per visible GPU, or 32 GiB on an eight-GPU node.
@@ -324,6 +324,9 @@ config:
   checkpoint:
     # Maximum seconds before the agent marks a checkpoint failed.
     timeoutSeconds: 3600
+    # Times a failed checkpoint may be retried, beyond the first attempt. 0 keeps
+    # retry opt-in, so upgrading changes no existing checkpoint's behaviour.
+    retryLimit: 0
 
   restore:
     # Maximum seconds to allow a restore attempt before the agent marks it failed

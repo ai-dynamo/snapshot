@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
+	"k8s.io/utils/ptr"
 )
 
 func validAgentConfig() *AgentConfig {
@@ -137,4 +138,34 @@ func TestTimeoutsAcceptTheLargestRepresentableValue(t *testing.T) {
 
 	restore := RestoreSpec{TimeoutSeconds: limit}
 	require.NoError(t, restore.Validate())
+}
+
+// Absent and explicit zero are different answers: zero asks for no retry, absent
+// expresses no preference and takes the default.
+func TestResolveRetryLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		configured *int
+		want       int
+	}{
+		{"absent takes the default", nil, DefaultCheckpointRetryLimit},
+		{"a configured limit is honoured", ptr.To(3), 3},
+		{"a configured zero is honoured", ptr.To(0), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &CheckpointSpec{RetryLimit: tc.configured}
+			if got := c.ResolveRetryLimit(); got != tc.want {
+				t.Errorf("ResolveRetryLimit() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCheckpointSpecRejectsANegativeRetryLimit(t *testing.T) {
+	if err := (&CheckpointSpec{RetryLimit: ptr.To(-1)}).Validate(); err == nil {
+		t.Error("a negative retryLimit should not validate")
+	}
+	if err := (&CheckpointSpec{RetryLimit: ptr.To(0)}).Validate(); err != nil {
+		t.Errorf("zero retryLimit should validate, got %v", err)
+	}
 }
