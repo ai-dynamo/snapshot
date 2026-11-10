@@ -183,3 +183,17 @@ func TestParseRestoreComplete(t *testing.T) {
 		})
 	}
 }
+
+func TestIsReservedControlFile(t *testing.T) {
+	for _, name := range []string{RestoreCompleteFile, RestoreFailedFile, RestoreProxyBinaryName, CUDAJobFileName} {
+		if !IsReservedControlFile(name) {
+			t.Errorf("IsReservedControlFile(%q) = false, want true", name)
+		}
+	}
+	// The workload writes ready-for-snapshot itself, so a probe may read it.
+	for _, name := range []string{ReadyForSnapshotFile, "released", ""} {
+		if IsReservedControlFile(name) {
+			t.Errorf("IsReservedControlFile(%q) = true, want false", name)
+		}
+	}
+}

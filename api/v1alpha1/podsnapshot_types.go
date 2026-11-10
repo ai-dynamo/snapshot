@@ -26,10 +26,10 @@ import (
 // PodSnapshot and PodSnapshotContent status condition types. Both objects share this
 // vocabulary; the operator and node agent set them via meta.SetStatusCondition.
 const (
-	// PodSnapshotConditionReady is True when capture and binding completed and the
-	// artifact is usable for restore.
+	// PodSnapshotConditionReady is True when the checkpoint and binding completed and
+	// the snapshot is usable for restore.
 	PodSnapshotConditionReady = "Ready"
-	// PodSnapshotConditionFailed is True when capture or binding failed terminally.
+	// PodSnapshotConditionFailed is True when the checkpoint or binding failed terminally.
 	PodSnapshotConditionFailed = "Failed"
 )
 
@@ -46,18 +46,10 @@ func IsPodSnapshotFailed(s *PodSnapshot) bool {
 // PodSnapshotSpec defines the desired state of PodSnapshot.
 // +kubebuilder:validation:XValidation:rule="!has(self.containers) || self.containers.all(c, c.name in self.source.podRef.containers)",message="containers must name containers in source.podRef.containers"
 type PodSnapshotSpec struct {
-	// Source identifies the captured workload. It is a struct (rather than an
+	// Source identifies the checkpointed workload. It is a struct (rather than an
 	// inlined reference) so future source variants can be added additively.
 	// +kubebuilder:validation:Required
 	Source PodSnapshotSource `json:"source"`
-
-	// CheckpointRetryLimit is how many times a failed capture may be retried in
-	// place, over and above the first attempt: 0 means one attempt and no retry.
-	// Unset means this request expressed no preference and the agent's
-	// cluster-wide default applies, which is distinct from an explicit 0.
-	// +optional
-	// +kubebuilder:validation:Minimum=0
-	CheckpointRetryLimit *int32 `json:"checkpointRetryLimit,omitempty"`
 
 	// Containers holds settings for the checkpointed containers, matched by
 	// name to source.podRef.containers. It is a separate list so settings stay
@@ -69,12 +61,13 @@ type PodSnapshotSpec struct {
 	Containers []ContainerSnapshotConfig `json:"containers,omitempty"`
 }
 
-// PodSnapshotSource identifies the workload captured by a PodSnapshot.
+// PodSnapshotSource identifies the workload a PodSnapshot was taken from.
 type PodSnapshotSource struct {
-	// PodRef references the pod, in the PodSnapshot's namespace, that is captured.
-	// The operator prepares the pod (control volume, checkpoint storage mount)
-	// before creating the PodSnapshot. The capture target container is carried on
-	// PodRef.Containers, not a pod annotation.
+	// PodRef references the pod, in the PodSnapshot's namespace, that is checkpointed.
+	// The operator prepares the pod (the snapshot-control volume) before creating
+	// the PodSnapshot; the snapshot store is mounted by the node agent, not the
+	// pod. The target container is carried on PodRef.Containers, not a pod
+	// annotation.
 	// +kubebuilder:validation:Required
 	PodRef PodReference `json:"podRef"`
 }
@@ -91,10 +84,10 @@ type PodReference struct {
 	// +optional
 	UID types.UID `json:"uid,omitempty"`
 
-	// Containers narrows the capture to these containers of the source pod. The
+	// Containers narrows the checkpoint to these containers of the source pod. The
 	// node agent reads this instead of the source pod's target-container
 	// annotation. v1alpha1 supports exactly one container; the cap is lifted when
-	// the runtime supports multi-container capture.
+	// the runtime supports more than one.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=1
@@ -126,7 +119,7 @@ type PodSnapshotStatus struct {
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // PodSnapshot is the Schema for the snapshots API. It is the namespaced binding
-// for a captured container checkpoint and is consumed by restore paths.
+// for one container's snapshot and is consumed by restore paths.
 //
 // No conversion: this type exists only in v1alpha1 (no other API version), so it
 // is not part of any conversion scheme.

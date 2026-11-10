@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Model Streamer configuration
 
 PageBroker accepts an optional `--model-streamer-config /path/streamer.json`
-startup argument for native S3 reader tuning alongside
+startup argument for S3 restore batching and native reader tuning alongside
 `--storage-config /path/s3.json`. Filesystem storage uses POSIX and does not use
 Model Streamer. The former `filesystem` tuning group is rejected.
 Both optional arguments may appear in either order. Existing invocations work
@@ -35,13 +35,15 @@ This example illustrates the schema, not recommended performance settings:
 
 ```json
 {
+  "restoreBatchBytes": 10000000000,
+  "restorePreparationSlots": 3,
   "readChunkBytes": 8388608,
   "processGroupSize": 1,
   "s3Reader": {
     "concurrency": 2,
     "targetGbps": 10,
     "maxConnections": 8,
-    "maxInflightMiB": 128,
+    "maxInflightMiB": 512,
     "maxRetries": 3,
     "retryWindowSeconds": 0,
     "lowSpeedTimeoutMs": 2000,
@@ -55,6 +57,8 @@ Native variable names below omit the common `RUNAI_STREAMER_` prefix.
 
 | JSON field | Native setting | Accepted values |
 | --- | --- | --- |
+| `restoreBatchBytes` | PageBroker batch/admission budget; no native variable | Positive unsigned 64-bit integer in bytes; default 10000000000 (10 GB) |
+| `restorePreparationSlots` | PageBroker preparation capacity; no native variable | Integer, 1–20; default 3, per restore |
 | `readChunkBytes` | `CHUNK_BYTESIZE` | Integer, 2 MiB–1 GiB; native S3 reads floor it to 5 MiB |
 | `processGroupSize` | `PROCESS_GROUP_SIZE` | Positive unsigned 32-bit integer |
 | `s3Reader.concurrency` | `OBJ_CONCURRENCY` | Integer, 1–1024 |
@@ -74,17 +78,19 @@ are not accepted by this contract; omit a field/variable to use its fallback.
 
 ## Precedence and compatibility
 
-For each tuning field: JSON overrides its native environment variable, then
+`restoreBatchBytes` and `restorePreparationSlots` are PageBroker settings with
+no environment fallback.
+For each native tuning field: JSON overrides its native environment variable, then
 PageBroker's existing S3 fallback applies where defined, otherwise the library
 uses its default. The legacy `RUNAI_STREAMER_CONCURRENCY` supplies object-storage
 concurrency only when its specific setting is absent. Explicit values are checked before any native environment mutation.
 
 When S3 storage is configured, omitted reader settings retain these fallbacks:
 
-| Reader field | Existing PageBroker fallback |
+| Reader field | PageBroker fallback |
 | --- | --- |
 | `maxConnections` | 4, independent of upload concurrency |
-| `maxInflightMiB` | 128, independent of the upload buffer budget |
+| `maxInflightMiB` | 512 per native client, independent of the upload buffer budget |
 | `readChunkBytes` | Smaller of 16 MiB and `limits.uploadPartBytes` |
 | `lowSpeedTimeoutMs` | `limits.requestSeconds * 1000` |
 | `maxRetries` | 3 |
@@ -95,6 +101,19 @@ versions, recognized native environment overrides also take precedence over
 these S3 fallbacks. Shared S3 endpoint, region, credentials, addressing and CA
 settings still come from the existing storage configuration/provider resolution.
 Reader tuning does not change SDK upload limits.
+
+## Restore batching
+
+`restoreBatchBytes` controls the target download batch size (default: 10 GB).
+Files larger than this value are downloaded whole.
+
+`restorePreparationSlots` controls how many batches each restore can prepare
+ahead, including the active batch (default: 3). Higher values may improve
+throughput but can increase memory use and contention.
+
+Configure both under `pageBroker.transferEngine.modelStreamer` in Helm values
+or through the tuning JSON above. Changes require a PageBroker restart.
+The staging volume must hold the entire snapshot regardless of these settings.
 
 ## Native behavior
 

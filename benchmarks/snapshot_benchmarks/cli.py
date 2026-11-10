@@ -310,7 +310,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--image",
         required=True,
-        help="Pre-built snapshot-ready engine image (see docs/guides/vllm.md)",
+        help="Pre-built snapshot-ready engine image (see docs/using-snapshot/supported-frameworks/vllm.md)",
     )
     run_parser.add_argument(
         "--image-pull-policy",

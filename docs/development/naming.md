@@ -3,14 +3,14 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Naming conventions
+# Naming Conventions
 
 Terms and naming patterns for the API, the chart, the CLI, and the docs. Use one
 name per concept, and use it everywhere: field, value, docs, log line, event,
 error message, and test. When a concept has two names, readers assume there are
 two things.
 
-## User-facing and internal names
+## User-Facing and Internal Names
 
 Snapshot has two kinds of names. Keep them apart.
 
@@ -73,12 +73,12 @@ out of the reference.
 | destination container | The container in a restore Pod that you restore into. `nvidia.com/restore-container-map` maps the target container to one or more destination containers | `target container` or `restore target` for this side |
 | node agent | The per-node DaemonSet (`snapshot-agent`) that drives CRIU and `cuda-checkpoint`. After the first use, "agent" is enough | `agent` for an AI assistant |
 | PageBroker | The broker sidecar of the node agent | `pagebroker` or `page broker` in prose |
-| baseline | The minimum versions every installation needs, in the baseline row of Compatibility | `general floor`, `default requirements` |
+| baseline | The minimum versions every installation needs, in the baseline row of Prerequisites | `general floor`, `default requirements` |
 
 Add a row when a concept could be called two ways, or when one definition has to
 hold across pages. A feature name does not need a row.
 
-## Naming a user-facing thing
+## Naming a User-Facing Thing
 
 These patterns are for user-facing names. An internal name follows its package.
 
@@ -92,12 +92,12 @@ These patterns are for user-facing names. An internal name follows its package.
 | Finalizer | `nvidia.com/` plus the object it protects and the action, in kebab-case | `nvidia.com/podsnapshotcontent-cleanup` |
 | Pod condition type | `nvidia.com/` plus PascalCase | `nvidia.com/Restored` |
 | Environment variable | `SNAPSHOT_` plus UPPER_SNAKE. `DYN_SNAPSHOT_` is a deprecated alias; do not add new ones | `SNAPSHOT_CONTROL_DIR` |
-| Helm value | lowerCamelCase. A setting that changes what Snapshot does is nested under its capability (`config.restore`, `storage`). A setting that shapes how a component is deployed is nested under the component (`operator`, `daemonset`). Name it like its siblings: `operator.*` durations are duration strings, `config.*` durations are `…Seconds`, sizes are `…Bytes` or a Kubernetes quantity | `config.restore.restoreTimeoutSeconds`, `config.restore.skipCompatCheck`, `operator.artifactCleanup.scanInterval: 10m`, `storage.pvc.size` |
+| Helm value | lowerCamelCase. A setting that changes what Snapshot does is nested under its capability (`config.restore`, `storage`). A setting that shapes how a component is deployed is nested under the component (`operator`, `daemonset`). Name it like its siblings: `operator.*` durations are duration strings, `config.*` durations are `…Seconds`, sizes are `…Bytes` or a Kubernetes quantity | `config.restore.timeoutSeconds`, `config.restore.skipCompatCheck`, `operator.artifactCleanup.scanInterval: 10m`, `storage.pvc.size` |
 | CLI flag | Kebab-case long option, named for the feature it turns on and not for the command it runs | `--manifest`, `--snapshot` |
 | Object, volume, or file that Snapshot creates | Kebab-case | `snapshot-agent`, `snapshot-control`, `ready-for-snapshot` |
-| Docs file | Kebab-case `.md`, except `README.md`, which indexes a directory or holds a SNEP. A framework guide is `docs/guides/<framework>.md`, with its manifests in `docs/guides/<framework>/` | `tensorrt-llm.md` |
+| Docs file | Kebab-case `.md`, except `README.md`, which indexes a directory or holds a SNEP. A framework guide is `docs/using-snapshot/<framework>.md`, with its manifests in `docs/using-snapshot/<framework>/` | `tensorrt-llm.md` |
 
-## Before you add a name
+## Before You Add a Name
 
 1. Decide who sees it. If a user, workload author, integrator, or operator can
    type it, read it, or see it, it is user-facing, and the rules above apply.

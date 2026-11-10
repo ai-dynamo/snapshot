@@ -1,0 +1,235 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package lifecyclehooks
+
+import (
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+)
+
+// serve starts a server on 127.0.0.1 and returns the URL of path on it, built
+// the way the agent builds a hook's URL.
+func serve(t *testing.T, path string, handler http.HandlerFunc) *url.URL {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	host, port, err := net.SplitHostPort(server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := RequestURL(host, p, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
+func TestHTTPStatus(t *testing.T) {
+	for _, tc := range []struct {
+		code int
+		ok   bool
+	}{
+		{http.StatusOK, true},
+		{http.StatusNoContent, true},
+		{http.StatusNotModified, false},
+		{http.StatusBadRequest, false},
+		{http.StatusNotFound, false},
+		{http.StatusServiceUnavailable, false},
+	} {
+		for _, method := range []string{http.MethodGet, http.MethodPost} {
+			t.Run(method+" "+strconv.Itoa(tc.code), func(t *testing.T) {
+				u := serve(t, "/checkpoint/status", func(w http.ResponseWriter, r *http.Request) {
+					if r.Method != method || r.URL.Path != "/checkpoint/status" {
+						t.Errorf("got %s %s", r.Method, r.URL.Path)
+					}
+					w.WriteHeader(tc.code)
+				})
+				send := HTTPGet
+				if method == http.MethodPost {
+					send = HTTPPost
+				}
+				err := send(t.Context(), NewHTTPClient(), u, time.Second)
+				if tc.ok && err != nil {
+					t.Fatalf("%s = %v, want nil", method, err)
+				}
+				if !tc.ok && (err == nil || !strings.Contains(err.Error(), "failed with statuscode: "+strconv.Itoa(tc.code))) {
+					t.Fatalf("%s = %v, want a failure with status %d", method, err, tc.code)
+				}
+			})
+		}
+	}
+}
+
+func TestHTTPSendsKubeletStyleHeaders(t *testing.T) {
+	u := serve(t, "/", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("User-Agent"); got != userAgent {
+			t.Errorf("User-Agent = %q, want %q", got, userAgent)
+		}
+		if got := r.Header.Get("Accept"); got != "*/*" {
+			t.Errorf("Accept = %q, want */*", got)
+		}
+		if r.ContentLength > 0 {
+			t.Errorf("body has %d bytes, want none", r.ContentLength)
+		}
+	})
+	if err := HTTPPost(t.Context(), NewHTTPClient(), u, time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHTTPFollowsNoRedirects(t *testing.T) {
+	for _, location := range []string{"/other", "http://other.invalid/"} {
+		for _, method := range []string{http.MethodGet, http.MethodPost} {
+			t.Run(method+" to "+location, func(t *testing.T) {
+				u := serve(t, "/", func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path != "/" {
+						t.Errorf("the redirect to %s was followed", r.URL.Path)
+					}
+					http.Redirect(w, r, location, http.StatusFound)
+				})
+				send := HTTPGet
+				if method == http.MethodPost {
+					send = HTTPPost
+				}
+				// Not followed: the 302 itself is the result, and it fails.
+				if err := send(t.Context(), NewHTTPClient(), u, time.Second); err == nil || !strings.Contains(err.Error(), "302") {
+					t.Fatalf("%s = %v, want the 302 to fail", method, err)
+				}
+			})
+		}
+	}
+}
+
+func TestHTTPClientIgnoresTheProxyEnvironment(t *testing.T) {
+	// Go caches the proxy environment on first use, so check the transport,
+	// not a request.
+	transport, ok := NewHTTPClient().Transport.(*http.Transport)
+	if !ok || transport.Proxy != nil {
+		t.Fatal("the transport must not use a proxy")
+	}
+	if !transport.DisableKeepAlives {
+		t.Fatal("the transport must disable keep-alives")
+	}
+}
+
+func TestHTTPTimeout(t *testing.T) {
+	release := make(chan struct{})
+	u := serve(t, "/", func(http.ResponseWriter, *http.Request) { <-release })
+	// Cleanups run last-registered first: release the handler before serve's
+	// server.Close, which waits for it.
+	t.Cleanup(func() { close(release) })
+	start := time.Now()
+	if err := HTTPGet(t.Context(), NewHTTPClient(), u, 100*time.Millisecond); err == nil {
+		t.Fatal("HTTPGet = nil, want a timeout")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("HTTPGet took %s, want about the timeout", elapsed)
+	}
+}
+
+func TestHTTPConnectionRefused(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	_ = listener.Close()
+	u, err := RequestURL("127.0.0.1", port, "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = HTTPGet(t.Context(), NewHTTPClient(), u, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "failed to send HTTP GET") {
+		t.Fatalf("HTTPGet = %v, want a connection error", err)
+	}
+}
+
+func TestRequestURL(t *testing.T) {
+	for _, tc := range []struct {
+		ip   string
+		port int
+		path string
+		want string
+	}{
+		{"10.0.0.5", 8000, "/checkpoint/status", "http://10.0.0.5:8000/checkpoint/status"},
+		{"fd00::5", 80, "/resume", "http://[fd00::5]:80/resume"},
+		{"10.0.0.5", 80, "", "http://10.0.0.5:80"},
+		{"10.0.0.5", 80, "status", "http://10.0.0.5:80/status"},
+		{"10.0.0.5", 80, "/x?y=1", "http://10.0.0.5:80/x?y=1"},
+		{"10.0.0.5", 80, "/a b", "http://10.0.0.5:80/a%20b"},
+		// Whatever host the path names, the request goes to the Pod.
+		{"10.0.0.5", 80, "//other.example/x", "http://10.0.0.5:80/x"},
+		{"10.0.0.5", 80, "https://other.example/x", "http://10.0.0.5:80/x"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			u, err := RequestURL(tc.ip, tc.port, tc.path)
+			if err != nil || u.String() != tc.want {
+				t.Fatalf("RequestURL = %v, %v; want %q", u, err, tc.want)
+			}
+		})
+	}
+	if _, err := RequestURL("10.0.0.5", 80, "/%zz"); err == nil || !strings.Contains(err.Error(), "invalid HTTP path") {
+		t.Fatalf("RequestURL = %v, want an error for a path that doesn't parse", err)
+	}
+}
+
+func TestResolvePort(t *testing.T) {
+	pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+		Name: "main",
+		Ports: []corev1.ContainerPort{
+			{Name: "http", ContainerPort: 8000},
+			{Name: "zero", ContainerPort: 0},
+		},
+	}}}}
+	for _, tc := range []struct {
+		name      string
+		container string
+		port      intstr.IntOrString
+		want      int
+	}{
+		{"number", "main", intstr.FromInt32(8080), 8080},
+		{"name", "main", intstr.FromString("http"), 8000},
+		{"unknown name", "main", intstr.FromString("metrics"), -1},
+		{"unknown container", "other", intstr.FromString("http"), -1},
+		{"zero", "main", intstr.FromInt32(0), -1},
+		{"named zero", "main", intstr.FromString("zero"), -1},
+		{"too large", "main", intstr.FromInt32(65536), -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ResolvePort(pod, tc.container, tc.port)
+			if got != tc.want || (err == nil) != (tc.want > 0) {
+				t.Fatalf("ResolvePort = %d, %v; want %d", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestHTTPTarget(t *testing.T) {
+	pod := func(hostNetwork bool, ip string) *corev1.Pod {
+		return &corev1.Pod{Spec: corev1.PodSpec{HostNetwork: hostNetwork}, Status: corev1.PodStatus{PodIP: ip}}
+	}
+	if ip, err := HTTPTarget(pod(false, "10.0.0.5")); err != nil || ip != "10.0.0.5" {
+		t.Fatalf("HTTPTarget = %q, %v; want the Pod IP", ip, err)
+	}
+	// As with kubelet's probes, a host-network Pod's IP is the node's IP.
+	if ip, err := HTTPTarget(pod(true, "192.168.1.7")); err != nil || ip != "192.168.1.7" {
+		t.Fatalf("HTTPTarget = %q, %v; want the host-network Pod's IP", ip, err)
+	}
+	if _, err := HTTPTarget(pod(false, "")); err == nil {
+		t.Fatal("HTTPTarget accepted a Pod with no IP")
+	}
+}
