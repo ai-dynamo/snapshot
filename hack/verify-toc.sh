@@ -9,7 +9,7 @@ exclude_file="$repo_root/hack/.notableofcontents"
 stale_file=$(mktemp)
 trap 'rm -f "$stale_file"' EXIT
 
-find "$repo_root/docs/proposals" -type f -name '*.md' | sort | while IFS= read -r file; do
+find "$repo_root/docs/design" -type f -name '*.md' | sort | while IFS= read -r file; do
 	rel_path=${file#"$repo_root"/}
 	if ! grep -Fxq "$rel_path" "$exclude_file" && ! mdtoc --inplace --max-depth=6 --dryrun "$file"; then
 		printf '%s\n' "$rel_path" >> "$stale_file"
