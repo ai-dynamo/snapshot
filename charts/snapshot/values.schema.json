@@ -3,6 +3,20 @@
   "$comment": "SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\nSPDX-License-Identifier: Apache-2.0",
   "type": "object",
   "properties": {
+    "config": {
+      "type": "object",
+      "properties": {
+        "checkpoint": {
+          "type": "object",
+          "properties": {
+            "retryLimit": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
     "pageBroker": {
       "type": "object",
       "properties": {

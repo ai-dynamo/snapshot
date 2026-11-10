@@ -1,0 +1,164 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# yaml-language-server: $schema=https://schema.buildwithfern.dev/docs-yml.json
+
+# This site is for reviewing the docs structure. The configuration is removed
+# before the pull request merges. The instance URL below is a placeholder.
+instances:
+  - url: nvidia-snapshot.docs.buildwithfern.com/snapshot
+
+title: NVIDIA Snapshot Documentation
+
+global-theme: nvidia
+
+logo:
+  right-text: Snapshot
+
+check:
+  rules:
+    broken-links: warn
+
+navbar-links:
+  - type: github
+    value: https://github.com/ai-dynamo/snapshot
+
+# Pages that are not written yet are empty placeholders.
+navigation:
+  - section: Overview
+    slug: overview
+    contents:
+      - page: What Is Snapshot?
+        path: ../docs/overview/what-is-snapshot.md
+        slug: what-is-snapshot
+      - page: Core Concepts
+        path: ../docs/overview/core-concepts.md
+        slug: core-concepts
+      - page: Architecture Overview
+        path: ../docs/overview/architecture-overview.md
+        slug: architecture-overview
+      - page: Performance
+        path: ../docs/overview/performance.md
+        slug: performance
+      - page: Limitations
+        path: ../docs/overview/limitations.md
+        slug: limitations
+  - section: Get Started
+    slug: get-started
+    contents:
+      - page: Prerequisites
+        path: ../docs/get-started/prerequisites.md
+        slug: prerequisites
+      - page: Installation
+        path: ../docs/get-started/installation.md
+        slug: installation
+      - page: Quickstart - Checkpoint and Restore One Pod
+        path: ../docs/get-started/quickstart.md
+        slug: quickstart
+  - section: Using Snapshot
+    slug: using-snapshot
+    contents:
+      - page: Checkpoint and Restore Flow
+        path: ../docs/using-snapshot/README.md
+        slug: checkpoint-and-restore-flow
+      - section: Supported Frameworks
+        slug: supported-frameworks
+        contents:
+          - page: vLLM
+            path: ../docs/using-snapshot/supported-frameworks/vllm.md
+            slug: vllm
+          - page: SGLang
+            path: ../docs/using-snapshot/supported-frameworks/sglang.md
+            slug: sglang
+          - page: TensorRT-LLM
+            path: ../docs/using-snapshot/supported-frameworks/tensorrt-llm.md
+            slug: tensorrt-llm
+          - page: Use Your Own Engine or Image
+            path: ../docs/using-snapshot/supported-frameworks/use-your-own-engine-or-image.md
+            slug: use-your-own-engine-or-image
+      - page: Checkpoint a Pod
+        path: ../docs/using-snapshot/checkpoint.md
+        slug: checkpoint-a-pod
+      - page: Restore a Pod
+        path: ../docs/using-snapshot/restore.md
+        slug: restore-a-pod
+  - section: Operate
+    slug: operate
+    contents:
+      - page: Configure Storage
+        path: ../docs/operate/configure-storage.md
+        slug: configure-storage
+      - section: Tune Storage
+        slug: tune-storage
+        path: ../docs/operate/tune-storage/README.md
+        contents:
+          - section: NFS
+            slug: nfs
+            path: ../docs/operate/tune-storage/nfs/README.md
+            contents:
+              - page: VAST NFS
+                path: ../docs/operate/tune-storage/nfs/vast-nfs.md
+                slug: vast-nfs
+              - page: Amazon EFS
+                path: ../docs/operate/tune-storage/nfs/amazon-efs.md
+                slug: amazon-efs
+          - page: Local NVMe and RAID0
+            path: ../docs/operate/tune-storage/local-nvme-raid0.md
+            slug: local-nvme-and-raid0
+          - page: Amazon S3
+            path: ../docs/operate/tune-storage/amazon-s3.md
+            slug: amazon-s3
+      - page: Upgrade Snapshot and the CRDs
+        path: ../docs/operate/upgrade.md
+        slug: upgrade
+  - section: Reference
+    slug: reference
+    contents:
+      - page: API Reference
+        path: ../docs/reference/api.md
+        slug: api
+      - page: Helm Chart Values
+        path: ../docs/reference/helm-values.md
+        slug: helm-chart-values
+      - page: snapshotctl CLI
+        path: ../docs/reference/cli.md
+        slug: snapshotctl-cli
+      - page: Workload Contract
+        path: ../docs/reference/workload-contract.md
+        slug: workload-contract
+      - page: Restore Pod Contract
+        path: ../docs/reference/restore-pod-contract.md
+        slug: restore-pod-contract
+  - section: Troubleshooting
+    slug: troubleshooting
+    contents:
+      - page: Reading a Failure Message
+        path: ../docs/troubleshooting/reading-a-failure-message.md
+        slug: reading-a-failure-message
+      - page: Troubleshoot Checkpoints
+        path: ../docs/troubleshooting/checkpoints.md
+        slug: troubleshoot-checkpoints
+      - page: Troubleshoot Restores
+        path: ../docs/troubleshooting/restores.md
+        slug: troubleshoot-restores
+      - page: Troubleshoot Slow Restores
+        path: ../docs/troubleshooting/slow-restores.md
+        slug: troubleshoot-slow-restores
+      - page: Troubleshoot the Agent
+        path: ../docs/troubleshooting/agent.md
+        slug: troubleshoot-the-agent
+  - section: Development
+    slug: development
+    contents:
+      - page: Build from Source
+        path: ../docs/development/build-from-source.md
+        slug: build-from-source
+      - page: Benchmarks Guide
+        path: ../docs/development/benchmarks-guide.md
+        slug: benchmarks-guide
+      - page: Writing Documentation
+        path: ../docs/development/writing-docs.md
+        slug: writing-documentation
+      - page: Naming Conventions
+        path: ../docs/development/naming.md
+        slug: naming-conventions

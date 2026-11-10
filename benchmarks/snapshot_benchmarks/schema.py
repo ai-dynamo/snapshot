@@ -55,7 +55,7 @@ class BenchmarkEnvironment:
     Collected on every run regardless of hardware, so a run on, e.g., a single
     A10G is a clearly-labeled, self-describing result rather than a silent,
     invalid comparison against the B200/VAST numbers published in
-    docs/development/benchmarks.md.
+    docs/overview/performance.md.
 
     `capture` is always populated once the source pod is Ready; `restore` is
     populated only for `mode="both"`, once the restore pod's node is known --
@@ -150,7 +150,7 @@ class RestoreTiming:
     `t0` for every derived duration is `restore_container_started_at`, not pod
     creation: the published doc's restore clock "begins once the container is
     already running, because CRIU injects the restored process into a
-    container that has already started" (docs/development/benchmarks.md).
+    container that has already started" (docs/overview/performance.md).
 
     `snapshot_restore_seconds` and `wake_and_copy_seconds` are the split the
     benchmark exists to report: the node agent's `nvidia.com/Restored` pod
