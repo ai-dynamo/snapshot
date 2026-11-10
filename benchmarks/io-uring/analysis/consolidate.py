@@ -33,11 +33,11 @@ def main():
     """Validate paired source estimates and write consolidated JSON and CSV."""
     rows = []
     filename = OUT / 'metrics-comparison.json'
-    data = json.loads(filename.read_text())
+    data = json.loads(filename.read_text(encoding='utf-8'))
     if data['accepted_cells'] != 540:
         raise ValueError('Incomplete 27B source')
     for model, source in {**SOURCES, '27B FP8': filename}.items():
-        data = json.loads(source.read_text())
+        data = json.loads(source.read_text(encoding='utf-8'))
         if data['accepted_cells'] != 540:
             raise ValueError('Incomplete source: ' + model)
         runs = {r['cell']: r for r in data['runs']}
@@ -61,7 +61,7 @@ def main():
     for row in rows:
         row['primary_workload'] = (row['isl'], row['osl'], row['concurrency']) == (128, 16, 128)
         row['interval_excludes_zero'] = row['ci95_low_pct'] > 0 or row['ci95_high_pct'] < 0
-    with (OUT / 'all-model-paired-metrics.csv').open('w', newline='') as stream:
+    with (OUT / 'all-model-paired-metrics.csv').open('w', newline='', encoding='utf-8') as stream:
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
@@ -72,7 +72,7 @@ def main():
               'cpu_method': data['cpu_method'],
               'source_sha256': {str(p.relative_to(REPO)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources},
               'comparisons': rows}
-    (OUT / 'all-model-paired-metrics.json').write_text(json.dumps(result, indent=2) + '\n')
+    (OUT / 'all-model-paired-metrics.json').write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8', newline='\n')
     print(json.dumps({'comparison_metric_rows': len(rows), 'primary_rows': sum(r['primary_workload'] for r in rows)}))
     metrics = ['latency_avg_ms', 'latency_p99_ms', 'ttft_avg_ms', 'itl_avg_ms', 'serving_cpu_ms_per_request']
     for model in [*SOURCES, '27B FP8']:

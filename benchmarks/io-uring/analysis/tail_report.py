@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parent
 T95 = {1: 12.706204736, 2: 4.302652730, 3: 3.182446305, 4: 2.776445105,
        5: 2.570581836, 6: 2.446911851, 7: 2.364624252, 8: 2.306004135, 9: 2.262157163}
 WINDOWS = {'early': (0, 90), 'steady': (120, 300), 'full': (0, 300)}
+PLANNED_PAIRS = 10
 # The original segment's execution_segments events record prolonged idle before
 # conditioning for repeats 2 and 5. Both conditions in each pair share a repeat.
 RECOVERY_IDLE_REPEATS = (2, 5)
@@ -35,7 +36,7 @@ def interval(ratios, *, confirmatory=False):
     average = statistics.mean(logs)
     result = {'pairs': len(logs), 'ratio': math.exp(average), 'individual_ratios': ratios,
               'ci95': None, 'interpretation': 'incomplete; no confirmatory conclusion'}
-    if len(logs) >= 2 and (not confirmatory or len(logs) == 10):
+    if len(logs) >= 2 and (not confirmatory or len(logs) == PLANNED_PAIRS):
         half = T95[len(logs) - 1] * statistics.stdev(logs) / math.sqrt(len(logs))
         low, high = math.exp(average - half), math.exp(average + half)
         result['ci95'] = [low, high]
@@ -78,12 +79,12 @@ def window_metrics(records, low, high):
 
 def generate():
     """Recompute follow-up results from original progress and request archives."""
-    progress = json.loads((ROOT / 'formal-progress.json').read_text())
+    progress = json.loads((ROOT / 'formal-progress.json').read_text(encoding='utf-8'))
     segments = [(ROOT, progress)]
     source_file = ROOT / 'continuation-source.json'
     if source_file.exists():
         import hashlib
-        source = json.loads(source_file.read_text())
+        source = json.loads(source_file.read_text(encoding='utf-8'))
         previous = ROOT.parent / source['directory']
         raw = (previous / 'formal-progress.json').read_bytes()
         if hashlib.sha256(raw).hexdigest() != source['progress_sha256']:
@@ -96,7 +97,7 @@ def generate():
         if cell['concurrency'] != 128:
             continue
         records = []
-        with (directory / 'results' / name / 'profile_export.jsonl').open() as stream:
+        with (directory / 'results' / name / 'profile_export.jsonl').open(encoding='utf-8') as stream:
             for line in stream:
                 record = json.loads(line)
                 if record.get('metadata', {}).get('benchmark_phase') == 'profiling':
@@ -110,7 +111,7 @@ def generate():
     identities = [(row['repeat'], row['condition']) for row in rows]
     if len(identities) != len(set(identities)):
         raise RuntimeError('Duplicate repeat/condition across benchmark segments')
-    for repeat in range(1, 11):
+    for repeat in range(1, PLANNED_PAIRS + 1):
         conditions = {r['condition']: r for r in rows if r['repeat'] == repeat}
         if set(conditions) == {'blocked', 'restored-blocked'}:
             pairs.append(conditions)
@@ -160,7 +161,7 @@ def generate():
     if result['excluding_recovery_pairs_steady_p99_exploratory'] is not None:
         result['excluding_recovery_pairs_steady_p99_exploratory'].pop('interpretation')
     temporary = ROOT / 'tail-results.json.tmp'
-    temporary.write_text(json.dumps(result, indent=2) + '\n')
+    temporary.write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8', newline='\n')
     temporary.replace(ROOT / 'tail-results.json')
     return result
 
