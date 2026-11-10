@@ -195,19 +195,21 @@ The evidence supports limited throughput and average-performance impact for thes
 
 ## Reproducibility artifacts
 
-The report package includes per-model analysis, consolidated secondary-metric comparisons, follow-up results, validation receipts and a file-integrity manifest. Detailed CPU provenance and per-run values are preserved in the analysis JSON files. Raw request exports and complete run directories are not included in the
-package. The original continuation progress file is unavailable.
+The report package includes per-model analysis, consolidated secondary-metric
+comparisons, follow-up results, validation receipts and a file-integrity
+manifest. Detailed CPU provenance and per-run values are preserved in the
+analysis JSON files. Raw request exports and complete run directories are not
+included in the package.
 
 - Main sweeps: 540 accepted cells per model; five paired repetitions per comparison.
 - Consolidated metrics: [CSV](analysis/all-model-paired-metrics.csv) and [JSON](analysis/all-model-paired-metrics.json).
 - Targeted follow-up: [results](analysis/tail-results.json) and the
   [receipt of validation in the original archive](analysis/final-analysis-validation.json).
-  The package omits both segments' `formal-progress.json` records and raw
-  request exports, so it cannot regenerate the follow-up results or sensitivity
-  tables. The [source record](analysis/tail/continuation-source.json) retains
-  the earlier segment's progress hash and marks the continuation's original
-  progress file and hash as unavailable. Its source integrity cannot be
-  independently verified from this package.
+  The [segment index](analysis/tail/continuation-source.json) hashes both
+  packaged per-run input files. `analysis/tail_report.py` recomputes the paired
+  estimates and sensitivity tables from these saved window metrics. The inputs
+  were extracted from the saved results; raw request exports are absent, so the
+  package cannot independently recalculate request-level windows or percentiles.
 - Model revisions and frozen execution versions:
   [0.6B](analysis/0.6b/formal-freeze.json),
   [8B](analysis/8b/formal-freeze.json),

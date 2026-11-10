@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Offline compatibility report; frozen benchmark controller remains unchanged."""
+"""Recompute paired follow-up estimates from packaged per-run window metrics."""
 
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -78,55 +79,32 @@ def window_metrics(records, low, high):
 
 
 def generate():
-    """Recompute results using the original archive layout rooted at ROOT.
+    """Verify both packaged segment inputs and recompute paired estimates.
 
-    ROOT is the directory containing this script. It must also contain
-    formal-progress.json and results/<cell>/profile_export.jsonl. When present,
-    continuation-source.json names an earlier sibling archive directory with
-    the same progress/export layout; its top-level progress_sha256 is checked
-    before those measurements are loaded. The nested continuation record's
-    progress_sha256: null means there is no integrity check for ROOT's progress
-    file. It does not disable validation of the earlier segment's recorded hash.
-    The report package omits these progress files and raw exports.
+    ROOT/tail/continuation-source.json lists input files relative to its own
+    directory, with a SHA-256 for each. Those files contain saved per-run window
+    metrics, not raw requests; this verifies the packaged analysis inputs and
+    recomputes run-level comparisons, not request-level windows or percentiles.
     """
-    progress_file = ROOT / 'formal-progress.json'
+    source_file = ROOT / 'tail/continuation-source.json'
     try:
-        progress = json.loads(progress_file.read_text(encoding='utf-8'))
+        source = json.loads(source_file.read_text(encoding='utf-8'))
     except FileNotFoundError as error:
         raise FileNotFoundError(
-            f'Missing archive input: {progress_file}. Place this script in the '
-            'original continuation archive alongside formal-progress.json and '
-            'results/<cell>/profile_export.jsonl; keep the earlier archive as '
-            'the sibling directory named by continuation-source.json. '
-            'The packaged report does not include these inputs.'
+            f'Missing packaged input index: {source_file}. Keep tail_report.py '
+            'alongside tail/ and its indexed per-run metric files.'
         ) from error
-    segments = [(ROOT, progress)]
-    source_file = ROOT / 'continuation-source.json'
-    if source_file.exists():
-        import hashlib
-        source = json.loads(source_file.read_text(encoding='utf-8'))
-        previous = ROOT.parent / source['directory']
-        raw = (previous / 'formal-progress.json').read_bytes()
-        if hashlib.sha256(raw).hexdigest() != source['progress_sha256']:
-            raise RuntimeError('Historical accepted measurements changed')
-        segments.insert(0, (previous, json.loads(raw)))
-    total_cells = sum(len(segment['cells']) for _, segment in segments)
-    rows = []
-    selected = [(directory, name, cell) for directory, segment in segments for name, cell in segment['cells'].items()]
-    for directory, name, cell in selected:
-        if cell['concurrency'] != 128:
-            continue
-        records = []
-        with (directory / 'results' / name / 'profile_export.jsonl').open(encoding='utf-8') as stream:
-            for line in stream:
-                record = json.loads(line)
-                if record.get('metadata', {}).get('benchmark_phase') == 'profiling':
-                    records.append(record)
-        rows.append({'cell': name, 'repeat': cell['repeat'], 'condition': cell['condition'],
-                     'gpu_uuid': cell['guard']['gpu_uuid'],
-                     'requests_per_second': cell['measurement']['requests_per_second'],
-                     'telemetry': cell['measurement']['telemetry'],
-                     'windows': {label: window_metrics(records, *bounds) for label, bounds in WINDOWS.items()}})
+    segments = []
+    for entry in source['segments']:
+        filename = source_file.parent / entry['file']
+        raw = filename.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != entry['sha256']:
+            raise RuntimeError(f'Packaged analysis input changed: {filename}')
+        segments.append(json.loads(raw))
+    total_cells = sum(segment['accepted_cells'] for segment in segments)
+    if total_cells != source['protocol_total_cells']:
+        raise ValueError('Segment cell counts do not match the protocol total')
+    rows = [run for segment in segments for run in segment['runs']]
     pairs = []
     identities = [(row['repeat'], row['condition']) for row in rows]
     if len(identities) != len(set(identities)):
@@ -158,15 +136,12 @@ def generate():
         throughput.pop('interpretation')  # Latency and throughput margins have opposite directions.
     else:
         same, sensitivity, throughput = [], None, None
-    result = {'state': progress['state'], 'accepted_cells': total_cells, 'planned_cells': 80,
+    result = {'state': segments[-1]['state'], 'accepted_cells': total_cells, 'planned_cells': 80,
               'accepted_primary_profiles': len(rows), 'planned_primary_profiles': 20,
               'complete_pairs': len(pairs), 'comparisons': comparisons, 'runs': rows,
               'same_gpu_pairs': len(same), 'same_gpu_steady_p99_sensitivity': sensitivity,
               'full_profile_throughput_secondary': throughput,
-              'execution_segments': [{'directory': directory.name,
-                                      'events': segment.get('execution_segments', []),
-                                      'startup_failures': segment.get('startup_failures', {})}
-                                     for directory, segment in segments],
+              'execution_segments': [segment['execution_segment'] for segment in segments],
               'method': 'Paired log run-level ratios; 95% Student-t intervals; primary conclusion requires all 10 pairs',
               'timing': 'Windows use request start relative to first profiling request after 30s warmup; not time since restore',
               'caveats': ['Secondary comparisons exploratory and unadjusted', 'Same-GPU sensitivity may have too few pairs',

@@ -20,6 +20,7 @@ This folder packages the report and derived analysis for the three model sweeps 
 | `analysis/0.6b/`, `analysis/8b/`, `analysis/27b/` | Original per-model summaries and frozen model/runtime metadata |
 | [analysis/metrics-comparison.json](analysis/metrics-comparison.json) | Recalculated 27B per-run latency and aligned CPU/request analysis |
 | [analysis/tail-results.json](analysis/tail-results.json) | Combined ten-pair restore follow-up, including windows and sensitivity checks |
+| `analysis/tail/initial-runs.json`, `analysis/tail/continuation-runs.json` | Saved per-run window metrics and execution metadata for the two segments |
 | [analysis/final-analysis-validation.json](analysis/final-analysis-validation.json) | Follow-up raw-export hash and recomputation verification receipt |
 | `analysis/tail/` | Follow-up experiment metadata and continuation provenance |
 | [SHA256SUMS.json](SHA256SUMS.json) | Package file-integrity manifest |
@@ -38,7 +39,19 @@ python3 analysis/consolidate.py
 
 This recomputes paired estimates and confidence intervals and rewrites the consolidated JSON/CSV. Regenerate the integrity manifest if intentional file changes are made afterward. Comparisons without five positive finite metric pairs are omitted; absent token-spacing metrics are not zero.
 
-The packaged `tail_report.py` records the follow-up analysis method. Recomputing it from raw requests requires the original experiment archives and their expected directory layout; it is not a standalone command for this report package. Its completed results are included as `analysis/tail-results.json`.
+Recompute the follow-up paired estimates from the packaged per-run window
+metrics:
+
+```sh
+python3 analysis/tail_report.py
+```
+
+The script verifies both input hashes in
+[the segment index](analysis/tail/continuation-source.json) and rewrites
+`analysis/tail-results.json`. The input files preserve the previously saved
+window metrics; they do not contain raw request exports. This command therefore
+recomputes paired ratios, confidence intervals and sensitivity subsets, but does
+not recalculate request-level windows or percentiles.
 
 Paths and run identifiers in original provenance files refer to the original experiment archives. No benchmark, cleanup, credential or cluster-control action is needed to inspect this package.
 
@@ -51,13 +64,9 @@ recorded in [the continuation source](analysis/tail/continuation-source.json).
 The frozen plan is preserved byte for byte so its hash still matches
 `plan_sha256` in the freeze record.
 
-The source record's top-level hashes identify the earlier segment. Its
-`continuation` entry identifies the second segment and explicitly records
-`progress_status: "unavailable"` and `progress_sha256: null`: the original
-continuation progress file is unavailable, and its hash was not retained in the
-package. Renaming or reconstructing a file cannot restore that evidence.
-
-Both segments' `formal-progress.json` files and the raw request exports are
-absent from this package. The manifest verifies the packaged files only; the
-continuation cannot be independently verified from them. Recomputing the
-follow-up requires recovering the original archives.
+The segment index identifies and hashes both packaged per-run input files.
+`initial-runs.json` covers repeats 1–5 (`formal-tail-` cell names), and
+`continuation-runs.json` covers repeats 6–10 (`formal-tc2-` cell names). Each
+file retains its original execution directory and events. These inputs were
+extracted from the saved `runs` and `execution_segments` in `tail-results.json`;
+their hashes verify the packaged inputs, not the original raw requests.

@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import hashlib
 import importlib.util
 import json
+import shutil
 from pathlib import Path
 import tempfile
 import unittest
@@ -17,17 +17,16 @@ SPEC.loader.exec_module(tail_report)
 
 
 class TailAnalysisTests(unittest.TestCase):
-    def test_missing_archive_explains_required_layout(self):
-        """Identify the missing input and archive layout before reading exports."""
+    def test_missing_inputs_explain_required_layout(self):
+        """Identify the missing packaged index and required directory layout."""
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             with patch.object(tail_report, "ROOT", root):
                 with self.assertRaises(FileNotFoundError) as raised:
                     tail_report.generate()
             message = str(raised.exception)
-            self.assertIn(str(root / "formal-progress.json"), message)
-            self.assertIn("results/<cell>/profile_export.jsonl", message)
-            self.assertIn("sibling directory", message)
+            self.assertIn(str(root / "tail/continuation-source.json"), message)
+            self.assertIn("alongside tail/", message)
 
     @staticmethod
     def request_record(start_seconds, latency):
@@ -94,80 +93,29 @@ class TailAnalysisTests(unittest.TestCase):
         self.assertEqual(tail_report.interval(complete, confirmatory=True)["ci95"], [1.0, 1.0])
 
     def test_paired_summary_from_packaged_run_metrics(self):
-        """Exercise pairing across segments without claiming raw-request validation."""
+        """Reproduce saved summaries and reject corruption in either input segment."""
         saved = json.loads((ANALYSIS / "tail-results.json").read_text(encoding="utf-8"))
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for index, segment in enumerate(saved["execution_segments"]):
-                directory = root / segment["directory"]
-                directory.mkdir()
-                cells = {}
-                for run in saved["runs"]:
-                    if (run["repeat"] <= 5) != (index == 0):
-                        continue
-                    cells[run["cell"]] = {
-                        "concurrency": 128,
-                        "repeat": run["repeat"],
-                        "condition": run["condition"],
-                        "guard": {"gpu_uuid": run["gpu_uuid"]},
-                        "measurement": {
-                            key: run[key]
-                            for key in ("requests_per_second", "telemetry")
-                        },
-                    }
-                    export = directory / "results" / run["cell"]
-                    export.mkdir(parents=True)
-                    # Precomputed windows isolate run-level pairing and inference.
-                    record = {
-                        "metadata": {"benchmark_phase": "profiling"},
-                        "windows": run["windows"],
-                    }
-                    (export / "profile_export.jsonl").write_text(
-                        json.dumps(record) + "\n", encoding="utf-8"
-                    )
-                for conditioning in range(30):
-                    cells[f"conditioning-{conditioning}"] = {"concurrency": 1}
-                progress = {
-                    "state": saved["state"],
-                    "cells": cells,
-                    "execution_segments": segment["events"],
-                    "startup_failures": segment["startup_failures"],
-                }
-                (directory / "formal-progress.json").write_text(
-                    json.dumps(progress), encoding="utf-8"
-                )
-
-            previous = root / saved["execution_segments"][0]["directory"]
-            current = root / saved["execution_segments"][1]["directory"]
-            source = {
-                "directory": previous.name,
-                "progress_sha256": hashlib.sha256(
-                    (previous / "formal-progress.json").read_bytes()
-                ).hexdigest(),
-                "continuation": {"directory": current.name, "progress_sha256": None},
-            }
-            (current / "continuation-source.json").write_text(
-                json.dumps(source), encoding="utf-8"
+            shutil.copytree(ANALYSIS / "tail", root / "tail")
+            source = json.loads(
+                (root / "tail/continuation-source.json").read_text(encoding="utf-8")
             )
-
-            def precomputed_windows(records, low, high):
-                """Return packaged windows instead of simulating raw latencies."""
-                label = next(
-                    key for key, bounds in tail_report.WINDOWS.items()
-                    if bounds == (low, high)
-                )
-                return records[0]["windows"][label]
-
-            with patch.object(tail_report, "ROOT", current), patch.object(
-                tail_report, "window_metrics", precomputed_windows
-            ):
+            with patch.object(tail_report, "ROOT", root):
                 actual = tail_report.generate()
-                # A null continuation hash must not bypass the earlier hash.
-                with (previous / "formal-progress.json").open("ab") as stream:
-                    stream.write(b" ")
-                with self.assertRaisesRegex(RuntimeError, "Historical accepted measurements changed"):
-                    tail_report.generate()
-            self.assertEqual(actual, saved)
+                self.assertEqual(actual, saved)
+                self.assertEqual(
+                    (root / "tail-results.json").read_bytes(),
+                    (ANALYSIS / "tail-results.json").read_bytes(),
+                )
+                for entry in source["segments"]:
+                    with self.subTest(segment=entry["file"]):
+                        filename = root / "tail" / entry["file"]
+                        original = filename.read_bytes()
+                        filename.write_bytes(original + b" ")
+                        with self.assertRaisesRegex(RuntimeError, "Packaged analysis input changed"):
+                            tail_report.generate()
+                        filename.write_bytes(original)
 
         idle_repeats = {
             event["repeat"]
