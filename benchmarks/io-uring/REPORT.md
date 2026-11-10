@@ -163,7 +163,13 @@ Queue counters do not identify submitted operation types, quantify syscall execu
 
 ## Validation and limitations
 
-Accepted main-sweep measurements passed their acceptance validators and reported no request errors. For the targeted follow-up, all 80 raw-export hashes were verified and the report was recomputed from raw records. No follow-up cells were invalid, and no CPU quota-pressure flags were raised. Low nonzero throttling was observed in some samples; the absence of a pressure flag is not a claim of zero throttling.
+Accepted main-sweep measurements passed their acceptance validators and reported
+no request errors. For the targeted follow-up, the archived validation run
+verified all 80 raw-export hashes and recomputed the report from raw records.
+The packaged validation receipt records that prior run; it is not a package-only
+recomputation. No follow-up cells were invalid, and no CPU quota-pressure flags
+were raised. Low nonzero throttling was observed in some samples; the absence of
+a pressure flag is not a claim of zero throttling.
 
 The consolidated secondary analysis contains **3,736 paired metric comparisons**, including 312 primary-workload metric rows. Comparisons lacking five positive finite metric pairs were omitted; missing token-spacing observations were not treated as zero. A total of 208 primary estimates from the two smaller-model analyses were cross-checked against their previously published results.
 
@@ -193,7 +199,17 @@ The report package includes per-model analysis, consolidated secondary-metric co
 
 - Main sweeps: 540 accepted cells per model; five paired repetitions per comparison.
 - Consolidated metrics: [CSV](analysis/all-model-paired-metrics.csv) and [JSON](analysis/all-model-paired-metrics.json).
-- Targeted follow-up: [results](analysis/tail-results.json) and [validation](analysis/final-analysis-validation.json).
-- Model revisions and frozen execution versions: packaged experiment metadata.
+- Targeted follow-up: [results](analysis/tail-results.json) and the
+  [receipt of validation in the original archive](analysis/final-analysis-validation.json).
+  The package omits both segments' `formal-progress.json` records and raw
+  request exports, so it cannot regenerate the follow-up results or sensitivity
+  tables. The earlier segment has a recorded progress hash; the continuation's
+  progress hash is not packaged, so its source integrity cannot be independently
+  verified here.
+- Model revisions and frozen execution versions:
+  [0.6B](analysis/0.6b/formal-freeze.json),
+  [8B](analysis/8b/formal-freeze.json),
+  [27B](analysis/27b/formal-freeze.json) and
+  [follow-up](analysis/tail/formal-freeze.json).
 
 All reported percentages are rounded for presentation. Machine-readable artifacts retain full precision.

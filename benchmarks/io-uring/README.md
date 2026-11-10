@@ -24,7 +24,9 @@ This folder packages the report and derived analysis for the three model sweeps 
 | `analysis/tail/` | Follow-up experiment metadata and continuation provenance |
 | [SHA256SUMS.json](SHA256SUMS.json) | Package file-integrity manifest |
 
-The per-model `RESULTS.md` files are original experiment summaries retained for provenance. The independent synthesis is `REPORT.md`.
+The per-model `RESULTS.md` files retain the experiment summaries and numerical
+results, with package notes clarifying archive references and completed phases.
+The independent synthesis is `REPORT.md`.
 
 ## Recompute the consolidated comparisons
 
@@ -39,3 +41,18 @@ This recomputes paired estimates and confidence intervals and rewrites the conso
 The packaged `tail_report.py` records the follow-up analysis method. Recomputing it from raw requests requires the original experiment archives and their expected directory layout; it is not a standalone command for this report package. Its completed results are included as `analysis/tail-results.json`.
 
 Paths and run identifiers in original provenance files refer to the original experiment archives. No benchmark, cleanup, credential or cluster-control action is needed to inspect this package.
+
+## Follow-up provenance
+
+The [frozen continuation plan](analysis/tail/formal-plan.json) covers repeats
+6–10: its `measurement_cells: 40` counts only the continuation. The earlier
+five pairs contribute 40 cells, for 80 cells in the full ten-pair protocol, as
+recorded in [the continuation source](analysis/tail/continuation-source.json).
+The frozen plan is preserved byte for byte so its hash still matches
+`plan_sha256` in the freeze record.
+
+The source record hashes the earlier segment's progress, not the continuation's
+own progress. Both `formal-progress.json` files and the raw request exports
+remain outside this package. No continuation progress hash is available here;
+the package manifest verifies the packaged files only. Recomputing the follow-up
+and verifying that continuation require the original archives.

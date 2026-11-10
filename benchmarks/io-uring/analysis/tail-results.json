@@ -2122,8 +2122,7 @@
     "ci95": [
       0.9082841184316129,
       1.0650848473591432
-    ],
-    "interpretation": "inconclusive for the 3% higher-latency margin"
+    ]
   },
   "full_profile_throughput_secondary": {
     "pairs": 10,
@@ -2237,7 +2236,6 @@
     "ci95": [
       0.9495681640267646,
       1.0783900739943235
-    ],
-    "interpretation": "inconclusive for the 3% higher-latency margin"
+    ]
   }
 }

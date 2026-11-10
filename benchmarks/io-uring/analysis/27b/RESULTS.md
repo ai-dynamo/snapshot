@@ -5,6 +5,10 @@ SPDX-License-Identifier: Apache-2.0
 
 io_uring benchmark — complete
 
+Package note: `startup/`, `checkpoints/`, `device-verification.json` and
+`gpu-policy.json` refer to the original experiment archives. These records are
+not included in this package.
+
 Accepted 540 of 540 planned cells on Qwen/Qwen3.8-27B-FP8.
 
 Each cell uses 30 seconds of warmup, 90 seconds of measurement and up to 60 seconds of drain.
@@ -32,7 +36,8 @@ Allowed queues showed sampled counter advances in these server-container observa
 
 Pilot rates used different GPU UUIDs and initial client settings; they are excluded from these comparisons.
 
-Sources: [CCL-590](https://linear.app/nvidia/issue/CCL-590), [PR4684 discussion](https://github.com/CentML/platform/pull/4684#discussion_r4315094597).
+Internal sources (access restricted): CCL-590 and the CentML/platform PR4684
+discussion. The public synthesis is in [the benchmark report](../../REPORT.md).
 
 
 Hardware policy: this separate 27B experiment uses the user-approved verified H100 pool with identical model, memory, driver, node, resources and MIG-disabled checks. Cross-condition GPU assignments may differ. Intervals include hardware variation between condition launches; the JSON separately reports policy strata, same-GPU pair counts, and each GPU pair. Do not interpret a pooled difference as an isolated same-device effect. This 27B phase uses the verified H100 pool from its first accepted cell. See device-verification.json and gpu-policy.json for this phase's fresh inventory.

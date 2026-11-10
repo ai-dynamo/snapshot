@@ -19,6 +19,7 @@ SOURCES = {
 
 
 def estimate(ratios):
+    """Return a geometric paired effect and 95% t interval for five ratios."""
     if len(ratios) != 5 or any(not math.isfinite(x) or x <= 0 for x in ratios):
         raise ValueError('Expected five finite positive paired ratios')
     logs = [math.log(x) for x in ratios]
@@ -29,6 +30,7 @@ def estimate(ratios):
 
 
 def main():
+    """Validate paired source estimates and write consolidated JSON and CSV."""
     rows = []
     filename = OUT / 'metrics-comparison.json'
     data = json.loads(filename.read_text())

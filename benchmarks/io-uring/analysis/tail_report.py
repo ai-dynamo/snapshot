@@ -12,9 +12,13 @@ ROOT = Path(__file__).resolve().parent
 T95 = {1: 12.706204736, 2: 4.302652730, 3: 3.182446305, 4: 2.776445105,
        5: 2.570581836, 6: 2.446911851, 7: 2.364624252, 8: 2.306004135, 9: 2.262157163}
 WINDOWS = {'early': (0, 90), 'steady': (120, 300), 'full': (0, 300)}
+# The original segment's execution_segments events record prolonged idle before
+# conditioning for repeats 2 and 5. Both conditions in each pair share a repeat.
+RECOVERY_IDLE_REPEATS = (2, 5)
 
 
 def percentile(values, fraction):
+    """Linearly interpolate a sample percentile; reject an empty sample."""
     values = sorted(values)
     if not values:
         raise ValueError('Empty percentile sample')
@@ -24,6 +28,7 @@ def percentile(values, fraction):
 
 
 def interval(ratios, *, confirmatory=False):
+    """Estimate paired log-ratio uncertainty; confirmation requires ten pairs."""
     if not ratios or any(not math.isfinite(v) or v <= 0 for v in ratios):
         raise ValueError('Expected positive finite paired ratios')
     logs = [math.log(v) for v in ratios]
@@ -41,6 +46,7 @@ def interval(ratios, *, confirmatory=False):
 
 
 def metric(record, name):
+    """Read a request metric, rejecting latency units other than milliseconds."""
     value = record['metrics'][name]
     if value['unit'] != 'ms':
         raise ValueError('Unexpected latency units: ' + name)
@@ -48,6 +54,7 @@ def metric(record, name):
 
 
 def window_metrics(records, low, high):
+    """Summarize requests by start time and gaps only where they are observed."""
     origin = min(r['metadata']['request_start_ns'] for r in records)
     selected = [r for r in records
                 if low <= (r['metadata']['request_start_ns'] - origin) / 1e9 < high]
@@ -70,6 +77,7 @@ def window_metrics(records, low, high):
 
 
 def generate():
+    """Recompute follow-up results from original progress and request archives."""
     progress = json.loads((ROOT / 'formal-progress.json').read_text())
     segments = [(ROOT, progress)]
     source_file = ROOT / 'continuation-source.json'
@@ -122,6 +130,8 @@ def generate():
         same = [p for p in pairs if p['blocked']['gpu_uuid'] == p['restored-blocked']['gpu_uuid']]
         sensitivity = interval([p['restored-blocked']['windows']['steady']['request_latency_p99_ms'] /
                                 p['blocked']['windows']['steady']['request_latency_p99_ms'] for p in same]) if same else None
+        if sensitivity is not None:
+            sensitivity.pop('interpretation')  # Exploratory subsets do not give a confirmatory verdict.
         throughput = interval([p['restored-blocked']['requests_per_second'] /
                                p['blocked']['requests_per_second'] for p in pairs])
         throughput.pop('interpretation')  # Latency and throughput margins have opposite directions.
@@ -142,11 +152,13 @@ def generate():
                           'Fixed C1→8→32→128 conditioning; cannot infer all prior workload histories',
                           'Chunk-gap secondary metric is conditional on observed inter-chunk gaps; absence is not zero',
                           'Repeats 2 and 5 have recorded recovery idle intervals; inspect sensitivity excluding those pairs']}
-    unaffected = [p for p in pairs if p['blocked']['repeat'] not in (2, 5)]
+    unaffected = [p for p in pairs if p['blocked']['repeat'] not in RECOVERY_IDLE_REPEATS]
     result['excluding_recovery_pairs_steady_p99_exploratory'] = (
         interval([p['restored-blocked']['windows']['steady']['request_latency_p99_ms'] /
                   p['blocked']['windows']['steady']['request_latency_p99_ms'] for p in unaffected])
         if unaffected else None)
+    if result['excluding_recovery_pairs_steady_p99_exploratory'] is not None:
+        result['excluding_recovery_pairs_steady_p99_exploratory'].pop('interpretation')
     temporary = ROOT / 'tail-results.json.tmp'
     temporary.write_text(json.dumps(result, indent=2) + '\n')
     temporary.replace(ROOT / 'tail-results.json')

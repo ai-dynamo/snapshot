@@ -5,6 +5,10 @@ SPDX-License-Identifier: Apache-2.0
 
 io_uring benchmark — complete
 
+Package note: `startup/`, `checkpoints/`, `recovery/`, `hardening/live/` and
+`gpu-policy-relaxation/` refer to the original experiment archives. These
+receipt directories are not included in this package.
+
 Accepted 540 of 540 planned cells on Qwen/Qwen3-0.6B.
 
 Each cell uses 30 seconds of warmup, 90 seconds of measurement and up to 60 seconds of drain.
@@ -26,13 +30,18 @@ Dynamo scope: GPU worker policy varied; frontend configuration, node, image, res
 
 Native checkpoint restore adds its own seccomp layer. Startup/capture/restore evidence is saved separately under startup/ and checkpoints/; steady-state measurement follows matched warmup. The phases and engine versions are analyzed independently.
 
-Native sleep/memory saver is enabled in every condition. Standalone policy applies to the native HTTP server and engine processes; the ingress and Istio proxy configuration stays fixed. Concurrency is measured through 128; capacity beyond that range is unmeasured. The Qwen3-8B phase is planned separately and has not started.
+Native sleep/memory saver is enabled in every condition. Standalone policy
+applies to the native HTTP server and engine processes; the ingress and Istio
+proxy configuration stays fixed. Concurrency is measured through 128; capacity
+beyond that range is unmeasured. The completed 8B and 27B phases are analyzed
+separately; their data is not pooled here.
 
 Allowed queues showed sampled counter advances in these server-container observations: dynamo-vllm: 0/120; sglang: 60/60; vllm: 60/60. These counters describe the exercised paths; they do not decode SQE operations or establish results for disk-heavy workloads.
 
 Pilot rates used different GPU UUIDs and initial client settings; they are excluded from these comparisons.
 
-Sources: [CCL-590](https://linear.app/nvidia/issue/CCL-590), [PR4684 discussion](https://github.com/CentML/platform/pull/4684#discussion_r4315094597).
+Internal sources (access restricted): CCL-590 and the CentML/platform PR4684
+discussion. The public synthesis is in [the benchmark report](../../REPORT.md).
 
 
 Execution interruption: a deadline-only extension triggered the original runner's in-memory integrity check after 38 validated cells. Cleanup completed, and the operator explicitly approved recovery. All 38 exports passed a fresh hash check. The replacement client matches the original image, node, CPU/memory allocation and exact dependencies. Dynamo repeat 1 allowed prefill cells at concurrency 1 and 8 precede the interruption; its remaining cells use a new worker launch. The primary 128/16 concurrency-128 comparison is outside that interrupted block. Recovery preflight data is excluded from formal comparisons. Original provenance and amendment receipts are retained under recovery/.
