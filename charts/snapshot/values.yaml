@@ -203,6 +203,46 @@ pageBroker:
       cpu: 32
       memory: 256Gi
 
+# The coordinator of pod groups: an unprivileged container in each agent Pod
+# that holds the coordination sessions of the groups whose rank-0 member runs on
+# its node. Deployed only with podGroups.enabled.
+coordinator:
+  # The port agents connect to, over TLS. The agent Pod uses the host's
+  # network, so it is a port on the node's IP.
+  port: 4224
+  # The port of the health endpoint the probes read, /healthz and /readyz, also
+  # on the node's IP.
+  healthPort: 4225
+  # The memory, in bytes, that every session's data shares. A group's writes
+  # fail once it is full. Keep resources.limits.memory at about twice this.
+  maxMemoryBytes: 1073741824
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 2Gi
+  # The coordinator serves tls.crt and tls.key, and agents trust the CA bundle
+  # ca.crt for serverName. By default the operator issues all three under a
+  # private CA, in the release's namespace. To bring your own, for example from
+  # cert-manager and trust-manager, set serving.secretName and one trust
+  # source; that turns the operator's issuer off.
+  tls:
+    serving:
+      # A kubernetes.io/tls Secret in the release's namespace, with tls.crt and
+      # tls.key. Its certificate must name serverName as a DNS name.
+      secretName: ""
+    # The CA bundle agents trust: exactly one of a ConfigMap and a Secret in the
+    # release's namespace, and the key that holds the bundle.
+    trust:
+      configMapName: ""
+      secretName: ""
+      key: ca.crt
+    # The name agents verify the serving certificate against, never resolved.
+    # Set it only with your own serving Secret. Empty is
+    # <release fullname>-coordinator.<namespace>.
+    serverName: ""
+
 # DaemonSet configuration for the checkpoint/restore agent
 daemonset:
   # Agent and nsrestore log level (trace, debug, info, warn, error)
@@ -381,3 +421,9 @@ config:
     libDir: "/usr/local/lib/snapshot/criu-plugins"
     allowUprobes: true             # Leave enabled for kernel/userspace probe compatibility
     skipInFlight: true             # Skip in-flight TCP connections
+
+# Alpha: pod groups (SNEP-324), which checkpoint a group of cooperating Pods
+# together and restore it. The chart installs what pod groups need only when
+# this is true.
+podGroups:
+  enabled: false
