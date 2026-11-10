@@ -75,8 +75,10 @@ func LastRestoreError(checkpointPath, workDir string) string {
 const criuRestoreSummary = "Restoring FAILED."
 
 // criuFollowOnError matches errors CRIU logs after the failure that caused
-// them: the restore summary and the exit of a task that hit the real error.
-var criuFollowOnError = regexp.MustCompile(`^(Restoring FAILED\.|\d+ exited, status=\d+|\d+ killed by signal \d+: .*)$`)
+// them: the restore summary, the exit of a task that hit the real error, and
+// the removal of the tmpfs CRIU mounts while restoring mounts. CRIU removes
+// that tmpfs even after a mount failed, and ignores a failed removal.
+var criuFollowOnError = regexp.MustCompile(`^(Restoring FAILED\.|\d+ exited, status=\d+|\d+ killed by signal \d+: .*|mnt: Unable to remove /tmp/cr-tmpfs\.[A-Za-z0-9]{6}: .*)$`)
 
 // lastCRIUError returns the message of the last "Error (file:line): msg" line
 // logged before the restore summary, skipping follow-on errors unless nothing
