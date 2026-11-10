@@ -35,6 +35,26 @@ func TestLastCRIUError(t *testing.T) {
 			want: "mnt-v2: Can't stat mountpoint /tmp/.criu.mntns.31gkOS/mnt-0000001303/cache/volume-9: No such file or directory",
 		},
 		{
+			name: "skips the tmpfs removal CRIU ignores after a mount failed",
+			log: `(00.006094) Error (criu/tun.c:85): tun: Unable to create tun: No such file or directory
+(00.055971)      1: Error (criu/mount.c:2394): mnt: Can't bind-mount at /tmp/.criu.mntns.2M074G/13-0000000000/cache/volume-9: No such file or directory
+(00.055975)      1: Error (criu/mount.c:2682): mnt: Unable to statfs /tmp/.criu.mntns.2M074G/13-0000000000/cache/volume-9: No such file or directory
+(00.055977)      1: mnt: Start with 0:(null)
+(00.056024)      1: Error (criu/mount.c:2274): mnt: Unable to remove /tmp/cr-tmpfs.TzILzr: Device or resource busy
+(00.056687) Error (criu/cr-restore.c:2419): Restoring FAILED.
+(00.057517) Error (criu/cgroup.c:2247): cg: cgroupd: recv req error: No such file or directory
+`,
+			want: "mnt: Unable to statfs /tmp/.criu.mntns.2M074G/13-0000000000/cache/volume-9: No such file or directory",
+		},
+		{
+			name: "reports a failed tmpfs unmount, which fails the restore",
+			log: `(00.006094) Error (criu/tun.c:85): tun: Unable to create tun: No such file or directory
+(00.056010)      1: Error (criu/mount.c:2269): mnt: Unable to umount /tmp/cr-tmpfs.TzILzr: Device or resource busy
+(00.056687) Error (criu/cr-restore.c:2419): Restoring FAILED.
+`,
+			want: "mnt: Unable to umount /tmp/cr-tmpfs.TzILzr: Device or resource busy",
+		},
+		{
 			name: "reports a teardown error when nothing before the summary failed",
 			log: `(00.035998) Error (criu/cr-restore.c:2419): Restoring FAILED.
 (00.036618) Error (criu/cgroup.c:2247): cg: cgroupd: recv req error: No such file or directory
