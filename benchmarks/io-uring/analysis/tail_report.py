@@ -56,7 +56,12 @@ def metric(record, name):
 
 
 def window_metrics(records, low, high):
-    """Summarize requests by start time and gaps only where they are observed."""
+    """Summarize request-relative windows and gaps only where observed.
+
+    The first profiling request approximates phase start. The packaged inputs
+    lack the actual phase-start timestamp, so the offset and its effect on
+    boundary membership cannot be determined from this package.
+    """
     origin = min(r['metadata']['request_start_ns'] for r in records)
     selected = [r for r in records
                 if low <= (r['metadata']['request_start_ns'] - origin) / 1e9 < high]
@@ -143,7 +148,9 @@ def generate():
               'full_profile_throughput_secondary': throughput,
               'execution_segments': [segment['execution_segment'] for segment in segments],
               'method': 'Paired log run-level ratios; 95% Student-t intervals; primary conclusion requires all 10 pairs',
-              'timing': 'Windows use request start relative to first profiling request after 30s warmup; not time since restore',
+              'timing': 'Windows use request start relative to first profiling request after 30s warmup; '
+                        'approximation of profiling-phase start, whose timestamp is unavailable in packaged inputs; '
+                        'boundary membership may differ; not time since restore',
               'caveats': ['Secondary comparisons exploratory and unadjusted', 'Same-GPU sensitivity may have too few pairs',
                           'Fixed C1→8→32→128 conditioning; cannot infer all prior workload histories',
                           'Chunk-gap secondary metric is conditional on observed inter-chunk gaps; absence is not zero',

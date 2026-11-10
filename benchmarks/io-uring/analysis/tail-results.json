@@ -2212,7 +2212,7 @@
     }
   ],
   "method": "Paired log run-level ratios; 95% Student-t intervals; primary conclusion requires all 10 pairs",
-  "timing": "Windows use request start relative to first profiling request after 30s warmup; not time since restore",
+  "timing": "Windows use request start relative to first profiling request after 30s warmup; approximation of profiling-phase start, whose timestamp is unavailable in packaged inputs; boundary membership may differ; not time since restore",
   "caveats": [
     "Secondary comparisons exploratory and unadjusted",
     "Same-GPU sensitivity may have too few pairs",

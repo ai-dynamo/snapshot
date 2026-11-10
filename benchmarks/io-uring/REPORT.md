@@ -129,7 +129,15 @@ The follow-up used Qwen3.8-27B-FP8 and compared ordinary blocked serving with re
 
 Each condition passed through concurrency 1, 8 and 32 before a five-minute concurrency-128 profile. Conditioning cells used 30 seconds of warmup and 90 seconds of profiling. The concurrency-128 cell used 30 seconds of warmup and 300 seconds of profiling.
 
-The prespecified primary endpoint was p99 request latency for requests starting **120–300 seconds into profiling**. Early and full-profile windows were secondary. These windows are relative to profiling, not time since restore; the experiment assesses serving after the preceding conditioning sequence.
+The prespecified primary endpoint was p99 request latency for requests starting
+**120–300 seconds into profiling**. Early and full-profile windows were secondary.
+The saved analysis anchors these windows to the first profiling request as an
+approximation of profiling-phase start. The actual phase-start timestamp is
+unavailable in the packaged inputs, so the offset cannot be quantified and
+requests near window boundaries may be assigned differently. The package
+preserves these request-relative windows; it does not realign them to phase
+start. These windows are not time since restore; the experiment assesses serving
+after the preceding conditioning sequence.
 
 The experiment completed **80 accepted cells**, including **518,327 concurrency-128 profiling requests**. The primary steady window included 310,037 requests. Effects used paired log ratios with 95% Student-t intervals across ten repetitions.
 
