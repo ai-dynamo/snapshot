@@ -45,7 +45,6 @@ struct EngineOptions {
   size_t buffer_count = 32;
   size_t chunk_bytes = 128ULL * 1024 * 1024;
   size_t max_pinned_bytes = 0;
-  size_t pooled_lanes = 0;
 };
 struct ParticipantResult {
   uint32_t captured_pid = 0;

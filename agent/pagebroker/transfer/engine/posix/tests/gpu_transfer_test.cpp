@@ -37,12 +37,12 @@ FileDescriptor CreateFile()
 }
 
 std::unique_ptr<transfer::TransferPool> MakePool(std::span<const CUcontext> contexts,
-                                                 transfer::TransferOptions options, size_t lanes)
+                                                 transfer::TransferOptions options)
 {
   std::vector<std::unique_ptr<transfer::TransferPoolDevice>> devices;
   std::vector<transfer::TransferPoolDevice*> allocations;
   for (const auto context : contexts) {
-    devices.push_back(std::make_unique<transfer::TransferPoolDevice>(context, options, lanes));
+    devices.push_back(std::make_unique<transfer::TransferPoolDevice>(context, options));
     allocations.push_back(devices.back().get());
   }
   for (auto& device : devices) device->AllowAccess(allocations);
@@ -92,17 +92,17 @@ class CudaTransfer : public testing::Test {
     }
   }
 
-  void RoundTrip(transfer::TransferBuffers& buffers)
+  void RoundTrip(transfer::TransferPool& pool)
   {
     auto file = CreateFile();
     Cancellation cancellation;
     ASSERT_EQ(cuMemcpyHtoD(gpu_.memory, source_.data(), data_bytes), CUDA_SUCCESS);
-    ASSERT_NO_THROW(buffers.Checkpoint(file.get(), gpu_.memory, data_bytes, gpu_.stream, cancellation));
+    ASSERT_NO_THROW(pool.Checkpoint(file.get(), gpu_.context, gpu_.memory, data_bytes, gpu_.stream, cancellation));
     std::vector<unsigned char> saved(data_bytes);
     ASSERT_EQ(pread(file.get(), saved.data(), data_bytes, 0), static_cast<ssize_t>(data_bytes));
     EXPECT_EQ(saved, source_);
     ASSERT_EQ(cuMemsetD8(gpu_.memory, 0, data_bytes), CUDA_SUCCESS);
-    ASSERT_NO_THROW(buffers.Restore(file.get(), gpu_.memory, data_bytes, gpu_.stream, cancellation));
+    ASSERT_NO_THROW(pool.Restore(file.get(), gpu_.context, gpu_.memory, data_bytes, gpu_.stream, cancellation));
     std::vector<unsigned char> restored(data_bytes);
     ASSERT_EQ(cuMemcpyDtoH(restored.data(), gpu_.memory, data_bytes), CUDA_SUCCESS);
     EXPECT_EQ(restored, source_);
@@ -112,61 +112,66 @@ class CudaTransfer : public testing::Test {
   std::vector<unsigned char> source_;
 };
 
-TEST_F(CudaTransfer, ReusesRingAcrossFilesAndPartialFinalChunks)
+TEST_F(CudaTransfer, ReusesSlotsAcrossFilesAndPartialFinalChunks)
 {
-  transfer::TransferBuffers buffers({4, chunk_bytes});
-  ASSERT_NO_THROW(buffers.Initialize(gpu_.context));
+  const std::array contexts{gpu_.context};
+  auto pool = MakePool(contexts, {4, chunk_bytes});
   for (int iteration = 0; iteration < 3; ++iteration) {
-    ASSERT_NO_FATAL_FAILURE(RoundTrip(buffers));
+    ASSERT_NO_FATAL_FAILURE(RoundTrip(*pool));
   }
 }
 
 TEST_F(CudaTransfer, FailedReadDoesNotPoisonNextFile)
 {
-  transfer::TransferBuffers buffers({2, chunk_bytes});
-  ASSERT_NO_THROW(buffers.Initialize(gpu_.context));
+  const std::array contexts{gpu_.context};
+  auto pool = MakePool(contexts, {2, chunk_bytes});
   auto empty = CreateFile();
   Cancellation cancellation;
   ASSERT_EQ(ftruncate(empty.get(), 0), 0);
-  EXPECT_THROW(buffers.Restore(empty.get(), gpu_.memory, data_bytes, gpu_.stream, cancellation),
+  EXPECT_THROW(pool->Restore(empty.get(), gpu_.context, gpu_.memory, data_bytes, gpu_.stream, cancellation),
                std::runtime_error);
-  ASSERT_NO_FATAL_FAILURE(RoundTrip(buffers));
+  ASSERT_NO_FATAL_FAILURE(RoundTrip(*pool));
 }
 
 TEST_F(CudaTransfer, FailedWriteDoesNotPoisonNextFile)
 {
-  transfer::TransferBuffers buffers({2, chunk_bytes});
-  ASSERT_NO_THROW(buffers.Initialize(gpu_.context));
+  const std::array contexts{gpu_.context};
+  auto pool = MakePool(contexts, {2, chunk_bytes});
   auto file = CreateFile();
   Cancellation cancellation;
   const auto path = "/proc/self/fd/" + std::to_string(file.get());
   FileDescriptor read_only(open(path.c_str(), O_RDONLY | O_CLOEXEC));
   ASSERT_GE(read_only.get(), 0);
-  EXPECT_THROW(buffers.Checkpoint(read_only.get(), gpu_.memory, data_bytes, gpu_.stream, cancellation),
+  EXPECT_THROW(pool->Checkpoint(read_only.get(), gpu_.context, gpu_.memory, data_bytes, gpu_.stream, cancellation),
                std::runtime_error);
-  ASSERT_NO_FATAL_FAILURE(RoundTrip(buffers));
+  ASSERT_NO_FATAL_FAILURE(RoundTrip(*pool));
 }
 
 TEST_F(CudaTransfer, CancelledRequestDoesNotPreventLaterTransfers)
 {
-  transfer::TransferBuffers buffers({4, chunk_bytes});
-  ASSERT_NO_THROW(buffers.Initialize(gpu_.context));
+  const std::array contexts{gpu_.context};
+  auto pool = MakePool(contexts, {4, chunk_bytes});
   auto file = CreateFile();
   Cancellation cancelled;
   cancelled.Cancel();
   Cancellation expired(Cancellation::Clock::now());
-  EXPECT_THROW(buffers.Checkpoint(file.get(), gpu_.memory, data_bytes, gpu_.stream, cancelled), std::runtime_error);
-  EXPECT_THROW(buffers.Checkpoint(file.get(), gpu_.memory, data_bytes, gpu_.stream, expired), std::runtime_error);
-  ASSERT_NO_FATAL_FAILURE(RoundTrip(buffers));
-  EXPECT_THROW(buffers.Restore(file.get(), gpu_.memory, data_bytes, gpu_.stream, cancelled), std::runtime_error);
-  EXPECT_THROW(buffers.Restore(file.get(), gpu_.memory, data_bytes, gpu_.stream, expired), std::runtime_error);
-  ASSERT_NO_FATAL_FAILURE(RoundTrip(buffers));
+  EXPECT_THROW(pool->Checkpoint(file.get(), gpu_.context, gpu_.memory, data_bytes, gpu_.stream, cancelled),
+               std::runtime_error);
+  EXPECT_THROW(pool->Checkpoint(file.get(), gpu_.context, gpu_.memory, data_bytes, gpu_.stream, expired),
+               std::runtime_error);
+  ASSERT_NO_FATAL_FAILURE(RoundTrip(*pool));
+  EXPECT_THROW(pool->Restore(file.get(), gpu_.context, gpu_.memory, data_bytes, gpu_.stream, cancelled),
+               std::runtime_error);
+  EXPECT_THROW(pool->Restore(file.get(), gpu_.context, gpu_.memory, data_bytes, gpu_.stream, expired),
+               std::runtime_error);
+  ASSERT_NO_FATAL_FAILURE(RoundTrip(*pool));
 }
 
 TEST_F(CudaTransfer, PoolRoundTripConcurrentFilesAndRecovery)
 {
   const std::array contexts{gpu_.context};
-  auto owner = MakePool(contexts, {4, chunk_bytes}, 2);
+  // 32 slots run two workers, so two files are in flight on separate lanes.
+  auto owner = MakePool(contexts, {32, chunk_bytes});
   auto& pool = *owner;
   auto first = CreateFile();
   auto second = CreateFile();
@@ -230,8 +235,9 @@ TEST(PooledTransfer, RoutesConcurrentExtentsAcrossAllDevices)
     contexts.push_back(device->context);
     devices.push_back(std::move(device));
   }
-  // With 2, 4 or 8 GPUs, count + 1 workers do not divide the slot budget evenly.
-  auto owner = MakePool(contexts, {4, chunk_bytes}, count + 1);
+  // With 2, 4 or 8 GPUs, 25 slots each run 3, 6 or 12 workers, which do not
+  // divide the slot budget evenly.
+  auto owner = MakePool(contexts, {25, chunk_bytes});
   auto& pool = *owner;
   Cancellation cancellation;
   for (int iteration = 0; iteration < 3; ++iteration) {
@@ -274,6 +280,16 @@ TEST(PooledTransfer, RoutesConcurrentExtentsAcrossAllDevices)
       EXPECT_EQ(actual, device->expected);
     }
   }
+}
+
+TEST(TransferOptions, PoolLanesGiveEachWorkerSixteenSlots)
+{
+  EXPECT_EQ(transfer::PoolLanes(1), 1);
+  EXPECT_EQ(transfer::PoolLanes(31), 1);
+  EXPECT_EQ(transfer::PoolLanes(32), 2);
+  EXPECT_EQ(transfer::PoolLanes(64), 4);
+  EXPECT_EQ(transfer::PoolLanes(256), 16);
+  EXPECT_EQ(transfer::PoolLanes(1024), 16);
 }
 
 TEST(TransferOptions, RejectsInvalidCapacityAndMemoryLimit)

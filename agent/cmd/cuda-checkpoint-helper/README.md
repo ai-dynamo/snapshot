@@ -32,5 +32,5 @@ make -C agent/cmd/cuda-checkpoint-helper helper CUDA_ROOT=/path/to/cuda
 
 The agent image builds this executable and includes it in the restore injection
 bundle. The host NVIDIA driver supplies runtime `libcuda`. The helper has no
-daemon, session protocol, transfer ring, NIXL, protobuf, or payload checksum
+daemon, session protocol, transfer buffers, NIXL, protobuf, or payload checksum
 dependency.

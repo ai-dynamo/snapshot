@@ -574,23 +574,20 @@ TEST(GpuCheckpoint, RestoresAllocationThroughRealCustomStorage)
   const auto visible_device = gpu::storage::FormatGPUUUID(uuid_bytes);
   constexpr size_t kTestBufferCount = 2;
   constexpr size_t kTestChunkBytes = 1024 * 1024;
-  const size_t pooled_lanes = std::getenv("PAGEBROKER_TEST_POOLED_TRANSFERS") ? 2 : 0;
-  const gpu::EngineOptions options{kTestBufferCount, kTestChunkBytes, 0, pooled_lanes};
+  const gpu::EngineOptions options{kTestBufferCount, kTestChunkBytes, 0};
   gpu::GpuEnginePtr engine;
   int count = 0;
   Check(cuDeviceGetCount(&count), "get test GPU count");
-  if (pooled_lanes && count > 1) {
+  if (count > 1) {
     Check(cuDeviceGet(&setup_failure_device, count - 1), "get failing test GPU");
     CUuuid failed_uuid;
     Check(cuDeviceGetUuid(&failed_uuid, setup_failure_device), "get failing GPU UUID");
     std::copy(std::begin(failed_uuid.bytes), std::end(failed_uuid.bytes), uuid_bytes.begin());
     const auto failed_device = gpu::storage::FormatGPUUUID(uuid_bytes);
     // Exercise partial stream/allocation setup and cross-device access failure.
-    // Also request more lanes than the surviving slots to test graceful shrink.
     for (int step : {1, 2, 3}) {
       setup_failure.store(step);
-      engine = std::make_shared<gpu::GpuEngine>(gpu::EngineOptions{
-          kTestBufferCount, kTestChunkBytes, 0, kTestBufferCount * static_cast<size_t>(count)});
+      engine = std::make_shared<gpu::GpuEngine>(options);
       EXPECT_EQ(setup_failure.exchange(0), 0) << "setup fault was not reached";
       ASSERT_TRUE(engine->Available());
       const auto failed_root = root / ("failed-" + std::to_string(step));
