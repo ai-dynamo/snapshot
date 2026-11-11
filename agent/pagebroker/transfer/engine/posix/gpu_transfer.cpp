@@ -8,9 +8,10 @@
 #include "fatal_cleanup.hpp"
 #include "file_descriptor.hpp"
 #include <cerrno>
+#include <chrono>
+#include <cstdint>
 #include <stdexcept>
 #include <system_error>
-#include <cstdio>
 #include <string>
 #include <nvtx3/nvtx3.hpp>
 
@@ -394,10 +395,6 @@ struct TransferPool::Impl {
     std::vector<void*> addresses;
     for (const auto& device : devices) {
       auto& state = *device->impl_;
-      Validate(state.options.buffer_count == options.buffer_count &&
-               state.options.chunk_bytes == options.chunk_bytes &&
-               state.options.direct_io == options.direct_io,
-               "inconsistent transfer pool devices");
       contexts.emplace(state.context, &state);
       for (const auto& slot : state.slots) {
         free[state.numa_node].push_back(slots.size());
@@ -508,6 +505,8 @@ struct TransferPool::Impl {
       RecordCopy(job.operation == io::Operation::Read
           ? cuMemcpyHtoDAsync(job.device + work.offset, host, work.size, stream)
           : cuMemcpyDtoHAsync(host, job.device + work.offset, work.size, stream), event, stream);
+      // This wait has no deadline. A copy that never completes holds this
+      // lane, and FIFO assignment can then hold every lane behind it.
       WaitForCopy(event);
     } catch (...) {
       CheckCleanup(cuStreamSynchronize(stream), "drain pooled CUDA stream");

@@ -18,8 +18,7 @@ main(int argc, char** argv)
   } catch (const std::invalid_argument& error) {
     std::cerr << "usage: pagebroker socket_path staging_directory storage_root "
                  "[--max-concurrent-requests count] [--custom-storage-engine on|off] "
-                 "[--custom-storage-buffer-count count] "
-                 "[--custom-storage-chunk-bytes bytes] "
+                 "[--custom-storage-buffer-count count] [--custom-storage-chunk-bytes bytes] "
                  "[--custom-storage-max-pinned-bytes bytes] "
                  "[--storage-config path] [--model-streamer-config path]\n"
               << "pagebroker: " << error.what() << '\n';

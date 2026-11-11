@@ -170,7 +170,7 @@ TEST_F(CudaTransfer, CancelledRequestDoesNotPreventLaterTransfers)
 TEST_F(CudaTransfer, PoolRoundTripConcurrentFilesAndRecovery)
 {
   const std::array contexts{gpu_.context};
-  // 32 slots run two workers, so two files are in flight on separate lanes.
+  // 32 slots run two workers, which share the two concurrent files.
   auto owner = MakePool(contexts, {32, chunk_bytes});
   auto& pool = *owner;
   auto first = CreateFile();
@@ -286,9 +286,11 @@ TEST(TransferOptions, PoolLanesGiveEachWorkerSixteenSlots)
 {
   EXPECT_EQ(transfer::PoolLanes(1), 1);
   EXPECT_EQ(transfer::PoolLanes(31), 1);
+  EXPECT_EQ(transfer::PoolLanes(47), 2);
   EXPECT_EQ(transfer::PoolLanes(32), 2);
   EXPECT_EQ(transfer::PoolLanes(64), 4);
   EXPECT_EQ(transfer::PoolLanes(256), 16);
+  EXPECT_EQ(transfer::PoolLanes(257), 16);
   EXPECT_EQ(transfer::PoolLanes(1024), 16);
 }
 

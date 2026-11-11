@@ -36,6 +36,26 @@ namespace {
 namespace transfer = snapshot::pagebroker::posix;
 constexpr auto kGpuWaitInterval = std::chrono::milliseconds{100};
 
+FileDescriptor
+OpenDirectory(int parent, const char* name)
+{
+  FileDescriptor directory(openat(parent, name, O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+  if (directory.get() < 0) {
+    throw std::system_error(errno, std::generic_category(), "open GPU directory");
+  }
+  return directory;
+}
+
+void
+ValidateDirectory(int fd)
+{
+  struct stat info{};
+  if (fstat(fd, &info)) {
+    throw std::system_error(errno, std::generic_category(), "stat GPU directory");
+  }
+  Validate(S_ISDIR(info.st_mode), "GPU artifact path must be a directory");
+}
+
 struct PrimaryContext {
   explicit PrimaryContext(CUdevice device) : device(device)
   {
@@ -186,7 +206,7 @@ struct Artifact::ArtifactState {
   ArtifactState(int directory_fd, Direction direction)
       : root(FileDescriptor::Duplicate(directory_fd)), direction(direction)
   {
-    root.RequireDirectory();
+    ValidateDirectory(root.get());
   }
 
   void CreateCheckpointDirectories(const std::vector<uint32_t>& captured_pids)
@@ -206,15 +226,15 @@ struct Artifact::ArtifactState {
       } else if (errno != EEXIST) {
         throw std::system_error(errno, std::generic_category(), "create GPU root directory");
       }
-      gpu_root = FileDescriptor::OpenDirectory(root.get(), kDataDirectory);
-      gpu_root.RequireDirectory();
+      gpu_root = OpenDirectory(root.get(), kDataDirectory);
+      ValidateDirectory(gpu_root.get());
       for (size_t index = 0; index < names.size(); ++index) {
         if (mkdirat(gpu_root.get(), names[index].c_str(), S_IRWXU)) {
           throw std::system_error(errno, std::generic_category(), "create GPU participant directory");
         }
         ++created;
-        auto directory = FileDescriptor::OpenDirectory(gpu_root.get(), names[index].c_str());
-        directory.RequireDirectory();
+        auto directory = OpenDirectory(gpu_root.get(), names[index].c_str());
+        ValidateDirectory(directory.get());
         participants.push_back({captured_pids[index], std::move(directory), {}});
       }
     } catch (...) {
@@ -232,11 +252,11 @@ struct Artifact::ArtifactState {
 
   void OpenRestoreDirectories(const std::vector<uint32_t>& captured_pids)
   {
-    auto gpu_root = FileDescriptor::OpenDirectory(root.get(), kDataDirectory);
-    gpu_root.RequireDirectory();
+    auto gpu_root = OpenDirectory(root.get(), kDataDirectory);
+    ValidateDirectory(gpu_root.get());
     for (const auto pid : captured_pids) {
-      auto directory = FileDescriptor::OpenDirectory(gpu_root.get(), std::to_string(pid).c_str());
-      directory.RequireDirectory();
+      auto directory = OpenDirectory(gpu_root.get(), std::to_string(pid).c_str());
+      ValidateDirectory(directory.get());
       PreparedParticipant participant{pid, std::move(directory), {}};
       const auto path = "/proc/self/fd/" + std::to_string(participant.directory.get());
       std::string error;
@@ -357,27 +377,29 @@ struct GpuEngine::GpuEngineState {
       });
       it = ready ? std::next(it) : devices.erase(it);
     }
-    if (!devices.empty()) {
-      std::vector<transfer::TransferPoolDevice*> allocations;
-      for (const auto& [id, device] : devices) {
-        (void)id;
-        allocations.push_back(device->pooled.get());
+    std::vector<transfer::TransferPoolDevice*> allocations;
+    for (const auto& [id, device] : devices) {
+      (void)id;
+      allocations.push_back(device->pooled.get());
+    }
+    // Keep all allocations alive until access checks finish. A failed target
+    // GPU is then removed before any lane starts using its resources.
+    std::vector<CUdevice> failed;
+    for (const auto& [id, device] : devices) {
+      if (!SetUpOrSkip(labels[id], [&] { device->pooled->AllowAccess(allocations); })) {
+        failed.push_back(id);
       }
-      // Keep all allocations alive until access checks finish. A failed target
-      // GPU is then removed before any lane starts using its resources.
-      std::vector<CUdevice> failed;
-      for (const auto& [id, device] : devices) {
-        if (!SetUpOrSkip(labels[id], [&] { device->pooled->AllowAccess(allocations); })) {
-          failed.push_back(id);
-        }
-      }
-      for (const auto id : failed) devices.erase(id);
-      std::vector<std::unique_ptr<transfer::TransferPoolDevice>> prepared;
-      for (auto& [id, device] : devices) {
-        (void)id;
-        prepared.push_back(std::move(device->pooled));
-      }
-      if (!prepared.empty()) pool = std::make_unique<transfer::TransferPool>(std::move(prepared));
+    }
+    for (const auto id : failed) devices.erase(id);
+    std::vector<std::unique_ptr<transfer::TransferPoolDevice>> prepared;
+    for (auto& [id, device] : devices) {
+      (void)id;
+      prepared.push_back(std::move(device->pooled));
+    }
+    // Without the shared workers no GPU can transfer, so skip them all.
+    if (!prepared.empty() &&
+        !SetUpOrSkip("all GPUs", [&] { pool = std::make_unique<transfer::TransferPool>(std::move(prepared)); })) {
+      devices.clear();
     }
     available = !devices.empty();
   }
