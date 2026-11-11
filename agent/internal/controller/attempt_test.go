@@ -468,6 +468,47 @@ func TestRunCheckpointReportsEveryRepeatAndAttempt(t *testing.T) {
 	assert.Contains(t, events[2].Message, "3 of 3 retries used")
 }
 
+// The request's limit rides on the work order, so the agent acts on what was
+// asked for without reading the request — and an explicit 0 is a request for no
+// retry, not the absence of one.
+func TestRunCheckpointHonoursTheRequestedLimit(t *testing.T) {
+	attemptRetryInitialDelayOriginal := attemptRetryInitialDelay
+	t.Cleanup(func() { attemptRetryInitialDelay = attemptRetryInitialDelayOriginal })
+	attemptRetryInitialDelay = time.Millisecond
+
+	retryable := pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting")
+	for _, tc := range []struct {
+		name         string
+		clusterLimit int
+		requested    *int32
+		wantAttempts int
+	}{
+		{name: "the request's limit wins over the cluster default", clusterLimit: 0, requested: ptr.To(int32(1)), wantAttempts: 2},
+		{name: "an explicit zero refuses the cluster default", clusterLimit: 5, requested: ptr.To(int32(0)), wantAttempts: 1},
+		{name: "a silent request takes the cluster default", clusterLimit: 1, wantAttempts: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			content := makeWorkOrder("content-a", "node-a", "a")
+			content.Spec.CheckpointRetryLimit = tc.requested
+			w := makeNodeController(t, &fakeCheckpointer{}, content)
+			w.config.Checkpoint.RetryLimit = ptr.To(tc.clusterLimit)
+			attempts := 0
+			w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+				attempts++
+				if attempts > 1 {
+					return nil, nil
+				}
+				return nil, executor.SuspendedSourceFailure(retryable, executor.SuspendedSource{})
+			}
+
+			require.NoError(t, w.runCheckpoint(context.Background(), content, makeSourcePod(),
+				"main", "cid", os.Getpid(), false, string(content.UID), t.TempDir()))
+
+			assert.Equal(t, tc.wantAttempts, attempts, "number of attempts")
+		})
+	}
+}
+
 // The dump kills the source, so a commit that failed after it has nothing left
 // to capture; another attempt would bury the cause under "no running task".
 func TestRunCheckpointDoesNotRetryAfterTheCommitFailed(t *testing.T) {

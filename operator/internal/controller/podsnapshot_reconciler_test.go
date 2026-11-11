@@ -151,6 +151,7 @@ func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap := makeSnapshotForReconcile()
 	snap.Spec.Source.PodRef.Containers = []string{"main"}
+	snap.Spec.CheckpointRetryLimit = ptr.To(int32(3))
 	r := makeSnapshotReconciler(s, snap, scheduledPod())
 
 	// Creation path records the binding and returns without a requeue; conditions are mirrored on the
@@ -170,6 +171,11 @@ func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	assert.Equal(t, snap.Name, content.Spec.PodSnapshotRef.Name)
 	assert.Equal(t, []string{"main"}, content.Spec.Source.PodRef.Containers,
 		"target containers propagate from PodSnapshot to PodSnapshotContent")
+	// Saved on the work order so the agent acts on what the request asked for
+	// without reading the request, which it has no cached client for.
+	require.NotNil(t, content.Spec.CheckpointRetryLimit,
+		"the request's retry limit propagates to PodSnapshotContent")
+	assert.Equal(t, int32(3), *content.Spec.CheckpointRetryLimit)
 
 	updated := &snapshotv1alpha1.PodSnapshot{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))

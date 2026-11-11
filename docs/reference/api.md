@@ -31,6 +31,7 @@ The namespaced binding for one container's snapshot; consumed by restore.
 | `source.podRef.name`       | string   | yes      | Name of the source pod, in the same namespace.                                                                      |
 | `source.podRef.uid`        | string   | no       | UID of the source pod, so the agent dumps that exact pod and not a same-named recreation.                           |
 | `source.podRef.containers` | []string | yes      | Container(s) to checkpoint. Exactly one in `v1alpha1`; each must be a DNS label.                                    |
+| `checkpointRetryLimit`     | int32    | no       | Times a failed checkpoint may be retried, over and above the first attempt. Unset defers to `config.checkpoint.retryLimit`; an explicit `0` asks for no retry and is not the same as unset. |
 | `containers`               | []ContainerSnapshotConfig | no       | Settings for a checkpointed container, by `name`. At most one entry. See [Container settings](#container-settings). |
 
 `status`:
@@ -55,6 +56,7 @@ when it binds a `PodSnapshot`; callers never create it.
 | `source.podRef`         | PodReference | yes      | The pod to dump (`name` / `uid` / `containers`).                                                                                                                                                                 |
 | `source.nodeName`       | string       | yes      | Node the source pod runs on; selects the node agent that performs the dump.                                                                                                                                      |
 | `storage.storeID`       | string       | no       | Backend-neutral store binding, immutable with the rest of `spec`. When `storage` is present, the ID must be `store-v1-` followed by 64 lowercase hexadecimal characters. Omitted by legacy filesystem producers. |
+| `checkpointRetryLimit`  | int32                     | no       | The `PodSnapshot`'s retry limit, saved at creation so the agent acts on it without reading the request. Unset defers to `config.checkpoint.retryLimit`.                                                          |
 | `containers`            | []ContainerSnapshotConfig | no       | The `PodSnapshot`'s [container settings](#container-settings), with defaults filled in. Every restore of this checkpoint uses them, even after the `PodSnapshot` or `SnapshotJob` changes or is gone.            |
 
 `status`:
@@ -88,6 +90,7 @@ one declarative object.
 |----------------------------------------|-----------------|----------|------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `podTemplate`                          | PodTemplateSpec | yes      | —          | The workload to run and checkpoint. The controller injects the snapshot contract (control volume, readiness probe, seccomp); image, command, GPU resources, and sidecars are the caller's. |
 | `podSnapshotTemplate.targetContainers` | []string        | no       | `["main"]` | Container(s) to checkpoint. Exactly one in `v1alpha1`; each must name a container present in `podTemplate`.                                                                             |
+| `podSnapshotTemplate.checkpointRetryLimit` | int32 | no       | —          | Copied to the generated `PodSnapshot`: times a failed checkpoint may be retried. Unset defers to `config.checkpoint.retryLimit`.                                                        |
 | `podSnapshotTemplate.containers`       | []ContainerSnapshotConfig | no       | —          | [Container settings](#container-settings), copied to the generated `PodSnapshot`. Each `name` must be in `targetContainers`.                                                            |
 | `activeDeadlineSeconds`                | int64           | no       | `3600`     | Total time allowed for scheduling, quiesce, and dump; applied to the batch/v1 Job.                                                                                                      |
 | `nonTargetArtifacts.containers`        | []string        | no       | —          | Non-target containers that write artifacts to the snapshot volume. Must be nonempty if `nonTargetArtifacts` is set.                                                               |

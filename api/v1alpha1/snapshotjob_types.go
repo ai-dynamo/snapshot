@@ -200,6 +200,14 @@ type PodSnapshotTemplate struct {
 	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	TargetContainers []string `json:"targetContainers,omitempty"`
 
+	// CheckpointRetryLimit is copied to the generated PodSnapshot: how many
+	// times a failed checkpoint may be retried in place, over and above the first
+	// attempt. Unset defers to the agent's cluster-wide default, which is
+	// distinct from an explicit 0 asking for no retry.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	CheckpointRetryLimit *int32 `json:"checkpointRetryLimit,omitempty"`
+
 	// Containers is copied to the generated PodSnapshot: settings for the
 	// checkpointed containers, matched by name to targetContainers.
 	// +optional
