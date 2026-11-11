@@ -4,7 +4,6 @@
 #pragma once
 
 #include <cuda.h>
-#include <cstdint>
 #include "cancellation.hpp"
 #include <memory>
 #include <span>
@@ -26,8 +25,7 @@ size_t TransferMemoryBytes(const TransferOptions& options, size_t device_count, 
 // allocation granularity. The engine sums these values before enforcing its cap.
 size_t StagingAllocationBytes(CUcontext context, const TransferOptions& options);
 // Workers for a pool of `slots` staging slots: one per 16 slots, from 1 to 16.
-// Restores on B200 with VAST NFS were fastest at about 16 slots per worker for
-// 32 to 256 slots. More workers leave each one too few requests in flight.
+// Each worker then keeps about 16 storage requests in flight.
 size_t PoolLanes(size_t slots);
 
 // Prepare each GPU independently before starting workers. Access setup is a
@@ -43,20 +41,13 @@ class TransferPoolDevice {
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
-// A bounded pool of I/O workers shared by ready device extents. Lanes assign
-// chunks from the oldest ready extent first, moving on as soon as its chunks are
-// assigned without waiting for its tail to drain. The total slot count is
-// options.buffer_count * surviving devices, and PoolLanes sets the worker count.
-// Free slots are shared by all lanes, preferring the target GPU's NUMA node.
-// Each file holds one contiguous device extent. Open it with O_DIRECT when
-// direct_io is enabled. Calls may run concurrently and return only after their
-// storage requests and DMA have drained. Lanes use private streams after
-// synchronizing the caller stream. Cancellation and caller deadlines are checked
-// between chunks. They do not interrupt NIXL waits, CUDA synchronization, or
-// fsync. Contexts and the pool must outlive all calls. Stream and token
-// ownership stays with the caller. The pool duplicates fd for each job and may
-// keep it open briefly after a call returns. Workers reopen it with independent
-// filesystem state. Checkpoint includes fsync.
+// I/O workers shared by all devices' slots. Workers take chunks from the oldest
+// extent first and prefer slots on the target GPU's NUMA node. Each file holds
+// one device extent, opened with O_DIRECT when direct_io is set. Calls may run
+// concurrently and return after their storage requests and DMA drain.
+// Cancellation is checked between chunks, not inside NIXL or CUDA waits.
+// Contexts and the pool must outlive all calls. The pool duplicates fd and
+// workers reopen it. Checkpoint includes fsync.
 class TransferPool {
  public:
   explicit TransferPool(std::vector<std::unique_ptr<TransferPoolDevice>> devices);

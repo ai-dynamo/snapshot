@@ -6,9 +6,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <cerrno>
-#include <string>
 #include <system_error>
-#include <sys/stat.h>
 
 #include <utility>
 
@@ -47,27 +45,4 @@ FileDescriptor::Duplicate(int value)
     throw std::system_error(errno, std::generic_category(), "duplicate file descriptor");
   }
   return copy;
-}
-
-FileDescriptor
-FileDescriptor::OpenDirectory(int parent, const char* name)
-{
-  FileDescriptor directory(openat(parent, name, O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
-  if (directory.get() < 0) {
-    const auto error = errno;
-    throw std::system_error(error, std::generic_category(), std::string("open directory ") + name);
-  }
-  return directory;
-}
-
-void
-FileDescriptor::RequireDirectory() const
-{
-  struct stat info{};
-  if (fstat(value_, &info)) {
-    throw std::system_error(errno, std::generic_category(), "stat directory");
-  }
-  if (!S_ISDIR(info.st_mode)) {
-    throw std::invalid_argument("artifact path must be a directory");
-  }
 }
