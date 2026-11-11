@@ -15,6 +15,7 @@ use cuinterpose_protocol::{
 };
 use rustix::net::{RecvFlags, recv};
 use serde::{Deserialize, Serialize};
+use std::os::fd::OwnedFd;
 use std::time::{Duration, Instant};
 
 const HEAD: &[u8] = b"full backing starts here";
@@ -126,7 +127,28 @@ fn ticket_imports_after_its_creator_releases_the_allocation() {
         importer.send_fd(&size, &ticket);
         importer.wait();
     }
-    // Closing the last copy ends the export, though the creator makes no further calls.
+    expect_export_ends(creator, ticket);
+}
+
+#[test]
+fn multicast_ticket_imports_after_its_creator_releases_the_object() {
+    match process::role().as_deref() {
+        Some("releasing-multicast-creator") => return releasing_multicast_creator(),
+        Some("late-multicast-importer") => return late_multicast_importer(),
+        _ => {}
+    }
+    shim::require_multicast();
+    let creator = spawn("releasing-multicast-creator");
+    let ((), ticket) = creator.recv_fd::<()>();
+    let importer = spawn("late-multicast-importer");
+    importer.send_fd(&(), &ticket);
+    importer.wait();
+    expect_export_ends(creator, ticket);
+}
+
+/// Closing the last copy of `ticket` ends the creator's export, though the creator makes
+/// no further calls.
+fn expect_export_ends(creator: Child, ticket: OwnedFd) {
     let mut bytes = [0; VIRTUAL_SHAREABLE_HANDLE_BYTES];
     recv(&ticket, &mut bytes, RecvFlags::PEEK).unwrap();
     let export = Request::Export {
@@ -135,16 +157,24 @@ fn ticket_imports_after_its_creator_releases_the_allocation() {
     };
     drop(ticket);
     let deadline = Instant::now() + process::TIMEOUT;
-    while shim::request(creator.pid(), &export).is_ok() {
-        assert!(Instant::now() < deadline, "the creator kept its export");
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let refusal = loop {
+        match shim::request(creator.pid(), &export) {
+            Ok(_) => {
+                assert!(Instant::now() < deadline, "the creator kept its export");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(refusal) => break refusal,
+        }
+    };
+    // Another refusal, such as from a failed creator, would not show the export ended.
+    assert_eq!(refusal, "allocation resource is unavailable");
     creator.send(&"stop");
     creator.wait();
 }
 
 /// Releases its allocation before sending the ticket, like a process that hands off
-/// memory and exits.
+/// memory and then goes idle. It must stay alive, because importers ask it for the
+/// export.
 fn releasing_creator() {
     cuda::primary_contexts(1);
     let properties = cuda::allocation_properties(0, false);
@@ -167,6 +197,29 @@ fn late_importer() {
     cuda::assert_bytes(address, HEAD, "import after creator release");
     cuda::unmap(address, size);
     cu!(cuMemRelease(handle));
+}
+
+/// Creates a multicast object with GPU 0, then releases it before sending the ticket.
+fn releasing_multicast_creator() {
+    cu!(cuInit(0));
+    cuda::make_primary_current(0);
+    let (group, _) = cuda::multicast_group(&[0]);
+    let ticket = cuda::export_fd(group);
+    cu!(cuMemRelease(group));
+    channel().send_fd(&(), &ticket);
+    drop(ticket);
+    assert_eq!(channel().recv::<String>(), "stop");
+}
+
+fn late_multicast_importer() {
+    let ((), ticket) = channel().recv_fd::<()>();
+    cu!(cuInit(0));
+    cuda::make_primary_current(1);
+    let group = cuda::import_fd(&ticket);
+    drop(ticket);
+    // The object is still live, so the importer can complete its group.
+    cu!(cuMulticastAddDevice(group, 1));
+    cu!(cuMemRelease(group));
 }
 
 #[test]

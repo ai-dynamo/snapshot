@@ -18,13 +18,14 @@ use cuinterpose_protocol::{
     self as protocol, AllocationId, AllocationReference, Error, NamespacePid, Reply, Request,
     Response, VIRTUAL_SHAREABLE_HANDLE_BYTES, VIRTUAL_SHAREABLE_HANDLE_MAGIC,
 };
-use rustix::event::{PollFd, PollFlags, Timespec, epoll, poll};
+use rustix::buffer::spare_capacity;
+use rustix::event::{Timespec, epoll};
 use rustix::fs::{FileType, fstat};
 use rustix::net::{
     AddressFamily, RecvFlags, SendFlags, SocketFlags, SocketType, recv, send, socketpair, sockopt,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{Mutex, MutexGuard};
 
@@ -45,8 +46,10 @@ pub fn decode(fd: i32) -> protocol::Result<Option<AllocationReference>> {
         return Ok(None);
     }
     // Peeking leaves the packet queued, so every copy of the ticket can be imported.
-    let mut bytes = [0; VIRTUAL_SHAREABLE_HANDLE_BYTES + 1];
-    let length = match recv(ticket, &mut bytes, RecvFlags::PEEK | RecvFlags::DONTWAIT) {
+    // With TRUNC, the length is the whole packet's, even past the buffer.
+    let mut bytes = [0; VIRTUAL_SHAREABLE_HANDLE_BYTES];
+    let flags = RecvFlags::PEEK | RecvFlags::DONTWAIT | RecvFlags::TRUNC;
+    let length = match recv(ticket, &mut bytes, flags) {
         Ok((_, length)) => length,
         Err(rustix::io::Errno::AGAIN) => return Ok(None),
         Err(error) => return Err(io(error)),
@@ -62,8 +65,6 @@ pub fn decode(fd: i32) -> protocol::Result<Option<AllocationReference>> {
     if length != VIRTUAL_SHAREABLE_HANDLE_BYTES {
         return Err(Error::Invalid("invalid virtual shareable handle size"));
     }
-    let bytes: [u8; VIRTUAL_SHAREABLE_HANDLE_BYTES] =
-        bytes[..VIRTUAL_SHAREABLE_HANDLE_BYTES].try_into().unwrap();
     Ok(Some(protocol::decode_virtual_shareable_handle(&bytes)?))
 }
 
@@ -153,50 +154,21 @@ fn decode_multicast_properties(
 
 // Cache complete backing metadata with the FD so an importer can preserve it after
 // the creator drops its local references. Serving exports never locks CUDA state.
+struct Export {
+    reference: AllocationReference,
+    descriptor: OwnedFd,
+    reply: Reply,
+    // The creator dropped every local reference while a ticket was open.
+    released: bool,
+}
+
 #[derive(Default)]
 pub(crate) struct Exports {
-    cached: BTreeMap<AllocationId, (AllocationReference, OwnedFd, Reply)>,
-    // The cache's end of each ticket's socket pair. It reports a hangup once the
-    // application has closed every copy of the ticket.
+    cached: BTreeMap<AllocationId, Export>,
+    // The cache's end of each ticket's socket pair, registered in the hangup monitor
+    // under its descriptor number. It reports a hangup once the application has closed
+    // every copy of the ticket.
     tickets: BTreeMap<AllocationId, Vec<OwnedFd>>,
-    // Exports whose creator dropped every local reference while a ticket was open.
-    released: BTreeSet<AllocationId>,
-}
-
-impl Exports {
-    /// Drop the ends of closed tickets, then the released exports they kept alive.
-    fn sweep(&mut self, hangups: &OwnedFd) {
-        self.tickets.retain(|_, ends| {
-            ends.retain(|end| {
-                let open = !closed(end);
-                // A forked child can share the end's file description, which would
-                // keep it registered after this process closes its descriptor.
-                if !open {
-                    let _ = epoll::delete(hangups, end);
-                }
-                open
-            });
-            !ends.is_empty()
-        });
-        let Self {
-            cached,
-            tickets,
-            released,
-        } = self;
-        released.retain(|id| {
-            let open = tickets.contains_key(id);
-            if !open {
-                cached.remove(id);
-            }
-            open
-        });
-    }
-}
-
-fn closed(end: &OwnedFd) -> bool {
-    let mut events = [PollFd::new(end, PollFlags::empty())];
-    let now = Timespec::default();
-    poll(&mut events, Some(&now)).is_ok() && events[0].revents().contains(PollFlags::HUP)
 }
 
 pub struct ExportCache {
@@ -205,6 +177,9 @@ pub struct ExportCache {
     // closed tickets without waiting for another CUDA call.
     hangups: OwnedFd,
 }
+
+// Ends beyond one batch stay ready, so the peer worker's next poll reaps them.
+const REAP_BATCH: usize = 64;
 
 impl ExportCache {
     pub fn new() -> Result<Self> {
@@ -224,21 +199,58 @@ impl ExportCache {
 
     /// Drop closed tickets and the released exports they kept alive.
     pub fn reap(&self) -> Result<()> {
-        self.exports
-            .lock()
-            .map_err(|_| CUDA_ERROR_UNKNOWN)?
-            .sweep(&self.hangups);
+        let mut exports = self.exports.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
+        // epoll reports a hangup or error on every registered end without being asked,
+        // and either means the application closed the ticket.
+        let mut ready = Vec::with_capacity(REAP_BATCH);
+        match epoll::wait(
+            &self.hangups,
+            spare_capacity(&mut ready),
+            Some(&Timespec::default()),
+        ) {
+            Ok(_) => {}
+            Err(rustix::io::Errno::INTR) => return Ok(()),
+            Err(error) => return Err(CoreError::io("wait for ticket hangups", error)),
+        }
+        let closed: BTreeSet<u64> = ready.iter().map(|event| event.data.u64()).collect();
+        let Exports { cached, tickets } = &mut *exports;
+        tickets.retain(|_, ends| {
+            ends.retain(|end| {
+                let open = !closed.contains(&(end.as_raw_fd() as u64));
+                // A forked child can share the end's file description, which would
+                // keep it registered after this process closes its descriptor.
+                if !open {
+                    let _ = epoll::delete(&self.hangups, end);
+                }
+                open
+            });
+            !ends.is_empty()
+        });
+        cached.retain(|id, export| !export.released || tickets.contains_key(id));
         Ok(())
     }
 
-    pub fn contains(&self, reference: &AllocationReference) -> Result<bool> {
-        Ok(self
-            .exports
+    /// The creator holds `reference` again, for example after importing its own ticket.
+    /// Report whether the export is cached, and keep it past the tickets open now.
+    pub fn reclaim(&self, reference: &AllocationReference) -> Result<bool> {
+        let mut exports = self.exports.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
+        Ok(match exports.cached.get_mut(&reference.id) {
+            Some(export) if export.reference == *reference => {
+                export.released = false;
+                true
+            }
+            _ => false,
+        })
+    }
+
+    #[cfg(test)]
+    fn contains(&self, reference: &AllocationReference) -> bool {
+        self.exports
             .lock()
-            .map_err(|_| CUDA_ERROR_UNKNOWN)?
+            .unwrap()
             .cached
             .get(&reference.id)
-            .is_some_and(|(known, _, _)| known == reference))
+            .is_some_and(|export| export.reference == *reference)
     }
 
     /// Issue a shareable handle for `reference`. The application receives one end of a
@@ -265,7 +277,7 @@ impl ExportCache {
         epoll::add(
             &self.hangups,
             &end,
-            epoll::EventData::new_u64(0),
+            epoll::EventData::new_u64(end.as_raw_fd() as u64),
             epoll::EventFlags::empty(),
         )
         .map_err(|error| CoreError::io("monitor shareable handle ticket", error))?;
@@ -281,14 +293,15 @@ impl ExportCache {
 
     /// The creator dropped its last local reference. An exported CUDA FD keeps its
     /// backing alive until every copy is closed, so keep the export while a ticket is
-    /// open. Exports without tickets, such as legacy IPC handles, end here.
+    /// open. Exports without tickets, such as legacy IPC handles, end here. A ticket
+    /// that closed but is not reaped yet still counts, and the next reap drops it.
     pub fn release(&self, id: &AllocationId) -> Result<()> {
         let mut exports = self.exports.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
-        exports.sweep(&self.hangups);
-        if exports.tickets.contains_key(id) {
-            exports.released.insert(*id);
-        } else {
-            exports.cached.remove(id);
+        let Exports { cached, tickets } = &mut *exports;
+        if !tickets.contains_key(id) {
+            cached.remove(id);
+        } else if let Some(export) = cached.get_mut(id) {
+            export.released = true;
         }
         Ok(())
     }
@@ -322,30 +335,47 @@ impl ExportCache {
         if exports
             .cached
             .get(&reference.id)
-            .is_some_and(|(known, _, _)| *known != reference)
+            .is_some_and(|export| export.reference != reference)
         {
             return Err(CUDA_ERROR_INVALID_HANDLE.into());
         }
-        exports
-            .cached
-            .insert(reference.id, (reference, descriptor, reply));
-        exports.released.remove(&reference.id);
+        exports.cached.insert(
+            reference.id,
+            Export {
+                reference,
+                descriptor,
+                reply,
+                released: false,
+            },
+        );
         Ok(())
     }
 
     pub fn remove(&self, id: &AllocationId) -> Result<()> {
         let mut exports = self.exports.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
         exports.cached.remove(id);
-        exports.released.remove(id);
         Ok(())
     }
 
     /// Drop every cached export before checkpoint. Ticket ends stay, so the checkpoint
-    /// sees each ticket as a whole socket pair.
+    /// sees each ticket as a whole socket pair, and after restore `release()` still
+    /// knows which tickets are open.
     pub fn clear(&self) -> Result<()> {
         let mut exports = self.exports.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
+        let dropped = exports
+            .cached
+            .values()
+            .filter(|export| export.released)
+            .count();
         exports.cached.clear();
-        exports.released.clear();
+        drop(exports);
+        if dropped != 0 {
+            // Only the creator re-exports after restore, so these tickets will fail to
+            // import. Say why here, since the import error cannot.
+            eprintln!(
+                "cuinterpose: checkpoint dropped {dropped} export(s) kept only by open virtual shareable FDs; importing those FDs after restore fails"
+            );
+        }
         Ok(())
     }
 
@@ -360,7 +390,9 @@ impl ExportCache {
             .lock()
             .map_err(|_| protocol::Error::Invalid("export cache poisoned"))?;
         let (result, descriptor) = match exports.cached.get(&reference.id) {
-            Some((known, fd, reply)) if known == reference => (Ok(reply.clone()), Some(fd)),
+            Some(export) if export.reference == *reference => {
+                (Ok(export.reply.clone()), Some(&export.descriptor))
+            }
             _ => (Err("allocation resource is unavailable".into()), None),
         };
         protocol::send(
@@ -384,7 +416,7 @@ impl Memblock {
             allocation.context = context()?;
         }
         let reference = self.reference();
-        if reference.creator_pid == namespace_pid && !export_cache()?.contains(&reference)? {
+        if reference.creator_pid == namespace_pid && !export_cache()?.reclaim(&reference)? {
             let fd = crate::driver::export_posix(self.driver_handle()?)?;
             let metadata = match self {
                 Self::Unicast(allocation) => ExportMetadata::Unicast {
@@ -500,7 +532,6 @@ mod codec_tests {
     use rustix::fs::{MemfdFlags, memfd_create};
     use std::fs::File;
     use std::io::Write;
-    use std::os::fd::AsRawFd;
     use std::os::unix::fs::FileExt;
 
     fn handle_file(bytes: &[u8]) -> File {
@@ -510,15 +541,19 @@ mod codec_tests {
         file
     }
 
-    /// A socket queued with one packet, shaped like a ticket.
-    fn packet(bytes: &[u8]) -> OwnedFd {
-        let (socket, end) = socketpair(
+    fn pair() -> (OwnedFd, OwnedFd) {
+        socketpair(
             AddressFamily::UNIX,
             SocketType::SEQPACKET,
             SocketFlags::CLOEXEC,
             None,
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    /// A socket queued with one packet, shaped like a ticket.
+    fn packet(bytes: &[u8]) -> OwnedFd {
+        let (socket, end) = pair();
         send(&end, bytes, SendFlags::empty()).unwrap();
         socket
     }
@@ -542,13 +577,10 @@ mod codec_tests {
         assert_eq!(decode(foreign.as_raw_fd()).unwrap(), None);
         let (socket, _peer) = UnixStream::pair().unwrap();
         assert_eq!(decode(socket.as_raw_fd()).unwrap(), None);
-        let (empty, _peer) = socketpair(
-            AddressFamily::UNIX,
-            SocketType::SEQPACKET,
-            SocketFlags::CLOEXEC,
-            None,
-        )
-        .unwrap();
+        let (empty, peer) = pair();
+        assert_eq!(decode(empty.as_raw_fd()).unwrap(), None);
+        // Once the peer closes, an empty socket reads end of file instead of EAGAIN.
+        drop(peer);
         assert_eq!(decode(empty.as_raw_fd()).unwrap(), None);
         for bytes in [&b"foreign handle"[..], b"CU"] {
             assert_eq!(decode(packet(bytes).as_raw_fd()).unwrap(), None);
@@ -569,13 +601,16 @@ mod codec_tests {
             id: [4; 16],
         })
         .unwrap();
-        for size in 3..bytes.len() {
-            let ticket = packet(&bytes[..size]);
-            assert!(decode(ticket.as_raw_fd()).is_err(), "accepted size {size}");
-        }
         let mut oversized = bytes.to_vec();
         oversized.push(0);
-        assert!(decode(packet(&oversized).as_raw_fd()).is_err());
+        // Three bytes end at the magic, so the version check rejects them first.
+        let sizes = (4..bytes.len()).map(|size| &bytes[..size]);
+        for ticket in sizes.chain([&oversized[..]]).map(packet) {
+            assert!(matches!(
+                decode(ticket.as_raw_fd()),
+                Err(Error::Invalid("invalid virtual shareable handle size"))
+            ));
+        }
     }
 
     #[test]
@@ -613,8 +648,8 @@ mod codec_tests {
             creator_pid: 3,
             ..reference
         };
-        assert!(cache.contains(&reference).unwrap());
-        assert!(!cache.contains(&other_creator).unwrap());
+        assert!(cache.contains(&reference));
+        assert!(!cache.contains(&other_creator));
         assert!(
             cache
                 .insert(
@@ -699,65 +734,195 @@ mod codec_tests {
 #[cfg(test)]
 mod cache_tests {
     use super::*;
+    use rustix::event::{PollFd, PollFlags, poll};
     use std::fs::File;
     use std::io::{Read, Write};
-    use std::os::fd::AsRawFd;
     use std::sync::{Arc, mpsc};
     use std::time::{Duration, Instant};
+
+    const REFERENCE: AllocationReference = AllocationReference {
+        creator_pid: 7,
+        id: [3; 16],
+    };
+
+    fn insert(cache: &ExportCache) {
+        cache
+            .insert(
+                REFERENCE,
+                File::open("/dev/zero").unwrap().into(),
+                ExportMetadata::Unicast {
+                    size: 8192,
+                    location: DEVICE_LOCATION,
+                },
+            )
+            .unwrap()
+    }
+
+    /// The peer worker reaps when the hangup monitor becomes readable.
+    fn hangup(cache: &ExportCache) -> bool {
+        let mut events = [PollFd::new(&cache.hangups, PollFlags::IN)];
+        poll(&mut events, Some(&Timespec::default())).unwrap() == 1
+    }
+
+    /// Reap once the closed ticket hangs up, as the peer worker does. Another test's child
+    /// process can hold every descriptor for a moment while it starts, which delays the
+    /// hangup.
+    fn reap_closed(cache: &ExportCache) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !hangup(cache) {
+            assert!(Instant::now() < deadline, "no ticket hung up");
+            std::thread::yield_now();
+        }
+        cache.reap().unwrap();
+    }
+
+    fn tickets(cache: &ExportCache) -> usize {
+        cache
+            .exports
+            .lock()
+            .unwrap()
+            .tickets
+            .values()
+            .map(Vec::len)
+            .sum()
+    }
 
     #[test]
     fn open_tickets_keep_a_released_export() {
         let cache = ExportCache::new().unwrap();
-        let reference = AllocationReference {
-            creator_pid: 7,
-            id: [3; 16],
-        };
-        let insert = || {
-            cache
-                .insert(
-                    reference,
-                    File::open("/dev/zero").unwrap().into(),
-                    ExportMetadata::Unicast {
-                        size: 8192,
-                        location: DEVICE_LOCATION,
-                    },
-                )
-                .unwrap()
-        };
-        // The peer worker reaps when the hangup monitor becomes readable.
-        let hangup = || {
-            let mut events = [PollFd::new(&cache.hangups, PollFlags::IN)];
-            poll(&mut events, Some(&Timespec::default())).unwrap() == 1
-        };
         // Without a ticket, such as for a legacy IPC handle, release ends the export.
-        insert();
-        cache.release(&reference.id).unwrap();
-        assert!(!cache.contains(&reference).unwrap());
+        insert(&cache);
+        cache.release(&REFERENCE.id).unwrap();
+        assert!(!cache.contains(&REFERENCE));
 
         // A creator may release before its peer imports the ticket.
-        insert();
-        let ticket = cache.issue(reference).unwrap();
+        insert(&cache);
+        let ticket = cache.issue(REFERENCE).unwrap();
         let copy = ticket.try_clone().unwrap();
-        cache.release(&reference.id).unwrap();
+        cache.release(&REFERENCE.id).unwrap();
         drop(ticket);
-        assert!(!hangup());
-        assert!(cache.contains(&reference).unwrap());
-        assert_eq!(decode(copy.as_raw_fd()).unwrap(), Some(reference));
+        assert!(!hangup(&cache));
+        assert!(cache.contains(&REFERENCE));
+        assert_eq!(decode(copy.as_raw_fd()).unwrap(), Some(REFERENCE));
         drop(copy);
-        assert!(hangup());
-        cache.reap().unwrap();
-        assert!(!hangup());
-        assert!(!cache.contains(&reference).unwrap());
-        assert!(cache.exports.lock().unwrap().tickets.is_empty());
+        reap_closed(&cache);
+        assert!(!hangup(&cache));
+        assert!(!cache.contains(&REFERENCE));
+        assert_eq!(tickets(&cache), 0);
 
         // Restoring the export makes it live again.
-        insert();
-        let ticket = cache.issue(reference).unwrap();
-        cache.release(&reference.id).unwrap();
-        insert();
+        insert(&cache);
+        let ticket = cache.issue(REFERENCE).unwrap();
+        cache.release(&REFERENCE.id).unwrap();
+        insert(&cache);
         drop(ticket);
-        cache.reap().unwrap();
-        assert!(cache.contains(&reference).unwrap());
+        reap_closed(&cache);
+        assert!(cache.contains(&REFERENCE));
+    }
+
+    #[test]
+    fn every_ticket_for_an_allocation_keeps_its_export() {
+        let cache = ExportCache::new().unwrap();
+        insert(&cache);
+        let first = cache.issue(REFERENCE).unwrap();
+        let second = cache.issue(REFERENCE).unwrap();
+        cache.release(&REFERENCE.id).unwrap();
+        drop(first);
+        reap_closed(&cache);
+        assert!(cache.contains(&REFERENCE));
+        assert_eq!(tickets(&cache), 1);
+        drop(second);
+        reap_closed(&cache);
+        assert!(!cache.contains(&REFERENCE));
+        assert_eq!(tickets(&cache), 0);
+    }
+
+    #[test]
+    fn release_leaves_a_closed_ticket_to_the_next_reap() {
+        let cache = ExportCache::new().unwrap();
+        insert(&cache);
+        drop(cache.issue(REFERENCE).unwrap());
+        cache.release(&REFERENCE.id).unwrap();
+        assert!(cache.contains(&REFERENCE));
+        reap_closed(&cache);
+        assert!(!cache.contains(&REFERENCE));
+    }
+
+    #[test]
+    fn a_creator_export_after_release_keeps_the_export() {
+        let cache = ExportCache::new().unwrap();
+        insert(&cache);
+        let old = cache.issue(REFERENCE).unwrap();
+        cache.release(&REFERENCE.id).unwrap();
+        // The creator imports its own ticket and exports the allocation again.
+        let other = AllocationReference {
+            creator_pid: 8,
+            ..REFERENCE
+        };
+        assert!(!cache.reclaim(&other).unwrap());
+        assert!(cache.reclaim(&REFERENCE).unwrap());
+        // The old ticket closing before the new one is issued must not end the export
+        // the creator holds again.
+        drop(old);
+        reap_closed(&cache);
+        assert!(cache.contains(&REFERENCE));
+        let new = cache.issue(REFERENCE).unwrap();
+        cache.release(&REFERENCE.id).unwrap();
+        assert!(cache.contains(&REFERENCE));
+        drop(new);
+        reap_closed(&cache);
+        assert!(!cache.contains(&REFERENCE));
+    }
+
+    #[test]
+    fn checkpoint_drops_exports_held_only_by_tickets() {
+        let cache = ExportCache::new().unwrap();
+        insert(&cache);
+        let ticket = cache.issue(REFERENCE).unwrap();
+        cache.release(&REFERENCE.id).unwrap();
+        cache.clear().unwrap();
+        assert!(!cache.contains(&REFERENCE));
+        assert_eq!(tickets(&cache), 1);
+        // The ticket end outlives the checkpoint, so when an export is cached again, its
+        // release still sees the open ticket.
+        insert(&cache);
+        cache.release(&REFERENCE.id).unwrap();
+        assert!(cache.contains(&REFERENCE));
+        drop(ticket);
+        reap_closed(&cache);
+        assert!(!cache.contains(&REFERENCE));
+    }
+
+    #[test]
+    fn reap_unregisters_an_end_a_child_process_shares() {
+        let cache = ExportCache::new().unwrap();
+        insert(&cache);
+        let ticket = cache.issue(REFERENCE).unwrap();
+        // The child keeps only a copy of the cache's end, as its stdin. Exec closes the
+        // other descriptors it inherits, including other tests' tickets.
+        let end = cache.exports.lock().unwrap().tickets[&REFERENCE.id][0]
+            .try_clone()
+            .unwrap();
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let _child = Child(
+            std::process::Command::new("sleep")
+                .arg("30")
+                .stdin(end)
+                .spawn()
+                .unwrap(),
+        );
+        drop(ticket);
+        reap_closed(&cache);
+        assert_eq!(tickets(&cache), 0);
+        // The child's copy keeps the end's file description, and with it a registration
+        // that reap did not remove, which would wake the peer worker forever.
+        assert!(!hangup(&cache));
     }
 
     #[test]
@@ -869,7 +1034,7 @@ mod cache_tests {
             sender.join().unwrap();
             completion.recv_timeout(Duration::from_secs(5)).unwrap();
             mutation.join().unwrap();
-            assert_eq!(cache.contains(&reference).unwrap(), replace);
+            assert_eq!(cache.contains(&reference), replace);
         }
     }
 }

@@ -133,6 +133,9 @@ The main operational constraints are:
 | Failure during preparation or reconstruction | The attempt is unusable. Terminate the affected workload rather than retrying a lost reply or resuming partial state. |
 | Memory overhead | Preserving shared data requires additional host memory, and adapting allocations can increase GPU memory use. See [Performance and Scalability](#performance-and-scalability). |
 | Artifact mismatch | Restore requires matching CuInterpose libraries. See [Checkpoint files and compatibility](#checkpoint-files-and-compatibility). |
+| Virtual shareable FD | The FD from `cuMemExportToShareableHandle` is a socket that carries an allocation reference. Pass it, duplicate it, and close it as usual, but do not read from it. A read removes the reference, and later imports of that FD fail. See [Interposing VMM sharing](#interposing-vmm-sharing). |
+| Creator lifetime | Imports of a virtual shareable FD need the process that created the allocation. Unlike a CUDA export FD, it does not keep the memory importable after that process exits. |
+| Checkpoint during a hand-off | If the creator released its allocation before checkpoint, its open virtual shareable FDs cannot be imported after restore. The shim then writes `cuinterpose: checkpoint dropped` and the number of exports to the application's stderr. |
 
 ## Background
 
@@ -303,7 +306,7 @@ This *virtual shareable FD* passes through the application's existing IPC mechan
 When the receiving application calls `cuMemImportFromShareableHandle`, its shim peeks the reference without consuming it and requests the real CUDA descriptor from the creator's socket.
 The shim keeps the other end of the pair, which reports a hangup once the application has closed every copy of the virtual shareable FD.
 Its peer thread watches these ends, so a released export ends as soon as the last copy closes.
-Like a CUDA export FD, an open virtual shareable FD keeps the backing importable after the creator releases its own handles and mappings.
+Like a CUDA export FD, an open virtual shareable FD keeps the backing importable after the creator releases its own handles and mappings, while the creator process runs.
 
 ```mermaid
 sequenceDiagram
@@ -347,7 +350,7 @@ Otherwise it selects the holder with the **lowest namespace PID** among processe
 Each recorded holder must have a local handle or mapping, and the creator process must still belong to the group.
 
 New imports contact the creator, which serves them from its cached export while it retains a handle or mapping, or while a virtual shareable FD for the allocation is still open.
-Checkpoint drops cached exports, so a virtual shareable FD that no process imported before checkpoint cannot be imported after restore unless some holder retains the allocation.
+Checkpoint drops cached exports, so a virtual shareable FD cannot be imported after restore unless the creator still holds the allocation.
 
 #### Multicast tracking
 
