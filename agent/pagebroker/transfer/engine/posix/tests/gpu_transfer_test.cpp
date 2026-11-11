@@ -294,15 +294,14 @@ TEST(TransferOptions, PoolLanesGiveEachWorkerSixteenSlots)
   EXPECT_EQ(transfer::PoolLanes(1024), 16);
 }
 
-TEST(TransferOptions, RejectsInvalidCapacityAndMemoryLimit)
+TEST(TransferOptions, RejectsInvalidCapacity)
 {
-  EXPECT_THROW(transfer::TransferMemoryBytes({0, chunk_bytes}, 1, 0), std::invalid_argument);
-  EXPECT_THROW(transfer::TransferMemoryBytes({1, chunk_bytes + 1}, 1, 0), std::invalid_argument);
-  EXPECT_THROW(transfer::TransferMemoryBytes({std::numeric_limits<size_t>::max(), chunk_bytes}, 1, 0),
+  EXPECT_THROW(transfer::TransferMemoryBytes({0, chunk_bytes}, 1), std::invalid_argument);
+  EXPECT_THROW(transfer::TransferMemoryBytes({1, chunk_bytes + 1}, 1), std::invalid_argument);
+  EXPECT_THROW(transfer::TransferMemoryBytes({std::numeric_limits<size_t>::max(), chunk_bytes}, 1),
                std::invalid_argument);
-  EXPECT_THROW(transfer::TransferMemoryBytes({2, chunk_bytes}, std::numeric_limits<size_t>::max(), 0),
+  EXPECT_THROW(transfer::TransferMemoryBytes({2, chunk_bytes}, std::numeric_limits<size_t>::max()),
                std::invalid_argument);
-  EXPECT_THROW(transfer::TransferMemoryBytes({2, chunk_bytes}, 2, 3 * chunk_bytes), std::invalid_argument);
-  EXPECT_EQ(transfer::TransferMemoryBytes({2, chunk_bytes}, 2, 0), 4 * chunk_bytes);
+  EXPECT_EQ(transfer::TransferMemoryBytes({2, chunk_bytes}, 2), 4 * chunk_bytes);
 }
 }  // namespace

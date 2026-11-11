@@ -574,7 +574,7 @@ TEST(GpuCheckpoint, RestoresAllocationThroughRealCustomStorage)
   const auto visible_device = gpu::storage::FormatGPUUUID(uuid_bytes);
   constexpr size_t kTestBufferCount = 2;
   constexpr size_t kTestChunkBytes = 1024 * 1024;
-  const gpu::EngineOptions options{kTestBufferCount, kTestChunkBytes, 0};
+  const gpu::EngineOptions options{kTestBufferCount, kTestChunkBytes};
   gpu::GpuEnginePtr engine;
   int count = 0;
   Check(cuDeviceGetCount(&count), "get test GPU count");

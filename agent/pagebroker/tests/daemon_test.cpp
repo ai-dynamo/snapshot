@@ -983,16 +983,14 @@ TEST(DaemonOptionsTest, ParsesCustomStorageOptions)
 {
   const std::vector<std::string_view> arguments{
       "socket", "staging", "storage", "--custom-storage-engine", "off",
-      "--max-concurrent-requests", "8", "--custom-storage-buffer-count", "2",
-      "--custom-storage-chunk-bytes", "1048576", "--custom-storage-max-pinned-bytes", "0"};
+      "--max-concurrent-requests", "8", "--custom-storage-staging-bytes-per-gpu", "268435456"};
   const auto options = ParseDaemonOptions(arguments);
   EXPECT_EQ(options.socket_path, "socket");
   EXPECT_EQ(options.staging_directory, "staging");
   EXPECT_EQ(options.storage_root, "storage");
   EXPECT_EQ(options.max_concurrent_requests, 8);
   EXPECT_EQ(options.gpu.buffer_count, 2);
-  EXPECT_EQ(options.gpu.chunk_bytes, 1048576);
-  EXPECT_EQ(options.gpu.max_pinned_bytes, 0);
+  EXPECT_EQ(options.gpu.chunk_bytes, 134217728);
   EXPECT_FALSE(options.enable_gpu);
 }
 
@@ -1000,10 +998,10 @@ TEST(DaemonOptionsTest, RejectsInvalidOptions)
 {
   const std::vector<std::vector<std::string_view>> invalid{
       {"--custom-storage-engine"}, {"--custom-storage-engine", "yes"},
-      {"--custom-storage-buffer-count", "0"}, {"--custom-storage-chunk-bytes", "0"},
-      {"--max-concurrent-requests", "0"}, {"--custom-storage-max-pinned-bytes", "-1"},
-      {"--custom-storage-buffer-count", "184467440737095516160"},
-      {"--custom-storage-chunk-bytes", "12bytes"}, {"--unknown", "1"}};
+      {"--custom-storage-staging-bytes-per-gpu", "0"}, {"--max-concurrent-requests", "0"},
+      {"--custom-storage-staging-bytes-per-gpu", "134217727"},
+      {"--custom-storage-staging-bytes-per-gpu", "184467440737095516160"},
+      {"--custom-storage-staging-bytes-per-gpu", "4GiB"}, {"--unknown", "1"}};
   for (const auto& suffix : invalid) {
     std::vector<std::string_view> arguments{"socket", "staging", "storage"};
     arguments.insert(arguments.end(), suffix.begin(), suffix.end());

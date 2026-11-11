@@ -16,7 +16,6 @@
 #include <cstdlib>
 #include <exception>
 #include <iterator>
-#include <limits>
 #include <map>
 #include <mutex>
 #include <numeric>
@@ -127,7 +126,6 @@ struct Device {
   std::string uuid;
   std::timed_mutex mutex;
   std::unique_ptr<transfer::TransferPoolDevice> pooled;
-  size_t staging_bytes = 0;
 };
 
 class TargetClaim {
@@ -346,7 +344,7 @@ struct GpuEngine::GpuEngineState {
       return;
     }
     const transfer::TransferOptions settings{options.buffer_count, options.chunk_bytes, true};
-    transfer::TransferMemoryBytes(settings, count, options.max_pinned_bytes);
+    transfer::TransferMemoryBytes(settings, count);
     std::map<CUdevice, std::string> labels;
     for (int index = 0; index < count; ++index) {
       CUdevice id;
@@ -354,21 +352,8 @@ struct GpuEngine::GpuEngineState {
       labels[id] = DeviceLabel(index, id);
       SetUpOrSkip(labels[id], [&] {
         auto device = std::make_unique<Device>(id);
-        device->staging_bytes = transfer::StagingAllocationBytes(device->context.handle, settings);
         devices.emplace(id, std::move(device));
       });
-    }
-    // The pinned-memory limit is configuration, not a GPU fault, so it still
-    // stops PageBroker. The check above counts every GPU; this one adds CUDA's
-    // allocation rounding for the GPUs that were kept, before any staging is pinned.
-    size_t total_bytes = 0;
-    for (const auto& [id, device] : devices) {
-      (void)id;
-      const size_t bytes = device->staging_bytes;
-      Require(bytes <= std::numeric_limits<size_t>::max() - total_bytes, "total pinned allocation overflow");
-      total_bytes += bytes;
-      Require(!options.max_pinned_bytes || total_bytes <= options.max_pinned_bytes,
-              "total pinned allocation exceeds max-pinned-bytes");
     }
     for (auto it = devices.begin(); it != devices.end();) {
       auto& device = *it->second;

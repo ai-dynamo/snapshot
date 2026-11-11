@@ -169,15 +169,10 @@ pageBroker:
     # RAM on the node, unbounded without this cap. Lowered to fit when it does
     # not leave the writing container room; see docs/operate/configure-storage.md.
     sizeLimit: 56Gi
-  # Pinned staging slots per visible GPU, allocated and registered before
-  # accepting GPU work. All GPUs share the slots, and PageBroker runs one
-  # transfer worker per 16 slots, up to 16. Defaults reserve 4 GiB per visible
-  # GPU, or 32 GiB on an eight-GPU node.
-  transferBufferCount: 32
-  # 128 MiB per slot. Must be a positive multiple of 4096 bytes.
-  transferChunkBytes: 134217728
-  # Zero is uncapped. This limit includes CUDA allocation-granularity rounding.
-  maxPinnedBytes: 0
+  # Pinned host memory per visible GPU for GPU transfers, in 128 MiB slots that
+  # all GPUs share. More memory keeps more reads in flight. The default 4 GiB is
+  # 32 GiB on an eight-GPU node. Must be a multiple of 134217728 (128 MiB).
+  stagingBytesPerGPU: 4294967296
   # S3 transfer and transaction limits, written as given into PageBroker's S3
   # configuration as its "limits" object. The keys and bounds are PageBroker's:
   # transactionSeconds, stagingBytes, activeTransactions, uploadPartBytes,
