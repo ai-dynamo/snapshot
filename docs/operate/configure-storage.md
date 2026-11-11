@@ -209,7 +209,7 @@ Leave `pageBroker.resources.limits.memory` at its chart default (`256Gi`)
 here: PageBroker needs headroom above the staging cap too, on top of the
 default GPU transfer buffers (4 GiB per visible GPU, `32Gi` on an eight-GPU
 node by default). The chart default already covers both; raise it further
-only if your node has more GPUs or a larger `pageBroker.transferBufferCount`.
+only if your node has more GPUs or a larger `pageBroker.stagingBytesPerGPU`.
 
 Each agent pod requests 10 CPU and 33Gi of memory in total by default, including
 the GPU engine transfer buffers. Nodes must have that allocatable capacity.

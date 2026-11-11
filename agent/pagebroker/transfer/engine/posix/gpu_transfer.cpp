@@ -200,7 +200,7 @@ void WaitForCopy(CUevent event)
 
 }  // namespace
 
-size_t TransferMemoryBytes(const TransferOptions& options, size_t device_count, size_t memory_limit_bytes)
+size_t TransferMemoryBytes(const TransferOptions& options, size_t device_count)
 {
   Validate(options.buffer_count && options.chunk_bytes && options.chunk_bytes % kDirectIOAlignment == 0,
            "transfer staging requires buffers with 4 KiB-aligned capacity");
@@ -209,33 +209,7 @@ size_t TransferMemoryBytes(const TransferOptions& options, size_t device_count, 
   const size_t per_device = options.buffer_count * options.chunk_bytes;
   Validate(device_count <= std::numeric_limits<size_t>::max() / per_device,
            "total transfer staging memory size overflows");
-  const size_t total = per_device * device_count;
-  Validate(!memory_limit_bytes || total <= memory_limit_bytes,
-           "total transfer staging memory exceeds configured limit");
-  return total;
-}
-
-size_t StagingAllocationBytes(CUcontext context, const TransferOptions& options)
-{
-  TransferMemoryBytes(options, 1, 0);
-  auto status = cuCtxSetCurrent(context);
-  CUdevice device;
-  CUmemAllocationProp properties{};
-  size_t granularity = 0;
-  if (status == CUDA_SUCCESS) {
-    status = HostAllocationProperties(&device, &properties, &granularity);
-  }
-  if (status != CUDA_SUCCESS) {
-    throw std::runtime_error(gpu::CudaErrorMessage(status, "query transfer allocation granularity"));
-  }
-  if (!granularity || options.chunk_bytes > std::numeric_limits<size_t>::max() - (granularity - 1)) {
-    throw std::invalid_argument("rounded transfer allocation size overflows");
-  }
-  const size_t rounded = ((options.chunk_bytes + granularity - 1) / granularity) * granularity;
-  if (options.buffer_count > std::numeric_limits<size_t>::max() / rounded) {
-    throw std::invalid_argument("rounded transfer staging memory size overflows");
-  }
-  return options.buffer_count * rounded;
+  return per_device * device_count;
 }
 
 size_t PoolLanes(size_t slots)
@@ -254,7 +228,7 @@ struct TransferPoolDevice::Impl {
 
   Impl(CUcontext context, TransferOptions options) : context(context), options(options)
   {
-    TransferMemoryBytes(options, 1, 0);
+    TransferMemoryBytes(options, 1);
     gpu::CheckCuda(cuCtxSetCurrent(context), "select pooled transfer context");
     gpu::CheckCuda(cuCtxGetDevice(&device), "get pooled transfer device");
     gpu::CheckCuda(cuDeviceGetAttribute(&numa_node, CU_DEVICE_ATTRIBUTE_HOST_NUMA_ID, device),

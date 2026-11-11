@@ -213,12 +213,8 @@ spec:
             {{- end }}
             - --max-concurrent-requests
             - {{ .Values.pageBroker.maxConcurrentRequests | quote }}
-            - --custom-storage-buffer-count
-            - {{ .Values.pageBroker.transferBufferCount | int64 | quote }}
-            - --custom-storage-chunk-bytes
-            - {{ .Values.pageBroker.transferChunkBytes | int64 | quote }}
-            - --custom-storage-max-pinned-bytes
-            - {{ .Values.pageBroker.maxPinnedBytes | int64 | quote }}
+            - --custom-storage-staging-bytes-per-gpu
+            - {{ .Values.pageBroker.stagingBytesPerGPU | int64 | quote }}
             {{- if and .Values.pageBroker.artifactAddressing (eq .Values.storage.type "pvc") }}
             # Enable only with a broker implementing the PVC artifact backend.
             - --storage-config

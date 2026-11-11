@@ -18,12 +18,8 @@ struct TransferOptions {
   size_t chunk_bytes = 128 * 1024 * 1024;
   bool direct_io = false;
 };
-// Validate buffer_count * chunk_bytes for all devices. A zero limit means no
-// cap. StagingAllocationBytes includes CUDA allocation rounding.
-size_t TransferMemoryBytes(const TransferOptions& options, size_t device_count, size_t memory_limit_bytes);
-// Physical bytes of one device's staging slots after rounding each slot to its
-// allocation granularity. The engine sums these values before enforcing its cap.
-size_t StagingAllocationBytes(CUcontext context, const TransferOptions& options);
+// Validate buffer_count * chunk_bytes for all devices and return the total.
+size_t TransferMemoryBytes(const TransferOptions& options, size_t device_count);
 // Workers for a pool of `slots` staging slots: one per 16 slots, from 1 to 16.
 // Each worker then keeps about 16 storage requests in flight.
 size_t PoolLanes(size_t slots);
