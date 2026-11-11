@@ -219,8 +219,6 @@ spec:
             - {{ .Values.pageBroker.transferChunkBytes | int64 | quote }}
             - --custom-storage-max-pinned-bytes
             - {{ .Values.pageBroker.maxPinnedBytes | int64 | quote }}
-            - --custom-storage-pooled-lanes
-            - {{ .Values.pageBroker.transferPooledLanes | int64 | quote }}
             {{- if and .Values.pageBroker.artifactAddressing (eq .Values.storage.type "pvc") }}
             # Enable only with a broker implementing the PVC artifact backend.
             - --storage-config

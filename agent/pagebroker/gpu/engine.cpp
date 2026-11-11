@@ -99,19 +99,15 @@ SetUpOrSkip(const std::string& gpu, Step step)
 }
 
 struct Device {
-  Device(CUdevice device, transfer::TransferOptions options)
-      : context(device), uuid(DeviceUUID(device)), buffers(options)
-  {
-  }
+  explicit Device(CUdevice device) : context(device), uuid(DeviceUUID(device)) {}
 
-  // Member order releases buffers before the retained context, including
+  // Member order releases staging before the retained context, including
   // partial engine setup and failed insertion into the device map.
   PrimaryContext context;
   std::string uuid;
   std::timed_mutex mutex;
-  transfer::TransferBuffers buffers;
   std::unique_ptr<transfer::TransferPoolDevice> pooled;
-  size_t ring_bytes = 0;
+  size_t staging_bytes = 0;
 };
 
 class TargetClaim {
@@ -331,25 +327,24 @@ struct GpuEngine::GpuEngineState {
     }
     const transfer::TransferOptions settings{options.buffer_count, options.chunk_bytes, true};
     transfer::TransferMemoryBytes(settings, count, options.max_pinned_bytes);
-    Validate(options.pooled_lanes <= settings.buffer_count * count, "invalid transfer pool lane count");
     std::map<CUdevice, std::string> labels;
     for (int index = 0; index < count; ++index) {
       CUdevice id;
       CheckCuda(cuDeviceGet(&id, index), "get GPU device");
       labels[id] = DeviceLabel(index, id);
       SetUpOrSkip(labels[id], [&] {
-        auto device = std::make_unique<Device>(id, settings);
-        device->ring_bytes = transfer::TransferBuffers::AllocationBytes(device->context.handle, settings);
+        auto device = std::make_unique<Device>(id);
+        device->staging_bytes = transfer::StagingAllocationBytes(device->context.handle, settings);
         devices.emplace(id, std::move(device));
       });
     }
     // The pinned-memory limit is configuration, not a GPU fault, so it still
     // stops PageBroker. The check above counts every GPU; this one adds CUDA's
-    // allocation rounding for the GPUs that were kept, before any ring is pinned.
+    // allocation rounding for the GPUs that were kept, before any staging is pinned.
     size_t total_bytes = 0;
     for (const auto& [id, device] : devices) {
       (void)id;
-      const size_t bytes = device->ring_bytes;
+      const size_t bytes = device->staging_bytes;
       Require(bytes <= std::numeric_limits<size_t>::max() - total_bytes, "total pinned allocation overflow");
       total_bytes += bytes;
       Require(!options.max_pinned_bytes || total_bytes <= options.max_pinned_bytes,
@@ -358,16 +353,11 @@ struct GpuEngine::GpuEngineState {
     for (auto it = devices.begin(); it != devices.end();) {
       auto& device = *it->second;
       const bool ready = SetUpOrSkip(labels[it->first], [&] {
-        if (options.pooled_lanes) {
-          device.pooled = std::make_unique<transfer::TransferPoolDevice>(
-              device.context.handle, settings, options.pooled_lanes);
-        } else {
-          device.buffers.Initialize(device.context.handle);
-        }
+        device.pooled = std::make_unique<transfer::TransferPoolDevice>(device.context.handle, settings);
       });
       it = ready ? std::next(it) : devices.erase(it);
     }
-    if (options.pooled_lanes && !devices.empty()) {
+    if (!devices.empty()) {
       std::vector<transfer::TransferPoolDevice*> allocations;
       for (const auto& [id, device] : devices) {
         (void)id;
@@ -492,12 +482,8 @@ class GpuEngine::Batch {
         if (ftruncate(file.get(), data.size)) {
           throw std::system_error(errno, std::generic_category(), "size GPU data file");
         }
-        if (engine_.pool) {
-          engine_.pool->Checkpoint(file.get(), transfer.device.context.handle, data.devPtr,
+        engine_.pool->Checkpoint(file.get(), transfer.device.context.handle, data.devPtr,
                                  data.size, data.stream, cancellation_);
-        } else {
-          transfer.device.buffers.Checkpoint(file.get(), data.devPtr, data.size, data.stream, cancellation_);
-        }
         result_.bytes += data.size;
       }
     }
@@ -513,12 +499,8 @@ class GpuEngine::Batch {
         if (file.get() < 0) {
           throw std::system_error(errno, std::generic_category(), "open GPU data file");
         }
-        if (engine_.pool) {
-          engine_.pool->Restore(file.get(), transfer.device.context.handle, data.devPtr,
-                               data.size, data.stream, cancellation_);
-        } else {
-          transfer.device.buffers.Restore(file.get(), data.devPtr, data.size, data.stream, cancellation_);
-        }
+        engine_.pool->Restore(file.get(), transfer.device.context.handle, data.devPtr,
+                              data.size, data.stream, cancellation_);
         result_.bytes += data.size;
       }
     }

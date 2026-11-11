@@ -169,13 +169,11 @@ pageBroker:
     # RAM on the node, unbounded without this cap. Lowered to fit when it does
     # not leave the writing container room; see docs/operate/configure-storage.md.
     sizeLimit: 56Gi
-  # Allocate and register the full ring before accepting GPU work.
-  # Defaults reserve 4 GiB per visible GPU, or 32 GiB on an eight-GPU node.
+  # Pinned staging slots per visible GPU, allocated and registered before
+  # accepting GPU work. All GPUs share the slots, and PageBroker runs one
+  # transfer worker per 16 slots, up to 16. Defaults reserve 4 GiB per visible
+  # GPU, or 32 GiB on an eight-GPU node.
   transferBufferCount: 32
-  # Tuning. Share GPU transfer capacity so ready GPUs can use idle staging slots.
-  # Zero gives each GPU its own buffers. Keep the same total memory budget.
-  # Must not exceed transferBufferCount * visible GPUs.
-  transferPooledLanes: 0
   # 128 MiB per slot. Must be a positive multiple of 4096 bytes.
   transferChunkBytes: 134217728
   # Zero is uncapped. This limit includes CUDA allocation-granularity rounding.
@@ -198,7 +196,7 @@ pageBroker:
     modelStreamer: {}
   # Requires 32 GiB of free allocatable memory, plus the agent request.
   # Override for each node profile. Budget 4 GiB per GPU plus process and staging
-  # overhead. A lower request does not reduce the pinned ring allocation.
+  # overhead. A lower request does not reduce the pinned staging allocation.
   resources:
     requests:
       cpu: 8
