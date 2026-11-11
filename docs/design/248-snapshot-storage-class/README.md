@@ -93,7 +93,8 @@ resolves it once and binds the content to that store for its whole life.
 **Retiring a store.** A protection finalizer holds the class while content
 references it. A terminating class takes no new snapshots but still restores
 and cleans up. `reclaimPolicy` decides whether deleting content also deletes
-its snapshots: `Delete` removes them, `Retain` keeps them.
+its snapshots: `Delete` removes them, `Retain` keeps them. The policy is copied
+onto the content at binding and does not change afterwards.
 
 **The default.** The chart renders its `storage.*` values as a class named
 `default` with `isDefault: true`, so an upgraded installation needs no manual
@@ -111,14 +112,14 @@ At most one class is the default; see [Default class](#default-class).
 | --- | --- | --- |
 | PVC not mounted | A PVC class names a claim the agents cannot see; captures would fail on every node. | The operator marks the class `Ready=False`, reason `ClaimNotMounted`, by checking the claim against the mounted set the chart renders. Adding a claim is a Helm upgrade (`storage.pvc.additionalClaims`). Documented limitation for this iteration. |
 | Agent without the claim | The class is `Ready`, because the operator reads the chart's mounted set, but a particular agent does not have the claim: it still runs the previous pod spec during a rolling upgrade, or the claim is missing on its node. | The agent maps `claimName` to a mount path from its own `config.yaml` and checks the path exists before any I/O. A claim it cannot map fails the operation with `StorageClassUnavailable`, and nothing is retried against another store. The existing retry succeeds once the node's agent has the mount. |
-| Class edited after binding | The location fields change; content bound to the old `storeID` would read or delete in the wrong place. | Location fields are immutable through CEL. Credentials and TLS settings stay editable because they are not identity inputs. The agent and maintenance compare the class's `status.storeID` with the content's binding before any I/O and refuse a mismatch. |
+| Class edited after binding | The location fields change; content bound to the old `storeID` would read or delete in the wrong place. Or `reclaimPolicy` flips and existing content loses data it was meant to keep. | Location fields are immutable through CEL, and the policy is frozen on the content at binding. Credentials and TLS settings stay editable because they are not identity inputs. The agent and maintenance compare the class's `status.storeID` with the content's binding before any I/O and refuse a mismatch. |
 | Class deleted under content | Content loses the only description of where its snapshots are. | Protection finalizer; a terminating class still resolves for existing content. Force-removing the finalizer leaves content with the existing `StoreInactive` handling from SNEP-237. |
 | Secret missing or revoked | An S3 class's Secret is deleted or rotated to an invalid key. | The class goes `Ready=False`, reason `CredentialsUnavailable`, and new bindings stop. In-flight operations fail with the existing credential errors; nothing is deleted on an access error. |
 | Agent holds credentials | Today only PageBroker and the operator see S3 credentials. The agent now reads the class's Secret and writes it to a local file for PageBroker. | The Secret must live in the Snapshot namespace; the agent's RBAC is a Role there, not a ClusterRole. The file is written to the memory-backed volume the two containers already share, mode `0600`, under a per-transaction directory removed on Commit or Abort. Accepted trade-off against giving PageBroker a Kubernetes client; see Alternatives. |
 | Duplicate or overlapping location | Two classes describe the same place, through the same fields, through an alias such as a second endpoint hostname, or through a nested prefix; cleanup through one could reach the other's content. | The operator refuses `Ready` for the later class with reason `DuplicateStore` or `StoreOverlap` and names the other; see [Store uniqueness](#store-uniqueness). |
 | Nested store in another cluster | Another cluster or installation registers a class above or below this one's prefix in the same bucket or claim. The scan cannot see it, and a sweep through the parent could delete the child's data. | The ancestor-marker check refuses the child when the parent registered first. A parent registered later is not detected, so a sweep never deletes inside a subtree whose marker names another store, and deleting content removes only its own recorded handles. Data written by something that leaves no marker is not protected. |
 | Old agent, new class | During a rolling upgrade an agent that predates this proposal receives content bound to a non-default class. | It passes its startup store to PageBroker, whose `storeID` does not match the content's; PageBroker returns `STORE_MISMATCH` and the capture fails before any I/O. The existing retry picks it up after the node upgrades. |
-| Default misconfigured | Two classes set `isDefault: true`, or the default is deleted and unnamed `PodSnapshot`s fail. | The admission policy denies both where the cluster supports it. Otherwise the oldest marked class wins with `DefaultConflict` on the others, and a Warning event flags a deleted default; see [Default class](#default-class). |
+| Default misconfigured | Two classes set `isDefault: true`, or the default is deleted and unnamed `PodSnapshot`s fail. | The admission policy denies both. If it is absent or bypassed, the oldest marked class wins with `DefaultConflict` on the others, and a Warning event flags a deleted default; see [Default class](#default-class). |
 
 ## Design Details
 
@@ -129,7 +130,8 @@ At most one class is the default; see [Default class](#default-class).
 A new cluster-scoped kind in `snapshot.nvidia.com/v1alpha1`, a discriminated
 union: `type` names the backend and exactly that block is set. Its location
 fields are the `storeID` inputs defined in `../../../api/storage` and are
-immutable (CEL `self == oldSelf`).
+immutable (CEL `self == oldSelf`). `reclaimPolicy`, credentials and TLS settings
+stay editable; an edit to `reclaimPolicy` applies to content bound afterwards.
 
 ```go
 // +kubebuilder:resource:scope=Cluster
@@ -194,7 +196,22 @@ while an older class is also marked; `Ready` is unaffected.
 (`spec.podSnapshotTemplate`) gain an optional `storageClassName`; empty selects
 the class marked `isDefault`. `PodSnapshotContent.spec.storage` gains the class
 name beside the digest, which stays the authority on *where*; the name says
-*how to reach it*. It is empty on content bound before classes existed.
+*how to reach it*. It also gains `reclaimPolicy`, copied from the class at
+binding and immutable, so editing the class later never changes what happens to
+existing content. The class always has a policy (it defaults to `Delete`), so
+every binding sets one. Only content bound before classes existed has neither
+field, or has no class when no class matches its digest; that content keeps
+today's behavior, and an empty policy means `Delete`.
+
+```go
+// PodSnapshotContentSpec.Storage; immutable once set.
+// +kubebuilder:validation:XValidation:rule="!has(self.storageClassName) || has(self.reclaimPolicy)",message="reclaimPolicy is required when storageClassName is set"
+type CheckpointStorageBinding struct {
+    StoreID          string        `json:"storeID,omitempty"`
+    StorageClassName string        `json:"storageClassName,omitempty"`
+    ReclaimPolicy    ReclaimPolicy `json:"reclaimPolicy,omitempty"`
+}
+```
 
 #### Resolution
 
@@ -209,8 +226,8 @@ name beside the digest, which stays the authority on *where*; the name says
    `StorageClassNotReady` or `StorageClassTerminating` and requeues; a watch on
    `SnapshotStorageClass` picks up later changes. This check is the authority:
    the job check is early, this one is where the `storeID` is frozen.
-4. It creates the `PodSnapshotContent` with `spec.storage.storeID` and
-   `storageClassName`, labeled `nvidia.com/snapshot-storage-class=<name>`.
+4. It creates the `PodSnapshotContent` with `spec.storage.storeID`,
+   `storageClassName` and `reclaimPolicy`, labeled `nvidia.com/snapshot-storage-class=<name>`.
 5. The class reconciler's `nvidia.com/snapshotstorageclass-protection`
    finalizer is removed only when the class is terminating and no content
    carries its label.
@@ -224,10 +241,7 @@ disappear unnoticed. Two layers hold that.
    setting `isDefault: true` while another class has it, and denies deleting
    the default. The default is moved first: clear `isDefault` on the old class,
    then set it on the new one. In between, an unnamed `PodSnapshot` fails with
-   `StorageClassNotFound` and retries. The policy needs Kubernetes 1.30 and is
-   installed only when the API server serves
-   `admissionregistration.k8s.io/v1` `ValidatingAdmissionPolicy`, so the
-   proposal adds no minimum version; see [Dependencies](#dependencies).
+   `StorageClassNotFound` and retries.
 2. **Operator.** Admission is not serialized and the policy may be absent. If
    two classes are marked, the earliest `creationTimestamp`, ties by name, is
    the default and the others get `DefaultConflict` naming it; `Ready` is
@@ -340,9 +354,10 @@ in-flight one keeps its key. Sharing happens in PageBroker's client cache.
 
 The backend registry is built from Ready and terminating classes.
 `backendForContent` resolves the content's class by name, checks its `storeID`
-against the binding, and returns that backend. Under `reclaimPolicy: Retain`, `delete-content` removes the finalizer without
-touching the store and emits `SnapshotsRetained` with the handle. Sweeps run
-per class and never cross stores. A sweep first reads the marker at its own
+against the binding, and returns that backend. Under the content's
+`reclaimPolicy: Retain`, `delete-content` removes the finalizer without touching
+the store and emits `SnapshotsRetained` with the handle. Sweeps run per class
+and never cross stores. A sweep first reads the marker at its own
 location and stops, reporting why, if it is missing or names another store. It
 then lists its prefix once and skips every subtree whose marker names a
 different `storeID`; on a PVC it does the same while walking directories.
@@ -385,9 +400,10 @@ action beyond `helm upgrade`:
 
 1. The same `storage.*` values now render the `default` class, so its `storeID`
    is byte-identical to the one recorded on every bound `PodSnapshotContent`.
-2. On start, the operator sets `spec.storage.storageClassName` on content that
-   has a `storeID` but no class name, by matching the digest against Ready
-   classes; content matching none keeps the `StoreInactive` handling.
+2. On start, the operator sets `spec.storage.storageClassName` and
+   `reclaimPolicy` on content that has a `storeID` but no class name, by
+   matching the digest against Ready classes; content matching none keeps the
+   `StoreInactive` handling.
 3. Content with no `spec.storage`, bound before SNEP-237, keeps the legacy
    path-addressed flow and is never assigned a class.
 4. `PodSnapshot`s and `SnapshotJob`s without `storageClassName` resolve to
@@ -410,9 +426,6 @@ the old operator ignores both and reads `storage.yaml`.
 
 - SNEP-237 artifact addressing: bound content, `storeID`, `ArtifactTarget` and
   `PublishedArtifact`; images that accept a per-request `StorageBackend`.
-- Kubernetes 1.30 or newer, only for the optional default-class admission
-  policy. The repository declares no minimum Kubernetes version today, and the
-  end-to-end suite runs on 1.32. Without the policy, the operator rule applies.
 
 ### Test Plan
 
