@@ -22,7 +22,6 @@ and does not describe automatic preheat.
 - [Proposal](#proposal)
   - [Limitations, Risks, and Mitigations](#limitations-risks-and-mitigations)
 - [Design Details](#design-details)
-  - [Components](#components)
   - [Cache Identity and Layout](#cache-identity-and-layout)
   - [Restore Source](#restore-source)
   - [Preheat](#preheat)
@@ -169,11 +168,9 @@ The open decisions are part of the readiness gate in
 
 ## Design Details
 
-### Components
-
 The design has three flows:
 
-- **S3 restore.** Unchanged.
+- **S3 restore.** The flow is unchanged.
 - **Preheat, from S3 to the NVMe.** The node agent decides what to download
   and publishes the result. PageBroker downloads into the node cache instead
   of into RAM. This is the main PageBroker change.
@@ -181,33 +178,6 @@ The design has three flows:
   mounts the local copy, and CRIU reads it. PageBroker transfers no snapshot
   data. It only opens the directory when the agent asks, and on nodes with
   CUDA custom storage it loads the GPU data.
-
-On S3 installations, PageBroker rejects the request to open a snapshot
-directory today. With the cache enabled, it must accept that request for the
-node cache, for reading in place only. It refuses to write a checkpoint into
-the cache or to copy a local snapshot into RAM. S3 stays the only place where
-snapshots are stored.
-
-The cache is mounted read-write into the node agent. PageBroker gets the cache
-read-only, plus write access to its work directory only. A restore from the
-NVMe always reads in place, regardless of `pageBroker.restoreMode`.
-
-Existing S3 restore correctness is preserved, and resource contention stays
-within agreed limits. These rules apply:
-
-- Preheat uses a new PageBroker request. The existing restore requests and
-  their behavior do not change.
-- With the cache disabled, PageBroker behaves as it does today.
-- A preheat download takes nothing from the RAM staging budget.
-- PageBroker's existing staging cleanup stays limited to its staging area.
-- PageBroker cannot modify a published copy.
-
-A new request does not isolate PageBroker's S3 reader, which preheat and
-restores share. A failed or timed-out download can stop that reader and fail
-the work in progress. PageBroker supports one reader per process, so a second
-reader object does not isolate preheat. The candidate is an isolated preheat
-download mechanism; implementation to be determined. This is the main open
-decision.
 
 ### Cache Identity and Layout
 
@@ -251,6 +221,8 @@ flowchart TD
 A disabled cache, absent copy, invalid manifest, or bad marker selects S3.
 A cache hit returns a local source without an S3 handle. Compatibility checks
 read the local manifest. A compatible copy can originate from another node.
+A restore from the NVMe always reads in place, regardless of
+`pageBroker.restoreMode`.
 
 ### Preheat
 
@@ -462,9 +434,10 @@ until PageBroker has stopped writing. It does not cancel a running download.
 A preheat and a restore can run at the same time, since the agent runs
 restores concurrently. They share PageBroker's S3 reader, the network, and the
 disk. A preheat can slow a restore, and a preheat failure can fail one; see
-[Components](#components). Processing one snapshot at a time bounds the
-overlap to one download. The readiness gate in
-[Graduation Criteria](#graduation-criteria) states the required outcomes.
+[Limitations, Risks, and Mitigations](#limitations-risks-and-mitigations).
+Processing one snapshot at a time bounds the overlap to one download. The
+readiness gate in [Graduation Criteria](#graduation-criteria) states the
+required outcomes.
 
 ### External Writers
 
@@ -695,7 +668,9 @@ Reviewers need to settle these points:
 3. Confirm bad-copy marking and deletion of externally prepared copies.
 4. Define command results for published copies with pending cleanup.
 5. Agree the import contract and shared-store cleanup ownership.
-6. Decide how preheat downloads are isolated from restores in PageBroker.
+6. Decide how preheat downloads are isolated from restores in PageBroker. The
+   candidate is an isolated preheat download mechanism; implementation to be
+   determined.
 7. Decide how recovery confirms that PageBroker has stopped writing.
 8. Agree the memory limits and the restore slowdown bound for a preheat.
 9. Confirm the newest-first order for automatic preheat.
