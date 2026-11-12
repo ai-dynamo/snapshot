@@ -82,15 +82,9 @@ Phase 1 has five goals:
 
 Phase 1 excludes these features:
 
-- A guarantee that every node holds every snapshot at all times.
-- Choosing which nodes receive copies, for all snapshots or for one snapshot.
-- Automatic replacement of a copy, including a copy marked bad.
-- Transfers of snapshots between nodes.
 - Filling the cache during a restore.
 - Automatic scheduling preference for nodes with a copy.
-- Removing live snapshots by age or cache size.
-- A preheat API object, cancellation, or reader tracking.
-- Direct downloads from S3 to NVMe.
+- Choosing which nodes receive copies.
 - PVC installations and multi-cluster support.
 
 ## Proposal
