@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"golang.org/x/sys/unix"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/kubernetes/fake"
@@ -43,7 +44,7 @@ func TestAttemptCheckpointReportsFailureWithoutRecordingIt(t *testing.T) {
 	}
 
 	_, err := w.attemptCheckpoint(context.Background(), &snapshotv1alpha1.PodSnapshotContent{}, &corev1.Pod{},
-		"main", "cid", 1, false, "uid", "/artifacts/uid", 0)
+		"main", "cid", 1, false, "uid", "/artifacts/uid", 0, nil)
 
 	if !errors.Is(err, want) {
 		t.Errorf("attemptCheckpoint() = %v, want %v", err, want)
@@ -66,7 +67,7 @@ func TestAttemptCheckpointPassesTheResolvedTarget(t *testing.T) {
 	}
 
 	if _, err := w.attemptCheckpoint(context.Background(), content, &corev1.Pod{},
-		"main", "cid", 42, true, "uid", "/artifacts/uid", 0); err != nil {
+		"main", "cid", 42, true, "uid", "/artifacts/uid", 0, nil); err != nil {
 		t.Fatalf("attemptCheckpoint() = %v", err)
 	}
 
@@ -107,7 +108,7 @@ func TestAttemptCheckpointInheritsTheCallersBudget(t *testing.T) {
 	want, _ := budget.Deadline()
 
 	if _, err := w.attemptCheckpoint(budget, &snapshotv1alpha1.PodSnapshotContent{}, &corev1.Pod{},
-		"main", "cid", 1, false, "uid", "/a", 0); err != nil {
+		"main", "cid", 1, false, "uid", "/a", 0, nil); err != nil {
 		t.Fatalf("attemptCheckpoint() = %v", err)
 	}
 
@@ -180,7 +181,7 @@ func TestAttemptCheckpointReportsAnExhaustedBudget(t *testing.T) {
 	defer cancel()
 
 	_, err := w.attemptCheckpoint(budget, &snapshotv1alpha1.PodSnapshotContent{}, &corev1.Pod{},
-		"main", "cid", 1, false, "uid", "/a", 0)
+		"main", "cid", 1, false, "uid", "/a", 0, nil)
 
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("attemptCheckpoint() = %v, want %v", err, context.DeadlineExceeded)
@@ -419,6 +420,10 @@ func TestTerminalReasonKeepsASettledReason(t *testing.T) {
 			captureFailure{reason: reasonStagingUnavailable, retryable: true}, reasonRetriesExhausted},
 		{"a timeout keeps its own reason",
 			captureFailure{reason: reasonCheckpointTimeout}, reasonCheckpointTimeout},
+		{"an image too large keeps its own reason",
+			captureFailure{reason: reasonImageTooLarge}, reasonImageTooLarge},
+		{"a full store keeps its own reason",
+			captureFailure{reason: reasonStoreExhausted}, reasonStoreExhausted},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, terminalReason(tc.failure, 2, 2))
@@ -453,11 +458,12 @@ func TestRunCheckpointDoesNotRetryAfterTheCommitFailed(t *testing.T) {
 func TestClassifyAttemptDoesNotRetryAFailedAbort(t *testing.T) {
 	retryable := pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting")
 
-	clean := classifyAttempt(retryable)
+	clean := settleAttempt(classifyCaptureFailure(retryable), retryable)
 	require.True(t, clean.failure.retryable, "a retryable failure with a clean abort is retried")
 
-	withFailedAbort := classifyAttempt(errors.Join(retryable,
-		executor.CleanupFailure(errors.New("abort: transaction not released"))))
+	joined := errors.Join(retryable,
+		executor.CleanupFailure(errors.New("abort: transaction not released")))
+	withFailedAbort := settleAttempt(classifyCaptureFailure(joined), joined)
 	assert.False(t, withFailedAbort.failure.retryable,
 		"an unconfirmed release must not be re-staged over")
 	assert.Equal(t, clean.failure.reason, withFailedAbort.failure.reason,
@@ -497,4 +503,56 @@ func TestRunCheckpointEndsASourceRevivedForARetryThatDidNotCome(t *testing.T) {
 	assert.True(t, sawEventReason(cs, reasonSourcePodResumed), "the first failure revived the source")
 	assert.True(t, sawEventReason(cs, reasonSourcePodTerminated),
 		"the revived source must not be left running once no attempt is coming")
+}
+
+// The refinement that names a storage shortage must not undo the veto a failed
+// abort put on retrying. Both arrive on one joined error, and the refinement
+// mints a fresh captureFailure, so the veto is easy to lose.
+func TestRunCheckpointDoesNotRetryAFullStagingDumpWhoseAbortFailed(t *testing.T) {
+	attemptRetryInitialDelayOriginal := attemptRetryInitialDelay
+	t.Cleanup(func() { attemptRetryInitialDelay = attemptRetryInitialDelayOriginal })
+	attemptRetryInitialDelay = time.Millisecond
+
+	staging := t.TempDir()
+	content := makeWorkOrder("content-a", "node-a", "a")
+	w := makeNodeController(t, &fakeCheckpointer{}, content)
+	w.config.Checkpoint.RetryLimit = ptr.To(2)
+	w.config.PageBroker.StagingPath = staging
+	w.stagingCapacityFn = func(string) (int64, error) { return 8 << 30, nil }
+	w.minimumImageSizeFn = func(string, []int) (int64, error) { return 1 << 30, nil }
+
+	attempts := 0
+	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		attempts++
+		// Staging filled mid-dump, and the abort that followed also failed.
+		full := &executor.DumpSpaceError{Dir: staging,
+			Err: errors.Join(errors.New("CRIU dump failed"), unix.ENOSPC)}
+		return nil, executor.SuspendedSourceFailure(
+			errors.Join(full, executor.CleanupFailure(errors.New("abort: transaction not released"))),
+			executor.SuspendedSource{})
+	}
+
+	require.NoError(t, w.runCheckpoint(context.Background(), content, makeSourcePod(),
+		"main", "cid", os.Getpid(), false, string(content.UID), t.TempDir()))
+
+	assert.Equal(t, 1, attempts,
+		"an unconfirmed release must not be re-staged over, however the volume filled")
+}
+
+// The refinement names the shortage and settleAttempt decides the retry, in
+// that order. A refined StagingUnavailable is retryable on its own, but a
+// failed abort still blocks the re-stage SNEP-394 forbids.
+func TestSettleAttemptOutranksARefinedFailure(t *testing.T) {
+	cause := errors.Join(errors.New("CRIU dump failed"), unix.ENOSPC)
+	refined := captureFailure{reason: reasonStagingUnavailable, retryable: true}
+
+	clean := settleAttempt(refined, cause)
+	assert.True(t, clean.failure.retryable, "contention on its own is worth retrying")
+	assert.Equal(t, reasonStagingUnavailable, clean.failure.reason)
+
+	joined := errors.Join(cause, executor.CleanupFailure(errors.New("abort: not released")))
+	settled := settleAttempt(refined, joined)
+	assert.False(t, settled.failure.retryable, "a failed abort outranks the refinement")
+	assert.Equal(t, reasonStagingUnavailable, settled.failure.reason,
+		"the shortage is still named for the operator")
 }

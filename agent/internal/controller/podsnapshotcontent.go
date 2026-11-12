@@ -51,6 +51,8 @@ type CheckpointParams struct {
 	// DumpRetriesRemaining is what is left of the capture's retry budget; a repeat of
 	// the dump spends it like any other retry.
 	DumpRetriesRemaining int
+	// DumpWorthRepeating reports whether repeating could reach a different outcome.
+	DumpWorthRepeating func(err error) (bool, string)
 	// StoreID binds this capture to a configured store; empty means legacy.
 	StoreID string
 }
@@ -284,12 +286,16 @@ func (w *NodeController) runCheckpoint(
 	logger.V(1).Info("Resolved the capture's retry budget", "retries", budget)
 	for {
 		artifact, err := w.attemptCheckpoint(captureCtx, content, pod, containerName, containerID, containerPID,
-			cuInterposeRequested, contentUID, artifactPath, budget-spent)
+			cuInterposeRequested, contentUID, artifactPath, budget-spent, w.dumpWorthRepeating(ctx, containerPID))
 		if err == nil {
 			return w.markCheckpointReady(ctx, content, artifactPath, containerName, artifact)
 		}
 
-		attempt := classifyAttempt(err)
+		// Measured while the source is still suspended, so the tree the dump was
+		// sizing is the one still there to size. Naming the shortage comes first
+		// and settling the retry last, so neither can quietly undo the other.
+		failure, err := w.refineFullStaging(ctx, classifyCaptureFailure(err), err, containerPID)
+		attempt := settleAttempt(failure, err)
 		// Repeats of the dump come out of the same budget as fresh attempts, so a
 		// caller asking for two retries gets two, however they were spent.
 		spent += attempt.suspended.DumpRetriesUsed
@@ -332,10 +338,10 @@ type failedAttempt struct {
 	suspendedSource bool
 }
 
-// classifyAttempt reads a failed attempt: why it failed, whether another attempt
-// could end differently, and what it left behind.
-func classifyAttempt(err error) failedAttempt {
-	failure := classifyCaptureFailure(err)
+// settleAttempt reads a failed attempt: whether another attempt could end
+// differently, and what it left behind. It takes the failure rather than
+// classifying one, so it runs last and a refinement cannot undo its verdicts.
+func settleAttempt(failure captureFailure, err error) failedAttempt {
 	// The dump terminates the source, so a commit that failed after it has no
 	// workload left for another attempt to capture.
 	if executor.StepOf(err) == executor.StepCommitCheckpoint {
@@ -447,6 +453,7 @@ func (w *NodeController) attemptCheckpoint(
 	contentUID string,
 	artifactPath string,
 	dumpRetriesRemaining int,
+	dumpWorthRepeating func(error) (bool, string),
 ) (*pagebroker.PublishedArtifact, error) {
 	storeID := ""
 	if content.Spec.Storage != nil {
@@ -462,8 +469,8 @@ func (w *NodeController) attemptCheckpoint(
 		StartedAt:            time.Now(),
 		CuInterposeRequested: cuInterposeRequested,
 		StoreID:              storeID,
-		// Read only once a dump has failed, so a capture that succeeds never reads it.
 		DumpRetriesRemaining: dumpRetriesRemaining,
+		DumpWorthRepeating:   dumpWorthRepeating,
 	}
 	// Success is success even past the deadline: executorCheckpoint returns nil only after it has
 	// stat'd the committed artifact, and the dump has already killed the source. Failing it here
@@ -786,6 +793,7 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		CuInterposeRequested: params.CuInterposeRequested,
 		StoreID:              params.StoreID,
 		DumpRetriesRemaining: params.DumpRetriesRemaining,
+		DumpWorthRepeating:   params.DumpWorthRepeating,
 	}
 	// Recovering the source belongs to runCheckpoint, which is the only place that
 	// knows whether another attempt follows.
