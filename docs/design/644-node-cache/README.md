@@ -25,9 +25,7 @@ and does not describe automatic preheat.
   - [Cache Identity and Layout](#cache-identity-and-layout)
   - [Restore Source](#restore-source)
   - [Preheat](#preheat)
-  - [Replace a Copy](#replace-a-copy)
   - [Interrupted Preheat](#interrupted-preheat)
-  - [Failed Local Restore](#failed-local-restore)
   - [Cleanup](#cleanup)
   - [Automatic Preheat](#automatic-preheat)
   - [External Writers](#external-writers)
@@ -138,8 +136,8 @@ This proposal accepts these limits. Each one states its effect and what an
 administrator does about it.
 
 - **Snapshot does not know which copies are in use.** Deleting a snapshot or
-  replacing its copy can fail a restore that is reading that copy. Delete a
-  snapshot, or replace its copy, only when no restore is using it.
+  removing its copy can fail a restore that is reading that copy. Delete a
+  snapshot, or remove its copy, only when no restore is using it.
 - **Preheat shares the S3 reader with restores.** PageBroker has one S3
   reader. A preheat can slow a restore. A preheat that fails or times out can
   fail a restore that is running at that moment. Run the command before
@@ -153,12 +151,12 @@ administrator does about it.
 - **Every node stores every snapshot.** Copies are never evicted. A snapshot
   that does not fit is skipped and restores from S3. A node with a different
   GPU model stores copies it cannot use. Delete old snapshots to free space.
-- **Copies are not checked for damage.** A restore checks that a copy belongs
-  to the snapshot, not that its content is intact. Give write access to the
-  cache only to administrators.
-- **A bad copy is not repaired automatically.** A copy that failed a restore
-  is marked bad and stays on disk. Restores of that snapshot use S3. Run the
-  command to rebuild the copy.
+- **Copies are not checked for damage after download.** A restore checks that
+  a copy belongs to the snapshot, not that its content is intact. It does not
+  switch to S3 after a failure, so a damaged copy keeps failing on that node.
+  To repair it, move that copy out of the cache while no restore uses it.
+  Later restores use S3, and preheat refills the copy. Give write access to
+  the cache only to administrators.
 - **The cache can land on the wrong disk.** If the NVMe is not mounted at the
   configured path, copies go to the root disk. Check that the path is on the
   intended disk. See [Configuration](#configuration).
@@ -202,8 +200,7 @@ flow unchanged.
 `<snapshot-uid>` is the UID of the snapshot's `PodSnapshotContent` object.
 
 Before it uses a copy, a restore rejects symlinks and non-directories at that
-entry. It checks that the manifest names this snapshot and container, then
-checks for a bad-copy marker.
+entry. It checks that the manifest names this snapshot and container.
 
 Validation has three separate meanings:
 
@@ -230,11 +227,11 @@ flowchart TD
     B -->|"No"| F["PageBroker:<br/>downloads from S3,<br/>the existing path"]
 ```
 
-A disabled cache, absent copy, invalid manifest, or bad marker selects S3.
-A cache hit returns a local source without an S3 handle. Compatibility checks
-read the local manifest. A compatible copy can originate from another node.
-A restore from the NVMe always reads in place, regardless of
-`pageBroker.restoreMode`.
+A disabled cache, absent copy, or invalid manifest selects S3. A cache hit
+returns a local source without an S3 handle. Compatibility checks read the
+local manifest. A compatible copy can originate from another node. A restore
+from the NVMe always reads in place, regardless of `pageBroker.restoreMode`.
+A restore does not switch source after it starts.
 
 ### Preheat
 
@@ -252,12 +249,14 @@ One preheat runs on a node at a time. The command and the agent share the
 lock, and a run holds it throughout writing and recovery. The command waits
 for it up to a bounded timeout.
 
-For each container, skip a usable copy unless replacement was requested.
-Otherwise, write a recovery record before starting the download. The record
-stays outside the directory that will be published, and it lets a later run
-finish the cleanup.
+A preheat only fills a missing copy. It never replaces a copy, and publication
+does not overwrite an entry that another writer published first.
 
-I2 shows the main flow. Publication details are separate in I3.
+For each container, skip a copy that already exists. Otherwise, write a
+recovery record before starting the download. The record stays outside the
+directory that will be published, and it lets a later run finish the cleanup.
+
+I2 shows the main flow.
 
 **Illustration 2 (I2): Prepare a Local Copy**
 
@@ -284,49 +283,28 @@ cleanup. If cleanup fails, keep the recovery record and report it. Cleanup is
 safe to repeat; an already-absent transaction is considered cleaned up.
 
 Containers have separate copies and transactions. Keep successful copies when
-another container fails. A later run processes containers still missing or
-invalid.
-
-### Replace a Copy
-
-Replacement requires that no restore is using the copy. The new copy must be
-complete and flushed before the operations in I3 begin.
-
-**Illustration 3 (I3): Replace a Copy**
-
-```mermaid
-flowchart LR
-    A["Move old copy aside"] --> B["Remove old bad marker"]
-    B --> C["Rename new copy<br/>into place"]
-    C --> D["Remove old copy"]
-```
-
-These are separate filesystem operations. If marker removal fails, do not
-publish the new copy. If the final directory is absent, restores use S3.
-Only a complete copy appears under the final name.
+another container fails. A later run processes containers still missing.
 
 ### Interrupted Preheat
 
-A crash can leave different states on disk. I4 shows which restore source is
-available. The next safe preheat run uses recovery records to finish cleanup.
+A crash can leave different states on disk. I3 shows which restore source is
+available. A later preheat run uses recovery records to finish cleanup.
 
-**Illustration 4 (I4): Interrupted Preheat**
+**Illustration 3 (I3): Interrupted Preheat**
 
 ```mermaid
 flowchart TD
-    A["Preheat interrupted"] --> B{"New copy<br/>published?"}
-    B -->|"Yes"| C["Use the new local copy"]
-    C --> D["Finish cleanup<br/>on the next safe run"]
-    B -->|"No"| E{"Usable<br/>old copy?"}
-    E -->|"Yes"| F["Keep using the old copy"]
-    E -->|"No"| G["Use S3"]
+    A["Preheat interrupted"] --> B{"Copy<br/>published?"}
+    B -->|"Yes"| C["Restores use the local copy"]
+    C --> D["Finish cleanup<br/>on a later run"]
+    B -->|"No"| E["Restores use S3"]
+    E --> F["Remove the temporary files<br/>on a later run"]
 ```
 
 Recovery gives these guarantees:
 
 - It preserves any published copy.
-- It distinguishes the final copy from temporary and replacement files,
-  including when only part of a replacement completed.
+- It distinguishes a published copy from temporary files.
 - It keeps its record until transaction cleanup and filesystem cleanup both
   finish.
 - It never publishes an incomplete copy and never deletes files that are
@@ -342,48 +320,24 @@ Recovery removes a temporary directory only when the run holds the node lock,
 one of its recovery records names that directory, and PageBroker has stopped
 writing to it. The record keeps another tool's temporary files out of scope.
 
-### Failed Local Restore
-
-A restore cannot switch source midway. I5 describes what happens to the copy
-after a local restore fails.
-
-**Illustration 5 (I5): Handle a Failed Local Restore**
-
-```mermaid
-flowchart TD
-    A["Local restore fails"] --> B{"Started<br/>reading?"}
-    B -->|"No"| C["Leave the copy unchanged"]
-    B -->|"Yes"| D["Mark the copy bad"]
-    D --> E["Later attempts use S3"]
-    D --> F["Rebuild during a safe preheat"]
-```
-
-A compatibility failure leaves the copy unchanged. A failure after reading
-starts writes a small marker beside the copy. The agent cannot prove that
-the files caused the failure, so this rule can mark a good copy too.
-
-Marking never moves or deletes the copy. Other restores can already be reading
-it or preparing to mount it. Several concurrent restores can fail before the
-marker is written.
-
 ### Cleanup
 
 The node agent periodically lists snapshot objects and removes unreferenced
-copies. I6 applies equally to Snapshot-created and externally created copies.
+copies. I4 applies equally to Snapshot-created and externally created copies.
 
-**Illustration 6 (I6): Clean Up Node Copies**
+**Illustration 4 (I4): Clean Up Node Copies**
 
 ```mermaid
 flowchart TD
     A["Cleanup timer runs"] --> B{"Listing<br/>succeeded?"}
     B -->|"No"| C["Remove nothing"]
     B -->|"Yes"| D{"Snapshot<br/>exists?"}
-    D -->|"Yes"| E["Keep the copy<br/>including a marked copy"]
-    D -->|"No"| F["Remove the copy<br/>and its marker"]
+    D -->|"Yes"| E["Keep the copy"]
+    D -->|"No"| F["Remove the copy"]
 ```
 
 Removal is subject to the active restore restriction. Preheat recovery owns
-temporary work and old copies.
+temporary work.
 
 ### Automatic Preheat
 
@@ -396,14 +350,14 @@ On each pass, the agent lists snapshots and selects those without a local
 copy. A snapshot is eligible when all of these conditions hold:
 
 - It is Ready, bound to the S3 store, and not being deleted.
-- The node has no copy of it, usable or marked bad.
+- The node has no copy of it.
 - The node is not clearly unable to restore it.
 - Its required space does not breach the free-space reserve.
 
-The agent processes one snapshot at a time, newest first. I7 shows the
+The agent processes one snapshot at a time, newest first. I5 shows the
 decision for each snapshot.
 
-**Illustration 7 (I7): Decide an Automatic Preheat**
+**Illustration 5 (I5): Decide an Automatic Preheat**
 
 ```mermaid
 flowchart TD
@@ -418,9 +372,6 @@ flowchart TD
 
 These rules keep the automatic path small:
 
-- **Fill only.** Automatic preheat creates missing copies. It never replaces
-  a copy and never rebuilds one marked bad. Publication does not overwrite an
-  entry that another writer published first.
 - **Definite mismatches only.** The agent compares the snapshot's recorded CPU
   architecture, kernel version, and CPU features with its node. A missing
   value is unknown, not a mismatch. Checks that need the restore pod, such as
@@ -438,8 +389,7 @@ These rules keep the automatic path small:
 - **Disabling.** Disabling automatic preheat stops new downloads. Existing
   copies stay subject to normal cleanup.
 
-Automatic recovery covers only interrupted fills. It leaves an interrupted
-replacement for the command. It follows the ownership rule in
+Automatic recovery follows the ownership rule in
 [Interrupted Preheat](#interrupted-preheat): it publishes or removes nothing
 until PageBroker has stopped writing. It does not cancel a running download.
 
@@ -472,15 +422,14 @@ command and Helm values, which are public interfaces. Exact command, flag,
 value, result, and event names remain review decisions.
 
 The command selects a snapshot by namespace and name. Running it in a node's
-agent pod selects that node. It supports replacing an existing copy and
-reports ready, skipped, or failed results with reasons. Cleanup failures must
-remain visible even when a copy was successfully published.
+agent pod selects that node. It reports ready, skipped, or failed results with
+reasons. Cleanup failures must remain visible even when a copy was
+successfully published.
 
 Preheat adds one request between the node agent and PageBroker. It is
 internal and not a public interface. This proposal adds no agent endpoint or
-cancellation command. Automatic preheat
-needs no new agent permission: the agent can already list snapshot objects and
-create events.
+cancellation command. Automatic preheat needs no new agent permission: the
+agent can already list snapshot objects and create events.
 
 ### Security
 
@@ -584,22 +533,21 @@ directories.
 
 The implementation needs these tests:
 
-- **Restore:** use a valid local copy; use S3 when the copy is absent,
-  invalid, or marked bad. A failed local restore marks the copy without
-  disrupting other restores. PageBroker serves direct local restore on S3
-  installations and rejects other path-based requests. S3 restore behaves the
-  same with the cache disabled.
+- **Restore:** use a valid local copy; use S3 when the copy is absent or
+  invalid. PageBroker serves direct local restore on S3 installations and
+  rejects other path-based requests. S3 restore behaves the same with the
+  cache disabled.
 - **Preheat:** a complete, flushed copy with modes and empty directories,
-  repeated requests, no space, a flush failure, replacement, and partial
-  success across containers. The command and the agent never write at once.
-  PageBroker cannot change a published copy through a descriptor or mapping
-  that it kept open.
+  repeated requests, no space, a flush failure, an existing copy left
+  unchanged, and partial success across containers. The command and the agent
+  never write at once. PageBroker cannot change a published copy through a
+  descriptor or mapping that it kept open.
 - **Recovery:** an interruption at any stage preserves published copies. Cover
   an agent restart, a PageBroker restart, and a lost completion response.
   Recovery never publishes an incomplete copy or deletes files still being
   written. Cleanup is safe to repeat, and a failed cleanup keeps its record.
-- **Cleanup:** remove copies of deleted snapshots and keep all others,
-  including marked copies. Remove nothing after a failed snapshot listing.
+- **Cleanup:** remove copies of deleted snapshots and keep all others. Remove
+  nothing after a failed snapshot listing.
 - **Automatic preheat:** a newly Ready snapshot, catch-up on a new node, skips
   for mismatch and for space, and no new download while cleanup is
   unresolved.
@@ -643,7 +591,8 @@ workload scheduling.
 
 A preheat object can add per-snapshot node choice, with per-node status.
 Later work can also track readers and check the intended disk. Retention or
-eviction of live copies is another candidate.
+eviction of live copies is another candidate. Automatic handling of a damaged
+copy, such as switching later restores to S3, is a third.
 
 Multi-cluster support depends on imports preserving snapshot identity, store
 binding, and container handles. Readiness must reflect available snapshot
@@ -688,7 +637,7 @@ Reviewers need to settle these points:
 
 1. Accept the S3-first scope and the operating restrictions.
 2. Choose the mount path and finalize configuration and command names.
-3. Confirm bad-copy marking and deletion of externally prepared copies.
+3. Confirm deletion of externally prepared copies.
 4. Define command results for published copies with pending cleanup.
 5. Agree the import contract and shared-store cleanup ownership.
 6. Decide how preheat downloads are isolated from restores in PageBroker. The
