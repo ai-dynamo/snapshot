@@ -569,32 +569,23 @@ directories.
 
 The implementation needs these tests:
 
-- **Restore:** hit, miss, bad marker, wrong identity, symlink rejection,
-  forced direct mode, compatibility failure, and source events.
-- **Concurrency:** a failed restore marks a copy without disrupting another
-  restore using it. Replacement still requires the phase 1 restriction.
-- **PageBroker:** direct local restore works on S3 installations; path-based
-  checkpoint and staged file restore remain rejected.
-- **Preheat:** repeated requests, lock contention, modes, empty directories,
-  replacement, no space, and partial success across containers.
-- **Recovery:** interruption before download, during copy, after each rename,
-  before marker removal, and after publication. Preserve published copies.
-- **Cleanup failures:** an absent transaction counts as success; other
-  transaction or local cleanup failures keep the recovery record.
-- **Deletion:** retain named copies, including marked copies; remove unnamed
-  copies and markers; remove nothing after a failed snapshot listing.
-- **Automatic preheat:** a newly Ready snapshot, catch-up on a new node,
-  newest-first order, skip on a definite mismatch, skip when space is short,
-  retry delay, rate-limited events, a marked copy left unchanged, and no
-  download while disabled.
-- **Shared lock:** the command and the agent never write at once; the agent
-  skips a pass while the command holds the lock.
-- **Automatic recovery:** recover an interrupted fill; leave an interrupted
-  replacement for the command; never overlap a restore start; start no new
-  download while cleanup is unresolved.
-- **Staging policy:** a restore that arrives during a preheat follows the
-  agreed policy under memory pressure, including its timeout.
-- **End to end:** a cache hit makes no S3 reads; a miss uses S3; GPU state
+- **Restore:** use a valid local copy; use S3 when the copy is absent,
+  invalid, or marked bad. A failed local restore marks the copy without
+  disrupting other restores. PageBroker serves direct local restore on S3
+  installations and rejects other path-based requests.
+- **Preheat:** a complete copy with modes and empty directories, repeated
+  requests, no space, replacement, and partial success across containers. The
+  command and the agent never write at once.
+- **Recovery:** an interruption at any stage preserves published copies.
+  Cleanup is safe to repeat, and a failed cleanup keeps its record. Automatic
+  recovery never overlaps a restore start.
+- **Cleanup:** remove copies of deleted snapshots and keep all others,
+  including marked copies. Remove nothing after a failed snapshot listing.
+- **Automatic preheat:** a newly Ready snapshot, catch-up on a new node, skips
+  for mismatch and for space, and no new download while cleanup is
+  unresolved. A restore that arrives during a preheat follows the agreed
+  policy under memory pressure.
+- **End to end:** a cache hit makes no S3 reads, a miss uses S3, and GPU state
   restores from the cache.
 
 ### Graduation Criteria
