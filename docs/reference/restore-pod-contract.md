@@ -193,8 +193,7 @@ the signal that ended it.
 A destination container gets up to the retry limit plus one restore attempts.
 The limit is `nvidia.com/restore-retry-limit`, or else
 `config.restore.retryLimit`, and defaults to 0 (see the
-[API Reference](api.md#restore)). Go producers set the annotation with
-`Options.RetryLimit`.
+[API Reference](api.md#restore)).
 
 The agent retries only a failed attempt that left the container untouched, and
 runs the retry in the same container. A failure changes the container once the
