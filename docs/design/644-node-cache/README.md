@@ -252,9 +252,13 @@ for it up to a bounded timeout.
 A preheat only fills a missing copy. It never replaces a copy, and publication
 does not overwrite an entry that another writer published first.
 
-For each container, skip a copy that already exists. Otherwise, write a
-recovery record before starting the download. The record stays outside the
-directory that will be published, and it lets a later run finish the cleanup.
+A snapshot can cover several containers, and each one has its own copy.
+Preheat handles them one at a time and skips a container whose copy is already
+on the node.
+
+Before each download, preheat saves a small note of what it is about to do,
+called a recovery record. If the download is interrupted, a later run reads
+the record and cleans up. The record is kept outside the copy's directory.
 
 I2 shows the main flow.
 
