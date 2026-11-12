@@ -57,13 +57,15 @@ snapshot before workloads start. S3 remains the source of truth.
 
 ## Motivation
 
-The S3 restore path downloads a snapshot into RAM before restoring it. Repeated
-restores repeat that download. A prepared local copy removes the download from
-the startup path.
+Today, every restore from S3 downloads the whole snapshot first. Restoring the
+same snapshot again downloads it again.
 
-Issue #644 requests a node cache. This proposal starts with S3 installations.
-Snapshot prepares the copies itself, and administrators can prepare one with a
-command.
+This proposal lets Snapshot keep a copy of each snapshot on the local NVMe of
+every node. A restore reads the local copy and skips the download. If a node
+has no copy, the restore uses S3 as it does today.
+
+Issue #644 requests this node cache. This proposal covers S3 installations
+first.
 
 ### Goals
 
