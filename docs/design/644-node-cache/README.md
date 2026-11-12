@@ -176,34 +176,22 @@ state. PageBroker downloads from S3. For preheat, the node agent decides what
 to download and publishes the result. PageBroker downloads from S3 straight
 into the node cache.
 
-I1 shows a restore from a local copy on an S3 installation. Only the cache
-check is new; the other steps exist today.
+I1 shows a restore from a local copy on an S3 installation.
 
 **Illustration 1 (I1): Restore From a Local Copy**
 
 ```mermaid
-sequenceDiagram
-    participant U as User
-    participant A as Node agent
-    participant C as Node NVMe cache
-    participant PB as PageBroker
-    participant P as Restore pod
-    U->>P: Create the pod with the restore-from annotation
-    A->>A: Find the Ready snapshot object
-    A->>C: Check for a usable local copy (new)
-    A->>C: Read the manifest and check compatibility
-    A->>PB: Ask to open the copy's directory
-    A->>P: Mount the local copy
-    P->>C: CRIU reads the process state
-    opt Node uses CUDA custom storage
-        PB->>C: Read the GPU data files
-        PB->>P: Load the GPU memory
-    end
-    A->>P: Mark the pod restored and record the source
+flowchart TD
+    A["A restore pod is created"] --> B["The node agent finds<br/>a usable local copy"]
+    B --> C["The agent mounts the copy<br/>into the pod"]
+    C --> D["CRIU restores the process<br/>from the NVMe"]
+    D --> E["The pod runs.<br/>S3 was not used."]
 ```
 
-S3 is not contacted, and nothing is staged in RAM. When no usable copy exists,
-the restore follows the existing S3 path; see
+Only the search for a local copy is new; the other steps exist today.
+PageBroker downloads nothing in this flow. On a node that uses CUDA custom
+storage, it loads the GPU data from the same local copy. When no usable copy
+exists, the restore follows the existing S3 path; see
 [Restore Source](#restore-source).
 
 The cache is mounted read-write into the node agent. PageBroker gets the cache
