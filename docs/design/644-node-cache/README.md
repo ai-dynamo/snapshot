@@ -188,17 +188,22 @@ The design has three flows:
 
 ### Cache Identity and Layout
 
-Use the existing local layout:
+The node cache uses the same directory layout that a PVC installation uses
+today, at the same path inside the agent pod:
 
 ```text
 artifacts/<snapshot-uid>/containers/<container>/
 ```
 
-Resolve `PodSnapshot.status.boundSnapshotContentName` to its
-`PodSnapshotContent`. Use that object's UID.
+A copy in the node cache looks to the restore code exactly like a snapshot on
+a PVC. This is what lets a restore from the NVMe use the existing PVC restore
+flow unchanged.
 
-Restore rejects symlinks and non-directories at the selected entry. It checks
-the manifest's UID and container, then checks for a bad-copy marker.
+`<snapshot-uid>` is the UID of the snapshot's `PodSnapshotContent` object.
+
+Before it uses a copy, a restore rejects symlinks and non-directories at that
+entry. It checks that the manifest names this snapshot and container, then
+checks for a bad-copy marker.
 
 Validation has three separate meanings:
 
