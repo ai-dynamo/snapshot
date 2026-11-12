@@ -49,7 +49,15 @@ user-mode driver 615.71.09.
 inspect. Check the `agent` container's library path instead:
 
 ```bash
+kubectl -n <namespace> get pods -o wide -l app.kubernetes.io/component=snapshot-agent
 kubectl -n <namespace> exec <agent-pod> -c agent -- printenv LD_LIBRARY_PATH
+```
+
+At restore, the helper searches those directories inside the restore Pod, and
+loads the first `libcuda.so` it finds. List each directory in the restore Pod:
+
+```bash
+kubectl -n <namespace> exec <restore-pod> -- ls <directory>
 ```
 
 The workload, PageBroker, and the `agent` container must use the same version.
@@ -76,11 +84,12 @@ entries:
 - The `agent` container, for `cuda-checkpoint-helper`. At restore, the directory
   must also exist in the restore Pod.
 
-The chart has no setting for the `agent` and `pagebroker` environment. Set it on
-the DaemonSet, for example:
+The chart has no setting for the `agent` and `pagebroker` environment. Find the
+agent DaemonSet, and set it there, for example:
 
 ```bash
-kubectl -n <namespace> set env daemonset/<release>-agent -c pagebroker \
+kubectl -n <namespace> get daemonset -l app.kubernetes.io/component=snapshot-agent
+kubectl -n <namespace> set env daemonset/<agent-daemonset> -c pagebroker \
   LD_LIBRARY_PATH=/usr/local/cuda-13.4/compat:/usr/local/lib
 ```
 
@@ -92,9 +101,9 @@ Forward compatibility applies only to some GPUs. See
 
 ## If It Fails
 
-If the workload and PageBroker use different versions, a checkpoint stops
-responding in `cuCheckpointProcessLock`. When it times out, it fails with
-`CUDA_ERROR_OPERATING_SYSTEM`. See
+If PageBroker meets the CustomStorage minimum but the workload does not, a
+checkpoint stops responding in `cuCheckpointProcessLock`. When it times out, it
+fails with `CUDA_ERROR_OPERATING_SYSTEM`. See
 [checkpointing GPU state](../troubleshooting/checkpoints.md#checkpointing-gpu-state).
 
 A restore of a workload that holds multicast groups may fail with
