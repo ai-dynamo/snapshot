@@ -57,7 +57,9 @@ restore fails at
 ### Multi-GPU Workloads
 
 Requires [GPU CustomStorage](#gpu-customstorage), so CUDA user-mode driver
-(`libcuda.so`) 615 or newer. To select a newer user-mode driver, see
+(`libcuda.so`) 615 or newer. Without CustomStorage, a multi-GPU restore takes
+too long and uses too much memory to be practical. To select a newer user-mode
+driver, see
 [Check the CUDA User-Mode Driver](../operate/cuda-driver.md). See also
 [Multi-GPU Workloads](../reference/workload-contract.md#multi-gpu-workloads).
 
