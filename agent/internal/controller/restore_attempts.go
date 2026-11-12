@@ -109,7 +109,7 @@ func (op *restoreOperation) startAttempt(ctx context.Context) (*restoreAttempts,
 		return nil, err
 	}
 	if !found {
-		limit, err := op.retryLimit()
+		limit, err := op.controller.restoreRetryLimit(op.pod)
 		if err != nil {
 			return nil, err
 		}
@@ -172,14 +172,14 @@ func (op *restoreOperation) forgetAttempts(ctx context.Context) {
 	}
 }
 
-// retryLimit is the Pod's nvidia.com/restore-retry-limit, or the agent's
-// restore.retryLimit when the Pod sets none.
-func (op *restoreOperation) retryLimit() (int, error) {
-	limit, found, err := podcontract.RestoreRetryLimitFromAnnotations(op.pod.Annotations)
+// restoreRetryLimit is the Pod's nvidia.com/restore-retry-limit, or the
+// agent's restore.retryLimit when the Pod sets none.
+func (w *NodeController) restoreRetryLimit(pod *corev1.Pod) (int, error) {
+	limit, found, err := podcontract.RestoreRetryLimitFromAnnotations(pod.Annotations)
 	if err != nil || found {
 		return limit, err
 	}
-	return op.controller.config.Restore.ResolveRetryLimit(), nil
+	return w.config.Restore.ResolveRetryLimit(), nil
 }
 
 // nodePodUID is the Pod's UID on the node, which names the Pod's directories

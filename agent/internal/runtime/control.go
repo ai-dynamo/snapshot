@@ -240,6 +240,12 @@ func removePodControlFile(podsDir, podUID, containerName, name string) error {
 		return err
 	}
 	defer dir.Close()
+	return RemoveFileInDir(dir, name)
+}
+
+// RemoveFileInDir removes name from dir, without following it. A file that is
+// already gone is not an error.
+func RemoveFileInDir(dir *os.File, name string) error {
 	if err := unix.Unlinkat(int(dir.Fd()), name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
 		return fmt.Errorf("remove %s in %s: %w", name, dir.Name(), err)
 	}
@@ -267,6 +273,12 @@ func podControlSentinelExists(podsDir, podUID, containerName, name string) (bool
 		return false, fmt.Errorf("control sentinel %q: %w", name, err)
 	}
 	defer dir.Close()
+	return SentinelInDirExists(dir, name)
+}
+
+// SentinelInDirExists reports whether dir holds a sentinel under name. Only a
+// regular file counts; anything else under the name is an error.
+func SentinelInDirExists(dir *os.File, name string) (bool, error) {
 	var st unix.Stat_t
 	if err := unix.Fstatat(int(dir.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		if errors.Is(err, unix.ENOENT) {

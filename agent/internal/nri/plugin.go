@@ -78,6 +78,9 @@ type Restorer interface {
 	// RestoreContainerStopped withdraws that report once the container stops,
 	// so a restore waits for its replacement instead.
 	RestoreContainerStopped(uid ktypes.UID, container, containerID string)
+	// RestoreAgain reports whether a destination container that starts again
+	// after the Pod's restore succeeded gets a new restore.
+	RestoreAgain(pod *corev1.Pod) bool
 }
 
 // destination is a restore destination container the plugin shaped, by the
@@ -224,12 +227,13 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 
 	lookupCtx, cancel := context.WithTimeout(ctx, lookupTimeout)
 	defer cancel()
-	destinations, err := p.restorer.RestoreDestinations(lookupCtx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+	restorePod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name:        name,
 		Namespace:   namespace,
 		UID:         ktypes.UID(uid),
 		Annotations: pod.GetAnnotations(),
-	}})
+	}}
+	destinations, err := p.restorer.RestoreDestinations(lookupCtx, restorePod)
 	if err != nil {
 		log.Error(err, "Cannot resolve restore destinations")
 		return nil, nil, fmt.Errorf("snapshot: resolve restore destinations: %w", err)
@@ -242,6 +246,9 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 	dir, err := p.openControlDir(pod.GetUid(), ctr.GetName())
 	if err == nil {
 		err = installProxy(p.proxyPath, dir)
+		if err == nil && p.restorer.RestoreAgain(restorePod) {
+			forgetRestoreComplete(dir, log)
+		}
 		_ = dir.Close()
 	}
 	if err != nil {
@@ -301,6 +308,24 @@ func podIdentity(pod *api.PodSandbox) (namespace, name, uid string) {
 		return pod.GetNamespace(), pod.GetName(), pod.GetUid()
 	}
 	return namespace, name, uid
+}
+
+// forgetRestoreComplete removes the restore-complete that an earlier container
+// of the destination left, so the proxy in this one waits for a new restore. A
+// restore-failed keeps it, since the restore ended for good. A failure leaves
+// the proxy to exit, as it would without the removal, so it does not fail the
+// container's creation.
+func forgetRestoreComplete(dir *os.File, log logr.Logger) {
+	failed, err := snapshotruntime.SentinelInDirExists(dir, podcontract.RestoreFailedFile)
+	if err == nil && !failed {
+		err = snapshotruntime.RemoveFileInDir(dir, podcontract.RestoreCompleteFile)
+	}
+	switch {
+	case err != nil:
+		log.Error(err, "Cannot clear the earlier restore's outcome; the restore proxy exits instead of waiting for a new restore")
+	case !failed:
+		log.Info("Container starts again after its restore succeeded; it waits for a new restore")
+	}
 }
 
 // installProxy copies the proxy binary into dir. It copies on every creation:

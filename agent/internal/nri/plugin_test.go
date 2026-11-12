@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -35,6 +36,13 @@ type fakeRestorer struct {
 	pod          *corev1.Pod
 	started      []started
 	stopped      []started
+	restoreAgain bool
+	againPod     *corev1.Pod
+}
+
+func (r *fakeRestorer) RestoreAgain(pod *corev1.Pod) bool {
+	r.againPod = pod
+	return r.restoreAgain
 }
 
 func (r *fakeRestorer) RestoreDestinations(_ context.Context, pod *corev1.Pod) ([]string, error) {
@@ -213,6 +221,52 @@ func TestCreateContainerFailsClosed(t *testing.T) {
 		require.Error(t, err)
 		assert.Nil(t, adjust)
 	})
+}
+
+// A destination that starts again after its restore succeeded loses the
+// restore-complete the restore left, so its proxy waits for a new restore
+// instead of exiting. Nothing about the outcome fails the container's
+// creation.
+func TestCreateContainerClearsTheOutcomeOfARestoreThatSucceeded(t *testing.T) {
+	complete, failed := podcontract.RestoreCompleteFile, podcontract.RestoreFailedFile
+	for name, tc := range map[string]struct {
+		restoreAgain bool
+		files        []string
+		dirs         []string
+		wantKept     []string
+	}{
+		"restored again":                  {restoreAgain: true, files: []string{complete}},
+		"no outcome yet":                  {restoreAgain: true},
+		"not restored again":              {files: []string{complete}, wantKept: []string{complete}},
+		"a restore that failed":           {restoreAgain: true, files: []string{complete, failed}, wantKept: []string{complete, failed}},
+		"a restore that failed alone":     {restoreAgain: true, files: []string{failed}, wantKept: []string{failed}},
+		"an outcome it cannot remove":     {restoreAgain: true, dirs: []string{complete}, wantKept: []string{complete}},
+		"a restore-failed it cannot read": {restoreAgain: true, files: []string{complete}, dirs: []string{failed}, wantKept: []string{complete, failed}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			restorer := &fakeRestorer{destinations: []string{"main"}, restoreAgain: tc.restoreAgain}
+			p, root := testPlugin(t, restorer)
+			dir := filepath.Join(root, "pod-uid", "main")
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			for _, file := range tc.files {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, file), nil, 0o644))
+			}
+			for _, sub := range tc.dirs {
+				require.NoError(t, os.Mkdir(filepath.Join(dir, sub), 0o755))
+			}
+
+			adjust, _, err := p.CreateContainer(context.Background(), restoreSandbox(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"}), &api.Container{Name: "main"})
+
+			require.NoError(t, err)
+			require.NotNil(t, adjust, "the container runs the proxy either way")
+			require.NotNil(t, restorer.againPod)
+			assert.Equal(t, "pod-uid", string(restorer.againPod.UID))
+			for _, file := range []string{complete, failed} {
+				_, statErr := os.Lstat(filepath.Join(dir, file))
+				assert.Equal(t, slices.Contains(tc.wantKept, file), statErr == nil, "%s exists = %t", file, statErr == nil)
+			}
+		})
+	}
 }
 
 // The controller restores as soon as the destination runs, by the identity it
