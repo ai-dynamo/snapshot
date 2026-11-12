@@ -158,6 +158,10 @@ administrator does about it.
   To repair it, move that copy out of the cache while no restore uses it.
   Later restores use S3, and preheat refills the copy. Give write access to
   the cache only to administrators.
+- **A cluster-wide re-download is possible.** If the snapshot objects
+  disappear for a moment, for example during a faulty upgrade, every node
+  removes its copies and later downloads them again. No data is lost, but S3
+  and the network carry the full load.
 - **The cache can land on the wrong disk.** If the NVMe is not mounted at the
   configured path, copies go to the root disk. Check that the path is on the
   intended disk. See [Configuration](#configuration).
@@ -172,6 +176,11 @@ agent and PageBroker, and it mounts a directory on the node's NVMe as the node
 cache. A local copy serves only restore pods scheduled on that node. If the
 cache directory is missing on a node, that node behaves as if the cache is
 disabled: restores there use S3, and no preheat runs.
+
+Each node agent subscribes to the snapshot objects in the cluster. It reacts
+when a snapshot becomes Ready or is deleted. It also compares all snapshots
+with its local copies when it starts and on an interval. That comparison
+covers a new node, an agent that was down, and a failed download.
 
 The design has three flows:
 
@@ -307,14 +316,15 @@ same run. It never publishes a directory that it finds left over.
 
 ### Cleanup
 
-The node agent periodically lists snapshot objects and removes unreferenced
-copies. I4 applies equally to Snapshot-created and externally created copies.
+When a snapshot is deleted, each node agent removes its local copy. The
+comparison also removes any copy whose snapshot no longer exists. I4 applies
+equally to Snapshot-created and externally created copies.
 
 **Illustration 4 (I4): Clean Up Node Copies**
 
 ```mermaid
 flowchart TD
-    A["Cleanup timer runs"] --> B{"Listing<br/>succeeded?"}
+    A["A snapshot is deleted,<br/>or the comparison runs"] --> B{"Listing<br/>succeeded?"}
     B -->|"No"| C["Remove nothing"]
     B -->|"Yes"| D{"Snapshot<br/>exists?"}
     D -->|"Yes"| E["Keep the copy"]
@@ -326,13 +336,12 @@ the work area.
 
 ### Automatic Preheat
 
-Automatic preheat runs in the node agent when
-`storage.nodeCache.preheat.enabled` is set. It reuses the periodic pass that
-[Cleanup](#cleanup) introduces. One rule covers a newly Ready
-snapshot, a node that joined later, and a retry after a failure.
+Automatic preheat runs in the node agent when it is enabled; see
+[Configuration](#configuration). It starts a download when a snapshot becomes
+Ready. The comparison covers a node that joined later and a retry after a
+failure.
 
-On each pass, the agent lists snapshots and selects those without a local
-copy. A snapshot is eligible when all of these conditions hold:
+A snapshot is eligible when all of these conditions hold:
 
 - It is Ready, bound to the S3 store, and not being deleted.
 - The node has no copy of it.
@@ -351,7 +360,7 @@ flowchart TD
     B -->|"No"| C{"Fits the<br/>free-space reserve?"}
     C -->|"No"| S
     C -->|"Yes"| D{"Lock free and<br/>work area empty?"}
-    D -->|"No"| W["Retry on a later pass"]
+    D -->|"No"| W["Retry later"]
     D -->|"Yes"| E["Run preheat<br/>to fill the copy"]
 ```
 
@@ -361,13 +370,13 @@ These rules keep the automatic path small:
   architecture, kernel version, and CPU features with its node. A missing
   value is unknown, not a mismatch. Checks that need the restore pod, such as
   GPU model and driver, stay at restore time.
-- **Shared lock.** If the command holds the node lock, the agent skips the
-  pass.
-- **Retries.** A failed download is retried on a later pass with an
-  increasing delay. The agent tracks work in progress, which prevents a pass
-  from starting duplicate work.
-- **Spread starts.** Each node adds a small random delay before a download,
-  which keeps all nodes from starting at once.
+- **Shared lock.** If the command holds the node lock, the agent tries again
+  later.
+- **Retries.** A failed download is retried later with an increasing delay.
+  The agent tracks work in progress, which prevents duplicate work.
+- **Spread starts.** Every node learns of a Ready snapshot at the same
+  moment. Each node adds a small random delay before a download, which keeps
+  all nodes from starting at once.
 - **One download at a time.** Automatic preheat starts no new download on a
   node while the work area still holds an unfinished one. It does not cancel
   a running download.
@@ -410,7 +419,7 @@ reasons.
 Preheat adds one request between the node agent and PageBroker. It is
 internal and not a public interface. This proposal adds no agent endpoint or
 cancellation command. Automatic preheat needs no new agent permission: the
-agent can already list snapshot objects and create events.
+agent can already list and watch snapshot objects and create events.
 
 ### Security
 
@@ -444,6 +453,9 @@ The proposed Helm values are:
 - `storage.nodeCache.minFreeSpace`: space to retain after a preheat copy.
 - `storage.nodeCache.preheat.enabled`: disabled by default; when enabled with
   the cache, each agent preheats every eligible snapshot.
+- `storage.nodeCache.scanInterval`: how often the agent compares all snapshots
+  with its local copies. The proposed default is 10 minutes, the same as the
+  operator's cleanup of the snapshot store.
 
 Units, required values, and defaults other than enablement are open.
 A free-space check does not reserve disk space against other writers.
@@ -475,8 +487,8 @@ unwritten disk data still use memory.
 Automatic preheat multiplies storage and S3 traffic by the number of nodes. A
 snapshot set of 1 TiB needs about 1 TiB on each node, plus the reserve and
 temporary working space. Fifty nodes hold about 50 TiB in total. A new node
-downloads the whole set. Each agent also lists all snapshot objects on every
-pass.
+downloads the whole set. Each agent keeps one subscription to the snapshot
+objects and lists them when it starts.
 
 Measure preheat duration, local versus S3 restore latency, peak memory during
 a preheat, disk use, and restore slowdown during a preheat. Include GPU
@@ -528,8 +540,9 @@ The implementation needs these tests:
   download never lead to an incomplete published copy. PageBroker removes its
   unfinished downloads and never removes files it is still writing. The agent
   never publishes a leftover directory.
-- **Cleanup:** remove copies of deleted snapshots and keep all others. Remove
-  nothing after a failed snapshot listing.
+- **Cleanup:** remove copies of deleted snapshots and keep all others. Cover a
+  snapshot deleted while the agent is down. Remove nothing after a failed
+  snapshot listing.
 - **Automatic preheat:** a newly Ready snapshot, catch-up on a new node, skips
   for mismatch and for space, and no new download while the work area holds
   an unfinished one.
