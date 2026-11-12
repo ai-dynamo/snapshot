@@ -69,23 +69,40 @@ first.
 
 ### Goals
 
-Phase 1 has five goals:
+Phase 1 has five goals. Each one maps to a requirement of issue #644, with S3
+as the shared store in place of a PVC:
 
-- Restore from a usable local copy without staging it into RAM.
-- Use the existing S3 path when no usable local copy exists.
-- Preheat every participating node automatically, including nodes added
-  later, without starting a restore pod.
-- Preheat one node on request with an administrator command.
-- Remove local copies after their snapshot is deleted.
+- **Local restore (requirement 2):** restore from a usable local copy without
+  staging it into RAM.
+- **Fallback (requirements 1 and 2):** use the existing S3 path when no usable
+  local copy exists. S3 remains the source of truth.
+- **Automatic preheat (requirement 5, in part):** preheat every participating
+  node, including nodes added later, without starting a restore pod. The
+  policy is one cluster-wide setting.
+- **Preheat on request (requirement 5, in part):** preheat one node with an
+  administrator command, not through the CRD.
+- **Cleanup (requirement 6, in part):** remove local copies after their
+  snapshot is deleted. Manual deletion and per-node status are not included.
+
+Phase 1 also meets requirements 7 and 8 in part. See
+[Cache Identity and Layout](#cache-identity-and-layout) and
+[Configuration](#configuration).
 
 ### Non-Goals
 
-Phase 1 excludes these features:
+Phase 1 excludes these features. Each one is a requirement of issue #644 that
+this proposal defers:
 
-- Filling the cache during a restore.
-- Automatic scheduling preference for nodes with a copy.
-- Choosing which nodes receive copies.
-- PVC installations and multi-cluster support.
+- **Lazy pull-through (requirement 3):** filling the cache during a restore.
+- **Cache-aware placement (requirement 4):** preferring nodes that already
+  hold a copy when a restore pod is scheduled. The scheduler chooses the node
+  as it does today.
+- **Pre-staging on selected nodes (requirement 5):** choosing which nodes
+  receive copies. Phase 1 copies to every participating node.
+- **A shared PVC as the source of truth (requirement 1):** phase 1 covers S3
+  installations only.
+
+Multi-cluster support is also excluded. Issue #644 does not request it.
 
 ## Proposal
 
