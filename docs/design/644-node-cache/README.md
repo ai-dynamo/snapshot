@@ -130,18 +130,33 @@ Another tool can prepare copies if it follows the contract in
 
 ### Limitations, Risks, and Mitigations
 
-Phase 1 accepts these limits. Each row gives the effect and what an
+Phase 1 accepts these limits. Each one states its effect and what an
 administrator does about it.
 
-| Limit | What it means | What to do |
-| --- | --- | --- |
-| Snapshot does not know which copies are in use | Deleting a snapshot or replacing its copy can fail a restore that is reading that copy. | Delete a snapshot, or replace its copy, only when no restore is using it. |
-| Preheat shares RAM with S3 restores | A preheat downloads through the same RAM that S3 restores use. A restore that starts during a preheat can run short. A snapshot larger than that RAM cannot be preheated. | Run the command before applications start. For automatic preheat, this is an open decision. |
-| An interrupted preheat can hold RAM | The download stays in RAM until it is cleaned up or expires. Cleaning it up can fail an S3 restore that is running at that moment. | Rerun the command when no restore is running. For automatic preheat, this is an open decision. |
-| Every node stores every snapshot | Copies are never evicted. A snapshot that does not fit is skipped and restores from S3. A node with a different GPU model stores copies it cannot use. | Delete old snapshots to free space. |
-| Copies are not checked for damage | A restore checks that a copy belongs to the snapshot, not that its content is intact. | Give write access to the cache only to administrators. |
-| A bad copy is not repaired automatically | A copy that failed a restore is marked bad and stays on disk. Restores of that snapshot use S3. | Run the command to rebuild the copy. |
-| The cache can land on the wrong disk | If the NVMe is not mounted at the configured path, copies go to the root disk. | Check that the path is on the intended disk. |
+- **Snapshot does not know which copies are in use.** Deleting a snapshot or
+  replacing its copy can fail a restore that is reading that copy. Delete a
+  snapshot, or replace its copy, only when no restore is using it.
+- **Preheat shares RAM with S3 restores.** A preheat downloads through the
+  same RAM that S3 restores use. A restore that starts during a preheat can
+  run short. A snapshot larger than that RAM cannot be preheated. Run the
+  command before applications start. For automatic preheat, this is an open
+  decision.
+- **An interrupted preheat can hold RAM.** The download stays in RAM until it
+  is cleaned up or expires. Cleaning it up can fail an S3 restore that is
+  running at that moment. Rerun the command when no restore is running. For
+  automatic preheat, this is an open decision.
+- **Every node stores every snapshot.** Copies are never evicted. A snapshot
+  that does not fit is skipped and restores from S3. A node with a different
+  GPU model stores copies it cannot use. Delete old snapshots to free space.
+- **Copies are not checked for damage.** A restore checks that a copy belongs
+  to the snapshot, not that its content is intact. Give write access to the
+  cache only to administrators.
+- **A bad copy is not repaired automatically.** A copy that failed a restore
+  is marked bad and stays on disk. Restores of that snapshot use S3. Run the
+  command to rebuild the copy.
+- **The cache can land on the wrong disk.** If the NVMe is not mounted at the
+  configured path, copies go to the root disk. Check that the path is on the
+  intended disk.
 
 The two open decisions are part of the readiness gate in
 [Graduation Criteria](#graduation-criteria).
