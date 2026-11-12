@@ -22,6 +22,7 @@ and does not describe automatic preheat.
 - [Proposal](#proposal)
   - [Limitations, Risks, and Mitigations](#limitations-risks-and-mitigations)
 - [Design Details](#design-details)
+  - [Changes by Component](#changes-by-component)
   - [Cache Identity and Layout](#cache-identity-and-layout)
   - [Restore Source](#restore-source)
   - [Preheat](#preheat)
@@ -192,6 +193,38 @@ The design has three flows:
   mounts the local copy, and CRIU reads it. PageBroker transfers no snapshot
   data. It only opens the directory when the agent asks, and on nodes with
   CUDA custom storage it loads the GPU data.
+
+### Changes by Component
+
+Three components change. Each change below links to the section that explains
+it.
+
+- **Node agent**, which runs on every node:
+  - **It looks in the node cache first.** When a restore starts, the agent
+    uses a local copy if the node has one. Otherwise it uses S3, as today. See
+    [Restore Source](#restore-source).
+  - **It follows the snapshots in the cluster.** The agent learns when a
+    snapshot becomes Ready and when one is deleted. It removes the local copy
+    of a deleted snapshot. See [Cleanup](#cleanup).
+  - **It prepares local copies.** The agent asks PageBroker to download a
+    snapshot, then puts the finished copy in place. See [Preheat](#preheat)
+    and [Automatic Preheat](#automatic-preheat).
+  - **It offers a preheat command.** An administrator can prepare one snapshot
+    on one node. See [API](#api).
+- **PageBroker**, which runs next to the agent on every node:
+  - **It downloads to the NVMe.** Today PageBroker downloads a snapshot only
+    into RAM. It gains a download into the node cache, and it checks and
+    flushes the files before it reports success. See [Preheat](#preheat).
+  - **It cleans up after itself.** It removes a download that did not finish.
+    See [Interrupted Preheat](#interrupted-preheat).
+  - **It opens a local copy for a restore.** On S3 installations, PageBroker
+    refuses today to open a snapshot directory on a disk. It must accept this
+    for the node cache, for reading only.
+- **Helm chart:**
+  - **It gains new settings and one new mount.** The chart adds the node cache
+    settings and mounts the cache directory into the agent pod. See
+    [API](#api).
+- **Not changed:** the operator, the CRDs, the S3 restore flow, and CRIU.
 
 ### Cache Identity and Layout
 
@@ -520,11 +553,8 @@ This proposal has no cluster-wide cache inventory or per-node API status.
 ### Dependencies
 
 The design builds on [SNEP-237](../237-s3-storage/README.md), PageBroker's S3
-download path, and the existing direct local restore path. PageBroker must
-serve both S3 and direct file restore when the cache is enabled. It also needs
-a download request that writes to the cache, accounts for disk space, flushes
-its files, leaves a finished download for the agent to publish, and removes an
-unfinished one.
+download path, and the existing direct local restore path.
+[Changes by Component](#changes-by-component) lists what PageBroker must gain.
 
 The design was checked against `main` at `3e143360`.
 
