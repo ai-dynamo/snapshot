@@ -394,7 +394,7 @@ func failedCheckpointContainer(pod *corev1.Pod) *corev1.ContainerStatus {
 }
 
 // preflightCuInterpose reads the explicit opt-in. An opted-in target must also start
-// under the launcher, which SnapshotJob adds and ordinary Pods must add themselves.
+// under the launcher, which the NRI plugin adds when the target mounts snapshot-control.
 func preflightCuInterpose(pod *corev1.Pod, target string) (bool, error) {
 	requested, err := podcontract.ParseCuInterposeAnnotation(pod.Annotations)
 	if err != nil || !requested {
@@ -402,7 +402,7 @@ func preflightCuInterpose(pod *corev1.Pod, target string) (bool, error) {
 	}
 	for i := range pod.Spec.Containers {
 		if pod.Spec.Containers[i].Name == target {
-			return true, podcontract.ValidateCuInterposeLauncher(&pod.Spec.Containers[i])
+			return true, podcontract.ValidateCuInterposeTarget(&pod.Spec.Containers[i])
 		}
 	}
 	return false, fmt.Errorf("cuinterpose target container %q not found", target)

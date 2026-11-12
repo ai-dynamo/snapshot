@@ -327,6 +327,16 @@ config:
     # Times a failed checkpoint may be retried, beyond the first attempt. 0 keeps
     # retry opt-in, so upgrading changes no existing checkpoint's behaviour.
     retryLimit: 0
+    # How a SnapshotJob source Pod with nvidia.com/snapshot-multi-gpu: enabled
+    # is prepared for multi-GPU checkpoints:
+    #   agent          The node agent prepares the target container when it
+    #                  starts. The Pod is unchanged. Needs NRI v0.10 or newer
+    #                  (containerd 2.2 or newer) on the node.
+    #   initContainer  The operator adds an init container that copies the
+    #                  libraries from the agent image, and starts the target
+    #                  through the launcher. Works on any runtime. The target
+    #                  must set command.
+    multiGpuPreparation: agent
 
   restore:
     # Maximum seconds to allow a restore attempt before the agent marks it failed

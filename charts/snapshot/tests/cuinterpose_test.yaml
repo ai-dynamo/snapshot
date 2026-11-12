@@ -1,20 +1,40 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-suite: cuinterpose delivery flags on the operator
+suite: multi-GPU preparation flags on the operator
 templates:
   - templates/operator-deployment.yaml
 tests:
-  - it: defaults the installer image to the chart appVersion
+  - it: leaves preparation to the agent by default
     chart:
       appVersion: v1.2.3
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
+          content: "--multi-gpu-preparation=agent"
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: "--cuinterpose-image=ghcr.io/ai-dynamo/snapshot/agent:v1.2.3"
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: "--cuinterpose-image-pull-policy=Always"
+
+  - it: defaults the init container image to the chart appVersion
+    chart:
+      appVersion: v1.2.3
+    set:
+      config.checkpoint.multiGpuPreparation: initContainer
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "--multi-gpu-preparation=initContainer"
+      - contains:
+          path: spec.template.spec.containers[0].args
           content: "--cuinterpose-image=ghcr.io/ai-dynamo/snapshot/agent:v1.2.3"
 
-  - it: passes the agent image and pull policy to the installer flags
+  - it: passes the agent image and pull policy to the init container flags
     set:
+      config.checkpoint.multiGpuPreparation: initContainer
       image.agent.tag: v9.9.9
       image.agent.pullPolicy: IfNotPresent
     asserts:
@@ -24,3 +44,9 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].args
           content: "--cuinterpose-image-pull-policy=IfNotPresent"
+
+  - it: rejects an unknown preparation
+    set:
+      config.checkpoint.multiGpuPreparation: nri
+    asserts:
+      - failedTemplate: {}

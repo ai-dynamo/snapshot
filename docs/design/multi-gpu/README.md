@@ -738,39 +738,42 @@ It is not copied to the source Pod.
   SnapshotJob admission and the agent's ordinary-Pod validation reject other values.
 - Removing the annotation does not unload the shim from a running process.
 - Adding the annotation to an already-running Pod does not load the shim.
-  An opted-in Pod that was not started through the launcher fails capture preflight.
+  The agent prepares containers only when they are created.
 
 CuInterpose adds no CRDs or CRD fields.
 
 #### Source Pod shaping
 
 The shim must load before the application creates CUDA allocations so it can record their full lifetime.
-Users who deploy their own Pod must prepare its target container before startup, then create a PodSnapshot referring to that Pod.
-SnapshotJob automates this preparation from the annotated Pod template and the selected target container's explicit application `command`:
+The agent's NRI plugin prepares the target container when the container runtime creates it, the same way for a SnapshotJob source and for a Pod the user deploys.
+The Pod object is not changed.
+With `config.checkpoint.multiGpuPreparation: initContainer`, the operator instead shapes a SnapshotJob source in `ShapeCuInterposeCapture` (`operator/internal/protocol/cuinterpose.go`): it adds the `snapshot-cuda-install` init container and an `emptyDir` at the delivery path, and prepends the launcher prefix to the target's `command`.
+The plugin then skips the target, as it skips any container that mounts the delivery path.
 
-| Preparation | User-created Pod | SnapshotJob |
-| --- | --- | --- |
-| Deliver the shim | Supply `cuinterpose-launch`, `libcuinterpose.so`, and `libcuinterpose_core.so` from a matching build before the application starts. | Adds an init container that copies the three files from the configured installer image into an `emptyDir`. |
-| Mount the files | Mount the delivery volume read-only at `/tmp/snapshot-cuda` in the target container. | Adds the volume and read-only target mount. |
-| Start the application | Prefix the target container's `command` with the [launcher arguments](#launcher-cli). | Prepends that prefix to the supplied application `command`, preserving `args` and `env`. |
+The plugin prepares a container when all of these hold:
 
-In the source Pod, the installer fills the shared volume before the target container starts.
-Both containers mount that volume at `/tmp/snapshot-cuda`, with different access modes:
+- The Pod has the multi-GPU annotation set to `enabled` and is not a restore Pod (it has no `nvidia.com/restore-from` annotation).
+- The container mounts `/snapshot-control`, which the workload contract requires of the checkpoint target.
+- The container does not deliver the shim itself: it mounts nothing at or under `/tmp/snapshot-cuda`, and its process does not already start with the [launcher arguments](#launcher-cli).
 
-```mermaid
-flowchart TB
-    subgraph P["Source Pod created by SnapshotJob"]
-        I["Added init container<br/>Copies files from the installer image"]
-        T["Target container<br/>Updated command: cuinterpose-launch … -- application<br/>Original args and env preserved"]
-        V[("Added shared emptyDir<br/>cuinterpose-launch<br/>libcuinterpose.so<br/>libcuinterpose_core.so")]
-        I -->|"Read-write mount"| V
-        T -->|"Read-only mount"| V
-    end
-```
+For such a container, the plugin performs these steps in `CreateContainer`:
 
-The operator rejects a missing application `command` or collisions with reserved installer names or mount paths before creating the source Job.
-For either workflow, the agent rejects an opted-in target without the expected launcher prefix before waiting for readiness or modifying the workload.
+| Step | What the plugin does |
+| --- | --- |
+| Deliver the shim | Copies `libcuinterpose.so` and `libcuinterpose_core.so` from the agent's restore bundle, and `cuinterpose-launch` from the agent image, into `snapshot-cuda/` inside the container's control directory. |
+| Mount the files | Adds a read-only bind mount of that directory at `/tmp/snapshot-cuda`, with the options of a read-only volume mount. |
+| Start the application | Prefixes the container's process arguments with the launcher arguments. The runtime has already resolved the image entrypoint into those arguments, so `command` is optional. The environment is unchanged. |
+
+The plugin fails the container's creation if it cannot copy the files, and kubelet retries it.
+Starting the workload without the shim would produce a Pod that cannot be checkpointed as requested.
+An invalid annotation value does not block the Pod; capture preflight reports it instead.
+
+Before waiting for readiness, the agent's capture preflight checks the opted-in target.
+It must mount `/snapshot-control` with no mount on the delivery path, or start with the launcher prefix in its `command`.
+Capture then verifies that every CUDA process loaded the shim, which catches a node without NRI.
 Library delivery mounts must be read-only because CRIU reapplies their source mount flags during restore.
+When the agent or the operator's init container delivers the libraries, capture and restore both use the agent's bundle, so their library hashes match when the agent versions match.
+A container that delivers its own libraries must deliver the same files as the restore node's agent bundle, or restore refuses the checkpoint.
 
 #### Launcher CLI
 
@@ -782,7 +785,8 @@ cuinterpose-launch --library PATH -- COMMAND [ARG...]
 The launcher verifies both libraries against its build's hashes, prepends `PATH` to the resolved `LD_PRELOAD`, and replaces itself with `COMMAND` using `exec`.
 It preserves existing preload entries, argument boundaries, and the resolved environment without invoking a shell.
 
-Snapshot requires this prefix in the target container's `command`:
+The agent's NRI plugin prepends this prefix to the target's process arguments.
+A container that delivers the shim itself puts the same prefix in its `command`:
 
 ```yaml
 command: ["/tmp/snapshot-cuda/cuinterpose-launch", "--library", "/tmp/snapshot-cuda/libcuinterpose.so", "--", "<original-command>"]
@@ -825,10 +829,8 @@ Otherwise, the helper's native multi-GPU jobfile requirement still applies.
 
 ### Configuration
 
-- `--cuinterpose-image` and `--cuinterpose-image-pull-policy` configure the operator's installer image and pull policy.
-  Helm supplies these flags, and the operator validates them at startup.
-- The installer uses the workload Pod's or ServiceAccount's image-pull credentials.
-- Installer resource requests and limits are both `100m` CPU and `64Mi` memory, preserving Guaranteed QoS when the rest of the Pod meets its requirements.
+- Delivery needs no configuration.
+  The NRI plugin copies the payload of the agent running on the node.
 - `CUINTERPOSE_SOCKET_DIR` overrides the shim's control socket directory, which defaults to `/tmp`.
   This override supports test isolation.
 - `SNAPSHOT_CONTROL_TIMEOUT_SECONDS` sets the internal control timeout, defaulting to 10 seconds.
@@ -915,13 +917,14 @@ Workloads that make many small direct allocations can still waste substantial me
   They use `0600` permissions within the target container, and the design assumes cooperating processes and trusted privileged Snapshot agents.
 - Host carriers place shared allocation contents in CRIU images.
   Checkpoint storage must protect these contents like other process memory.
-- The installer runs without root privileges, drops capabilities, and uses a read-only root filesystem.
-  It leaves workload security contexts unchanged.
+- The NRI plugin adds no container to the Pod and leaves workload security contexts unchanged.
+  It writes the payload as the agent, into the container's control directory, and opens that directory without following symlinks.
 
 ### Dependencies
 
 - Linux/amd64 with compatible GPUs and drivers providing the VMM and multicast APIs the workload uses.
 - glibc 2.34 or newer for the preload libraries.
+- A container runtime with NRI v0.10 or newer on the source node, such as containerd 2.2, for shim delivery.
 - CUDA Runtime 12.0 or newer when an application looks up driver entry points through a CUDA runtime library.
 - Existing Snapshot and CRIU compatibility and privilege requirements.
 
