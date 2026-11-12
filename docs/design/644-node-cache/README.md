@@ -29,6 +29,7 @@ This SNEP is the document to review; the source copy is historical context.
   - [Interrupted Preheat](#interrupted-preheat)
   - [Failed Local Restore](#failed-local-restore)
   - [Cleanup](#cleanup)
+  - [Automatic Preheat](#automatic-preheat)
   - [External Writers](#external-writers)
   - [API](#api)
   - [Security](#security)
@@ -50,8 +51,9 @@ This SNEP is the document to review; the source copy is historical context.
 ## Summary
 
 Snapshot can restore a workload from a snapshot already stored on the node's
-local disk. If no usable copy exists, it restores from S3. Administrators can
-download snapshots before workloads start. S3 remains the source of truth.
+local disk. If no usable copy exists, it restores from S3. When automatic
+preheat is enabled, each node attempts to keep a local copy of every eligible
+snapshot before workloads start. S3 remains the source of truth.
 
 ## Motivation
 
@@ -59,22 +61,29 @@ The S3 restore path downloads a snapshot into RAM before restoring it. Repeated
 restores repeat that download. A prepared local copy removes the download from
 the startup path.
 
-Issue #644 requests a node cache. This proposal starts with S3 installations
-and gives administrators a built-in way to prepare copies.
+Issue #644 requests a node cache. This proposal starts with S3 installations.
+Snapshot prepares the copies itself, and administrators can prepare one with a
+command.
 
 ### Goals
 
-Phase 1 has four goals:
+Phase 1 has five goals:
 
 - Restore from a usable local copy without staging it into RAM.
 - Use the existing S3 path when no usable local copy exists.
-- Preheat chosen nodes without starting a restore pod.
+- Preheat every participating node automatically, including nodes added
+  later, without starting a restore pod.
+- Preheat one node on request with an administrator command.
 - Remove local copies after their snapshot is deleted.
 
 ### Non-Goals
 
 Phase 1 excludes these features:
 
+- A guarantee that every node holds every snapshot at all times.
+- Choosing which nodes receive copies, for all snapshots or for one snapshot.
+- Automatic replacement of a copy, including a copy marked bad.
+- Transfers of snapshots between nodes.
 - Filling the cache during a restore.
 - Automatic scheduling preference for nodes with a copy.
 - Removing live snapshots by age or cache size.
@@ -91,9 +100,25 @@ The cache is optional and disabled by default. A restore still requires a
 live, Ready snapshot object. Files left on disk do not grant permission to
 restore a deleted snapshot.
 
-An administrator runs a preheat command inside the selected node's agent pod.
-The command prepares each container's copy and reports the result. Another
-tool can prepare copies if it follows the same publication contract.
+Automatic preheat is a separate setting, also disabled by default. When it is
+enabled, each node running a cache-enabled agent attempts to keep a local copy
+of every eligible Ready snapshot. New nodes download existing snapshots, and
+existing nodes download newly Ready snapshots. Downloads are asynchronous;
+incomplete or unavailable copies use the existing S3 restore path.
+
+This is eventual replication, not a guarantee. A node skips a snapshot that
+does not fit, that it clearly cannot restore, or whose download fails. Each
+agent downloads its own copy from S3. Nodes do not transfer snapshots to each
+other.
+
+Automatic preheat belongs to phase 1 because preparing copies before
+applications start is the required initial functionality. The design suits a
+cluster with a bounded snapshot collection.
+
+An administrator can also run a preheat command inside one node's agent pod.
+The command prepares each container's copy and reports the result. It is the
+only way to replace a copy or to rebuild one marked bad. Another tool can
+prepare copies if it follows the same publication contract.
 
 ### Limitations, Risks, and Mitigations
 
@@ -101,23 +126,39 @@ Phase 1 accepts these limits:
 
 1. **No reader tracking.** Delete a snapshot or replace its copy only when no
    restore is running or starting against that copy. Rebuilding a bad copy is
-   a replacement.
+   a replacement. Automatic preheat never replaces a copy.
 2. **Shared staging budget.** Preheat can consume capacity needed by restores.
-   Preheat nodes before applications start. The behavior under pressure must
-   be measured.
-3. **Interrupted downloads.** A stopped command can leave RAM allocated until
-   transaction expiry, pod recreation, or recovery. Ending an active download
-   can fail other S3 restores. Recover while no restore is running on the node.
+   Run the command before applications start. Automatic preheat can start
+   soon after a checkpoint, or on a new node that is receiving restore pods.
+   The behavior under pressure must be measured.
+3. **Interrupted downloads.** A stopped command or a restarted agent can leave
+   RAM allocated until transaction expiry, pod recreation, or recovery. Ending
+   an active download can fail other S3 restores. Recover a command's work
+   while no restore is running on the node.
 4. **RAM limit.** Each staged download must fit the PageBroker staging budget.
    Preheat does not remove the existing S3 staging limit.
 5. **Trusted writers.** Restore checks identity, not payload checksums. External
    tools must write complete copies. Cache write access is privileged.
 6. **Disk selection.** A missing directory can be created on the root disk.
    Administrators must ensure the configured path uses the intended disk.
-7. **Manual capacity management.** Live copies are not evicted. Disabling the
-   cache leaves copies on disk for manual removal.
-8. **Independent downloads.** Each node downloads its own copy. Stagger large
-   preheat jobs when needed.
+7. **Manual capacity management.** Live copies are not evicted. Every
+   participating node needs room for every retained snapshot. A snapshot that
+   does not fit is skipped and restores from S3. Delete old snapshots to free
+   space. Disabling the cache leaves copies on disk for manual removal.
+8. **Independent downloads.** Each node downloads its own copy from S3. A new
+   snapshot starts a download on every participating node. A new node
+   downloads the whole set.
+9. **Coarse node filter.** A node skips a snapshot only on a definite mismatch
+   of CPU architecture, kernel, or CPU features. A node with a different GPU
+   model still receives copies it cannot restore.
+10. **Wider data placement.** Snapshots from every namespace are copied to
+    every participating node.
+11. **Manual repair.** Automatic preheat leaves a copy marked bad in place.
+    Use the command to rebuild it.
+
+Limits 2 and 3 are accepted for the command only. For automatic preheat they
+are open decisions, and the readiness gate in
+[Graduation Criteria](#graduation-criteria) must pass first.
 
 Copying to disk also adds page-cache memory. Measurements must include both
 staging and the preheat process. No performance improvement is claimed yet.
@@ -127,8 +168,10 @@ staging and the preheat process. No performance improvement is claimed yet.
 ### Components
 
 The node agent selects the source and coordinates restore. CRIU reads process
-state. PageBroker downloads from S3 and restores GPU memory. The preheat
-command runs in the agent pod and writes the node cache.
+state. PageBroker downloads from S3 and restores GPU memory. Preheat runs in
+the agent pod and writes the node cache. The node agent runs it automatically,
+and the command runs it on request. Both use one implementation and one node
+lock.
 
 I1 shows restore responsibilities. Dashed arrows show coordination. Solid
 arrows show reads or data movement. I3 shows preheat separately.
@@ -199,20 +242,27 @@ read the local manifest. A compatible copy can originate from another node.
 
 ### Preheat
 
-The command accepts a snapshot namespace and name. It runs inside the node
-agent pod because PageBroker's socket and staging volume are available there.
-No restore pod is needed.
+A preheat run prepares one snapshot on one node. The command and automatic
+preheat call the same routine. The command accepts a snapshot namespace and
+name. A run executes inside the node agent pod because PageBroker's socket and
+staging volume are available there. No restore pod is needed.
 
-Before processing containers, the command performs these steps:
+Before processing containers, a run performs these steps:
 
-1. Acquire the node's preheat lock, waiting up to a bounded timeout.
+1. Acquire the node's preheat lock.
 2. Recover unfinished attempts from the cache work area.
 3. Read the Ready snapshot and its store ID and container handles.
 
+The lock is a file lock in the cache work area, since the command runs as a
+separate process from the agent. A run holds it throughout writing and
+recovery. The command waits for it up to a bounded timeout. Automatic preheat
+does not wait; see [Automatic Preheat](#automatic-preheat).
+
 For each container, skip a usable copy unless replacement was requested.
 Otherwise, create a recovery record before starting the download. The record
-holds the transaction ID and the paths needed for cleanup. It stays outside
-the directory that will be published.
+holds the transaction ID, the paths needed for cleanup, and whether the
+attempt is a fill or a replacement. It stays outside the directory that will
+be published.
 
 I3 shows the main flow. Publication details are separate in I4.
 
@@ -225,9 +275,12 @@ flowchart LR
     C --> D["Publish the copy"]
 ```
 
-After download, check available space against `minFreeSpace`. Copy the staged
-directory while preserving file modes, directory modes, and empty directories.
-Validate the copy against staging and flush it before publication.
+Before download, skip a copy if its required space would breach the
+free-space reserve, `minFreeSpace`. How a run learns the size before download
+is an open decision. After download, check available space again. Copy the
+staged directory while preserving file modes, directory modes, and empty
+directories. Validate the copy against staging and flush it before
+publication.
 
 Ask PageBroker to end the transaction after validation. If that fails, the
 complete copy can still be published. Keep the recovery record and report
@@ -288,6 +341,11 @@ Recovery repeats transaction cleanup safely. It retains records when cleanup
 fails. Path identities must distinguish the final copy from temporary and old
 copies, including when only part of replacement completed.
 
+Recovery removes a temporary directory only when the run holds the node lock
+and one of its recovery records names that directory. The lock confirms that
+no Snapshot writer is active. The record keeps another tool's temporary files
+out of scope.
+
 ### Failed Local Restore
 
 A restore cannot switch source midway. I6 describes what happens to the copy
@@ -332,6 +390,88 @@ A marker does not change ownership. Keep marked copies while their snapshot
 exists. Remove the copy and marker after deletion, subject to the active
 restore restriction. Preheat recovery owns temporary work and old copies.
 
+### Automatic Preheat
+
+Automatic preheat runs in the node agent when
+`storage.nodeCache.preheat.enabled` is set. It reuses the periodic pass that
+[Cleanup](#cleanup) introduces in phase 1. One rule covers a newly Ready
+snapshot, a node that joined later, and a retry after a failure.
+
+On each pass, the agent lists snapshots and selects those without a local
+copy. A snapshot is eligible when all of these conditions hold:
+
+- It is Ready, bound to the S3 store, and not being deleted.
+- The node has no copy of it, usable or marked bad.
+- The node is not clearly unable to restore it.
+- Its required space does not breach the free-space reserve.
+
+The agent processes one snapshot at a time, newest first. I8 shows the
+decision for each snapshot.
+
+**Illustration 8 (I8): Decide an Automatic Preheat**
+
+```mermaid
+flowchart TD
+    A["Ready snapshot<br/>without a local copy"] --> B{"Clearly<br/>incompatible?"}
+    B -->|"Yes"| S["Skip and report"]
+    B -->|"No"| C{"Fits the<br/>free-space reserve?"}
+    C -->|"No"| S
+    C -->|"Yes"| D{"Lock free and<br/>cleanup resolved?"}
+    D -->|"No"| W["Retry on a later pass"]
+    D -->|"Yes"| E["Run preheat<br/>to fill the copy"]
+```
+
+These rules keep the automatic path small:
+
+- **Fill only.** Automatic preheat creates missing copies. It never replaces
+  a copy and never rebuilds one marked bad. Publication does not overwrite an
+  entry that another writer published first.
+- **Definite mismatches only.** The agent compares the snapshot's recorded CPU
+  architecture, kernel version, and CPU features with its node. A missing
+  value is unknown, not a mismatch. Checks that need the restore pod, such as
+  GPU model and driver, stay at restore time.
+- **Shared lock.** If the command holds the node lock, the agent skips the
+  pass.
+- **Retries.** A failed download or copy is retried on a later pass with an
+  increasing delay. The agent tracks work in progress, which prevents a pass
+  from starting duplicate work.
+- **Spread starts.** Each node adds a small random delay before a download,
+  which keeps all nodes from starting at once.
+- **Bounded leftovers.** Automatic preheat starts no new download on a node
+  while an earlier automatic attempt has unresolved cleanup. A node holds at
+  most one unreleased automatic preheat download.
+- **Disabling.** Disabling automatic preheat stops new downloads. Existing
+  copies stay subject to normal cleanup.
+
+Automatic recovery covers only interrupted fills. It leaves an interrupted
+replacement for the command. Recovery has two operations with different risk:
+
+- **Remove an unpublished temporary directory.** No restore reads a temporary
+  name. The node lock and the recovery record make this removal safe.
+- **End the interrupted download's transaction.** This can fail concurrent S3
+  restores. It must not overlap with a restore that is starting or running on
+  the node.
+
+The proposed coordination is a gate inside the agent, which runs both restores
+and automatic recovery. Recovery proceeds only when no restore is active, and
+new restores wait until it finishes. Evidence that ending a finished, idle
+download is safe during restores would remove the need for the gate. This is
+an open decision. The command runs as a separate process and stays under the
+phase 1 restriction.
+
+A restore can arrive after a preheat starts, since the agent runs restores
+concurrently. A check before the preheat starts does not protect that restore.
+The policy must be admission control or a reservation for staging capacity.
+The smaller option is admission control by waiting: a restore that needs S3
+staging waits while a preheat holds it. Processing one snapshot at a time
+bounds the wait to one download and copy. The timeout behavior is undecided:
+the restore can fail, or it can proceed from S3 and accept the overlap. This
+is an open decision.
+
+Deliver the command and the shared implementation first. Deliver automatic
+preheat last, after its readiness gate in
+[Graduation Criteria](#graduation-criteria) passes.
+
 ### External Writers
 
 An external tool can publish a copy under this contract:
@@ -348,17 +488,19 @@ the tool cannot reconstruct that layout.
 
 ### API
 
-Phase 1 changes no CRDs. It adds an administrator command and Helm values,
-which are public interfaces. Exact command, flag, result, and event names
-remain review decisions.
+Phase 1 adds no new Kubernetes API or CRD. It adds an administrator command
+and Helm values, which are public interfaces. Exact command, flag, value,
+result, and event names remain review decisions.
 
 The command selects a snapshot by namespace and name. Running it in a node's
 agent pod selects that node. It supports replacing an existing copy and
 reports ready, skipped, or failed results with reasons. Cleanup failures must
 remain visible even when a copy was successfully published.
 
-The command wraps a reusable preheat package. Phase 2 can call that package
-from a watcher. Phase 1 adds no agent endpoint or cancellation command.
+The command wraps a reusable preheat package. The node agent calls the same
+package for automatic preheat. Phase 1 adds no agent endpoint or cancellation
+command. Automatic preheat needs no new agent permission: the agent can
+already list snapshot objects and create events.
 
 ### Security
 
@@ -370,6 +512,12 @@ The command requires exec access to the privileged agent pod. A cache writer
 can supply process state, so write access is administrator-level trust.
 PageBroker receives a read-only cache mount. Preserve its existing S3
 credential path; the command should not need direct S3 credentials.
+
+Automatic preheat widens where snapshot data rests. Snapshots from every
+namespace are copied to every participating node, with no administrator action
+for each snapshot. On a cluster shared by tenants, every participating node
+holds process memory from every tenant. Leave automatic preheat disabled where
+that is not acceptable.
 
 Cleanup removes copies after snapshot deletion. Disabling the feature leaves
 copies behind, so removal instructions are required. Filesystem deletion is
@@ -383,9 +531,15 @@ The proposed Helm values are:
 - `storage.nodeCache.enabled`: disabled by default; phase 1 supports S3 only.
 - `storage.nodeCache.hostPath`: the local cache directory.
 - `storage.nodeCache.minFreeSpace`: space to retain after a preheat copy.
+- `storage.nodeCache.preheat.enabled`: disabled by default; when enabled with
+  the cache, each agent preheats every eligible snapshot.
 
 Names, units, required values, and defaults other than enablement are open.
 A free-space check does not reserve disk space against other writers.
+
+The participating nodes are the nodes where the agent runs with the cache
+enabled. The chart's existing agent placement settings choose those nodes.
+Phase 1 adds no separate setting to choose nodes for preheat.
 
 The proposed mount path is `/checkpoints`, which reuses the local restore
 path. A dedicated path adds mount-helper changes. Resolve this choice against
@@ -397,15 +551,26 @@ A cache hit avoids the S3 download and RAM staging. Preheat still uses both
 RAM and disk. Only one preheat runs per node, but it shares PageBroker's
 resources with restores.
 
+Automatic preheat multiplies storage and S3 traffic by the number of nodes. A
+snapshot set of 1 TiB needs about 1 TiB on each node, plus the reserve and
+temporary working space. Fifty nodes hold about 50 TiB in total. A new node
+downloads the whole set. Each agent also lists all snapshot objects on every
+pass.
+
 Measure preheat duration, local versus S3 restore latency, peak staging and
 copy memory, disk use, and restore behavior near the staging limit. Include
-GPU snapshots and repeated restores. Do not infer speedups from the diagrams.
+GPU snapshots, repeated restores, a restore that arrives during a preheat, and
+catch-up time on a new node. Do not infer speedups from the diagrams.
 
 ### Monitoring
 
 Each restore emits a log and pod event naming its selected source. Preheat
 reports per-container results and unresolved cleanup. Cleanup logs failures
 with the snapshot identity and reason.
+
+Automatic preheat emits an event when it skips or fails a snapshot, naming the
+node and the reason. It rate-limits repeated events for the same snapshot and
+reason. It logs each completed copy.
 
 Phase 1 has no cluster-wide cache inventory or per-node API status. Exact event
 reasons and any new metrics remain open; use existing naming conventions.
@@ -443,6 +608,17 @@ The implementation needs these tests:
   transaction or local cleanup failures keep the recovery record.
 - **Deletion:** retain named copies, including marked copies; remove unnamed
   copies and markers; remove nothing after a failed snapshot listing.
+- **Automatic preheat:** a newly Ready snapshot, catch-up on a new node,
+  newest-first order, skip on a definite mismatch, skip when space is short,
+  retry delay, rate-limited events, a marked copy left unchanged, and no
+  download while disabled.
+- **Shared lock:** the command and the agent never write at once; the agent
+  skips a pass while the command holds the lock.
+- **Automatic recovery:** recover an interrupted fill; leave an interrupted
+  replacement for the command; never overlap a restore start; start no new
+  download while cleanup is unresolved.
+- **Staging policy:** a restore that arrives during a preheat follows the
+  agreed policy under memory pressure, including its timeout.
 - **End to end:** a cache hit makes no S3 reads; a miss uses S3; GPU state
   restores from the cache.
 
@@ -460,17 +636,34 @@ These are proposed evidence gates, not release dates:
 - **Stable use:** public interfaces are settled, operational evidence supports
   the limits, and upgrade and disable behavior are documented.
 
+Automatic preheat has its own readiness gate. Do not merge it until all of
+these conditions hold:
+
+- Maintainers agree a policy for a restore that arrives during a preheat,
+  including its timeout behavior.
+- Tests show the policy holds under memory pressure, and neither the agent nor
+  PageBroker is stopped for memory use.
+- A node holds at most one unreleased automatic preheat download.
+- Recovery coordination with restores is decided and tested.
+- A run can learn a snapshot's size before download.
+
 Maintainers must agree the maturity labels and thresholds during review.
 
 ### Later Phases
 
-Phase 2 adds a preheat object, node selection, and per-node status. Track all
-objects that still need a copy, rather than only the object that created it.
-Ownership of command-created and external copies needs an explicit policy.
+A preheat node selector is a possible enhancement. It limits copies to a
+group of nodes, which helps clusters with mixed GPU models. It needs node-label
+lookup and an agent permission. It does not change workload scheduling.
 
-Phase 2 also moves preheat into the agent process, tracks readers, defines a
-staging-budget policy, and checks the intended disk. Node labeling requires
-either agent permission or operator ownership of that action.
+Phase 2 adds a preheat object for per-snapshot node choice, with per-node
+status. Track all objects that still need a copy, rather than only the object
+that created it. Ownership of command-created and external copies needs an
+explicit policy.
+
+Phase 2 also tracks readers, extends the staging-budget policy, and checks the
+intended disk. Retention or eviction of live copies is a candidate for a later
+phase. Node labeling requires either agent permission or operator ownership of
+that action.
 
 Phase 3 depends on imports preserving snapshot identity, store binding, and
 container handles. Readiness must reflect available snapshot data. Shared
@@ -480,14 +673,24 @@ Cross-cluster tests are required. These dependencies are not resolved here.
 ## Implementation History
 
 On 2026-11-11, the source plan was adapted into this illustrated draft for
-author review. No feature implementation or runtime validation is recorded.
+author review. On 2026-11-12, the draft added automatic preheat to phase 1. No
+feature implementation or runtime validation is recorded.
 
 ## Alternatives
 
-The source plan considered these alternatives:
+The source plan and its review considered these alternatives:
 
-- **Agent-managed preheat now:** survives dropped exec sessions but adds
-  request handling. Defer it to phase 2.
+- **Command-only preheat in phase 1:** smaller, but an administrator must run
+  it on each node for each snapshot. Preparing copies before applications
+  start is the required initial functionality.
+- **Administrator-selected nodes:** limits disk use on mixed clusters, but
+  adds node-label lookup and an agent permission. Defer it as the preheat node
+  selector.
+- **Every node that can restore the snapshot:** a node cannot know this before
+  the restore pod exists. Only CPU architecture, kernel, and CPU features are
+  known without a pod.
+- **A preheat object with a controller:** gives per-snapshot node choice and
+  status, but adds an API. Defer it to phase 2.
 - **Direct S3-to-disk download:** removes staging pressure but requires a new
   transfer path. Reuse PageBroker first.
 - **External distribution tools:** can help share downloads, but introduce
@@ -508,6 +711,11 @@ Reviewers need to settle these points:
 5. Agree the import contract and shared-store cleanup ownership.
 6. Clarify whether the source plan's proof-before-PR rule includes the future
    proposal PR or only implementation PRs.
+7. Agree the policy and timeout for a restore that arrives during a preheat.
+8. Agree how automatic recovery coordinates with restores.
+9. Confirm how a run learns a snapshot's size before download.
+10. Confirm `storage.nodeCache.preheat.enabled` and the newest-first order.
+11. Accept copies of every namespace's snapshots on every participating node.
 
 ### Source and Scope
 
@@ -516,8 +724,10 @@ paths, dated issue states, estimates, and code references from its original
 branch. It is not a second current specification.
 
 This draft refines cleanup record retention, crash-window wording, and
-multi-container retry wording discussed during review. It does not qualify
-runtime behavior or claim acceptance of future APIs.
+multi-container retry wording discussed during review. It also adds automatic
+preheat to phase 1. The source plan defers agent-run preheat to phase 2 and
+does not describe this design. This draft does not qualify runtime behavior or
+claim acceptance of future APIs.
 
 ### Next Steps
 
