@@ -399,23 +399,18 @@ func TestValidateRejectsMinimumContractDrift(t *testing.T) {
 	}
 }
 
-func TestBuildSetsRetryLimit(t *testing.T) {
+func TestBuildKeepsRetryLimitAnnotation(t *testing.T) {
 	tests := []struct {
 		name     string
 		existing *string
-		limit    *int
 		want     *string
 		wantErr  bool
 	}{
 		{name: "unset leaves the agent default"},
-		{name: "zero", limit: ptr(0), want: ptr("0")},
-		{name: "positive", limit: ptr(4), want: ptr("4")},
-		{name: "matching annotation", existing: ptr("4"), limit: ptr(4), want: ptr("4")},
-		{name: "annotation without option is kept", existing: ptr("2"), want: ptr("2")},
-		{name: "negative", limit: ptr(-1), wantErr: true},
-		{name: "conflicting annotation", existing: ptr("2"), limit: ptr(4), wantErr: true},
-		{name: "invalid annotation", existing: ptr("many"), wantErr: true},
-		{name: "invalid annotation with option", existing: ptr("many"), limit: ptr(1), wantErr: true},
+		{name: "zero", existing: ptr("0"), want: ptr("0")},
+		{name: "positive", existing: ptr("2"), want: ptr("2")},
+		{name: "negative", existing: ptr("-1"), wantErr: true},
+		{name: "not a number", existing: ptr("many"), wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -425,7 +420,7 @@ func TestBuildSetsRetryLimit(t *testing.T) {
 			}
 			before := pod.DeepCopy()
 
-			shaped, err := Build(pod, restoreRequest(), Options{RetryLimit: test.limit})
+			shaped, err := Build(pod, restoreRequest(), Options{})
 			if !reflect.DeepEqual(pod, before) {
 				t.Fatal("Build() mutated its input")
 			}
@@ -456,7 +451,7 @@ func TestBuildSetsRetryLimit(t *testing.T) {
 }
 
 func TestValidateRejectsInvalidRetryLimit(t *testing.T) {
-	valid, err := Build(restorePodFixture(), restoreRequest(), Options{RetryLimit: ptr(1)})
+	valid, err := Build(restorePodFixture(), restoreRequest(), Options{})
 	if err != nil {
 		t.Fatalf("Build() failed: %v", err)
 	}
