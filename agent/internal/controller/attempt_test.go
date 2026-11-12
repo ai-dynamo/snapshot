@@ -6,18 +6,23 @@ package controller
 import (
 	"context"
 	"errors"
+	"os"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -38,7 +43,7 @@ func TestAttemptCheckpointReportsFailureWithoutRecordingIt(t *testing.T) {
 	}
 
 	_, err := w.attemptCheckpoint(context.Background(), &snapshotv1alpha1.PodSnapshotContent{}, &corev1.Pod{},
-		"main", "cid", 1, false, "uid", "/artifacts/uid")
+		"main", "cid", 1, false, "uid", "/artifacts/uid", 0)
 
 	if !errors.Is(err, want) {
 		t.Errorf("attemptCheckpoint() = %v, want %v", err, want)
@@ -61,7 +66,7 @@ func TestAttemptCheckpointPassesTheResolvedTarget(t *testing.T) {
 	}
 
 	if _, err := w.attemptCheckpoint(context.Background(), content, &corev1.Pod{},
-		"main", "cid", 42, true, "uid", "/artifacts/uid"); err != nil {
+		"main", "cid", 42, true, "uid", "/artifacts/uid", 0); err != nil {
 		t.Fatalf("attemptCheckpoint() = %v", err)
 	}
 
@@ -102,7 +107,7 @@ func TestAttemptCheckpointInheritsTheCallersBudget(t *testing.T) {
 	want, _ := budget.Deadline()
 
 	if _, err := w.attemptCheckpoint(budget, &snapshotv1alpha1.PodSnapshotContent{}, &corev1.Pod{},
-		"main", "cid", 1, false, "uid", "/a"); err != nil {
+		"main", "cid", 1, false, "uid", "/a", 0); err != nil {
 		t.Fatalf("attemptCheckpoint() = %v", err)
 	}
 
@@ -175,9 +180,321 @@ func TestAttemptCheckpointReportsAnExhaustedBudget(t *testing.T) {
 	defer cancel()
 
 	_, err := w.attemptCheckpoint(budget, &snapshotv1alpha1.PodSnapshotContent{}, &corev1.Pod{},
-		"main", "cid", 1, false, "uid", "/a")
+		"main", "cid", 1, false, "uid", "/a", 0)
 
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("attemptCheckpoint() = %v, want %v", err, context.DeadlineExceeded)
 	}
+}
+
+// A fresh attempt suspends the workload again, so the loop only takes one when
+// the failure could clear and the budget allows it.
+func TestRunCheckpointRetriesUntilTheBudgetRuns(t *testing.T) {
+	attemptRetryInitialDelayOriginal := attemptRetryInitialDelay
+	t.Cleanup(func() { attemptRetryInitialDelay = attemptRetryInitialDelayOriginal })
+	attemptRetryInitialDelay = time.Millisecond
+
+	retryable := pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting")
+	for _, tc := range []struct {
+		name         string
+		limit        int
+		err          error
+		failures     int
+		wantAttempts int
+		wantReason   string
+	}{
+		{name: "a transient failure succeeds on a fresh attempt", limit: 2, err: retryable, failures: 1, wantAttempts: 2},
+		{name: "retries run out", limit: 1, err: retryable, failures: 9, wantAttempts: 2, wantReason: reasonRetriesExhausted},
+		{name: "a settled failure is not retried", limit: 5, err: errors.New("criu exploded"), failures: 9, wantAttempts: 1, wantReason: reasonCheckpointFailed},
+		{name: "no budget means one attempt", limit: 0, err: retryable, failures: 9, wantAttempts: 1, wantReason: reasonCheckpointFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			content := makeWorkOrder("content-a", "node-a", "a")
+			w := makeNodeController(t, &fakeCheckpointer{}, content)
+			w.config.Checkpoint.RetryLimit = ptr.To(tc.limit)
+			attempts := 0
+			w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+				attempts++
+				if attempts <= tc.failures {
+					return nil, tc.err
+				}
+				return nil, nil
+			}
+
+			// A retry only follows a source the recovery could put back, so the
+			// live test process stands in for one.
+			require.NoError(t, w.runCheckpoint(context.Background(), content, makeSourcePod(),
+				"main", "cid", os.Getpid(), false, string(content.UID), t.TempDir()))
+
+			assert.Equal(t, tc.wantAttempts, attempts, "number of attempts")
+			got := getContent(t, w, content.Name)
+			if tc.wantReason == "" {
+				assert.True(t, isContentReady(got), "a capture that succeeded on retry must be Ready")
+				return
+			}
+			require.True(t, isContentFailed(got))
+			assert.Equal(t, tc.wantReason,
+				meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed).Reason)
+		})
+	}
+}
+
+// Repeats of the dump come out of the same budget as fresh attempts, so a
+// caller asking for two retries gets two however they were spent.
+func TestRunCheckpointCountsDumpRepeatsAgainstTheBudget(t *testing.T) {
+	content := makeWorkOrder("content-a", "node-a", "a")
+	w := makeNodeController(t, &fakeCheckpointer{}, content)
+	w.config.Checkpoint.RetryLimit = ptr.To(2)
+	attempts := 0
+	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		attempts++
+		// The attempt reports it already spent both retries repeating its dump.
+		return nil, executor.SuspendedSourceFailure(
+			pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting"),
+			executor.SuspendedSource{DumpRetriesUsed: 2})
+	}
+
+	require.NoError(t, w.runCheckpoint(context.Background(), content, makeSourcePod(),
+		"main", "cid", 42, false, string(content.UID), t.TempDir()))
+
+	assert.Equal(t, 1, attempts, "a budget spent on dump repeats leaves nothing for a fresh attempt")
+	assert.Equal(t, reasonRetriesExhausted,
+		meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions,
+			snapshotv1alpha1.PodSnapshotConditionFailed).Reason)
+}
+
+// A source that could not be put back has nothing left to capture, so a retry
+// against it is guaranteed to fail on "no running task found" — burning a
+// retry and burying the cause that actually ended the checkpoint.
+func TestRunCheckpointDoesNotRetryAnUnrecoverableSource(t *testing.T) {
+	attemptRetryInitialDelayOriginal := attemptRetryInitialDelay
+	t.Cleanup(func() { attemptRetryInitialDelay = attemptRetryInitialDelayOriginal })
+	attemptRetryInitialDelay = time.Millisecond
+
+	retryable := pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting")
+	for _, tc := range []struct {
+		name          string
+		customStorage bool
+		wantAttempts  int
+	}{
+		// CustomStorage sent the GPU memory to PageBroker, whose execution is torn
+		// down by the time the dump fails, so the workload cannot be revived.
+		{name: "an unrevivable source ends the checkpoint", customStorage: true, wantAttempts: 1},
+		{name: "a revivable source is retried", wantAttempts: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			content := makeWorkOrder("content-a", "node-a", "a")
+			w := makeNodeController(t, &fakeCheckpointer{}, content)
+			w.config.Checkpoint.RetryLimit = ptr.To(2)
+			attempts := 0
+			w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+				attempts++
+				if attempts > 1 {
+					return nil, nil
+				}
+				return nil, executor.SuspendedSourceFailure(retryable,
+					executor.SuspendedSource{CustomStorageUsed: tc.customStorage})
+			}
+
+			// A revival only succeeds against a process that is really there and
+			// really released, so the live test process stands in for the source.
+			require.NoError(t, w.runCheckpoint(context.Background(), content, makeSourcePod(),
+				"main", "cid", os.Getpid(), false, string(content.UID), t.TempDir()))
+
+			assert.Equal(t, tc.wantAttempts, attempts, "number of attempts")
+			if tc.wantAttempts == 1 {
+				assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), reasonSourcePodTerminated),
+					"the owner must be told the source was ended")
+			}
+		})
+	}
+}
+
+// A capture that failed before the suspend left the source running, and recovery
+// ends a source it cannot revive — so reaching recovery at all would kill a
+// workload this capture never took.
+func TestRunCheckpointLeavesASourceItNeverSuspendedAlone(t *testing.T) {
+	content := makeWorkOrder("content-a", "node-a", "a")
+	w := makeNodeController(t, &fakeCheckpointer{}, content)
+	w.config.Checkpoint.RetryLimit = ptr.To(0)
+	signalled := 0
+	w.sendSignalFn = func(logr.Logger, int, syscall.Signal, string) error {
+		signalled++
+		return nil
+	}
+	// Refused before the workload was ever suspended, so the error carries no
+	// suspended source.
+	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		return nil, pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting")
+	}
+
+	require.NoError(t, w.runCheckpoint(context.Background(), content, makeSourcePod(),
+		"main", "cid", os.Getpid(), false, string(content.UID), t.TempDir()))
+
+	assert.Zero(t, signalled, "a source that was never suspended must not be signalled")
+	assert.False(t, sawEventReason(w.clientset.(*fake.Clientset), reasonSourcePodTerminated))
+	assert.Len(t, eventsForReason(w.clientset.(*fake.Clientset), reasonCheckpointFailed), 1,
+		"the failure that ended the capture still reaches the source Pod's owner")
+}
+
+// The shift overflows int64 far enough out, and a zero or negative delay would
+// let fresh attempts run back to back with no backoff.
+func TestAttemptRetryDelayStaysWithinTheBackoff(t *testing.T) {
+	for _, attempt := range []int{1, 2, 5, 34, 65, 1000} {
+		delay := attemptRetryDelay(attempt)
+		assert.Positive(t, delay, "attempt %d", attempt)
+		assert.LessOrEqual(t, delay, attemptRetryDelayCeiling, "attempt %d", attempt)
+	}
+}
+
+// Repeats and fresh attempts come out of one budget, so each attempt may only
+// repeat what is left of it. Handing every attempt the full limit again let a
+// capture report "3 of 2 retries used" on a node.
+func TestRunCheckpointSharesOneBudgetAcrossAttempts(t *testing.T) {
+	attemptRetryInitialDelayOriginal := attemptRetryInitialDelay
+	t.Cleanup(func() { attemptRetryInitialDelay = attemptRetryInitialDelayOriginal })
+	attemptRetryInitialDelay = time.Millisecond
+
+	content := makeWorkOrder("content-a", "node-a", "a")
+	w := makeNodeController(t, &fakeCheckpointer{}, content)
+	w.config.Checkpoint.RetryLimit = ptr.To(2)
+
+	retryable := pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting")
+	var offered []int
+	w.checkpointFn = func(_ context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		offered = append(offered, params.DumpRetriesRemaining)
+		// Each attempt spends one of the budget repeating its dump.
+		return nil, executor.SuspendedSourceFailure(retryable,
+			executor.SuspendedSource{DumpRetriesUsed: 1})
+	}
+
+	require.NoError(t, w.runCheckpoint(context.Background(), content, makeSourcePod(),
+		"main", "cid", os.Getpid(), false, string(content.UID), t.TempDir()))
+
+	// Attempt one may repeat twice; it spends one, and the retry that follows
+	// spends another, so attempt two is offered nothing.
+	assert.Equal(t, []int{2, 0}, offered, "each attempt is offered only what is left")
+	assert.Equal(t, reasonRetriesExhausted,
+		meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions,
+			snapshotv1alpha1.PodSnapshotConditionFailed).Reason)
+}
+
+// The attempt that ends the capture fails like any other, and its cause is the
+// one to act on. Reporting only the attempts a retry follows left that last one
+// out of the events entirely.
+func TestRunCheckpointReportsTheFailureThatEndedIt(t *testing.T) {
+	attemptRetryInitialDelayOriginal := attemptRetryInitialDelay
+	t.Cleanup(func() { attemptRetryInitialDelay = attemptRetryInitialDelayOriginal })
+	attemptRetryInitialDelay = time.Millisecond
+
+	content := makeWorkOrder("content-a", "node-a", "a")
+	w := makeNodeController(t, &fakeCheckpointer{}, content)
+	w.config.Checkpoint.RetryLimit = ptr.To(1)
+
+	retryable := pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting")
+	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		return nil, executor.SuspendedSourceFailure(retryable, executor.SuspendedSource{})
+	}
+
+	require.NoError(t, w.runCheckpoint(context.Background(), content, makeSourcePod(),
+		"main", "cid", os.Getpid(), false, string(content.UID), t.TempDir()))
+
+	assert.Len(t, eventsForReason(w.clientset.(*fake.Clientset), reasonCheckpointAttemptFailed), 1,
+		"only the attempt a retry followed reports as an attempt")
+	events := eventsForReason(w.clientset.(*fake.Clientset), reasonRetriesExhausted)
+	require.Len(t, events, 1, "the attempt that ended the capture reports under the terminal reason")
+	assert.Contains(t, events[0].Message, "after 1 of 1 retries")
+	assert.Contains(t, events[0].Message, "broker restarting", "the cause to act on, not just the count")
+}
+
+// A settled failure ended the checkpoint on its own terms. Reporting that the
+// retries ran out would bury the thing an operator has to act on.
+func TestTerminalReasonKeepsASettledReason(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		failure captureFailure
+		want    string
+	}{
+		{"retries running out reads as exhaustion",
+			captureFailure{reason: reasonStagingUnavailable, retryable: true}, reasonRetriesExhausted},
+		{"a timeout keeps its own reason",
+			captureFailure{reason: reasonCheckpointTimeout}, reasonCheckpointTimeout},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, terminalReason(tc.failure, 2, 2))
+		})
+	}
+}
+
+// The dump kills the source, so a commit that failed after it has nothing left
+// to capture; another attempt would bury the cause under "no running task".
+func TestRunCheckpointDoesNotRetryAfterTheCommitFailed(t *testing.T) {
+	content := makeWorkOrder("content-a", "node-a", "a")
+	w := makeNodeController(t, &fakeCheckpointer{}, content)
+	w.config.Checkpoint.RetryLimit = ptr.To(2)
+	attempts := 0
+	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		attempts++
+		return nil, &executor.StepError{
+			Step: executor.StepCommitCheckpoint,
+			Err:  pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting"),
+		}
+	}
+
+	require.NoError(t, w.runCheckpoint(context.Background(), content, makeSourcePod(),
+		"main", "cid", 4242, false, string(content.UID), t.TempDir()))
+
+	assert.Equal(t, 1, attempts, "a commit failure leaves no source for a second attempt")
+}
+
+// An attempt whose abort failed may still hold its transaction. Retrying would
+// prepare the same destination against it, which SNEP-394 forbids: a re-stage
+// must confirm release first.
+func TestClassifyAttemptDoesNotRetryAFailedAbort(t *testing.T) {
+	retryable := pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting")
+
+	clean := classifyAttempt(retryable)
+	require.True(t, clean.failure.retryable, "a retryable failure with a clean abort is retried")
+
+	withFailedAbort := classifyAttempt(errors.Join(retryable,
+		executor.CleanupFailure(errors.New("abort: transaction not released"))))
+	assert.False(t, withFailedAbort.failure.retryable,
+		"an unconfirmed release must not be re-staged over")
+	assert.Equal(t, clean.failure.reason, withFailedAbort.failure.reason,
+		"the cleanup failure must not become the reported cause")
+}
+
+// Recovery only hears about the attempt that suspended a workload. A source an
+// earlier attempt revived would otherwise be left running, holding its GPUs,
+// when a later attempt failed before suspending anything — the stuck Pod that
+// terminating on the first failure avoids.
+func TestRunCheckpointEndsASourceRevivedForARetryThatDidNotCome(t *testing.T) {
+	attemptRetryInitialDelayOriginal := attemptRetryInitialDelay
+	t.Cleanup(func() { attemptRetryInitialDelay = attemptRetryInitialDelayOriginal })
+	attemptRetryInitialDelay = time.Millisecond
+
+	content := makeWorkOrder("content-a", "node-a", "a")
+	w := makeNodeController(t, &fakeCheckpointer{}, content)
+	w.config.Checkpoint.RetryLimit = ptr.To(1)
+	retryable := pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting")
+
+	attempts := 0
+	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		attempts++
+		if attempts == 1 {
+			// Suspended the workload, so recovery revives it for the retry.
+			return nil, executor.SuspendedSourceFailure(retryable, executor.SuspendedSource{})
+		}
+		// Refused before anything was suspended, with the budget now spent.
+		return nil, retryable
+	}
+
+	require.NoError(t, w.runCheckpoint(context.Background(), content, makeSourcePod(),
+		"main", "cid", os.Getpid(), false, string(content.UID), t.TempDir()))
+
+	require.Equal(t, 2, attempts)
+	cs := w.clientset.(*fake.Clientset)
+	assert.True(t, sawEventReason(cs, reasonSourcePodResumed), "the first failure revived the source")
+	assert.True(t, sawEventReason(cs, reasonSourcePodTerminated),
+		"the revived source must not be left running once no attempt is coming")
 }
