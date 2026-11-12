@@ -111,8 +111,8 @@ placing a complete snapshot copy there before an application starts. A preheat
 downloads the snapshot from S3 straight to that directory.
 
 The cache is optional and disabled by default. A restore still requires a
-live, Ready snapshot object. Files left on disk do not grant permission to
-restore a deleted snapshot.
+live, Ready snapshot object. A deleted snapshot cannot be restored, even if
+its files are still on a node's disk.
 
 Automatic preheat is a separate setting, also disabled by default. When it is
 enabled, each node running a cache-enabled agent attempts to keep a local copy
