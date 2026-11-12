@@ -93,9 +93,12 @@ entries:
       value: /usr/local/cuda-13.4/compat:<existing entries>
   ```
 
-- The `pagebroker` container. Keep `/usr/local/lib`, which holds PageBroker's
-  own libraries, including `libnixl.so`. Removing it can prevent PageBroker
-  from starting.
+- The `pagebroker` container. Set
+  `LD_LIBRARY_PATH=/usr/local/cuda-13.4/compat:/usr/local/lib`.
+  The first directory selects the newer CUDA driver. The second supplies
+  PageBroker's other dependencies, including `libnixl.so`. With only the
+  compatibility directory, PageBroker cannot find those dependencies and
+  fails to start.
 - The `agent` container, for `cuda-checkpoint-helper`. At restore, the directory
   must also exist in the restore Pod.
 
