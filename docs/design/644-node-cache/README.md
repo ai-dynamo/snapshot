@@ -176,24 +176,6 @@ state. PageBroker downloads from S3. For preheat, the node agent decides what
 to download and publishes the result. PageBroker downloads from S3 straight
 into the node cache.
 
-I1 shows a restore from a local copy on an S3 installation.
-
-**Illustration 1 (I1): Restore From a Local Copy**
-
-```mermaid
-flowchart TD
-    A["A restore pod is created"] --> B["The node agent finds<br/>a usable local copy"]
-    B --> C["The agent mounts the copy<br/>into the pod"]
-    C --> D["CRIU restores the process<br/>from the NVMe"]
-    D --> E["The pod runs.<br/>S3 was not used."]
-```
-
-Only the search for a local copy is new; the other steps exist today.
-PageBroker downloads nothing in this flow. On a node that uses CUDA custom
-storage, it loads the GPU data from the same local copy. When no usable copy
-exists, the restore follows the existing S3 path; see
-[Restore Source](#restore-source).
-
 The cache is mounted read-write into the node agent. PageBroker gets the cache
 read-only, plus write access to its work directory only. Local restore uses
 direct mode regardless of `pageBroker.restoreMode`. PageBroker still opens a
@@ -246,22 +228,25 @@ prove that a local copy is complete or undamaged.
 ### Restore Source
 
 Reject a restore whose snapshot object is missing or not Ready. For an
-eligible snapshot, choose its source as shown in I2.
+eligible snapshot, choose its source as shown in I1.
 
-**Illustration 2 (I2): Choose the Restore Source**
+**Illustration 1 (I1): Choose the Restore Source**
 
 ```mermaid
 flowchart TD
-    A["Ready snapshot selected"] --> B{"Usable<br/>local copy?"}
-    B -->|"Yes"| C["Check compatibility"]
-    C -->|"Pass"| D["Restore directly from NVMe"]
-    C -->|"Fail"| E["Fail restore"]
-    B -->|"No"| F["Use the existing S3 path"]
+    A["Node agent:<br/>finds the Ready snapshot"] --> B{"Node agent:<br/>usable local copy?"}
+    B -->|"Yes"| C{"Node agent:<br/>compatible with this node?"}
+    C -->|"Yes"| D["Node agent mounts the copy.<br/>CRIU restores from the NVMe."]
+    C -->|"No"| E["Node agent:<br/>fails the restore"]
+    B -->|"No"| F["PageBroker:<br/>downloads from S3,<br/>the existing path"]
 ```
 
 A disabled cache, absent copy, invalid manifest, or bad marker selects S3.
 A cache hit returns a local source without an S3 handle. Compatibility checks
 read the local manifest. A compatible copy can originate from another node.
+
+On the local path, PageBroker downloads nothing. On a node that uses CUDA
+custom storage, it loads the GPU data from the same local copy.
 
 ### Preheat
 
@@ -284,9 +269,9 @@ Otherwise, write a recovery record before starting the download. The record
 stays outside the directory that will be published, and it lets a later run
 finish the cleanup.
 
-I3 shows the main flow. Publication details are separate in I4.
+I2 shows the main flow. Publication details are separate in I3.
 
-**Illustration 3 (I3): Prepare a Local Copy**
+**Illustration 2 (I2): Prepare a Local Copy**
 
 ```mermaid
 flowchart LR
@@ -317,9 +302,9 @@ invalid.
 ### Replace a Copy
 
 Replacement requires that no restore is using the copy. The new copy must be
-complete and flushed before the operations in I4 begin.
+complete and flushed before the operations in I3 begin.
 
-**Illustration 4 (I4): Replace a Copy**
+**Illustration 3 (I3): Replace a Copy**
 
 ```mermaid
 flowchart LR
@@ -334,10 +319,10 @@ Only a complete copy appears under the final name.
 
 ### Interrupted Preheat
 
-A crash can leave different states on disk. I5 shows which restore source is
+A crash can leave different states on disk. I4 shows which restore source is
 available. The next safe preheat run uses recovery records to finish cleanup.
 
-**Illustration 5 (I5): Interrupted Preheat**
+**Illustration 4 (I4): Interrupted Preheat**
 
 ```mermaid
 flowchart TD
@@ -371,10 +356,10 @@ writing to it. The record keeps another tool's temporary files out of scope.
 
 ### Failed Local Restore
 
-A restore cannot switch source midway. I6 describes what happens to the copy
+A restore cannot switch source midway. I5 describes what happens to the copy
 after a local restore fails.
 
-**Illustration 6 (I6): Handle a Failed Local Restore**
+**Illustration 5 (I5): Handle a Failed Local Restore**
 
 ```mermaid
 flowchart TD
@@ -396,9 +381,9 @@ marker is written.
 ### Cleanup
 
 The node agent periodically lists snapshot objects and removes unreferenced
-copies. I7 applies equally to Snapshot-created and externally created copies.
+copies. I6 applies equally to Snapshot-created and externally created copies.
 
-**Illustration 7 (I7): Clean Up Node Copies**
+**Illustration 6 (I6): Clean Up Node Copies**
 
 ```mermaid
 flowchart TD
@@ -427,10 +412,10 @@ copy. A snapshot is eligible when all of these conditions hold:
 - The node is not clearly unable to restore it.
 - Its required space does not breach the free-space reserve.
 
-The agent processes one snapshot at a time, newest first. I8 shows the
+The agent processes one snapshot at a time, newest first. I7 shows the
 decision for each snapshot.
 
-**Illustration 8 (I8): Decide an Automatic Preheat**
+**Illustration 7 (I7): Decide an Automatic Preheat**
 
 ```mermaid
 flowchart TD
