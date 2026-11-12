@@ -52,6 +52,15 @@ func runCheckpointHelper(ctx context.Context, targetPID int, action, helperPath 
 	if ownProcessGroup {
 		snapshotruntime.SetProcessGroupCancellation(cmd, helperWaitDelay)
 	}
+	details := snapshotruntime.ProcessDetails{
+		ObservedPID:   targetPID,
+		OutermostPID:  targetPID,
+		InnermostPID:  targetPID,
+		NamespacePIDs: []int{targetPID},
+	}
+	if process, err := snapshotruntime.ReadProcessDetails("/proc", targetPID); err == nil {
+		details = process
+	}
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
@@ -64,6 +73,9 @@ func runCheckpointHelper(ctx context.Context, targetPID int, action, helperPath 
 	log.Info("cuda-checkpoint-helper command started",
 		"pid", cmd.Process.Pid,
 		"target_pid", targetPID,
+		"outermost_pid", details.OutermostPID,
+		"innermost_pid", details.InnermostPID,
+		"cmdline", details.Cmdline,
 		"action", action,
 		"args", args,
 		"timeout", timeout,
@@ -78,21 +90,29 @@ func runCheckpointHelper(ctx context.Context, targetPID int, action, helperPath 
 		if actionCtx.Err() != nil {
 			err = actionCtx.Err()
 		}
-		log.Error(err, "cuda-checkpoint-helper command failed",
-			"pid", cmd.Process.Pid,
-			"target_pid", targetPID,
-			"action", action,
-			"duration", duration,
-			"timed_out", actionCtx.Err() == context.DeadlineExceeded,
-			"libcuda_path", libcudaPath,
-			"libcuda_version", libcudaVersion,
-			"output", out,
-		)
+		if !(action == actionRestore && err == context.Canceled) {
+			log.Error(err, "cuda-checkpoint-helper command failed",
+				"pid", cmd.Process.Pid,
+				"target_pid", targetPID,
+				"outermost_pid", details.OutermostPID,
+				"innermost_pid", details.InnermostPID,
+				"cmdline", details.Cmdline,
+				"action", action,
+				"duration", duration,
+				"timed_out", actionCtx.Err() == context.DeadlineExceeded,
+				"libcuda_path", libcudaPath,
+				"libcuda_version", libcudaVersion,
+				"output", out,
+			)
+		}
 		return fmt.Errorf("cuda-checkpoint-helper %v failed for pid %d after %s: %w (output: %s)", args, targetPID, duration, err, out)
 	}
 	log.Info("cuda-checkpoint-helper command finished",
 		"pid", cmd.Process.Pid,
 		"target_pid", targetPID,
+		"outermost_pid", details.OutermostPID,
+		"innermost_pid", details.InnermostPID,
+		"cmdline", details.Cmdline,
 		"action", action,
 		"duration", duration,
 		"timed_out", false,

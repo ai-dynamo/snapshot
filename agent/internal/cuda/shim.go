@@ -62,15 +62,5 @@ func runAction(ctx context.Context, pid int, action, deviceMap, helperBinaryPath
 	if action == actionRestore && deviceMap != "" {
 		args = append(args, "--device-map", deviceMap)
 	}
-<<<<<<< HEAD
-	details := snapshotruntime.ProcessDetails{
-		ObservedPID:   pid,
-		OutermostPID:  pid,
-		InnermostPID:  pid,
-		NamespacePIDs: []int{pid},
-	}
-	if process, err := snapshotruntime.ReadProcessDetails("/proc", pid); err == nil {
-		details = process
-	}
 	return runCheckpointHelper(ctx, pid, action, helperBinaryPath, args, ownProcessGroup, log)
 }
