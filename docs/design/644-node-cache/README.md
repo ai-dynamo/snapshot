@@ -179,7 +179,8 @@ The design has three flows:
 - **S3 restore.** The flow is unchanged.
 - **Preheat, from S3 to the NVMe.** The node agent decides what to download
   and publishes the result. PageBroker downloads into the node cache instead
-  of into RAM. This is the main PageBroker change.
+  of into RAM. This requires modifications in PageBroker, which today supports
+  only the S3 to tmpfs download flow.
 - **Restore from the NVMe.** The existing PVC restore flow. The node agent
   mounts the local copy, and CRIU reads it. PageBroker transfers no snapshot
   data. It only opens the directory when the agent asks, and on nodes with
