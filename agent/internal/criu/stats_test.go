@@ -18,8 +18,8 @@ func TestReadDumpStatsReadsServiceHeader(t *testing.T) {
 	payload := statsEntry(dumpStatsMessage(dumpStatsFixture{
 		freezingUsec: 12_000,
 		frozenUsec:   2_000_000,
-		memdumpUsec:  400_000,
-		memwriteUsec: 4_500_000,
+		memdumpUsec:  4_500_000,
+		memwriteUsec: 400_000,
 		pagesWritten: 100,
 		pagesScanned: 110,
 		pagesLazy:    3,
@@ -35,7 +35,7 @@ func TestReadDumpStatsReadsServiceHeader(t *testing.T) {
 	if stats.Freezing != 12*time.Millisecond || stats.Frozen != 2*time.Second {
 		t.Fatalf("freeze timings = %s / %s", stats.Freezing, stats.Frozen)
 	}
-	if stats.MemDump != 400*time.Millisecond || stats.MemWrite != 4500*time.Millisecond {
+	if stats.MemDump != 4500*time.Millisecond || stats.MemWrite != 400*time.Millisecond {
 		t.Fatalf("memory timings = %s / %s", stats.MemDump, stats.MemWrite)
 	}
 	if stats.PagesWritten != 100 || stats.PagesWrittenBytes() != 100*uint64(os.Getpagesize()) {

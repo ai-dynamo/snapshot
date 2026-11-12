@@ -737,14 +737,14 @@ func TestCheckpointTimingSummarySplitsCUDAAndCRIU(t *testing.T) {
 			CRIUStats: &criu.DumpStats{
 				Freezing:     12 * time.Millisecond,
 				Frozen:       2 * time.Second,
-				MemDump:      400 * time.Millisecond,
-				MemWrite:     4500 * time.Millisecond,
+				MemDump:      4500 * time.Millisecond,
+				MemWrite:     400 * time.Millisecond,
 				PagesWritten: 100,
 			},
-			CRIUImageBytes:         &imageBytes,
-			OverlayCaptureDuration: 343 * time.Millisecond,
-			OverlayDiffBytes:       49 << 20,
-			AccountingDuration:     20 * time.Millisecond,
+			CheckpointDirBytesBeforeOverlay: &imageBytes,
+			OverlayCaptureDuration:          343 * time.Millisecond,
+			OverlayDiffBytes:                49 << 20,
+			AccountingDuration:              20 * time.Millisecond,
 		},
 		Switch: 200 * time.Microsecond,
 	})
@@ -759,10 +759,10 @@ func TestCheckpointTimingSummarySplitsCUDAAndCRIU(t *testing.T) {
 	assert.Equal(t, (1500 * time.Millisecond).String(), cudaFields["copy"])
 
 	criuFields := summary["criu"].(map[string]any)
-	assert.Equal(t, (4500 * time.Millisecond).String(), criuFields["memwrite"])
-	assert.Equal(t, (400 * time.Millisecond).String(), criuFields["memdump"])
+	assert.Equal(t, (400 * time.Millisecond).String(), criuFields["memwrite"])
+	assert.Equal(t, (4500 * time.Millisecond).String(), criuFields["memdump"])
 	assert.Equal(t, uint64(100)*uint64(os.Getpagesize()), criuFields["pages_written_bytes"])
-	assert.Equal(t, imageBytes, criuFields["image_bytes"])
+	assert.Equal(t, imageBytes, criuFields["checkpoint_dir_bytes_before_overlay"])
 	assert.NotContains(t, criuFields, "image_growth")
 
 	overlay := summary["overlay"].(map[string]any)

@@ -133,11 +133,14 @@ type checkpointPhaseTimings struct {
 	CRIUDumpDuration       time.Duration
 	CRIUStats              *criu.DumpStats
 	CRIUStatsError         string
-	CRIUImageBytes         *int64
-	CUDAPhasesMeasured     bool
-	OverlayCaptureDuration time.Duration
-	OverlayDiffBytes       int64
-	AccountingDuration     time.Duration
+	// CheckpointDirBytesBeforeOverlay is the staging directory after CRIU
+	// returns and before the rootfs diff is written. It includes the manifest,
+	// dump.log, the CUDA job file, and criu.conf, so it is not the CRIU image.
+	CheckpointDirBytesBeforeOverlay *int64
+	CUDAPhasesMeasured              bool
+	OverlayCaptureDuration          time.Duration
+	OverlayDiffBytes                int64
+	AccountingDuration              time.Duration
 }
 
 // Checkpoint captures a container through PageBroker and commits its artifact.
@@ -504,9 +507,10 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	}
 	timings.CRIUDumpDuration = dump.Duration
 
-	// Stats and the final image size are diagnostic. A failure here must not
-	// fail a dump that already succeeded. The walk is its own phase so it
-	// does not hide inside criu_dump or unaccounted.
+	// Stats and the staging-directory size are diagnostic. A failure here must
+	// not fail a dump that already succeeded. The walk is its own phase so it
+	// does not hide inside criu_dump or unaccounted. Overlay capture has not
+	// run yet, so the total is not the final checkpoint size.
 	accountingStart := time.Now()
 	if stats, statsErr := criu.ReadDumpStats(checkpointDir); statsErr != nil {
 		timings.CRIUStatsError = statsErr.Error()
@@ -517,7 +521,7 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	if imageBytes, bytesErr := criu.DirectoryBytes(checkpointDir); bytesErr != nil {
 		log.Info("CRIU image size unavailable", "error", bytesErr)
 	} else {
-		timings.CRIUImageBytes = &imageBytes
+		timings.CheckpointDirBytesBeforeOverlay = &imageBytes
 	}
 	timings.AccountingDuration = time.Since(accountingStart)
 
@@ -739,8 +743,8 @@ func criuSummary(timings *checkpointPhaseTimings) map[string]any {
 	if timings.CRIUStatsError != "" {
 		criuFields["stats_error"] = timings.CRIUStatsError
 	}
-	if timings.CRIUImageBytes != nil {
-		criuFields["image_bytes"] = *timings.CRIUImageBytes
+	if timings.CheckpointDirBytesBeforeOverlay != nil {
+		criuFields["checkpoint_dir_bytes_before_overlay"] = *timings.CheckpointDirBytesBeforeOverlay
 	}
 	return criuFields
 }

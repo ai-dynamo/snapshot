@@ -26,12 +26,13 @@ const (
 // DumpStats is the dump half of CRIU's stats-dump image.
 //
 // Durations are CRIU's own timers, in the same units CRIU prints ("N us").
-// They are not a partition of the agent's criu_dump wall time: freezing is
-// outside the frozen window, memdump and memwrite sit inside it, and CRIU
-// starts a memwrite timer both around the whole page transfer and around
-// each write, so the last write interval can be counted twice. Use them to
-// see whether a dump is dominated by reading the frozen process (memdump)
-// or by writing pages (memwrite). Do not add them together or to criu_dump.
+// They are not a partition of the agent's criu_dump wall time. freezing is
+// outside the frozen window. memwrite runs inside memdump: the page dump
+// starts TIME_MEMDUMP, xfer_pages() is the TIME_MEMWRITE window, then
+// TIME_MEMDUMP stops. So memdump is at least memwrite, and the read time is
+// memdump minus memwrite. The double-counted last write interval is only in
+// the pre-dump path, which this agent does not use. Do not add the timers
+// together or to criu_dump.
 type DumpStats struct {
 	Freezing           time.Duration
 	Frozen             time.Duration
