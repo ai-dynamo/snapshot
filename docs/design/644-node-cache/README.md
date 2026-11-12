@@ -526,8 +526,7 @@ a download request that writes to the cache, accounts for disk space, flushes
 its files, leaves a finished download for the agent to publish, and removes an
 unfinished one.
 
-The design was checked against branch `feat/pagebroker-restore-file-ranges`
-at `fcb89163`, not `main`. Recheck the implementation baseline before coding.
+The design was checked against `main` at `3e143360`.
 
 ### Test Plan
 
