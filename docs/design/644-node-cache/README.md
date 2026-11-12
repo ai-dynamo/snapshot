@@ -130,37 +130,21 @@ Another tool can prepare copies if it follows the contract in
 
 ### Limitations, Risks, and Mitigations
 
-Phase 1 accepts these limits:
+Phase 1 accepts these limits. Each row gives the effect and what an
+administrator does about it.
 
-1. **No reader tracking.** Delete a snapshot or replace its copy only when no
-   restore is running or starting against that copy. Rebuilding a bad copy is
-   a replacement.
-2. **Shared staging budget.** Preheat can consume capacity needed by restores.
-   Run the command before applications start. Automatic preheat can start
-   soon after a checkpoint, or on a new node that is receiving restore pods.
-3. **Interrupted downloads.** A stopped command or a restarted agent can leave
-   RAM allocated until transaction expiry, pod recreation, or recovery. Ending
-   an active download can fail other S3 restores. Recover a command's work
-   while no restore is running on the node.
-4. **RAM limit.** Each staged download must fit the PageBroker staging budget.
-   Preheat does not remove the existing S3 staging limit.
-5. **Trusted writers.** Restore checks identity, not payload checksums. External
-   tools must write complete copies. Cache write access is privileged.
-6. **Disk selection.** A missing directory can be created on the root disk.
-   Administrators must ensure the configured path uses the intended disk.
-7. **Capacity.** Live copies are not evicted, and every participating node
-   needs room for every retained snapshot. A snapshot that does not fit is
-   skipped and restores from S3. The design suits a bounded snapshot
-   collection: delete old snapshots to free space. Disabling the cache leaves
-   copies on disk for manual removal.
-8. **Coarse node filter.** A node with a different GPU model still receives
-   copies it cannot restore.
-9. **Manual repair.** Automatic preheat leaves a copy marked bad in place.
-   Use the command to rebuild it.
+| Limit | What it means | What to do |
+| --- | --- | --- |
+| Snapshot does not know which copies are in use | Deleting a snapshot or replacing its copy can fail a restore that is reading that copy. | Delete a snapshot, or replace its copy, only when no restore is using it. |
+| Preheat shares RAM with S3 restores | A preheat downloads through the same RAM that S3 restores use. A restore that starts during a preheat can run short. A snapshot larger than that RAM cannot be preheated. | Run the command before applications start. For automatic preheat, this is an open decision. |
+| An interrupted preheat can hold RAM | The download stays in RAM until it is cleaned up or expires. Cleaning it up can fail an S3 restore that is running at that moment. | Rerun the command when no restore is running. For automatic preheat, this is an open decision. |
+| Every node stores every snapshot | Copies are never evicted. A snapshot that does not fit is skipped and restores from S3. A node with a different GPU model stores copies it cannot use. | Delete old snapshots to free space. |
+| Copies are not checked for damage | A restore checks that a copy belongs to the snapshot, not that its content is intact. | Give write access to the cache only to administrators. |
+| A bad copy is not repaired automatically | A copy that failed a restore is marked bad and stays on disk. Restores of that snapshot use S3. | Run the command to rebuild the copy. |
+| The cache can land on the wrong disk | If the NVMe is not mounted at the configured path, copies go to the root disk. | Check that the path is on the intended disk. |
 
-Limits 2 and 3 are accepted for the command only. For automatic preheat they
-are open decisions, and the readiness gate in
-[Graduation Criteria](#graduation-criteria) must pass first.
+The two open decisions are part of the readiness gate in
+[Graduation Criteria](#graduation-criteria).
 
 ## Design Details
 
