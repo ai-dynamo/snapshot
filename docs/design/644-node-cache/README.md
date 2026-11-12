@@ -161,12 +161,18 @@ administrator does about it.
   command to rebuild the copy.
 - **The cache can land on the wrong disk.** If the NVMe is not mounted at the
   configured path, copies go to the root disk. Check that the path is on the
-  intended disk.
+  intended disk. See [Configuration](#configuration).
 
 The open decisions are part of the readiness gate in
 [Graduation Criteria](#graduation-criteria).
 
 ## Design Details
+
+Snapshot runs one agent pod on each selected node. The pod holds the node
+agent and PageBroker, and it mounts a directory on the node's NVMe as the node
+cache. A local copy serves only restore pods scheduled on that node. If the
+cache directory is missing on a node, that node behaves as if the cache is
+disabled: restores there use S3, and no preheat runs.
 
 The design has three flows:
 
@@ -509,6 +515,17 @@ A free-space check does not reserve disk space against other writers.
 The participating nodes are the nodes where the agent runs with the cache
 enabled. The chart's existing agent placement settings choose those nodes.
 
+The chart mounts the `hostPath` directory into the agent pod. Before enabling
+the cache, an administrator prepares each node that should hold copies:
+
+1. Format the NVMe and mount it on the node.
+2. Use the same path on every such node. The setting is one value for the
+   installation.
+3. Confirm that the path is on the NVMe and not on the root disk.
+
+Snapshot never creates the cache directory, and it does not format or mount
+disks.
+
 The proposed mount path is `/checkpoints`, which reuses the local restore
 path. A dedicated path adds mount-helper changes. Resolve this choice against
 related storage designs before implementation.
@@ -675,6 +692,8 @@ Reviewers need to settle these points:
 8. Agree the memory limits and the restore slowdown bound for a preheat.
 9. Confirm the newest-first order for automatic preheat.
 10. Accept copies of every namespace's snapshots on every participating node.
+11. Confirm that the chart can mount the cache without Kubernetes creating a
+    missing directory.
 
 ### Next Steps
 
