@@ -124,7 +124,10 @@ func (w *NodeController) isStagingDir(dir string) bool {
 // eventually the agent's own rootfs — and report a capacity that was never the
 // dump's.
 func stagingAncestor(dir, staging string) (string, bool) {
-	for current := dir; ; {
+	// filepath.Dir cleans as it walks, so an uncleaned root would never compare
+	// equal and the walk would pass the very boundary it is here to stop at.
+	staging = filepath.Clean(staging)
+	for current := filepath.Clean(dir); ; {
 		if _, err := os.Stat(current); err == nil {
 			return current, true
 		}
@@ -146,8 +149,11 @@ func stagingAncestor(dir, staging string) (string, bool) {
 func (w *NodeController) dumpWorthRepeating(ctx context.Context, containerPID int) func(error) (bool, string) {
 	return func(err error) (bool, string) {
 		failure, _ := w.refineFullStaging(ctx, classifyCaptureFailure(err), err, containerPID)
-		if failure.reason == reasonImageTooLarge {
+		switch failure.reason {
+		case reasonImageTooLarge:
 			return false, "the image cannot fit the volume it is written to"
+		case reasonStoreExhausted:
+			return false, "the store it is written to is full, and no repeat here frees it"
 		}
 		return true, ""
 	}

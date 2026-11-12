@@ -291,10 +291,11 @@ func (w *NodeController) runCheckpoint(
 			return w.markCheckpointReady(ctx, content, artifactPath, containerName, artifact)
 		}
 
-		attempt := classifyAttempt(err)
 		// Measured while the source is still suspended, so the tree the dump was
-		// sizing is the one still there to size.
-		attempt.failure, err = w.refineFullStaging(ctx, attempt.failure, err, containerPID)
+		// sizing is the one still there to size. Naming the shortage comes first
+		// and settling the retry last, so neither can quietly undo the other.
+		failure, err := w.refineFullStaging(ctx, classifyCaptureFailure(err), err, containerPID)
+		attempt := settleAttempt(failure, err)
 		// Repeats of the dump come out of the same budget as fresh attempts, so a
 		// caller asking for two retries gets two, however they were spent.
 		spent += attempt.suspended.DumpRetriesUsed
@@ -337,10 +338,10 @@ type failedAttempt struct {
 	suspendedSource bool
 }
 
-// classifyAttempt reads a failed attempt: why it failed, whether another attempt
-// could end differently, and what it left behind.
-func classifyAttempt(err error) failedAttempt {
-	failure := classifyCaptureFailure(err)
+// settleAttempt reads a failed attempt: whether another attempt could end
+// differently, and what it left behind. It takes the failure rather than
+// classifying one, so it runs last and a refinement cannot undo its verdicts.
+func settleAttempt(failure captureFailure, err error) failedAttempt {
 	// The dump terminates the source, so a commit that failed after it has no
 	// workload left for another attempt to capture.
 	if executor.StepOf(err) == executor.StepCommitCheckpoint {

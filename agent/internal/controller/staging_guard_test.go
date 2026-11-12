@@ -304,3 +304,24 @@ func TestRefineFullStagingDoesNotSizeATerminatedSource(t *testing.T) {
 	assert.False(t, sized, "a tree that is gone must not be sized")
 	assert.Equal(t, reasonCheckpointFailed, got.reason, "the failure is reported unrefined")
 }
+
+// filepath.Dir cleans as it walks, so an uncleaned root would never compare
+// equal and the walk would pass the boundary it exists to stop at.
+func TestStagingAncestorStopsAtAnUncleanStagingRoot(t *testing.T) {
+	got, ok := stagingAncestor("/no-such-staging/checkpoint/tx", "/no-such-staging/")
+	assert.False(t, ok, "a trailing slash must not let the walk escape")
+	assert.Empty(t, got)
+}
+
+// A full store is no more repeatable than an image that cannot fit: repeating
+// spends the budget and a backoff against a volume no repeat here frees.
+func TestDumpWorthRepeatingRefusesAFullStore(t *testing.T) {
+	staging := t.TempDir()
+	store := t.TempDir()
+	w := guardController(staging, 8<<30, 1<<30, nil, nil)
+
+	ok, reason := w.dumpWorthRepeating(context.Background(), os.Getpid())(
+		&executor.DumpSpaceError{Dir: store, Err: errors.Join(errors.New("CRIU dump failed"), unix.ENOSPC)})
+	assert.False(t, ok)
+	assert.NotEmpty(t, reason, "a refusal must say why")
+}
