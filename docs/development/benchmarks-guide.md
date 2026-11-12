@@ -250,11 +250,23 @@ apparent size (`st_size`, holes included) and an allocated size
 bytes the filesystem did not allocate. `pagemap_holes` is a different number.
 It counts pages CRIU skipped because a parent image already holds them, the
 same count as `pages_skipped_parent`, and it is zero without
-`--prev-images-dir`. A large non-`pages` category is the rest of the image.
-The finish-path offsets (`first_dumping_core_seconds`, the thread-core span,
-`unfreezing_seconds`, `writing_stats_seconds`, `dumping_finished_seconds`)
-are CRIU's own log clock. Pagemap and per-thread lines are summarized in the
-inventory command so `Dumping finished` is not dropped.
+`--prev-images-dir`. The report converts it to bytes only when the same result
+has `pages_written` and `pages_written_bytes`, using their ratio as the host
+page size, and otherwise prints the count alone. A large non-`pages` category
+is the rest of the image.
+
+The dump-log offsets are CRIU's own log clock. They do not split a
+multi-process dump (vLLM) into a page-write phase, a metadata phase, and a
+kill phase. CRIU finishes each task (pages, then core, then threads and mm)
+before the next, so the first `Dumping core` (`first_dumping_core_seconds`)
+can come before the last `Pagemap generated`. Use
+`core_after_last_pagemap_seconds`, the first `Dumping core` at or after the
+last pagemap, as the end of the private page writes. Shared anonymous memory
+is written after `Dumping pstree`, so the time from there to
+`Dumping finished` includes that write as well as unfreezing and reaping
+(`unfreezing_seconds`, `writing_stats_seconds`, `dumping_finished_seconds`).
+Pagemap and per-thread lines are summarized in the inventory command so
+`Dumping finished` is not dropped.
 
 ## Interpreting Results
 

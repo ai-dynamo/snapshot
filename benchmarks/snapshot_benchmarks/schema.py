@@ -374,6 +374,9 @@ class CheckpointImage:
     # "Dumping finished" is not dropped behind hundreds of pagemap lines.
     pagemap_count: int = 0
     pagemap_pages: int = 0
+    # Pages CRIU skipped because a parent image holds them (pages_skipped_parent),
+    # zero without --prev-images-dir. A count only: converting it to bytes needs
+    # the host page size, which the report derives from the agent log.
     pagemap_holes: int = 0
     pagemap_first_seconds: float | None = None
     pagemap_last_seconds: float | None = None
@@ -402,17 +405,6 @@ class CheckpointImage:
         return self.pages_bytes - allocated
 
     @property
-    def pagemap_hole_bytes(self) -> int | None:
-        """Pages skipped because a parent image already holds them.
-
-        The count equals ``pages_skipped_parent`` and is zero without
-        ``--prev-images-dir``. None when no pagemap summary was read.
-        """
-        if self.pagemap_count == 0:
-            return None
-        return self.pagemap_holes * 4096
-
-    @property
     def non_page_bytes(self) -> int:
         return sum(category.bytes for category in self.categories if category.name != "pages")
 
@@ -426,7 +418,30 @@ class CheckpointImage:
 
     @property
     def first_dumping_core_seconds(self) -> float | None:
+        """First task's core dump. Not the end of the page write.
+
+        CRIU finishes each task (pages, then core, then threads and mm) before
+        the next, so on a multi-process tree such as vLLM this line can come
+        before the last ``Pagemap generated``.
+        """
         return _first_event(self.dump_log, "Dumping core (pid:")
+
+    @property
+    def core_after_last_pagemap_seconds(self) -> float | None:
+        """The first ``Dumping core (pid:`` at or after the last pagemap.
+
+        That is the earliest point where every task's private pages are
+        written. It falls back to the first core line when there is no pagemap
+        summary. Shared anonymous memory is written later, after
+        ``Dumping pstree``.
+        """
+        last = self.pagemap_last_seconds
+        if last is None:
+            return self.first_dumping_core_seconds
+        for event in self.dump_log:
+            if event.message.startswith("Dumping core (pid:") and event.offset_seconds >= last:
+                return event.offset_seconds
+        return None
 
     @property
     def dumping_mm_seconds(self) -> float | None:

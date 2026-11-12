@@ -161,6 +161,34 @@ def _staging_bytes(result: dict) -> int | None:
     return capture.get("checkpoint_dir_bytes_before_overlay", capture.get("criu_image_bytes"))
 
 
+def _page_size(result: dict) -> int | None:
+    """Host page size implied by the agent's own counters, or None.
+
+    ``pages_written_bytes`` is ``pages_written`` times the agent host's page
+    size, so the ratio recovers it. It is not assumed to be 4096: arm64 hosts
+    can use 16 KiB or 64 KiB pages.
+    """
+    capture = result.get("checkpoint_agent_log") or {}
+    pages = capture.get("criu_pages_written")
+    written = capture.get("criu_pages_written_bytes")
+    if not pages or not written or written % pages:
+        return None
+    return written // pages
+
+
+def _hole_sentence(result: dict, image: dict) -> str:
+    holes = image.get("pagemap_holes", 0)
+    size = _page_size(result)
+    amount = f"{holes}"
+    if size and holes:
+        amount += f" ({_fmt_bytes(holes * size)} at {size // 1024} KiB pages)"
+    return (
+        f"Pagemap holes {amount} are pages CRIU skipped because a parent "
+        "image already holds them. That count is `pages_skipped_parent` and "
+        "is zero without `--prev-images-dir`. It is not file sparseness."
+    )
+
+
 def _image_section(results: list[dict]) -> list[str]:
     """Names the files in the checkpoint and the CRIU log lines around the dump."""
     lines = [
@@ -169,11 +197,17 @@ def _image_section(results: list[dict]) -> list[str]:
         "Categories sum every file. Apparent size counts sparse holes; "
         "allocated size is `st_blocks * 512`. Files lists only those of at "
         "least 1 MiB. `pages` is CRIU's private page images. Dump log times "
-        "are CRIU's own clock. `Pagemap generated` is the page list, before "
-        "the write. `Dumping core` is the first metadata after that write. "
-        "Thread cores are one line per thread, summarized as first–last. "
-        "`Unfreezing tasks` is the start of killing the frozen tree, and "
-        "`Writing stats` is after that wait. `Dumping finished` is the end.",
+        "are CRIU's own clock. CRIU dumps one task at a time (pages, then "
+        "core, then threads and mm), so on a multi-process tree such as vLLM "
+        "the first `Dumping core` can come before the last `Pagemap "
+        "generated`. The first `Dumping core` at or after the last pagemap is "
+        "the earliest point where every task's private pages are written. "
+        "Shared anonymous memory is written after `Dumping pstree`, so the "
+        "time from there to `Dumping finished` is not only killing the "
+        "frozen tree. Thread cores are one line per thread, summarized as "
+        "first–last. `Unfreezing tasks` is the start of killing the frozen "
+        "tree, and `Writing stats` is after that wait. `Dumping finished` is "
+        "the end.",
         "",
     ]
     for result in results:
@@ -183,30 +217,19 @@ def _image_section(results: list[dict]) -> list[str]:
         label = (result.get("model") or {}).get("label", "-")
         lines.append(f"### {label}")
         lines.append("")
-        lines.append(
-            "| Category | Apparent | Allocated | Files | | Dump log | Offset (s) |"
-        )
-        lines.append("|---|---:|---:|---:|---|---|---:|")
-        categories = image.get("categories") or []
-        marks = _dump_marks(image)
-        rows = max(len(categories), len(marks), 1)
-        for index in range(rows):
-            if index < len(categories):
-                category = categories[index]
-                category_name = category.get("name", "-")
-                category_bytes = _fmt_bytes(category.get("bytes"))
-                category_allocated = _fmt_bytes(category.get("allocated_bytes"))
-                category_count = str(category.get("file_count", "-"))
-            else:
-                category_name, category_bytes, category_allocated, category_count = "", "", "", ""
-            if index < len(marks):
-                mark_name, mark_offset_text = marks[index]
-            else:
-                mark_name, mark_offset_text = "", ""
+        lines.append("| Category | Apparent | Allocated | Files |")
+        lines.append("|---|---:|---:|---:|")
+        for category in image.get("categories") or []:
             lines.append(
-                f"| {category_name} | {category_bytes} | {category_allocated} | {category_count} | "
-                f"| {mark_name} | {mark_offset_text} |"
+                f"| {category.get('name', '-')} | {_fmt_bytes(category.get('bytes'))} | "
+                f"{_fmt_bytes(category.get('allocated_bytes'))} | "
+                f"{category.get('file_count', '-')} |"
             )
+        lines.append("")
+        lines.append("| Dump log | Offset (s) |")
+        lines.append("|---|---:|")
+        for name, offset in _dump_marks(image):
+            lines.append(f"| {name} | {offset} |")
         lines.append("")
         lines.append(
             f"Pages apparent {_fmt_bytes(image.get('pages_bytes'))}, "
@@ -214,13 +237,7 @@ def _image_section(results: list[dict]) -> list[str]:
             f"sparse {_fmt_bytes(image.get('pages_sparse_bytes'))}."
         )
         lines.append("")
-        lines.append(
-            f"Pagemap holes {image.get('pagemap_holes', 0)} "
-            f"({_fmt_bytes(image.get('pagemap_hole_bytes'))}) are pages CRIU "
-            "skipped because a parent image already holds them. That count is "
-            "`pages_skipped_parent` and is zero without `--prev-images-dir`. "
-            "It is not file sparseness."
-        )
+        lines.append(_hole_sentence(result, image))
         lines.append("")
         large = image.get("files") or []
         if large:
@@ -245,8 +262,12 @@ def _dump_marks(image: dict) -> list[tuple[str, str]]:
         thread_span = f"{_fmt(first)}–{_fmt(last)} ({count})"
     return [
         ("First Dumping pages", _fmt(image.get("first_dumping_pages_seconds"))),
-        ("Last Pagemap generated", _fmt(image.get("last_pagemap_seconds"))),
         ("First Dumping core", _fmt(image.get("first_dumping_core_seconds"))),
+        ("Last Pagemap generated", _fmt(image.get("last_pagemap_seconds"))),
+        (
+            "Dumping core at or after last pagemap",
+            _fmt(image.get("core_after_last_pagemap_seconds")),
+        ),
         ("Thread cores", thread_span),
         ("Dumping mm", _fmt(image.get("dumping_mm_seconds"))),
         ("Dumping pstree", _fmt(image.get("dumping_pstree_seconds"))),
@@ -494,6 +515,8 @@ def render(results: list[dict]) -> str:
     )
     if any(r.get("checkpoint_agent_log") for r in current):
         text += "\n" + "\n".join(_capture_sections(current))
+    if any(r.get("checkpoint_image") for r in current):
+        text += "\n" + "\n".join(_image_section(current))
     warnings = [
         f"- {r['model']['label']}: {warning}"
         for r in current

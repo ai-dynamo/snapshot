@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import re
 import shlex
-from collections import defaultdict
 
 from snapshot_benchmarks.schema import (
     ArtifactFile,
@@ -160,7 +159,7 @@ def file_category(path: str) -> str:
 
 
 def _parse_files(text: str) -> tuple[list[ArtifactFile], list[ImageCategory], int]:
-    totals: dict[str, list[int | None]] = defaultdict(lambda: [0, 0, 0])
+    categories: dict[str, ImageCategory] = {}
     large: list[ArtifactFile] = []
     count = 0
     for line in text.splitlines():
@@ -169,35 +168,25 @@ def _parse_files(text: str) -> tuple[list[ArtifactFile], list[ImageCategory], in
             continue
         size, allocated, path = parsed
         count += 1
-        bucket = totals[file_category(path)]
-        bucket[0] = int(bucket[0] or 0) + size
-        bucket[1] = int(bucket[1] or 0) + 1
-        if allocated is None:
-            bucket[2] = None
-        elif bucket[2] is not None:
-            bucket[2] = int(bucket[2]) + allocated
+        name = file_category(path)
+        category = categories.setdefault(
+            name, ImageCategory(name=name, bytes=0, file_count=0, allocated_bytes=0)
+        )
+        category.bytes += size
+        category.file_count += 1
+        category.allocated_bytes = (category.allocated_bytes or 0) + allocated
         if size >= _LARGE_FILE_BYTES:
             large.append(ArtifactFile(path=path, bytes=size, allocated_bytes=allocated))
     large.sort(key=lambda item: item.bytes, reverse=True)
-    categories = [
-        ImageCategory(
-            name=name,
-            bytes=int(size_count[0] or 0),
-            file_count=int(size_count[1] or 0),
-            allocated_bytes=None if size_count[2] is None else int(size_count[2]),
-        )
-        for name, size_count in totals.items()
-    ]
-    categories.sort(key=lambda item: item.bytes, reverse=True)
-    return large[:_MAX_LARGE_FILES], categories, count
+    ordered = sorted(categories.values(), key=lambda item: item.bytes, reverse=True)
+    return large[:_MAX_LARGE_FILES], ordered, count
 
 
-def _parse_file_line(line: str) -> tuple[int, int | None, str] | None:
+def _parse_file_line(line: str) -> tuple[int, int, str] | None:
+    """`find -printf '%s\\t%b\\t%P'`: apparent size, 512-byte blocks, path."""
     parts = line.strip().split("\t")
     if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit() and parts[2]:
         return int(parts[0]), int(parts[1]) * _BLOCK_SIZE, parts[2].removeprefix("./")
-    if len(parts) == 2 and parts[0].isdigit() and parts[1]:
-        return int(parts[0]), None, parts[1].removeprefix("./")
     return None
 
 

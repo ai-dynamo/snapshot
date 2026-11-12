@@ -56,8 +56,9 @@ def test_parse_inventory_names_non_page_bytes() -> None:
     assert parsed.last_pagemap_seconds == 1.2
     assert parsed.pagemap_pages == 1_040_734
     assert parsed.pagemap_holes == 12_596
-    assert parsed.pagemap_hole_bytes == 12_596 * 4096
+    assert not hasattr(parsed, "pagemap_hole_bytes")
     assert parsed.first_dumping_core_seconds == 3.6
+    assert parsed.core_after_last_pagemap_seconds == 3.6
     assert parsed.thread_core_count == 724
     assert parsed.thread_core_first_seconds == 3.7
     assert parsed.thread_core_last_seconds == 4.05
@@ -100,22 +101,6 @@ def test_awk_keeps_finish_after_pagemap_flood(tmp_path: Path) -> None:
     assert parsed.thread_core_count == 800
     assert not any(event.message.startswith("Pagemap generated:") for event in parsed.dump_log)
     assert not any("for thread" in event.message for event in parsed.dump_log)
-
-
-def test_parse_inventory_accepts_size_only_lines() -> None:
-    parsed = image.parse_inventory(
-        """
-## files
-4096	containers/main/pages-1.img
-## dump-log
-./containers/main/dump.log:(01.000000) Dumping finished successfully
-"""
-    )
-
-    assert parsed.pages_bytes == 4096
-    assert parsed.pages_allocated_bytes is None
-    assert parsed.pages_sparse_bytes is None
-    assert parsed.dumping_finished_seconds == 1.0
 
 
 def test_report_includes_image_categories() -> None:
@@ -190,3 +175,91 @@ def test_awk_summarizes_a_dump_log(tmp_path: Path) -> None:
     assert parsed.writing_stats_seconds == 4.9
     assert parsed.dumping_finished_seconds == 5.0
     assert len(parsed.dump_log) == 6
+
+
+MULTI_PROCESS = """
+## files
+4096	8	containers/main/pages-1.img
+## dump-log
+./containers/main/dump.log:(00.500000) Dumping pages (type: 1 pid: 100)
+./containers/main/dump.log:(01.000000) Dumping core (pid: 100)
+./containers/main/dump.log:(02.000000) Dumping pages (type: 1 pid: 200)
+./containers/main/dump.log:(03.000000) Dumping core (pid: 200)
+./containers/main/dump.log:(04.000000) Dumping pstree
+./containers/main/dump.log:(05.000000) Dumping finished successfully
+## summary
+pagemap count=3 first=00.600000 last=02.500000 pages=300 holes=5
+"""
+
+
+def test_core_after_last_pagemap_skips_an_earlier_tasks_core() -> None:
+    parsed = image.parse_inventory(MULTI_PROCESS)
+
+    assert parsed.first_dumping_core_seconds == 1.0
+    assert parsed.last_pagemap_seconds == 2.5
+    # pid 100's core precedes pid 200's pages, so it is not the end of the write.
+    assert parsed.core_after_last_pagemap_seconds == 3.0
+
+
+def test_core_after_last_pagemap_falls_back_without_a_pagemap_summary() -> None:
+    parsed = image.parse_inventory(
+        "## files\n## dump-log\n"
+        "./containers/main/dump.log:(01.000000) Dumping core (pid: 100)\n"
+    )
+
+    assert parsed.core_after_last_pagemap_seconds == 1.0
+
+
+def _result(*, pages_written, pages_written_bytes, holes=1000) -> dict:
+    parsed = image.parse_inventory(INVENTORY)
+    parsed.pagemap_holes = holes
+    result = {
+        "schema_version": 2,
+        "run_id": "r",
+        "model": {"label": "Qwen3 0.6B", "tp": 1, "ep": 1},
+        "engine": {"name": "vllm", "version": "0.1"},
+        "environment": {},
+        "cold_start": {"startup_to_ready_seconds": 60.0, "measurement": None},
+        "checkpoint": {"checkpoint_seconds": 8.0},
+        "checkpoint_image": _to_json_value(parsed),
+        "restore_attempts": [],
+    }
+    if pages_written is not None:
+        result["checkpoint_agent_log"] = {
+            "criu_pages_written": pages_written,
+            "criu_pages_written_bytes": pages_written_bytes,
+        }
+    return result
+
+
+def test_hole_bytes_use_the_page_size_the_agent_recorded() -> None:
+    text = report.render([_result(pages_written=100, pages_written_bytes=100 * 65536)])
+
+    # 1000 holes * 64 KiB, not * 4096.
+    assert "Pagemap holes 1000 (0.07 GB at 64 KiB pages)" in text
+
+
+def test_hole_bytes_are_omitted_without_a_page_size() -> None:
+    text = report.render([_result(pages_written=None, pages_written_bytes=None)])
+
+    assert "Pagemap holes 1000 are pages CRIU skipped" in text
+    assert "KiB pages" not in text
+
+
+def test_report_v2_prints_the_image_inventory_and_core_marks() -> None:
+    text = report.render([_result(pages_written=100, pages_written_bytes=100 * 4096)])
+
+    assert "## What is in the checkpoint image" in text
+    assert "Dumping core at or after last pagemap" in text
+    assert "Shared anonymous memory is written after `Dumping pstree`" in text
+    assert "| Dump log | Offset (s) |" in text
+    assert "| Category | Apparent | Allocated | Files |" in text
+
+
+def test_report_v2_surfaces_image_parse_warnings() -> None:
+    result = _result(pages_written=None, pages_written_bytes=None)
+    result["checkpoint_image"]["parse_warnings"] = ["inventory failed: no shell"]
+
+    text = report.render([result])
+
+    assert "inventory failed: no shell" in text
