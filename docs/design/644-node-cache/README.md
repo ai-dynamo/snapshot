@@ -178,9 +178,10 @@ cache directory is missing on a node, that node behaves as if the cache is
 disabled: restores there use S3, and no preheat runs.
 
 Each node agent subscribes to the snapshot objects in the cluster. It reacts
-when a snapshot becomes Ready or is deleted. It also compares all snapshots
-with its local copies when it starts and on an interval. That comparison
-covers a new node, an agent that was down, and a failed download.
+when a snapshot becomes Ready or is deleted. When it starts, it receives every
+existing snapshot, which covers a new node and an agent that was down. It also
+re-checks its local copies against the snapshots regularly, which covers a
+failed download and a copy that was removed by hand.
 
 The design has three flows:
 
@@ -317,14 +318,14 @@ same run. It never publishes a directory that it finds left over.
 ### Cleanup
 
 When a snapshot is deleted, each node agent removes its local copy. The
-comparison also removes any copy whose snapshot no longer exists. I4 applies
-equally to Snapshot-created and externally created copies.
+regular re-check also removes any copy whose snapshot no longer exists. I4
+applies equally to Snapshot-created and externally created copies.
 
 **Illustration 4 (I4): Clean Up Node Copies**
 
 ```mermaid
 flowchart TD
-    A["A snapshot is deleted,<br/>or the comparison runs"] --> B{"Listing<br/>succeeded?"}
+    A["A snapshot is deleted,<br/>or the re-check runs"] --> B{"Snapshot list<br/>available?"}
     B -->|"No"| C["Remove nothing"]
     B -->|"Yes"| D{"Snapshot<br/>exists?"}
     D -->|"Yes"| E["Keep the copy"]
@@ -338,8 +339,8 @@ the work area.
 
 Automatic preheat runs in the node agent when it is enabled; see
 [Configuration](#configuration). It starts a download when a snapshot becomes
-Ready. The comparison covers a node that joined later and a retry after a
-failure.
+Ready. The start of the subscription covers a node that joined later, and the
+regular re-check covers a retry after a failure.
 
 A snapshot is eligible when all of these conditions hold:
 
@@ -453,9 +454,6 @@ The proposed Helm values are:
 - `storage.nodeCache.minFreeSpace`: space to retain after a preheat copy.
 - `storage.nodeCache.preheat.enabled`: disabled by default; when enabled with
   the cache, each agent preheats every eligible snapshot.
-- `storage.nodeCache.scanInterval`: how often the agent compares all snapshots
-  with its local copies. The proposed default is 10 minutes, the same as the
-  operator's cleanup of the snapshot store.
 
 Units, required values, and defaults other than enablement are open.
 A free-space check does not reserve disk space against other writers.
