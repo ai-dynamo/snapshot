@@ -107,7 +107,8 @@ Multi-cluster support is also excluded. Issue #644 does not request it.
 ## Proposal
 
 A **node cache** is a directory on the node's local NVMe. **Preheat** means
-placing a complete snapshot copy there before an application starts.
+placing a complete snapshot copy there before an application starts. A preheat
+downloads the snapshot from S3 straight to that directory.
 
 The cache is optional and disabled by default. A restore still requires a
 live, Ready snapshot object. Files left on disk do not grant permission to
@@ -124,6 +125,10 @@ does not fit, that it clearly cannot restore, or whose download fails. Each
 agent downloads its own copy from S3. Nodes do not transfer snapshots to each
 other.
 
+Existing S3 restore correctness is preserved, with or without the cache.
+Resource contention between a preheat and a restore stays within agreed
+limits.
+
 An administrator can also preheat one node with a command; see [API](#api).
 Another tool can prepare copies if it follows the contract in
 [External Writers](#external-writers).
@@ -136,15 +141,16 @@ administrator does about it.
 - **Snapshot does not know which copies are in use.** Deleting a snapshot or
   replacing its copy can fail a restore that is reading that copy. Delete a
   snapshot, or replace its copy, only when no restore is using it.
-- **Preheat shares RAM with S3 restores.** A preheat downloads through the
-  same RAM that S3 restores use. A restore that starts during a preheat can
-  run short. A snapshot larger than that RAM cannot be preheated. Run the
-  command before applications start. For automatic preheat, this is an open
-  decision.
-- **An interrupted preheat can hold RAM.** The download stays in RAM until it
-  is cleaned up or expires. Cleaning it up can fail an S3 restore that is
-  running at that moment. Rerun the command when no restore is running. For
-  automatic preheat, this is an open decision.
+- **Preheat shares the S3 reader with restores.** PageBroker has one S3
+  reader. A preheat can slow a restore. A preheat that fails or times out can
+  fail a restore that is running at that moment. Run the command before
+  applications start. For automatic preheat, this is an open decision.
+- **Preheat still uses memory.** It does not allocate snapshot-sized RAM
+  staging. Its download buffers, mapped pages, and unwritten disk data still
+  use memory. The limits must be measured.
+- **An interrupted preheat leaves temporary files.** They stay on disk until
+  recovery removes them. Recovery must first confirm that PageBroker has
+  stopped writing. How it confirms this is an open decision.
 - **Every node stores every snapshot.** Copies are never evicted. A snapshot
   that does not fit is skipped and restores from S3. A node with a different
   GPU model stores copies it cannot use. Delete old snapshots to free space.
@@ -158,7 +164,7 @@ administrator does about it.
   configured path, copies go to the root disk. Check that the path is on the
   intended disk.
 
-The two open decisions are part of the readiness gate in
+The open decisions are part of the readiness gate in
 [Graduation Criteria](#graduation-criteria).
 
 ## Design Details
@@ -166,16 +172,35 @@ The two open decisions are part of the readiness gate in
 ### Components
 
 The node agent selects the source and coordinates restore. CRIU reads process
-state. PageBroker downloads from S3 and restores GPU memory. Preheat runs in
-the agent pod and writes the node cache.
+state. PageBroker downloads from S3 and restores GPU memory. For preheat, the
+node agent decides what to download and publishes the result. PageBroker
+downloads from S3 straight into the node cache.
 
-The cache is mounted read-write into the node agent and read-only into
-PageBroker. Local restore uses direct mode regardless of
-`pageBroker.restoreMode`. PageBroker still opens a local restore transaction.
+The cache is mounted read-write into the node agent. PageBroker gets the cache
+read-only, plus write access to its work directory only. Local restore uses
+direct mode regardless of `pageBroker.restoreMode`. PageBroker still opens a
+local restore transaction.
 
 On an S3 installation, enable PageBroker's file engine for direct restore
 when the cache is enabled. Reject path-based checkpoint and staged-restore
 requests. The cache must not become the snapshot store.
+
+Existing S3 restore correctness is preserved, and resource contention stays
+within agreed limits. These rules apply:
+
+- Preheat uses a new PageBroker request. The existing restore requests and
+  their behavior do not change.
+- With the cache disabled, PageBroker behaves as it does today.
+- A preheat download takes nothing from the RAM staging budget.
+- PageBroker's existing staging cleanup stays limited to its staging area.
+- PageBroker cannot modify a published copy.
+
+A new request does not isolate PageBroker's S3 reader, which preheat and
+restores share. A failed or timed-out download can stop that reader and fail
+the work in progress. PageBroker supports one reader per process, so a second
+reader object does not isolate preheat. The candidate is an isolated preheat
+download mechanism; implementation to be determined. This is the main open
+decision.
 
 ### Cache Identity and Layout
 
@@ -223,9 +248,8 @@ read the local manifest. A compatible copy can originate from another node.
 ### Preheat
 
 A preheat run prepares one snapshot on one node. The command and automatic
-preheat call the same routine. A run executes inside the node agent pod
-because PageBroker's socket and staging volume are available there. No restore
-pod is needed.
+preheat call the same routine. The node agent runs it and asks PageBroker to
+download. No restore pod is needed.
 
 Before processing containers, a run performs these steps:
 
@@ -248,22 +272,25 @@ I2 shows the main flow. Publication details are separate in I3.
 
 ```mermaid
 flowchart LR
-    A["Download from S3<br/>into RAM"] --> B["Copy to a temporary<br/>directory on NVMe"]
-    B --> C["Check files<br/>and flush to disk"]
-    C --> D["Publish the copy"]
+    A["Download from S3 to a temporary<br/>directory on NVMe"] --> B["Check files<br/>and flush to disk"]
+    B --> C["Publish the copy"]
 ```
 
-Before download, skip a copy if its required space would breach the
-free-space reserve, `minFreeSpace`. How a run learns the size before download
-is an open decision. After download, check available space again. Copy the
-staged directory while preserving file modes, directory modes, and empty
-directories. Validate the copy against staging and flush it before
-publication.
+PageBroker reads the snapshot's file list and sizes before it writes. Skip a
+copy if its required space would breach the free-space reserve,
+`minFreeSpace`. The estimate must also account for filesystem overhead.
 
-Ask PageBroker to end the transaction after validation. Every exit path
-attempts cleanup. If cleanup fails, keep the recovery record and report it; a
-complete copy can still be published. Cleanup is safe to repeat; an
-already-absent transaction is considered cleaned up.
+PageBroker writes into a temporary directory in the cache work area. It
+preserves file modes, directory modes, and empty directories.
+
+Before PageBroker reports success, it confirms the expected files, sizes,
+modes, and directories, and it flushes the files to disk. A flush failure
+prevents publication. The agent then checks the copy's identity, renames it
+into place, and makes the rename durable.
+
+End the PageBroker transaction after publication. Every exit path attempts
+cleanup. If cleanup fails, keep the recovery record and report it. Cleanup is
+safe to repeat; an already-absent transaction is considered cleaned up.
 
 Containers have separate copies and transactions. Keep successful copies when
 another container fails. A later run processes containers still missing or
@@ -311,11 +338,18 @@ Recovery gives these guarantees:
   including when only part of a replacement completed.
 - It keeps its record until transaction cleanup and filesystem cleanup both
   finish.
+- It never publishes an incomplete copy and never deletes files that are
+  still being written.
 
-Recovery removes a temporary directory only when the run holds the node lock
-and one of its recovery records names that directory. The lock confirms that
-no Snapshot writer is active. The record keeps another tool's temporary files
-out of scope.
+After an agent restart, recovery must identify the existing download and
+confirm that PageBroker has stopped writing before it publishes or deletes
+anything. A missing or expired transaction alone authorizes neither. The cases
+include a PageBroker restart and a lost completion response. How recovery
+confirms this is an open decision.
+
+Recovery removes a temporary directory only when the run holds the node lock,
+one of its recovery records names that directory, and PageBroker has stopped
+writing to it. The record keeps another tool's temporary files out of scope.
 
 ### Failed Local Restore
 
@@ -402,7 +436,7 @@ These rules keep the automatic path small:
   GPU model and driver, stay at restore time.
 - **Shared lock.** If the command holds the node lock, the agent skips the
   pass.
-- **Retries.** A failed download or copy is retried on a later pass with an
+- **Retries.** A failed download is retried on a later pass with an
   increasing delay. The agent tracks work in progress, which prevents a pass
   from starting duplicate work.
 - **Spread starts.** Each node adds a small random delay before a download,
@@ -414,29 +448,16 @@ These rules keep the automatic path small:
   copies stay subject to normal cleanup.
 
 Automatic recovery covers only interrupted fills. It leaves an interrupted
-replacement for the command. Recovery has two operations with different risk:
+replacement for the command. It follows the ownership rule in
+[Interrupted Preheat](#interrupted-preheat): it publishes or removes nothing
+until PageBroker has stopped writing. It does not cancel a running download.
 
-- **Remove an unpublished temporary directory.** No restore reads a temporary
-  name. [Interrupted Preheat](#interrupted-preheat) gives the removal rule.
-- **End the interrupted download's transaction.** This can fail concurrent S3
-  restores. It must not overlap with a restore that is starting or running on
-  the node.
-
-The proposed coordination is a gate inside the agent, which runs both restores
-and automatic recovery. Recovery proceeds only when no restore is active, and
-new restores wait until it finishes. Evidence that ending a finished, idle
-download is safe during restores would remove the need for the gate. This is
-an open decision. The command runs as a separate process and stays under the
-phase 1 restriction.
-
-A restore can arrive after a preheat starts, since the agent runs restores
-concurrently. A check before the preheat starts does not protect that restore.
-The policy must be admission control or a reservation for staging capacity.
-The smaller option is admission control by waiting: a restore that needs S3
-staging waits while a preheat holds it. Processing one snapshot at a time
-bounds the wait to one download and copy. The timeout behavior is undecided:
-the restore can fail, or it can proceed from S3 and accept the overlap. This
-is an open decision.
+A preheat and a restore can run at the same time, since the agent runs
+restores concurrently. They share PageBroker's S3 reader, the network, and the
+disk. A preheat can slow a restore, and a preheat failure can fail one; see
+[Components](#components). Processing one snapshot at a time bounds the
+overlap to one download. The readiness gate in
+[Graduation Criteria](#graduation-criteria) states the required outcomes.
 
 ### External Writers
 
@@ -463,7 +484,9 @@ agent pod selects that node. It supports replacing an existing copy and
 reports ready, skipped, or failed results with reasons. Cleanup failures must
 remain visible even when a copy was successfully published.
 
-Phase 1 adds no agent endpoint or cancellation command. Automatic preheat
+Preheat adds one request between the node agent and PageBroker. It is
+internal and not a public interface. Phase 1 adds no agent endpoint or
+cancellation command. Automatic preheat
 needs no new agent permission: the agent can already list snapshot objects and
 create events.
 
@@ -475,7 +498,9 @@ to the privileged components that need it.
 
 The command requires exec access to the privileged agent pod. A cache writer
 can supply process state, so write access is administrator-level trust.
-PageBroker receives a read-only cache mount. Preserve its existing S3
+PageBroker can write only to the cache work directory; the rest of the cache
+is read-only for it. Verify that it cannot change a published copy through a
+descriptor or mapping kept open after the rename. Preserve its existing S3
 credential path; the command should not need direct S3 credentials.
 
 Automatic preheat widens where snapshot data rests. Snapshots from every
@@ -510,8 +535,9 @@ related storage designs before implementation.
 
 ### Performance and Scalability
 
-A cache hit avoids the S3 download and RAM staging. Preheat still uses both
-RAM and disk, and copying to disk adds page-cache memory.
+A cache hit avoids the S3 download and RAM staging. A preheat does not
+allocate snapshot-sized RAM staging. Its download buffers, mapped pages, and
+unwritten disk data still use memory.
 
 Automatic preheat multiplies storage and S3 traffic by the number of nodes. A
 snapshot set of 1 TiB needs about 1 TiB on each node, plus the reserve and
@@ -519,9 +545,9 @@ temporary working space. Fifty nodes hold about 50 TiB in total. A new node
 downloads the whole set. Each agent also lists all snapshot objects on every
 pass.
 
-Measure preheat duration, local versus S3 restore latency, peak staging and
-copy memory, disk use, and restore behavior near the staging limit. Include
-GPU snapshots, repeated restores, a restore that arrives during a preheat, and
+Measure preheat duration, local versus S3 restore latency, peak memory during
+a preheat, disk use, and restore slowdown during a preheat. Include GPU
+snapshots, repeated restores, a snapshot larger than available RAM, and
 catch-up time on a new node. Do not infer speedups from the diagrams.
 
 ### Monitoring
@@ -538,16 +564,18 @@ Phase 1 has no cluster-wide cache inventory or per-node API status.
 
 ### Dependencies
 
-The design builds on [SNEP-237](../237-s3-storage/README.md), the S3 staged
+The design builds on [SNEP-237](../237-s3-storage/README.md), PageBroker's S3
 download path, and the existing direct local restore path. PageBroker must
-serve both S3 and direct file restore when the cache is enabled.
+serve both S3 and direct file restore when the cache is enabled. It also needs
+a download request that writes to the cache, accounts for disk space, flushes
+its files, and leaves the directory in place.
 
 The design was checked against branch `feat/pagebroker-restore-file-ranges`
 at `fcb89163`, not `main`. Recheck the implementation baseline before coding.
 
 ### Test Plan
 
-First, prove the key assumption: stage from S3, copy to disk, and restore
+First, prove the key assumption: download from S3 straight to disk, and restore
 through the direct local path. Include GPU data, restrictive modes, and empty
 directories.
 
@@ -556,19 +584,26 @@ The implementation needs these tests:
 - **Restore:** use a valid local copy; use S3 when the copy is absent,
   invalid, or marked bad. A failed local restore marks the copy without
   disrupting other restores. PageBroker serves direct local restore on S3
-  installations and rejects other path-based requests.
-- **Preheat:** a complete copy with modes and empty directories, repeated
-  requests, no space, replacement, and partial success across containers. The
-  command and the agent never write at once.
-- **Recovery:** an interruption at any stage preserves published copies.
-  Cleanup is safe to repeat, and a failed cleanup keeps its record. Automatic
-  recovery never overlaps a restore start.
+  installations and rejects other path-based requests. S3 restore behaves the
+  same with the cache disabled.
+- **Preheat:** a complete, flushed copy with modes and empty directories,
+  repeated requests, no space, a flush failure, replacement, and partial
+  success across containers. The command and the agent never write at once.
+  PageBroker cannot change a published copy through a descriptor or mapping
+  that it kept open.
+- **Recovery:** an interruption at any stage preserves published copies. Cover
+  an agent restart, a PageBroker restart, and a lost completion response.
+  Recovery never publishes an incomplete copy or deletes files still being
+  written. Cleanup is safe to repeat, and a failed cleanup keeps its record.
 - **Cleanup:** remove copies of deleted snapshots and keep all others,
   including marked copies. Remove nothing after a failed snapshot listing.
 - **Automatic preheat:** a newly Ready snapshot, catch-up on a new node, skips
   for mismatch and for space, and no new download while cleanup is
-  unresolved. A restore that arrives during a preheat follows the agreed
-  policy under memory pressure.
+  unresolved.
+- **Isolation:** during a concurrent S3 restore, cause a full disk, a write
+  failure, an S3 failure, and a timeout in a preheat. Measure restore slowdown
+  and memory with a snapshot larger than available RAM, under the real
+  container limits.
 - **End to end:** a cache hit makes no S3 reads, a miss uses S3, and GPU state
   restores from the cache.
 
@@ -578,22 +613,22 @@ These are proposed evidence gates, not release dates:
 
 - **Initial opt-in use:** the layout proof passes, phase 1 tests pass, resource
   use is measured, and administrators can follow the documented restrictions.
-- **Broader use:** reader coordination, interrupted-operation handling,
-  staging-budget policy, and disk checks have qualified tests.
+- **Broader use:** reader coordination, interrupted-operation handling, and
+  disk checks have qualified tests.
 - **Stable use:** public interfaces are settled, operational evidence supports
   the limits, and upgrade and disable behavior are documented.
 
 Deliver the command and the shared implementation first. Automatic preheat
 comes last and has its own readiness gate. Do not merge it until all of these
-conditions hold:
+outcomes are shown:
 
-- Maintainers agree a policy for a restore that arrives during a preheat,
-  including its timeout behavior.
-- Tests show the policy holds under memory pressure, and neither the agent nor
-  PageBroker is stopped for memory use.
+- A preheat failure or timeout does not cause an otherwise successful
+  concurrent restore to fail.
+- Restore slowdown during a preheat stays within an agreed, measured bound.
+- Large downloads stay within the agreed memory limits.
+- Recovery never publishes an incomplete copy or deletes files still being
+  written.
 - A node holds at most one unreleased automatic preheat download.
-- Recovery coordination with restores is decided and tested.
-- A run can learn a snapshot's size before download.
 
 Maintainers must agree the maturity labels and thresholds during review.
 
@@ -604,9 +639,8 @@ group of nodes, which helps clusters with mixed GPU models. It does not change
 workload scheduling.
 
 Phase 2 adds a preheat object for per-snapshot node choice, with per-node
-status. It also tracks readers, extends the staging-budget policy, and checks
-the intended disk. Retention or eviction of live copies is a candidate for a
-later phase.
+status. It also tracks readers and checks the intended disk. Retention or
+eviction of live copies is a candidate for a later phase.
 
 Phase 3 depends on imports preserving snapshot identity, store binding, and
 container handles. Readiness must reflect available snapshot data. Shared
@@ -616,8 +650,9 @@ Cross-cluster tests are required. These dependencies are not resolved here.
 ## Implementation History
 
 On 2026-11-11, the source plan was adapted into this illustrated draft for
-author review. On 2026-11-12, the draft added automatic preheat to phase 1. No
-feature implementation or runtime validation is recorded.
+author review. On 2026-11-12, the draft added automatic preheat to phase 1 and
+changed preheat to download straight to the node cache. No feature
+implementation or runtime validation is recorded.
 
 ## Alternatives
 
@@ -633,8 +668,11 @@ The source plan and its review considered these alternatives:
   the restore pod exists.
 - **A preheat object with a controller:** gives per-snapshot node choice and
   status, but adds an API. Defer it to phase 2.
-- **Direct S3-to-disk download:** removes staging pressure but requires a new
-  transfer path. Reuse PageBroker first.
+- **Download into RAM, then copy in the agent:** reuses the existing download
+  request unchanged. It limits a snapshot to the staging RAM, takes that RAM
+  from restores, and adds a second copy.
+- **A second S3 reader in PageBroker for preheat:** PageBroker supports one
+  reader per process, and its teardown affects every S3 client in the process.
 - **External distribution tools:** can help share downloads, but introduce
   integration and operating costs. Keep the download behind a small interface.
 
@@ -649,9 +687,9 @@ Reviewers need to settle these points:
 3. Confirm bad-copy marking and deletion of externally prepared copies.
 4. Define command results for published copies with pending cleanup.
 5. Agree the import contract and shared-store cleanup ownership.
-6. Agree the policy and timeout for a restore that arrives during a preheat.
-7. Agree how automatic recovery coordinates with restores.
-8. Confirm how a run learns a snapshot's size before download.
+6. Decide how preheat downloads are isolated from restores in PageBroker.
+7. Decide how recovery confirms that PageBroker has stopped writing.
+8. Agree the memory limits and the restore slowdown bound for a preheat.
 9. Confirm the newest-first order for automatic preheat.
 10. Accept copies of every namespace's snapshots on every participating node.
 
