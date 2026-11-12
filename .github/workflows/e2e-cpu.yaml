@@ -72,10 +72,10 @@ env:
   SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "480"
   CI_PHASE_LOG: ${{ github.workspace }}/.ci-phases.tsv
   CACHE_TAG_SUFFIX: ${{ inputs.cache_scope_suffix }}
-  # Written by push-artifacts.yaml from main and release/*; read-only here.
-  # See the comment on CACHE_REF_PREFIX there for why this is not the Actions
-  # cache, and hack/ci-cache-flags.sh for why the tag is keyed by branch.
-  CACHE_REF_PREFIX: ghcr.io/ai-dynamo/snapshot/cache
+  # The layer cache is written by push-artifacts.yaml from main and release/*
+  # and read-only here; hack/ci-cache-flags.sh derives its prefix from the
+  # repository's owner and says why the tag is keyed by branch. See
+  # push-artifacts.yaml for why it is not the Actions cache.
   # The branch this change targets, whose cache it reads. base_ref is set on a
   # pull request; ref_name covers a workflow_dispatch run on a branch.
   CACHE_BRANCH: ${{ github.base_ref || github.ref_name }}

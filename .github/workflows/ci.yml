@@ -22,9 +22,9 @@ permissions:
   contents: read
 
 env:
-  # Written by push-artifacts.yaml on main; read-only here. See the comment on
-  # CACHE_REF_PREFIX there for why this is not the Actions cache.
-  CACHE_REF_PREFIX: ghcr.io/ai-dynamo/snapshot/cache
+  # The layer cache is written by push-artifacts.yaml on main and read-only
+  # here; hack/ci-cache-flags.sh derives its prefix from the repository's
+  # owner. See push-artifacts.yaml for why it is not the Actions cache.
   # The branch this change targets, whose cache it reads. base_ref is set on a
   # pull request; ref_name covers a push to main.
   CACHE_BRANCH: ${{ github.base_ref || github.ref_name }}

@@ -27,20 +27,22 @@ concurrency:
 
 permissions: {}
 
-env:
-  # Passed through to make, so the references we sign are the ones it pushed.
-  REGISTRY: ghcr.io/ai-dynamo/snapshot
-  # Layer cache, one tag per image. Not type=gha: the Actions cache is capped
-  # at 10 GiB per repository and the Go module caches alone exceed that, so
-  # buildx entries were evicted before any later run could read them and every
-  # build in every workflow started cold. A registry has no such ceiling, and
-  # it is readable from the pull request workflows, which the Actions cache
-  # was not across refs.
-  #
-  # Only this workflow writes it, and it runs on main and release branches
-  # alone. A pull request that could write a shared cache could also poison
-  # every build that reads it afterwards.
-  CACHE_REF_PREFIX: ghcr.io/ai-dynamo/snapshot/cache
+# REGISTRY is not set here: it names the account that owns the repository this
+# runs in, which the version job computes (see the registry output there) and
+# every job that pushes reads. Passed through to make, so the references we sign
+# are the ones it pushed.
+#
+# Layer cache, one tag per image, under REGISTRY/cache: hack/ci-cache-flags.sh
+# derives the prefix the same way. Not type=gha: the Actions cache is capped
+# at 10 GiB per repository and the Go module caches alone exceed that, so
+# buildx entries were evicted before any later run could read them and every
+# build in every workflow started cold. A registry has no such ceiling, and
+# it is readable from the pull request workflows, which the Actions cache
+# was not across refs.
+#
+# Only this workflow writes it, and it runs on main and release branches
+# alone. A pull request that could write a shared cache could also poison
+# every build that reads it afterwards.
 
 jobs:
 
@@ -62,6 +64,7 @@ jobs:
       head_sha: ${{ steps.compute.outputs.head_sha }}
       release: ${{ steps.compute.outputs.release }}
       matrix: ${{ steps.compute.outputs.matrix }}
+      registry: ${{ steps.compute.outputs.registry }}
     steps:
       - name: Compute version and tags
         id: compute
@@ -104,6 +107,12 @@ jobs:
             echo "tags=${VERSION}" >> "$GITHUB_OUTPUT"
           fi
           echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+
+          # The account that owns this repository: ai-dynamo upstream, a fork's
+          # owner in a fork, whose GITHUB_TOKEN can push nowhere else. Lowered,
+          # because GHCR refuses upper case and an account name may have it.
+          OWNER="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          echo "registry=ghcr.io/${OWNER}/snapshot" >> "$GITHUB_OUTPUT"
 
           # A release builds every image natively for amd64 and arm64 and joins
           # them under one tag. Any other run stays amd64 only, because the e2e
@@ -157,6 +166,8 @@ jobs:
       packages: write
       id-token: write
     runs-on: ${{ matrix.runner }}
+    env:
+      REGISTRY: ${{ needs.version.outputs.registry }}
     # Sized for the agent: CRIU from source on a CUDA base, plus an SBOM scan.
     timeout-minutes: 75
     strategy:
@@ -260,6 +271,8 @@ jobs:
       packages: write
       id-token: write
     runs-on: ubuntu-24.04
+    env:
+      REGISTRY: ${{ needs.version.outputs.registry }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -339,6 +352,8 @@ jobs:
     outputs:
       chart: ${{ steps.push.outputs.chart }}
     runs-on: ubuntu-24.04
+    env:
+      REGISTRY: ${{ needs.version.outputs.registry }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -425,6 +440,8 @@ jobs:
       packages: read
       id-token: write
     runs-on: ubuntu-24.04
+    env:
+      REGISTRY: ${{ needs.version.outputs.registry }}
     timeout-minutes: 30
     steps:
       - name: Confirm the release exists
