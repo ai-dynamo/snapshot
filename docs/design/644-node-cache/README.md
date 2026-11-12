@@ -10,9 +10,6 @@ installations. It is a draft for author review. The feature is not implemented
 or accepted by this document.
 
 Tracking issue: [#644](https://github.com/ai-dynamo/snapshot/issues/644).
-The preserved [source plan](full-plan.md) records the earlier detailed design.
-This SNEP is the document to review; the source copy is historical context
-and does not describe automatic preheat.
 
 <!-- toc -->
 - [Summary](#summary)
@@ -74,8 +71,9 @@ with S3 as the shared store in place of a PVC:
 - **Fallback (requirements 1 and 2):** use the existing S3 path when no usable
   local copy exists.
 - **Automatic preheat (requirement 5, in part):** preheat every participating
-  node, including nodes added later, without starting a restore pod. The
-  policy is one cluster-wide setting.
+  node, including nodes added later, without starting a restore pod. A
+  participating node is a node where the agent runs with the cache enabled.
+  The policy is one cluster-wide setting.
 - **Preheat on request (requirement 5, in part):** preheat one node with an
   administrator command, not through the CRD.
 - **Cleanup (requirement 6, in part):** remove local copies after their
@@ -121,9 +119,9 @@ does not fit, that it clearly cannot restore, or whose download fails. Each
 agent downloads its own copy from S3. Nodes do not transfer snapshots to each
 other.
 
-Existing S3 restore correctness is preserved, with or without the cache.
-Resource contention between a preheat and a restore stays within agreed
-limits.
+A preheat must not break an S3 restore, and its effect on restore speed must
+stay within agreed limits. Both are open today; see
+[Graduation Criteria](#graduation-criteria).
 
 An administrator can also preheat one node with a command; see [API](#api).
 An administrator can also place copies with another tool; see
@@ -144,10 +142,10 @@ administrator does about it.
 - **Preheat still uses memory.** It does not allocate snapshot-sized RAM
   staging. Its download buffers, mapped pages, and unwritten disk data still
   use memory. The limits must be measured.
-- **An interrupted preheat wastes its download.** The unfinished files stay in
-  the cache work area until PageBroker removes them, at the latest when the
-  request reaches its maximum lifetime. A later preheat downloads the snapshot
-  again.
+- **An interrupted preheat wastes its download.** The unpublished files stay
+  in the cache work area until PageBroker removes them, at the latest when the
+  request reaches its maximum lifetime. Automatic preheat on that node waits
+  until then. A later preheat downloads the snapshot again.
 - **Every node stores every snapshot.** Copies are never evicted. A snapshot
   that does not fit is skipped and restores from S3. A node with a different
   GPU model stores copies it cannot use. Delete old snapshots to free space.
@@ -215,8 +213,8 @@ it.
   - **It downloads to the NVMe.** Today PageBroker downloads a snapshot only
     into RAM. It gains a download into the node cache, and it checks and
     flushes the files before it reports success. See [Preheat](#preheat).
-  - **It cleans up after itself.** It removes a download that did not finish.
-    See [Interrupted Preheat](#interrupted-preheat).
+  - **It cleans up after itself.** It removes a download that was not
+    published. See [Interrupted Preheat](#interrupted-preheat).
   - **It opens a local copy for a restore.** On S3 installations, PageBroker
     refuses today to open a snapshot directory on a disk. It must accept this
     for the node cache, for reading only.
@@ -229,15 +227,17 @@ it.
 ### Cache Identity and Layout
 
 The node cache uses the same directory layout that a PVC installation uses
-today, at the same path inside the agent pod:
+today. With the proposed mount path, the path inside the agent pod is the same
+too:
 
 ```text
 artifacts/<snapshot-uid>/containers/<container>/
 ```
 
-A copy in the node cache looks to the restore code exactly like a snapshot on
-a PVC. This is what lets a restore from the NVMe use the existing PVC restore
-flow unchanged.
+A copy in the node cache is meant to look to the restore code exactly like a
+snapshot on a PVC, so that a restore from the NVMe can use the existing PVC
+restore flow unchanged. This is the key assumption, and the
+[Test Plan](#test-plan) proves it first.
 
 `<snapshot-uid>` is the UID of the snapshot's `PodSnapshotContent` object.
 
@@ -250,8 +250,8 @@ Validation has three separate meanings:
 - **Completeness:** file lists, sizes, and modes are checked during preheat.
 - **Content integrity:** checksums are not included.
 
-An immutable snapshot does not need freshness updates. Immutability does not
-prove that a local copy is complete or undamaged.
+A snapshot never changes after it is taken, so a local copy cannot become out
+of date.
 
 ### Restore Source
 
@@ -269,11 +269,10 @@ flowchart TD
     B -->|"No"| F["PageBroker:<br/>downloads from S3,<br/>the existing path"]
 ```
 
-A disabled cache, absent copy, or invalid manifest selects S3. A cache hit
-returns a local source without an S3 handle. Compatibility checks read the
-local manifest. A compatible copy can originate from another node. A restore
-from the NVMe always reads in place, regardless of `pageBroker.restoreMode`.
-A restore does not switch source after it starts.
+A disabled cache, absent copy, or invalid manifest selects S3. A compatible
+copy can originate from another node. A restore from the NVMe always reads in
+place, regardless of `pageBroker.restoreMode`. A restore does not switch
+source after it starts.
 
 ### Preheat
 
@@ -301,9 +300,9 @@ flowchart LR
     B --> C["Publish the copy"]
 ```
 
-PageBroker reads the snapshot's file list and sizes before it writes. Skip a
-copy if its required space would breach the free-space reserve,
-`minFreeSpace`. The estimate must also account for filesystem overhead.
+PageBroker reads the snapshot's file list and sizes before it writes. It
+skips a copy whose required space would breach the free-space reserve; see
+[API](#api). The estimate must also account for filesystem overhead.
 
 PageBroker writes into a temporary directory in a work area of the cache. Only
 preheat uses that work area. PageBroker preserves file modes, directory modes,
@@ -312,15 +311,17 @@ and empty directories.
 Before PageBroker reports success, it confirms the expected files, sizes,
 modes, and directories, and it flushes the files to disk. A flush failure
 prevents publication. The agent then checks the copy's identity, renames it
-into place, and makes the rename durable.
+into place, and makes the rename durable. It then closes its request to
+PageBroker.
 
 Keep successful copies when another container fails. A later run processes
 containers still missing.
 
 ### Interrupted Preheat
 
-An interrupted preheat leaves an unfinished download in the work area. It is
-never under a copy's final name, so no restore uses it. I3 shows the result.
+An interrupted preheat leaves a download in the work area that was not
+published. It is never under a copy's final name, so no restore uses it. I3
+shows the result.
 
 **Illustration 3 (I3): Interrupted Preheat**
 
@@ -329,13 +330,13 @@ flowchart TD
     A["Preheat interrupted"] --> B{"Copy<br/>published?"}
     B -->|"Yes"| C["Restores use the local copy"]
     B -->|"No"| E["Restores use S3"]
-    E --> F["PageBroker removes<br/>the unfinished download"]
+    E --> F["PageBroker removes<br/>the unpublished download"]
     F --> G["A later preheat<br/>downloads again"]
 ```
 
-PageBroker removes its own unfinished downloads, as it does for its RAM
+PageBroker removes its own unpublished downloads, as it does for its RAM
 staging today. It tracks the downloads it is running, so it never removes
-files that are still being written. It removes an unfinished download in
+files that are still being written. It removes an unpublished download in
 three cases:
 
 - The download fails.
@@ -364,8 +365,10 @@ flowchart TD
     D -->|"No"| F["Remove the copy"]
 ```
 
-Removal is subject to the active restore restriction. Cleanup does not touch
-the work area.
+Cleanup looks only at published copies. It does not touch preheat's work area
+or a tool's temporary directory. It does not check whether a restore is
+reading a copy; see
+[Limitations, Risks, and Mitigations](#limitations-risks-and-mitigations).
 
 ### Automatic Preheat
 
@@ -379,7 +382,6 @@ A snapshot is eligible when all of these conditions hold:
 - It is Ready, bound to the S3 store, and not being deleted.
 - The node has no copy of it.
 - The node is not clearly unable to restore it.
-- Its required space does not breach the free-space reserve.
 
 The agent processes one snapshot at a time, newest first. I5 shows the
 decision for each snapshot.
@@ -390,11 +392,12 @@ decision for each snapshot.
 flowchart TD
     A["Ready snapshot<br/>without a local copy"] --> B{"Clearly<br/>incompatible?"}
     B -->|"Yes"| S["Skip and report"]
-    B -->|"No"| C{"Fits the<br/>free-space reserve?"}
-    C -->|"No"| S
-    C -->|"Yes"| D{"Lock free and<br/>work area empty?"}
+    B -->|"No"| D{"Lock free and<br/>work area empty?"}
     D -->|"No"| W["Retry later"]
-    D -->|"Yes"| E["Run preheat<br/>to fill the copy"]
+    D -->|"Yes"| E["Ask PageBroker<br/>to download"]
+    E --> C{"Fits the<br/>free-space reserve?"}
+    C -->|"No"| S
+    C -->|"Yes"| F["Download and<br/>publish the copy"]
 ```
 
 These rules keep the automatic path small:
@@ -403,6 +406,8 @@ These rules keep the automatic path small:
   architecture, kernel version, and CPU features with its node. A missing
   value is unknown, not a mismatch. Checks that need the restore pod, such as
   GPU model and driver, stay at restore time.
+- **Space check.** PageBroker checks the space when the download starts. A
+  snapshot that does not fit is skipped and reported.
 - **Shared lock.** If the command holds the node lock, the agent tries again
   later.
 - **Retries.** A failed download is retried later with an increasing delay.
@@ -411,7 +416,7 @@ These rules keep the automatic path small:
   moment. Each node adds a small random delay before a download, which keeps
   all nodes from starting at once.
 - **One download at a time.** Automatic preheat starts no new download on a
-  node while the work area still holds an unfinished one. It does not cancel
+  node while the work area still holds an unpublished one. It does not cancel
   a running download.
 - **Disabling.** Disabling automatic preheat stops new downloads. Existing
   copies stay subject to normal cleanup.
@@ -437,10 +442,10 @@ A placed copy must meet these rules:
    [Cache Identity and Layout](#cache-identity-and-layout), and the same files
    that a PVC installation holds for that snapshot. File modes, directory
    modes, and empty directories are preserved.
-3. It is written under a temporary name on the same disk, outside preheat's
-   work area, and then renamed into place without overwriting an entry.
+3. It is written under a temporary name in the cache directory, next to the
+   copies and outside preheat's work area, and then renamed into place without
+   overwriting an entry.
 4. It is not changed after it is published.
-5. Restore pods start only after the rename.
 
 The supported way to obtain a correct copy is to preheat one node, then copy
 that snapshot's directory to other nodes with a tool that keeps modes. A plain
@@ -451,7 +456,7 @@ Snapshot treats a placed copy like any other. It removes the copy when its
 snapshot is deleted, and it does not verify the content. Automatic preheat
 fills only missing copies and never overwrites a placed one. A copy made for a
 snapshot in another cluster is not accepted, since that snapshot has a
-different ID.
+different UID.
 
 ### API
 
@@ -506,7 +511,7 @@ to the privileged components that need it.
 
 The command requires exec access to the privileged agent pod. A cache writer
 can supply process state, so write access is administrator-level trust.
-PageBroker can write only to the cache work directory; the rest of the cache
+PageBroker can write only to the work area of the cache; the rest of the cache
 is read-only for it. Verify that it cannot change a published copy through a
 descriptor or mapping kept open after the rename. Preserve its existing S3
 credential path; the command should not need direct S3 credentials.
@@ -536,13 +541,13 @@ objects and lists them when it starts.
 Measure preheat duration, local versus S3 restore latency, peak memory during
 a preheat, disk use, and restore slowdown during a preheat. Include GPU
 snapshots, repeated restores, a snapshot larger than available RAM, and
-catch-up time on a new node. Do not infer speedups from the diagrams.
+catch-up time on a new node.
 
 ### Monitoring
 
 Each restore emits a log and pod event naming its selected source. Preheat
-reports per-container results. Cleanup logs failures
-with the snapshot identity and reason.
+reports per-container results. Cleanup logs failures with the snapshot
+identity and reason.
 
 Automatic preheat emits an event when it skips or fails a snapshot, naming the
 node and the reason. It rate-limits repeated events for the same snapshot and
@@ -553,23 +558,23 @@ This proposal has no cluster-wide cache inventory or per-node API status.
 ### Dependencies
 
 The design builds on [SNEP-237](../237-s3-storage/README.md), PageBroker's S3
-download path, and the existing direct local restore path.
+download path, and the existing PVC restore flow.
 [Changes by Component](#changes-by-component) lists what PageBroker must gain.
 
 The design was checked against `main` at `3e143360`.
 
 ### Test Plan
 
-First, prove the key assumption: download from S3 straight to disk, and restore
-through the direct local path. Include GPU data, restrictive modes, and empty
-directories.
+First, prove the key assumption: download from S3 straight to disk, and
+restore through the existing PVC restore flow. Include GPU data, restrictive
+modes, and empty directories.
 
 The implementation needs these tests:
 
 - **Restore:** use a valid local copy; use S3 when the copy is absent or
-  invalid. PageBroker serves direct local restore on S3 installations and
-  rejects other path-based requests. S3 restore behaves the same with the
-  cache disabled.
+  invalid. PageBroker opens a local copy on S3 installations, for reading
+  only, and refuses to write a checkpoint into the cache. S3 restore behaves
+  the same with the cache disabled.
 - **Preheat:** a complete, flushed copy with modes and empty directories,
   repeated requests, no space, a flush failure, an existing copy left
   unchanged, and partial success across containers. The command and the agent
@@ -577,14 +582,14 @@ The implementation needs these tests:
   descriptor or mapping that it kept open.
 - **Interruption:** an agent restart, a PageBroker restart, and a failed
   download never lead to an incomplete published copy. PageBroker removes its
-  unfinished downloads and never removes files it is still writing. The agent
+  unpublished downloads and never removes files it is still writing. The agent
   never publishes a leftover directory.
 - **Cleanup:** remove copies of deleted snapshots and keep all others. Cover a
   snapshot deleted while the agent is down. Remove nothing after a failed
   snapshot listing.
 - **Automatic preheat:** a newly Ready snapshot, catch-up on a new node, skips
   for mismatch and for space, and no new download while the work area holds
-  an unfinished one.
+  an unpublished one.
 - **Isolation:** during a concurrent S3 restore, cause a full disk, a write
   failure, an S3 failure, and a timeout in a preheat. Measure restore slowdown
   and memory with a snapshot larger than available RAM, under the real
@@ -598,8 +603,7 @@ These are proposed evidence gates, not release dates:
 
 - **Initial opt-in use:** the layout proof passes, the tests pass, resource
   use is measured, and administrators can follow the documented restrictions.
-- **Broader use:** reader coordination, interrupted-operation handling, and
-  disk checks have qualified tests.
+- **Broader use:** the open decisions are settled and their tests pass.
 - **Stable use:** public interfaces are settled, operational evidence supports
   the limits, and upgrade and disable behavior are documented.
 
@@ -613,7 +617,7 @@ outcomes are shown:
 - Large downloads stay within the agreed memory limits.
 - An interruption never leads to an incomplete published copy, and no files
   are removed while they are being written.
-- A node holds at most one unfinished preheat download.
+- A node holds at most one unpublished preheat download.
 
 Maintainers must agree the maturity labels and thresholds during review.
 
@@ -628,26 +632,22 @@ Later work can also track readers and check the intended disk. Retention or
 eviction of live copies is another candidate. Automatic handling of a damaged
 copy, such as switching later restores to S3, is a third.
 
-Multi-cluster support depends on imports preserving snapshot identity, store
-binding, and container handles. Readiness must reflect available snapshot
-data. Shared stores need deletion and orphan-sweep rules that protect other
-clusters. Cross-cluster tests are required. These dependencies are not
-resolved here.
+Multi-cluster support is also later work. It depends on importing a snapshot
+into another cluster, which this proposal does not cover.
 
 ## Implementation History
 
-On 2026-11-11, the source plan was adapted into this illustrated draft for
-author review. On 2026-11-12, the draft added automatic preheat and changed
-preheat to download straight to the node cache. No feature
-implementation or runtime validation is recorded.
+On 2026-11-11, this draft was written for author review. On 2026-11-12, the
+draft added automatic preheat and changed preheat to download straight to the
+node cache. No feature implementation or runtime validation is recorded.
 
 ## Alternatives
 
-The source plan and its review considered these alternatives:
+These alternatives were considered:
 
-- **Command-only preheat:** smaller, but an administrator must run
-  it on each node for each snapshot. Preparing copies before applications
-  start is the required initial functionality.
+- **Command-only preheat:** smaller, but an administrator must run it on each
+  node for each snapshot. Preparing copies before applications start is the
+  required initial functionality.
 - **Administrator-selected nodes:** limits disk use on mixed clusters, but
   adds node-label lookup and an agent permission. Defer it as the preheat node
   selector.
@@ -661,7 +661,7 @@ The source plan and its review considered these alternatives:
 - **A second S3 reader in PageBroker for preheat:** PageBroker supports one
   reader per process, and its teardown affects every S3 client in the process.
 - **External distribution tools:** can help share downloads, but introduce
-  integration and operating costs. Keep the download behind a small interface.
+  integration and operating costs.
 
 ## Appendix
 
@@ -672,16 +672,15 @@ Reviewers need to settle these points:
 1. Accept the S3-first scope and the operating restrictions.
 2. Choose the mount path and finalize configuration and command names.
 3. Confirm deletion of copies placed by an administrator.
-4. Agree the import contract and shared-store cleanup ownership.
-5. Decide how preheat downloads are isolated from restores in PageBroker. The
+4. Decide how preheat downloads are isolated from restores in PageBroker. The
    candidate is an isolated preheat download mechanism; implementation to be
    determined.
-6. Confirm that PageBroker removes its own unfinished preheat downloads.
-7. Agree the memory limits and the restore slowdown bound for a preheat.
-8. Confirm the newest-first order for automatic preheat.
-9. Accept copies of every namespace's snapshots on every participating node.
-10. Confirm that the chart can mount the cache without Kubernetes creating a
-    missing directory.
+5. Confirm that PageBroker removes its own unpublished preheat downloads.
+6. Agree the memory limits and the restore slowdown bound for a preheat.
+7. Confirm the newest-first order for automatic preheat.
+8. Accept copies of every namespace's snapshots on every participating node.
+9. Confirm that the chart can mount the cache without Kubernetes creating a
+   missing directory.
 
 ### Next Steps
 
