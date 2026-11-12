@@ -239,18 +239,13 @@ that its root filesystem is writable.
 
 ### preparing GPU restore
 
-For a GPU checkpoint, nsrestore prepares the CUDA job file and the GPU device
-mounts, and opens the CUDA tools it will need after CRIU replaces the mount
-namespace.
+For a GPU checkpoint, nsrestore prepares the GPU device mounts and opens the
+CUDA tools it will need after CRIU replaces the mount namespace.
 
 **Likely causes:**
 
-- A multi-GPU checkpoint with no CUDA job file. The message names it
 - GPU device paths that the placeholder cannot see
 - A bundle mount that went away because the placeholder restarted
-
-For the first cause, take the checkpoint again with the source launched under
-`cuda-checkpoint --launch-job`.
 
 ```bash
 kubectl exec <restore-pod> -n <ns> -c <container> -- nvidia-smi -L

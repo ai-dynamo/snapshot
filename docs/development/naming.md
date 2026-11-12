@@ -37,8 +37,7 @@ To keep the mechanism out of what users meet:
 
 - Do not copy another tool's option names into a value, flag, annotation, or
   field. Decide what the user gets, and name that. The `config.criu.*` values
-  and `snapshotctl checkpoint --cuda-checkpoint-wrap` follow the mechanism. Do
-  not copy them.
+  follow the mechanism. Do not copy them.
 - Group settings that change what Snapshot does by capability (`checkpoint`,
   `restore`, `storage`), not by the tool that implements them. Settings that
   shape how a component is deployed, such as images, resources, and tolerations,

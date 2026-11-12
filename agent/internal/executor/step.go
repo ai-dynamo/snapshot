@@ -40,7 +40,6 @@ const (
 	StepInspectSource         Step = "inspecting source container"
 	StepPrepareCheckpoint     Step = "preparing PageBroker checkpoint"
 	StepInspectCuInterpose    Step = "inspecting cuinterpose"
-	StepStageCUDAJobFile      Step = "staging CUDA job file"
 	StepConfigureCheckpoint   Step = "configuring CRIU dump and writing checkpoint manifest"
 	StepCheckpointGPU         Step = "checkpointing GPU state"
 	StepDumpCRIU              Step = "dumping with CRIU"

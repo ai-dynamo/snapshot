@@ -50,7 +50,6 @@ func runCheckpoint(args []string) error {
 	kubeContext := flags.String("kube-context", "", "Kubernetes context override")
 	snapshotName := flags.String("snapshot", "", "Required. Name of the PodSnapshot to create")
 	container := flags.String("container", "", "Required. Name of the workload container inside the manifest to checkpoint")
-	cudaCheckpointWrap := flags.Bool("cuda-checkpoint-wrap", false, "Wrap the container command with cuda-checkpoint --launch-job (required for multi-GPU checkpoints; the placeholder image must have cuda-checkpoint at the same path as the source container)")
 	timeout := flags.Duration("timeout", 45*time.Minute, "Maximum time to wait for checkpoint completion")
 
 	if err := flags.Parse(args); err != nil {
@@ -68,13 +67,12 @@ func runCheckpoint(args []string) error {
 
 	snapshotctlLog.Info("Running checkpoint", "manifest", *manifest, "namespace", *namespace)
 	result, err := runCheckpointFlow(context.Background(), checkpointOptions{
-		ManifestPath:       *manifest,
-		Namespace:          *namespace,
-		KubeContext:        *kubeContext,
-		SnapshotName:       *snapshotName,
-		Container:          *container,
-		CudaCheckpointWrap: *cudaCheckpointWrap,
-		Timeout:            *timeout,
+		ManifestPath: *manifest,
+		Namespace:    *namespace,
+		KubeContext:  *kubeContext,
+		SnapshotName: *snapshotName,
+		Container:    *container,
+		Timeout:      *timeout,
 	})
 	if err != nil {
 		return err

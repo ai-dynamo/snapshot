@@ -47,8 +47,8 @@ without importing Snapshot's custom-resource API:
 outcome := podcontract.ClassifyRestoreOutcome(pod.Status.Conditions)
 ```
 
-The package also owns the shared control-volume, environment, checkpoint-sentinel,
-and CUDA job-file names used by Snapshot-managed source and restore Pods.
+The package also owns the shared control-volume, environment, and
+checkpoint-sentinel names used by Snapshot-managed source and restore Pods.
 
 The producer supplies `SourceContainer` from the referenced `PodSnapshot`.
 Empty mappings restore that source into the same-named destination only. The

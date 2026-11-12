@@ -342,8 +342,7 @@ COPY --from=criu-builder /criu-install/usr/local /usr/local
 COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
 RUN criu --version
 
-# Native checkpoint/restore uses the in-repository helper. The optional workload
-# launch-job wrapper uses the standalone binary supplied by the workload image.
+# Native checkpoint/restore uses the in-repository helper.
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
 COPY --from=cuinterpose-builder /cuinterpose/build/cuinterpose-coordinator /usr/local/bin/cuinterpose-coordinator
 # The operator copies the launcher into source workloads. It execs the application,
