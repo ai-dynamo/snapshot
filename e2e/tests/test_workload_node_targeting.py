@@ -129,6 +129,20 @@ def test_boolean_environment_rejects_invalid_input(monkeypatch, name, value):
     with pytest.raises(ValueError, match=f"{name} must be true or false"):
         k8s.bool_env(name)
 
+def test_cpu_only_pins_hostname_only_when_set(monkeypatch):
+    """CPU-only preflight already requires one ready node, so an unset hostname
+    stays an empty selector. A set hostname is pinned on this path too."""
+    monkeypatch.setenv("SNAPSHOT_E2E_CPU_ONLY", "true")
+
+    assert workloads.workload_scheduling() == {}
+
+    monkeypatch.setenv("SNAPSHOT_E2E_NODE_HOSTNAME", "only-node")
+
+    assert workloads.workload_scheduling() == {
+        "nodeSelector": {"kubernetes.io/hostname": "only-node"}
+    }
+
+
 def test_workload_pods_pin_hostname_when_set(monkeypatch):
     monkeypatch.delenv("SNAPSHOT_E2E_AVOID_MIG", raising=False)
     monkeypatch.setenv("SNAPSHOT_E2E_NODE_HOSTNAME", "node-a")
