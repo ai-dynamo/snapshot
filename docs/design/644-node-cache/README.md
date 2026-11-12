@@ -171,19 +171,26 @@ The open decisions are part of the readiness gate in
 
 ### Components
 
-The node agent selects the source and coordinates restore. CRIU reads process
-state. PageBroker downloads from S3. For preheat, the node agent decides what
-to download and publishes the result. PageBroker downloads from S3 straight
-into the node cache.
+The design has three flows:
+
+- **S3 restore.** Unchanged.
+- **Preheat, from S3 to the NVMe.** The node agent decides what to download
+  and publishes the result. PageBroker downloads into the node cache instead
+  of into RAM. This is the main PageBroker change.
+- **Restore from the NVMe.** The existing PVC restore flow. The node agent
+  mounts the local copy, and CRIU reads it. PageBroker transfers no snapshot
+  data. It only opens the directory when the agent asks, and on nodes with
+  CUDA custom storage it loads the GPU data.
+
+On S3 installations, PageBroker rejects the request to open a snapshot
+directory today. With the cache enabled, it must accept that request for the
+node cache, for reading in place only. It refuses to write a checkpoint into
+the cache or to copy a local snapshot into RAM. S3 stays the only place where
+snapshots are stored.
 
 The cache is mounted read-write into the node agent. PageBroker gets the cache
-read-only, plus write access to its work directory only. Local restore uses
-direct mode regardless of `pageBroker.restoreMode`. PageBroker still opens a
-local restore transaction.
-
-On an S3 installation, enable PageBroker's file engine for direct restore
-when the cache is enabled. Reject path-based checkpoint and staged-restore
-requests. The cache must not become the snapshot store.
+read-only, plus write access to its work directory only. A restore from the
+NVMe always reads in place, regardless of `pageBroker.restoreMode`.
 
 Existing S3 restore correctness is preserved, and resource contention stays
 within agreed limits. These rules apply:
@@ -244,9 +251,6 @@ flowchart TD
 A disabled cache, absent copy, invalid manifest, or bad marker selects S3.
 A cache hit returns a local source without an S3 handle. Compatibility checks
 read the local manifest. A compatible copy can originate from another node.
-
-On the local path, PageBroker downloads nothing. On a node that uses CUDA
-custom storage, it loads the GPU data from the same local copy.
 
 ### Preheat
 
