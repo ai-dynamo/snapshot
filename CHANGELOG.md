@@ -74,6 +74,11 @@ commit-level history for each release is on its
   `example.com/pool DoesNotExist` keeps the agent off those nodes. An install
   that sets none is unchanged. See
   [Agent DaemonSet and Access](docs/reference/helm-values.md#agent-daemonset-and-access).
+- `operator.checkpointCompletionGrace` (`--checkpoint-completion-grace`,
+  default `5m`) sets how long a checkpoint waits for the node agent's result
+  after its source Pod becomes terminal. Raise it when uploading the largest
+  snapshot takes longer than five minutes. An install that does not set it is
+  unchanged. See [Operator](docs/reference/helm-values.md#operator).
 
 ### Changed
 
@@ -153,6 +158,11 @@ commit-level history for each release is on its
   namespace rather than the restore container's (#593), so lookups by PID,
   such as UCX shared-memory endpoints (#802), work after a restore. Only
   checkpoints taken after the upgrade get it; take older ones again.
+- A `PodSnapshot` whose source Pod ended and whose node agent published no
+  result within `operator.checkpointCompletionGrace` now fails with
+  `CheckpointResultTimeout` instead of `SourcePodGone`. `SourcePodGone` remains
+  only for a source Pod whose status records no time it ended. Alerts or
+  scripts that match on `SourcePodGone` need to match the new reason too.
 
 ### Deprecated
 

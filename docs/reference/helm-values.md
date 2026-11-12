@@ -103,6 +103,7 @@ payload checksums.
 | Value | Default | Description |
 |-------|---------|-------------|
 | `operator.resources` | 50m CPU / 64Mi request, 500m CPU / 256Mi limit | CPU and memory requests/limits for the operator manager. |
+| `operator.checkpointCompletionGrace` | `5m` | How long a checkpoint waits for the node agent's result before the PodSnapshot fails with `CheckpointResultTimeout`. The window starts when the source Pod becomes terminal, not when the checkpoint starts, so it is separate from `config.checkpoint.timeoutSeconds`, which bounds the whole checkpoint. Raise it above the upload time of the largest snapshot. |
 | `operator.nodeSelector` | `{}` | Node selector for the operator pod. |
 | `operator.affinity` | `{}` | Affinity rules for the operator pod. |
 | `operator.tolerations` | `[]` | Tolerations for the operator pod. |
