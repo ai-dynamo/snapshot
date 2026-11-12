@@ -72,6 +72,15 @@ The workload, PageBroker, and the `agent` container must use the same version.
 On a compatible older kernel-mode driver, the `cuda-compat-13-4` package
 provides user-mode driver 615. It installs the libraries in
 `/usr/local/cuda-13.4/compat`. Installing the package alone does not select it.
+
+Alternatively, download a compatible NVIDIA Data Center GPU driver runfile from
+NVIDIA's website. Extract it with `sh <driver>.run -x`, then copy the user-mode
+libraries listed in
+[Forward Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/latest/forward-compatibility.html#manually-installing-from-runfile)
+to a directory accessible to each container. This does not install the
+kernel-mode driver. Use that directory instead of `/usr/local/cuda-13.4/compat`
+in the commands below.
+
 In each container below, make that directory available, in the image or through
 a volume. Then put it first in `LD_LIBRARY_PATH`, followed by the existing
 entries:
@@ -85,7 +94,8 @@ entries:
   ```
 
 - The `pagebroker` container. Keep `/usr/local/lib`, which holds PageBroker's
-  own libraries.
+  own libraries, including `libnixl.so`. Removing it can prevent PageBroker
+  from starting.
 - The `agent` container, for `cuda-checkpoint-helper`. At restore, the directory
   must also exist in the restore Pod.
 
