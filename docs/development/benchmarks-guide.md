@@ -222,19 +222,24 @@ split is `checkpoint_agent_log`, parsed from the capture-node agent's
   `phases.cuda_checkpoint` and does not measure lock, copy, and job file
 - `phases.criu_dump` — CRIU dump RPC wall time, including the page write
 - `criu_freezing`, `criu_memdump`, `criu_memwrite` — CRIU's own timers.
-  Memdump is reading the frozen process. Memwrite is writing pages. They
-  overlap the CRIU wall and are not added to it; CRIU can count the last
-  write interval twice, so use them to see which side dominates
-- `criu_pages_written_bytes` and `criu_image_bytes` — page payload versus
-  the whole CRIU image. `memwrite_gigabytes_per_second` divides the page
-  payload by CRIU's memwrite timer. The image directory also holds other
-  bytes, so it is not turned into a rate
+  memwrite runs inside memdump, so memdump includes the page-write time and
+  `criu_read` (memdump minus memwrite) is the time spent reading the frozen
+  process. Both overlap the CRIU wall. Do not add them to each other or to
+  the CRIU wall. CRIU's double-counted last write interval exists only in
+  its pre-dump path, which the agent does not use
+- `criu_pages_written_bytes` — page payload. `memwrite_gigabytes_per_second`
+  divides it by CRIU's memwrite timer
+- `checkpoint_dir_bytes_before_overlay` — apparent size of the staging
+  directory after CRIU returns and before the rootfs diff is written. It
+  includes the manifest, dump.log, CUDA job file, and criu.conf, so it is not
+  the CRIU image and not the final checkpoint size, and it is not turned into
+  a rate. Results written before the rename call this `criu_image_bytes`
 - `phases.overlay_capture` and `overlay_diff_bytes` — writable-layer tar
 
-`report` prints this as **Where the capture time goes** and **How the CRIU
-image was written** when a result has `checkpoint_agent_log`. An agent built
+`report` prints this as **Where the capture time goes** and **How the pages
+were written** when a result has `checkpoint_agent_log`. An agent built
 before this split still produces phase totals; the result then warns that
-the criu memwrite split is absent.
+the CRIU memwrite split is absent.
 
 ## Interpreting Results
 

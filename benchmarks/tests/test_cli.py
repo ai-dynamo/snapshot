@@ -7,21 +7,38 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from snapshot_benchmarks.cli import CleanupError, _reject_keep_with_repeats, build_parser, cmd_sweep, main
+from snapshot_benchmarks.cli import (
+    CleanupError,
+    _reject_keep_with_repeats,
+    build_parser,
+    cmd_run,
+    cmd_sweep,
+    main,
+)
+
+
+# The required flags every run/sweep invocation needs. Without them argparse
+# exits 2 before the flag under test is read, so a test that omits them proves
+# nothing about that flag.
+_REQUIRED = [
+    "--context", "ctx",
+    "--node", "gpu-node",
+    "--model-pvc", "models",
+    "--work-pvc", "work",
+    "--image", "example/image",
+]
 
 
 def test_sweep_repeats() -> None:
-    args = build_parser().parse_args(
-        ["sweep", "--image", "example/image", "--repeats", "3"]
-    )
+    args = build_parser().parse_args(["sweep", *_REQUIRED, "--repeats", "3"])
 
     assert args.repeats == 3
 
 
 def test_keep_with_repeats_is_rejected(capsys: pytest.CaptureFixture[str]) -> None:
     commands = (
-        ["run", "--image", "example/image", "--model-label", "model", "--repeats", "2", "--keep"],
-        ["sweep", "--image", "example/image", "--repeats", "2", "--keep"],
+        ["run", *_REQUIRED, "--model-label", "model", "--repeats", "2", "--keep"],
+        ["sweep", *_REQUIRED, "--repeats", "2", "--keep"],
     )
     for command in commands:
         assert main(command) == 2
@@ -29,18 +46,19 @@ def test_keep_with_repeats_is_rejected(capsys: pytest.CaptureFixture[str]) -> No
 
 
 def test_single_run_keep_is_allowed() -> None:
-    args = build_parser().parse_args(
-        ["run", "--image", "example/image", "--model-label", "model", "--keep"]
-    )
+    args = build_parser().parse_args(["run", *_REQUIRED, "--model-label", "model", "--keep"])
 
     assert _reject_keep_with_repeats(args) is None
 
 
-def test_repeats_must_be_positive() -> None:
-    with pytest.raises(SystemExit):
+def test_repeats_must_be_positive(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as excinfo:
         build_parser().parse_args(
-            ["run", "--image", "example/image", "--model-label", "model", "--repeats", "0"]
+            ["run", *_REQUIRED, "--model-label", "model", "--repeats", "0"]
         )
+
+    assert excinfo.value.code == 2
+    assert "must be at least 1" in capsys.readouterr().err
 
 
 def _sweep_args(*, repeats: int = 2, fail_fast: bool = False) -> MagicMock:
@@ -115,3 +133,23 @@ def test_sweep_fail_fast_reraises() -> None:
     ):
         with pytest.raises(RuntimeError, match="stop here"):
             cmd_sweep(args)
+
+
+def test_dry_run_renders_every_repeat() -> None:
+    args = build_parser().parse_args(
+        ["run", *_REQUIRED, "--model", "org/model", "--repeats", "3", "--dry-run"]
+    )
+    calls: list[int] = []
+
+    def run_one(*_args):
+        calls.append(1)
+        return None
+
+    with (
+        patch("snapshot_benchmarks.cli._setup", return_value=(MagicMock(), MagicMock())),
+        patch("snapshot_benchmarks.cli._run_one", side_effect=run_one),
+        patch("snapshot_benchmarks.cli.results.invocation_dir", return_value="/tmp/out"),
+    ):
+        assert cmd_run(args) == 0
+
+    assert len(calls) == 3

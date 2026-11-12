@@ -26,8 +26,6 @@ import json
 import re
 from typing import Any
 
-from snapshot_e2e.benchmark import parse_agent_timing_summary
-
 from snapshot_benchmarks.schema import AgentLogPhases, CheckpointAgentLog
 
 RESTORE_SUMMARY_MARKER = "Restore timing summary"
@@ -169,51 +167,62 @@ def parse_checkpoint_agent_log(
     totals becomes warnings on the returned object, never an exception.
     """
     parsed = CheckpointAgentLog(log_source_pod=log_source_pod)
-    try:
-        summary = parse_agent_timing_summary(
-            log_text,
-            message=CHECKPOINT_SUMMARY_MARKER,
-            field="checkpoint",
-            matches={"content": content},
-        )
-    except ValueError as exc:
-        parsed.parse_warnings.append(str(exc))
-        return parsed
-
-    parsed.log_line_found = True
-    parsed.duration = summary.duration_seconds
-    parsed.started_to_complete = summary.started_to_complete_seconds
-    parsed.phases = dict(summary.phases_seconds)
-    nested = summary.nested_seconds
-    parsed.cuda_lock = nested.get("cuda.lock")
-    parsed.cuda_copy = nested.get("cuda.copy")
-    parsed.cuda_job_file = nested.get("cuda.job_file")
-    parsed.criu_freezing = nested.get("criu.freezing")
-    parsed.criu_frozen = nested.get("criu.frozen")
-    parsed.criu_memdump = nested.get("criu.memdump")
-    parsed.criu_memwrite = nested.get("criu.memwrite")
-
-    # The e2e parser keeps Go durations. Page and byte counters are integers
-    # on the same payload, so they are read from that object afterwards.
     payload = _find_summary_json(
         log_text,
         marker=CHECKPOINT_SUMMARY_MARKER,
         matches={"content": content},
     )
-    checkpoint = payload.get("checkpoint") if isinstance(payload, dict) else None
-    if isinstance(checkpoint, dict):
-        criu = checkpoint.get("criu")
-        if isinstance(criu, dict):
-            parsed.criu_pages_written = _int(criu.get("pages_written"))
-            parsed.criu_pages_written_bytes = _int(criu.get("pages_written_bytes"))
-            parsed.criu_pages_scanned = _int(criu.get("pages_scanned"))
-            parsed.criu_image_bytes = _int(criu.get("image_bytes"))
-            stats_error = criu.get("stats_error")
-            if isinstance(stats_error, str) and stats_error:
-                parsed.parse_warnings.append(f"criu stats unavailable: {stats_error}")
-        overlay = checkpoint.get("overlay")
-        if isinstance(overlay, dict):
-            parsed.overlay_diff_bytes = _int(overlay.get("diff_bytes"))
+    if payload is None:
+        parsed.parse_warnings.append(
+            f'"{CHECKPOINT_SUMMARY_MARKER}" line for content={content!r} '
+            "not found in the provided agent log"
+        )
+        return parsed
+    checkpoint = payload.get("checkpoint")
+    if not isinstance(checkpoint, dict):
+        parsed.parse_warnings.append(
+            f'"{CHECKPOINT_SUMMARY_MARKER}" line found but had no "checkpoint" object'
+        )
+        return parsed
+
+    parsed.log_line_found = True
+    parsed.duration = parse_go_duration(checkpoint.get("duration"))
+    parsed.started_to_complete = parse_go_duration(checkpoint.get("started_to_complete"))
+    phases = checkpoint.get("phases")
+    if isinstance(phases, dict):
+        for name, value in phases.items():
+            seconds = parse_go_duration(value) if isinstance(value, str) else None
+            if seconds is not None:
+                parsed.phases[name] = seconds
+    else:
+        parsed.parse_warnings.append('"checkpoint" object had no "phases" map')
+
+    cuda = checkpoint.get("cuda")
+    if isinstance(cuda, dict):
+        parsed.cuda_lock = parse_go_duration(cuda.get("lock"))
+        parsed.cuda_copy = parse_go_duration(cuda.get("copy"))
+        parsed.cuda_job_file = parse_go_duration(cuda.get("job_file"))
+
+    criu = checkpoint.get("criu")
+    if isinstance(criu, dict):
+        parsed.criu_freezing = parse_go_duration(criu.get("freezing"))
+        parsed.criu_frozen = parse_go_duration(criu.get("frozen"))
+        parsed.criu_memdump = parse_go_duration(criu.get("memdump"))
+        parsed.criu_memwrite = parse_go_duration(criu.get("memwrite"))
+        parsed.criu_pages_written = _int(criu.get("pages_written"))
+        parsed.criu_pages_written_bytes = _int(criu.get("pages_written_bytes"))
+        parsed.criu_pages_scanned = _int(criu.get("pages_scanned"))
+        # Agents before the rename logged image_bytes for the same directory
+        # walk. It was never the CRIU image, so it is read as the same field.
+        parsed.checkpoint_dir_bytes_before_overlay = _int(
+            criu.get("checkpoint_dir_bytes_before_overlay", criu.get("image_bytes"))
+        )
+        stats_error = criu.get("stats_error")
+        if isinstance(stats_error, str) and stats_error:
+            parsed.parse_warnings.append(f"criu stats unavailable: {stats_error}")
+    overlay = checkpoint.get("overlay")
+    if isinstance(overlay, dict):
+        parsed.overlay_diff_bytes = _int(overlay.get("diff_bytes"))
 
     if parsed.criu_memwrite is None and not any(
         warning.startswith("criu stats unavailable:") for warning in parsed.parse_warnings
@@ -226,12 +235,6 @@ def parse_checkpoint_agent_log(
 
 
 def _int(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
+    if isinstance(value, int) and not isinstance(value, bool):
         return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    if isinstance(value, str) and value.isdigit():
-        return int(value)
     return None

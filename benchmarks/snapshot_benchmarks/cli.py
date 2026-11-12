@@ -200,8 +200,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         if args.repeats > 1:
             print(f"=== {model.label} (repeat {repeat}/{args.repeats}) ===")
         result = _run_one(cfg, engine, model, args, out_dir)
-        if result is None:
-            return 0
+        if result is None:  # dry run: nothing to write, still render every repeat
+            continue
         path = results.write_result(result, out_dir)
         print(f"wrote {path}")
     return 0

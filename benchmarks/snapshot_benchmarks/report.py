@@ -115,14 +115,15 @@ def _capture_sections(results: list[dict]) -> list[str]:
         "moves device state into host memory before CRIU runs. Those CUDA "
         "columns are blank when the capture used PageBroker CustomStorage, "
         "which records the CUDA total and does not measure the split. CRIU "
-        "memdump is CRIU reading the frozen process; CRIU memwrite is CRIU "
-        "writing pages. Those two CRIU timers overlap the CRIU wall and are "
-        "not added to it. Checkpoint (API) is the one-second Kubernetes Ready "
+        "memdump is CRIU's page-dump timer and it includes memwrite, the time "
+        "spent writing pages. CRIU read is memdump minus memwrite. memdump "
+        "and memwrite overlap the CRIU wall; they are not added to it or to "
+        "each other. Checkpoint (API) is the one-second Kubernetes Ready "
         "timestamp and is coarser than Wall.",
         "",
         "| Model | Wall (s) | CUDA lock | CUDA copy | CRIU wall | CRIU freeze | "
-        "CRIU memdump | CRIU memwrite | Overlay | Checkpoint (API) |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "CRIU memdump | of which memwrite | CRIU read | Overlay | Checkpoint (API) |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for result in results:
         capture = result.get("checkpoint_agent_log") or {}
@@ -133,7 +134,7 @@ def _capture_sections(results: list[dict]) -> list[str]:
         phases = capture.get("phases") or {}
         lines.append(
             "| {label} | {wall} | {lock} | {copy} | {criu} | {freeze} | {memdump} | "
-            "{memwrite} | {overlay} | {api} |".format(
+            "{memwrite} | {read} | {overlay} | {api} |".format(
                 label=model.get("label", "-"),
                 wall=_fmt(capture.get("duration")),
                 lock=_fmt(capture.get("cuda_lock")),
@@ -142,6 +143,7 @@ def _capture_sections(results: list[dict]) -> list[str]:
                 freeze=_fmt(capture.get("criu_freezing")),
                 memdump=_fmt(capture.get("criu_memdump")),
                 memwrite=_fmt(capture.get("criu_memwrite")),
+                read=_fmt(capture.get("criu_read")),
                 overlay=_fmt(phases.get("overlay_capture")),
                 api=_fmt(checkpoint.get("checkpoint_seconds")),
             )
@@ -149,15 +151,17 @@ def _capture_sections(results: list[dict]) -> list[str]:
     lines.append("")
     lines.extend(
         [
-            "## How the CRIU image was written",
+            "## How the pages were written",
             "",
             "Memwrite GB/s divides CRIU's written page bytes (`pages_written`) "
-            "by CRIU's memwrite timer. The CRIU image column is the apparent "
-            "size of the image directory. That directory also holds metadata "
-            "and pages `pages_written` does not count, so it is not turned "
-            "into a rate against the dump wall.",
+            "by CRIU's memwrite timer. The staging directory column is the "
+            "apparent size of the checkpoint directory after CRIU returns and "
+            "before the rootfs diff is added. It includes the manifest, "
+            "dump.log, CUDA job file, and criu.conf, so it is neither the CRIU "
+            "image nor the final checkpoint size, and it is not turned into a "
+            "rate against the dump wall.",
             "",
-            "| Model | Pages written | CRIU image | Overlay diff | Memwrite GB/s |",
+            "| Model | Pages written | Staging dir before overlay | Overlay diff | Memwrite GB/s |",
             "|---|---:|---:|---:|---:|",
         ]
     )
@@ -167,16 +171,32 @@ def _capture_sections(results: list[dict]) -> list[str]:
             continue
         model = result.get("model") or {}
         lines.append(
-            "| {label} | {pages} | {image} | {overlay} | {memwrite_rate} |".format(
+            "| {label} | {pages} | {staging} | {overlay} | {memwrite_rate} |".format(
                 label=model.get("label", "-"),
                 pages=_fmt_bytes(capture.get("criu_pages_written_bytes")),
-                image=_fmt_bytes(capture.get("criu_image_bytes")),
+                staging=_fmt_bytes(
+                    capture.get(
+                        "checkpoint_dir_bytes_before_overlay",
+                        capture.get("criu_image_bytes"),
+                    )
+                ),
                 overlay=_fmt_bytes(capture.get("overlay_diff_bytes")),
                 memwrite_rate=_fmt(capture.get("memwrite_gigabytes_per_second")),
             )
         )
     lines.append("")
     return lines
+
+
+def _agent_log_warnings(results: list[dict]) -> list[tuple[str, str]]:
+    return [
+        (r.get("model", {}).get("label", "?"), w)
+        for r in results
+        for w in (
+            ((r.get("agent_log_phases") or {}).get("parse_warnings") or [])
+            + ((r.get("checkpoint_agent_log") or {}).get("parse_warnings") or [])
+        )
+    ]
 
 
 def render(results: list[dict]) -> str:
@@ -320,11 +340,13 @@ def render(results: list[dict]) -> str:
         )
         + "\n"
     )
+    if any(r.get("checkpoint_agent_log") for r in current):
+        text += "\n" + "\n".join(_capture_sections(current))
     warnings = [
         f"- {r['model']['label']}: {warning}"
         for r in current
         for warning in r.get("warnings", [])
-    ]
+    ] + [f"- {label}: {warning}" for label, warning in _agent_log_warnings(current)]
     if warnings:
         text += "\n## Warnings\n\n" + "\n".join(warnings) + "\n"
     if legacy:
@@ -449,14 +471,7 @@ def _render_legacy(results: list[dict]) -> str:
         for r in results
         for w in (r.get("warnings") or [])
     ]
-    agent_log_warnings = [
-        (r.get("model", {}).get("label", "?"), w)
-        for r in results
-        for w in (
-            ((r.get("agent_log_phases") or {}).get("parse_warnings") or [])
-            + ((r.get("checkpoint_agent_log") or {}).get("parse_warnings") or [])
-        )
-    ]
+    agent_log_warnings = _agent_log_warnings(results)
     if warnings or agent_log_warnings:
         lines.append("## Warnings")
         lines.append("")
