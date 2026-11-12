@@ -126,18 +126,14 @@ type CheckpointRequest struct {
 }
 
 type checkpointPhaseTimings struct {
-	CUDACheckpointDuration time.Duration
-	CUDALockDuration       time.Duration
-	CUDACopyDuration       time.Duration
-	CUDAJobFileDuration    time.Duration
-	CRIUDumpDuration       time.Duration
-	CRIUStats              *criu.DumpStats
-	CRIUStatsError         string
+	CUDA             cuda.CheckpointPhaseTimings
+	CRIUDumpDuration time.Duration
+	CRIUStats        *criu.DumpStats
+	CRIUStatsError   string
 	// CheckpointDirBytesBeforeOverlay is the staging directory after CRIU
 	// returns and before the rootfs diff is written. It includes the manifest,
 	// dump.log, the CUDA job file, and criu.conf, so it is not the CRIU image.
 	CheckpointDirBytesBeforeOverlay *int64
-	CUDAPhasesMeasured              bool
 	OverlayCaptureDuration          time.Duration
 	OverlayDiffBytes                int64
 	AccountingDuration              time.Duration
@@ -493,19 +489,13 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	if err != nil {
 		return nil, failStep(StepCheckpointGPU, err)
 	}
-	timings.CUDACheckpointDuration = gpuTimings.TotalDuration
-	if gpuTimings.PhasesMeasured {
-		timings.CUDAPhasesMeasured = true
-		timings.CUDALockDuration = gpuTimings.LockDuration
-		timings.CUDACopyDuration = gpuTimings.CopyDuration
-		timings.CUDAJobFileDuration = gpuTimings.JobFileDuration
-	}
+	timings.CUDA = gpuTimings
 
-	dump, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, log)
+	dumpDuration, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, log)
 	if err != nil {
 		return nil, failStep(StepDumpCRIU, err)
 	}
-	timings.CRIUDumpDuration = dump.Duration
+	timings.CRIUDumpDuration = dumpDuration
 
 	// Stats and the staging-directory size are diagnostic. A failure here must
 	// not fail a dump that already succeeded. The walk is its own phase so it
@@ -519,7 +509,7 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 		timings.CRIUStats = &stats
 	}
 	if imageBytes, bytesErr := criu.DirectoryBytes(checkpointDir); bytesErr != nil {
-		log.Info("CRIU image size unavailable", "error", bytesErr)
+		log.Info("checkpoint directory size unavailable", "error", bytesErr)
 	} else {
 		timings.CheckpointDirBytesBeforeOverlay = &imageBytes
 	}
@@ -691,7 +681,7 @@ func checkpointTimingSummary(in checkpointSummaryInput) map[string]any {
 	timings := in.Timings
 	unaccounted := remainingDuration(in.Wall,
 		in.GPUDeviceMap,
-		timings.CUDACheckpointDuration,
+		timings.CUDA.TotalDuration,
 		timings.CRIUDumpDuration,
 		timings.OverlayCaptureDuration,
 		timings.AccountingDuration,
@@ -701,7 +691,7 @@ func checkpointTimingSummary(in checkpointSummaryInput) map[string]any {
 		"duration": in.Wall.String(),
 		"phases": map[string]string{
 			"gpu_device_map":                in.GPUDeviceMap.String(),
-			"cuda_checkpoint":               timings.CUDACheckpointDuration.String(),
+			"cuda_checkpoint":               timings.CUDA.TotalDuration.String(),
 			"criu_dump":                     timings.CRIUDumpDuration.String(),
 			"overlay_capture":               timings.OverlayCaptureDuration.String(),
 			"artifact_accounting":           timings.AccountingDuration.String(),
@@ -713,11 +703,11 @@ func checkpointTimingSummary(in checkpointSummaryInput) map[string]any {
 			"diff_bytes": timings.OverlayDiffBytes,
 		},
 	}
-	if timings.CUDAPhasesMeasured {
+	if timings.CUDA.PhasesMeasured {
 		summary["cuda"] = map[string]string{
-			"lock":     timings.CUDALockDuration.String(),
-			"copy":     timings.CUDACopyDuration.String(),
-			"job_file": timings.CUDAJobFileDuration.String(),
+			"lock":     timings.CUDA.LockDuration.String(),
+			"copy":     timings.CUDA.CopyDuration.String(),
+			"job_file": timings.CUDA.JobFileDuration.String(),
 		}
 	}
 	if !in.StartedAt.IsZero() {

@@ -627,9 +627,10 @@ def _record_agent_summary(
             duration,
         )
     for name, duration in summary.nested_seconds.items():
+        group, key = name.split(".", 1)
         result.record_measurement(
             f"{operation}.{name}.duration",
-            f"{operation.capitalize()} {name.replace('.', ' ')}",
+            f"{operation.capitalize()} {_phase_display_name(group)} {_phase_display_name(key)}",
             "seconds",
             duration,
         )

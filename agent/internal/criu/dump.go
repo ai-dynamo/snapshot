@@ -94,24 +94,18 @@ func BuildDumpOptions(
 	return criuOpts, nil
 }
 
-// DumpExecution is the agent's view of one CRIU dump.
-//
-// Duration is the wall time of the dump RPC. CRIU's own memdump/memwrite
-// timers are read afterwards from stats-dump; see DumpStats.
-type DumpExecution struct {
-	Duration time.Duration
-}
-
 // ExecuteDump opens the image directory FD, runs the CRIU dump, and cleans up.
+// It returns the wall time of the dump RPC. CRIU's own memdump/memwrite timers
+// are read afterwards from stats-dump; see DumpStats.
 func ExecuteDump(
 	criuOpts *criurpc.CriuOpts,
 	checkpointDir string,
 	settings *types.CRIUSettings,
 	log logr.Logger,
-) (DumpExecution, error) {
+) (time.Duration, error) {
 	imageDir, imageDirFD, err := openPathForCRIU(checkpointDir)
 	if err != nil {
-		return DumpExecution{}, fmt.Errorf("failed to open image directory: %w", err)
+		return 0, fmt.Errorf("failed to open image directory: %w", err)
 	}
 	defer imageDir.Close()
 	criuOpts.ImagesDirFd = proto.Int32(imageDirFD)
@@ -119,7 +113,7 @@ func ExecuteDump(
 	criuClient := criulib.MakeCriu()
 	if settings != nil && strings.TrimSpace(settings.BinaryPath) != "" {
 		if _, err := os.Stat(settings.BinaryPath); err != nil {
-			return DumpExecution{}, fmt.Errorf("criu binary not found at %s: %w", settings.BinaryPath, err)
+			return 0, fmt.Errorf("criu binary not found at %s: %w", settings.BinaryPath, err)
 		}
 		criuClient.SetCriuPath(settings.BinaryPath)
 	}
@@ -136,11 +130,11 @@ func ExecuteDump(
 			"skip_mnt", criuOpts.GetSkipMnt(),
 			"dump_log_tail", readLogTail(dumpLogPath),
 		)
-		return DumpExecution{}, fmt.Errorf("CRIU dump failed: %w", dumpErr)
+		return 0, fmt.Errorf("CRIU dump failed: %w", dumpErr)
 	}
 
 	log.Info("CRIU dump completed", "duration", criuDumpDuration)
-	return DumpExecution{Duration: criuDumpDuration}, nil
+	return criuDumpDuration, nil
 }
 
 func readLogTail(path string) string {

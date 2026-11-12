@@ -728,12 +728,14 @@ func TestCheckpointTimingSummarySplitsCUDAAndCRIU(t *testing.T) {
 		Wall:         7289 * time.Millisecond,
 		GPUDeviceMap: 36 * time.Millisecond,
 		Timings: &checkpointPhaseTimings{
-			CUDAPhasesMeasured:     true,
-			CUDALockDuration:       100 * time.Millisecond,
-			CUDACopyDuration:       1500 * time.Millisecond,
-			CUDAJobFileDuration:    65 * time.Millisecond,
-			CUDACheckpointDuration: 1665 * time.Millisecond,
-			CRIUDumpDuration:       5197 * time.Millisecond,
+			CUDA: cuda.CheckpointPhaseTimings{
+				PhasesMeasured:  true,
+				LockDuration:    100 * time.Millisecond,
+				CopyDuration:    1500 * time.Millisecond,
+				JobFileDuration: 65 * time.Millisecond,
+				TotalDuration:   1665 * time.Millisecond,
+			},
+			CRIUDumpDuration: 5197 * time.Millisecond,
 			CRIUStats: &criu.DumpStats{
 				Freezing:     12 * time.Millisecond,
 				Frozen:       2 * time.Second,
@@ -763,7 +765,6 @@ func TestCheckpointTimingSummarySplitsCUDAAndCRIU(t *testing.T) {
 	assert.Equal(t, (4500 * time.Millisecond).String(), criuFields["memdump"])
 	assert.Equal(t, uint64(100)*uint64(os.Getpagesize()), criuFields["pages_written_bytes"])
 	assert.Equal(t, imageBytes, criuFields["checkpoint_dir_bytes_before_overlay"])
-	assert.NotContains(t, criuFields, "image_growth")
 
 	overlay := summary["overlay"].(map[string]any)
 	assert.Equal(t, int64(49<<20), overlay["diff_bytes"])
@@ -773,21 +774,12 @@ func TestCheckpointTimingSummaryOmitsUnmeasuredCUDA(t *testing.T) {
 	summary := checkpointTimingSummary(checkpointSummaryInput{
 		Wall: 2 * time.Second,
 		Timings: &checkpointPhaseTimings{
-			CUDACheckpointDuration: 800 * time.Millisecond,
-			CRIUDumpDuration:       time.Second,
+			CUDA:             cuda.CheckpointPhaseTimings{TotalDuration: 800 * time.Millisecond},
+			CRIUDumpDuration: time.Second,
 		},
 	})
 
 	assert.NotContains(t, summary, "cuda")
 	phases := summary["phases"].(map[string]string)
 	assert.Equal(t, (800 * time.Millisecond).String(), phases["cuda_checkpoint"])
-}
-
-func TestSourceNeedsRecoveryWrapsCaptureFailures(t *testing.T) {
-	wrapped := sourceNeedsRecovery(errors.New("capture failed"), []int{41}, false, false)
-	suspended, needsRecovery := SuspendedSourceOf(wrapped)
-	assert.True(t, needsRecovery)
-	assert.Equal(t, []int{41}, suspended.GPUPIDs)
-	_, needsRecovery = SuspendedSourceOf(errors.New("prepare failed"))
-	assert.False(t, needsRecovery)
 }

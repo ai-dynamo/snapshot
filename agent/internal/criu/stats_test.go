@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	criustats "github.com/checkpoint-restore/go-criu/v8/stats"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -24,7 +25,7 @@ func TestReadDumpStatsReadsServiceHeader(t *testing.T) {
 		pagesScanned: 110,
 		pagesLazy:    3,
 	}))
-	if err := os.WriteFile(filepath.Join(dir, statsDumpFilename), frameStats(true, payload), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, criustats.StatsDump), frameStats(true, payload), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -49,7 +50,7 @@ func TestReadDumpStatsReadsServiceHeader(t *testing.T) {
 func TestReadDumpStatsRejectsBareStatsMagic(t *testing.T) {
 	dir := t.TempDir()
 	payload := statsEntry(dumpStatsMessage(dumpStatsFixture{freezingUsec: 1, memwriteUsec: 2}))
-	if err := os.WriteFile(filepath.Join(dir, statsDumpFilename), frameStats(false, payload), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, criustats.StatsDump), frameStats(false, payload), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ReadDumpStats(dir); err == nil {
@@ -59,7 +60,7 @@ func TestReadDumpStatsRejectsBareStatsMagic(t *testing.T) {
 
 func TestReadDumpStatsRejectsWrongMagic(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, statsDumpFilename), []byte("nope-nope-nope"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, criustats.StatsDump), []byte("nope-nope-nope"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ReadDumpStats(dir); err == nil {
@@ -123,10 +124,10 @@ func frameStats(serviceHeader bool, payload []byte) []byte {
 	buf := make([]byte, 0, 12+len(payload))
 	var magic [4]byte
 	if serviceHeader {
-		binary.LittleEndian.PutUint32(magic[:], imgServiceMagic)
+		binary.LittleEndian.PutUint32(magic[:], criustats.ImgServiceMagic)
 		buf = append(buf, magic[:]...)
 	}
-	binary.LittleEndian.PutUint32(magic[:], statsMagic)
+	binary.LittleEndian.PutUint32(magic[:], criustats.StatsMagic)
 	buf = append(buf, magic[:]...)
 	var size [4]byte
 	binary.LittleEndian.PutUint32(size[:], uint32(len(payload)))
