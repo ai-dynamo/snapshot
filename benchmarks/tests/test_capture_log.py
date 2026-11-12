@@ -186,3 +186,41 @@ def _v2_result_from(saved: dict) -> dict:
     result = _v2_result(CheckpointAgentLog())
     result["checkpoint_agent_log"] = saved
     return result
+
+
+def test_repeated_captures_are_mean_and_spread() -> None:
+    runs = []
+    for memdump, memwrite in ((4.2, 0.3), (4.5, 0.4), (4.8, 0.5)):
+        parsed = CheckpointAgentLog(
+            log_line_found=True,
+            duration=memdump + 1,
+            phases={"criu_dump": memdump},
+            criu_memdump=memdump,
+            criu_memwrite=memwrite,
+            criu_pages_written_bytes=7_000_000_000,
+        )
+        runs.append(_v2_result(parsed))
+    runs.append(
+        _v2_result(
+            CheckpointAgentLog(
+                log_line_found=True,
+                duration=9.0,
+                phases={"criu_dump": 8.0},
+                criu_memdump=8.0,
+                criu_memwrite=1.0,
+            )
+        )
+    )
+    runs[-1]["model"] = {"label": "Qwen3 14B", "tp": 1, "ep": 1}
+
+    text = report.render(runs)
+    capture = text.split("## Where the capture time goes", 1)[1].split(
+        "## How the pages were written", 1
+    )[0]
+
+    # 4.2, 4.5, 4.8 -> mean 4.5, sample sd 0.3. One capture row, not three.
+    assert capture.count("| Qwen3 0.6B |") == 1
+    assert "4.500 ± 0.300" in capture
+    assert "0.400 ± 0.100" in capture
+    row = next(line for line in capture.splitlines() if line.startswith("| Qwen3 14B |"))
+    assert "±" not in row

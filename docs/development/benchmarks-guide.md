@@ -237,7 +237,8 @@ split is `checkpoint_agent_log`, parsed from the capture-node agent's
 - `phases.overlay_capture` and `overlay_diff_bytes` — writable-layer tar
 
 `report` prints this as **Where the capture time goes** and **How the pages
-were written** when a result has `checkpoint_agent_log`. An agent built
+were written** when a result has `checkpoint_agent_log`. Repeated runs of the
+same model are one row, mean ± sample standard deviation. An agent built
 before this split still produces phase totals; the result then warns that
 the CRIU memwrite split is absent.
 

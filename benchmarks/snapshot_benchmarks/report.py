@@ -105,6 +105,40 @@ def _cold_phases(measured):
     return raw
 
 
+def _spread(values: list[float | None], digits: int = 3) -> str:
+    """Mean ± sample standard deviation, or the raw value when there is one."""
+    present = [value for value in values if value is not None]
+    if not present:
+        return "-"
+    if len(present) == 1:
+        return _fmt(present[0], digits)
+    return f"{_fmt(mean(present), digits)} ± {_fmt(stdev(present), digits)}"
+
+
+def _spread_bytes(values: list[int | None]) -> str:
+    present = [value for value in values if value is not None]
+    if not present:
+        return "-"
+    if len(present) == 1:
+        return _fmt_bytes(present[0])
+    return f"{mean(present) / 1e9:.2f} ± {stdev(present) / 1e9:.2f} GB"
+
+
+def _capture_groups(results: list[dict]) -> list[tuple[str, list[dict]]]:
+    """Repeats of one model, in the order the models first appear."""
+    groups: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for result in results:
+        if not result.get("checkpoint_agent_log"):
+            continue
+        label = (result.get("model") or {}).get("label", "-")
+        if label not in groups:
+            order.append(label)
+            groups[label] = []
+        groups[label].append(result)
+    return [(label, groups[label]) for label in order]
+
+
 def _criu_read(capture: dict) -> float | None:
     """memdump minus memwrite, computed here so results saved before the
     ``criu_read`` property existed still render it."""
@@ -112,6 +146,19 @@ def _criu_read(capture: dict) -> float | None:
     if memdump is None or memwrite is None or memwrite > memdump:
         return None
     return memdump - memwrite
+
+
+def _capture_field(result: dict, name: str) -> float | None:
+    return (result.get("checkpoint_agent_log") or {}).get(name)
+
+
+def _capture_phase(result: dict, name: str) -> float | None:
+    return ((result.get("checkpoint_agent_log") or {}).get("phases") or {}).get(name)
+
+
+def _staging_bytes(result: dict) -> int | None:
+    capture = result.get("checkpoint_agent_log") or {}
+    return capture.get("checkpoint_dir_bytes_before_overlay", capture.get("criu_image_bytes"))
 
 
 def _capture_sections(results: list[dict]) -> list[str]:
@@ -128,33 +175,34 @@ def _capture_sections(results: list[dict]) -> list[str]:
         "spent writing pages. CRIU read is memdump minus memwrite. memdump "
         "and memwrite overlap the CRIU wall; they are not added to it or to "
         "each other. Checkpoint (API) is the one-second Kubernetes Ready "
-        "timestamp and is coarser than Wall.",
+        "timestamp and is coarser than Wall. Repeated runs of the same model "
+        "are one row, the mean ± the sample standard deviation. A single run "
+        "is the raw value.",
         "",
         "| Model | Wall (s) | CUDA lock | CUDA copy | CRIU wall | CRIU freeze | "
         "CRIU memdump | of which memwrite | CRIU read | Overlay | Checkpoint (API) |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
-    for result in results:
-        capture = result.get("checkpoint_agent_log") or {}
-        if not capture:
-            continue
-        model = result.get("model") or {}
-        checkpoint = result.get("checkpoint") or {}
-        phases = capture.get("phases") or {}
+    for label, group in _capture_groups(results):
         lines.append(
             "| {label} | {wall} | {lock} | {copy} | {criu} | {freeze} | {memdump} | "
             "{memwrite} | {read} | {overlay} | {api} |".format(
-                label=model.get("label", "-"),
-                wall=_fmt(capture.get("duration")),
-                lock=_fmt(capture.get("cuda_lock")),
-                copy=_fmt(capture.get("cuda_copy")),
-                criu=_fmt(phases.get("criu_dump")),
-                freeze=_fmt(capture.get("criu_freezing")),
-                memdump=_fmt(capture.get("criu_memdump")),
-                memwrite=_fmt(capture.get("criu_memwrite")),
-                read=_fmt(_criu_read(capture)),
-                overlay=_fmt(phases.get("overlay_capture")),
-                api=_fmt(checkpoint.get("checkpoint_seconds")),
+                label=label,
+                wall=_spread([_capture_field(result, "duration") for result in group]),
+                lock=_spread([_capture_field(result, "cuda_lock") for result in group]),
+                copy=_spread([_capture_field(result, "cuda_copy") for result in group]),
+                criu=_spread([_capture_phase(result, "criu_dump") for result in group]),
+                freeze=_spread([_capture_field(result, "criu_freezing") for result in group]),
+                memdump=_spread([_capture_field(result, "criu_memdump") for result in group]),
+                memwrite=_spread([_capture_field(result, "criu_memwrite") for result in group]),
+                read=_spread([_criu_read(result.get("checkpoint_agent_log") or {}) for result in group]),
+                overlay=_spread([_capture_phase(result, "overlay_capture") for result in group]),
+                api=_spread(
+                    [
+                        (result.get("checkpoint") or {}).get("checkpoint_seconds")
+                        for result in group
+                    ]
+                ),
             )
         )
     lines.append("")
@@ -168,29 +216,27 @@ def _capture_sections(results: list[dict]) -> list[str]:
             "before the rootfs diff is added. It includes the manifest, "
             "dump.log, CUDA job file, and criu.conf, so it is neither the CRIU "
             "image nor the final checkpoint size, and it is not turned into a "
-            "rate against the dump wall.",
+            "rate against the dump wall. Repeated runs of the same model are "
+            "one row, the mean ± the sample standard deviation.",
             "",
             "| Model | Pages written | Staging dir before overlay | Overlay diff | Memwrite GB/s |",
             "|---|---:|---:|---:|---:|",
         ]
     )
-    for result in results:
-        capture = result.get("checkpoint_agent_log") or {}
-        if not capture:
-            continue
-        model = result.get("model") or {}
+    for label, group in _capture_groups(results):
         lines.append(
             "| {label} | {pages} | {staging} | {overlay} | {memwrite_rate} |".format(
-                label=model.get("label", "-"),
-                pages=_fmt_bytes(capture.get("criu_pages_written_bytes")),
-                staging=_fmt_bytes(
-                    capture.get(
-                        "checkpoint_dir_bytes_before_overlay",
-                        capture.get("criu_image_bytes"),
-                    )
+                label=label,
+                pages=_spread_bytes(
+                    [_capture_field(result, "criu_pages_written_bytes") for result in group]
                 ),
-                overlay=_fmt_bytes(capture.get("overlay_diff_bytes")),
-                memwrite_rate=_fmt(capture.get("memwrite_gigabytes_per_second")),
+                staging=_spread_bytes([_staging_bytes(result) for result in group]),
+                overlay=_spread_bytes(
+                    [_capture_field(result, "overlay_diff_bytes") for result in group]
+                ),
+                memwrite_rate=_spread(
+                    [_capture_field(result, "memwrite_gigabytes_per_second") for result in group]
+                ),
             )
         )
     lines.append("")
