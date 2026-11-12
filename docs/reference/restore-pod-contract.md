@@ -186,6 +186,20 @@ The proxy reserves two exit codes:
 Every other exit code is the restored workload's own, or 128 plus the number of
 the signal that ended it.
 
+## Restore Retries
+
+A destination container gets up to the retry limit plus one restore attempts.
+The limit is `nvidia.com/restore-retry-limit`, or else
+`config.restore.retryLimit`, and defaults to 0 (see the
+[API Reference](api.md#restore)).
+
+The agent retries only a failed attempt that left the container untouched, and
+runs the retry in the same container. A failure changes the container once the
+restore begins to apply the snapshot to it. Such a failure ends the restore,
+and so does a container that stops during an attempt, since another attempt
+needs a new container. The `restartPolicy` does not change which failures are
+retried, and retries also work on nodes without the restore proxy.
+
 ## Nodes Without the Restore Proxy
 
 On a node whose container runtime has no NRI, or NRI older than v0.10

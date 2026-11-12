@@ -129,7 +129,8 @@ payload checksums.
 
 - `config.overlay.exclusions` - Rootfs-diff tar exclusions. Default: `/proc`, `/sys`, `/dev`, `*/.cache/huggingface`, `*/__pycache__`, `*.pyc`. A file the checkpointed processes hold open or mapped at dump time is archived even when an exclusion matches it, so CRIU can reopen it. Other excluded files are not restored; the workload must recreate them if needed.
 - `config.checkpoint.timeoutSeconds` - Maximum seconds for a checkpoint before the agent marks it failed. Default `3600`.
-- `config.restore.timeoutSeconds` - Maximum seconds for a restore before the agent marks it failed. Default `7200`.
+- `config.restore.timeoutSeconds` - Maximum seconds for a restore, across all of its attempts, before the agent marks it failed. Default `7200`.
+- `config.restore.retryLimit` - How many more restore attempts each destination container gets after its first attempt fails. A restore Pod overrides it with `nvidia.com/restore-retry-limit`. Default `0`.
 
 `config.criu.*` - CRIU options:
 
