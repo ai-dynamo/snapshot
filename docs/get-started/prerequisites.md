@@ -37,17 +37,35 @@ S3 backend. The chart ships the agent and PageBroker as a pair, so
 `image.agent.tag` selects both. With S3, you do not need a `ReadWriteMany`
 storage class. See [Other Backends](../operate/configure-storage.md#other-backends).
 
+### GPU CustomStorage
+
+Requires CUDA driver API 13.4 or newer, which is user-mode driver (`libcuda.so`)
+615 or newer, in each process listed in
+[Which Library Each Process Loads](../operate/cuda-driver.md#which-library-each-process-loads).
+
+If PageBroker is below the minimum, a checkpoint uses the driver-managed format.
+See [PageBroker GPU Engine](../reference/helm-values.md#pagebroker-gpu-engine). If
+PageBroker meets the minimum but the workload does not, the checkpoint stops
+responding in `cuCheckpointProcessLock`. When it times out, it fails with
+`CUDA_ERROR_OPERATING_SYSTEM` at the
+[checkpointing GPU state](../troubleshooting/checkpoints.md#checkpointing-gpu-state)
+step. It does not switch to the driver-managed format. A CustomStorage snapshot
+restores only on a node where PageBroker meets the minimum. On other nodes, the
+restore fails at
+[validating checkpoint manifest against the restore request](../troubleshooting/restores.md#validating-checkpoint-manifest-against-the-restore-request).
+
 ### Multi-GPU Workloads
 
 Requires the baseline if the workload holds no multicast groups. Otherwise,
-requires CUDA user-mode driver (`libcuda.so`) 615 or newer.
+requires CUDA user-mode driver (`libcuda.so`) 595 or newer. This minimum also
+applies when the workload sets `nvidia.com/snapshot-multi-gpu: enabled`.
 
-The 580 user-mode driver cannot restore a process that holds
-[multicast groups](../design/multi-gpu/README.md#multicast-mappings),
-for example through NCCL NVLS. The restore fails with
-`CUDA_ERROR_INVALID_DEVICE`. To use a 615 or newer user-mode driver with an
-older kernel-mode driver, point `LD_LIBRARY_PATH` at the directory that contains
-its `libcuda.so` in both the workload and PageBroker. See
+Restore on drivers older than 595 may fail with `CUDA_ERROR_INVALID_DEVICE` when
+the workload holds
+[multicast groups](../design/multi-gpu/README.md#multicast-mappings), for
+example through NCCL NVLS, even with multi-GPU support enabled. To select a
+newer user-mode driver, see
+[Check the CUDA User-Mode Driver](../operate/cuda-driver.md). See also
 [Multi-GPU Workloads](../reference/workload-contract.md#multi-gpu-workloads).
 
 ### Restore Proxy
