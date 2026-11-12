@@ -385,11 +385,19 @@ def setup_snapshot_install(args: argparse.Namespace, context: SetupContext) -> N
     )
 
 
+# One retry: enough for a failing capture to report an attempt and spend it,
+# without doubling how long a test that fails for a settled reason takes.
+E2E_CHECKPOINT_RETRY_LIMIT = 1
+
+
 def snapshot_helm_overrides(
     mode: str, host_namespace: str, helm_set: Sequence[str] | None
 ) -> list[str]:
     """Helm --set assignments for every install and upgrade of the chart."""
     overrides = parse_helm_overrides(helm_set, os.environ.get("SNAPSHOT_E2E_HELM_SET"))
+    # Retry ships off, so an install that takes the default exercises none of it.
+    # First, so the user's overrides still win.
+    overrides.insert(0, f"config.checkpoint.retryLimit={E2E_CHECKPOINT_RETRY_LIMIT}")
     if mode == "vcluster" and host_namespace:
         # Other clusters may share the vCluster's nodes: restore only this
         # vCluster's Pods. First, so the user's overrides still win.

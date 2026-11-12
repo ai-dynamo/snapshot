@@ -1379,6 +1379,7 @@ def create_ready_source(
     handle_sigterm: bool = False,
     hooks_server: bool = False,
     release_dir: bool = False,
+    anon_ballast_mb: int | None = None,
 ) -> tuple[object, str]:
     pod = snap.source_pod(
         config=config,
@@ -1388,6 +1389,7 @@ def create_ready_source(
         memory_limit=memory_limit,
         handle_sigterm=handle_sigterm,
         hooks_server=hooks_server,
+        anon_ballast_mb=anon_ballast_mb,
     )
     k8s.create_pod(snap.add_release_dir(pod) if release_dir else pod)
     pod = snap.wait_for_pod_ready(config.namespace, run.source_pod)
