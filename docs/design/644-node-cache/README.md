@@ -28,10 +28,9 @@ and does not describe automatic preheat.
   - [Interrupted Preheat](#interrupted-preheat)
   - [Cleanup](#cleanup)
   - [Automatic Preheat](#automatic-preheat)
-  - [External Writers](#external-writers)
+  - [Copies Placed by an Administrator](#copies-placed-by-an-administrator)
   - [API](#api)
   - [Security](#security)
-  - [Configuration](#configuration)
   - [Performance and Scalability](#performance-and-scalability)
   - [Monitoring](#monitoring)
   - [Dependencies](#dependencies)
@@ -82,8 +81,7 @@ with S3 as the shared store in place of a PVC:
   snapshot is deleted. Manual deletion and per-node status are not included.
 
 This proposal also meets requirements 7 and 8 in part. See
-[Cache Identity and Layout](#cache-identity-and-layout) and
-[Configuration](#configuration).
+[Cache Identity and Layout](#cache-identity-and-layout) and [API](#api).
 
 ### Non-Goals
 
@@ -127,8 +125,8 @@ Resource contention between a preheat and a restore stays within agreed
 limits.
 
 An administrator can also preheat one node with a command; see [API](#api).
-Another tool can prepare copies if it follows the contract in
-[External Writers](#external-writers).
+An administrator can also place copies with another tool; see
+[Copies Placed by an Administrator](#copies-placed-by-an-administrator).
 
 ### Limitations, Risks, and Mitigations
 
@@ -164,7 +162,7 @@ administrator does about it.
   and the network carry the full load.
 - **The cache can land on the wrong disk.** If the NVMe is not mounted at the
   configured path, copies go to the root disk. Check that the path is on the
-  intended disk. See [Configuration](#configuration).
+  intended disk. See [API](#api).
 
 The open decisions are part of the readiness gate in
 [Graduation Criteria](#graduation-criteria).
@@ -319,7 +317,8 @@ same run. It never publishes a directory that it finds left over.
 
 When a snapshot is deleted, each node agent removes its local copy. The
 regular re-check also removes any copy whose snapshot no longer exists. I4
-applies equally to Snapshot-created and externally created copies.
+applies equally to copies that preheat placed and copies that an administrator
+placed.
 
 **Illustration 4 (I4): Clean Up Node Copies**
 
@@ -337,10 +336,10 @@ the work area.
 
 ### Automatic Preheat
 
-Automatic preheat runs in the node agent when it is enabled; see
-[Configuration](#configuration). It starts a download when a snapshot becomes
-Ready. The start of the subscription covers a node that joined later, and the
-regular re-check covers a retry after a failure.
+Automatic preheat runs in the node agent when it is enabled; see [API](#api).
+It starts a download when a snapshot becomes Ready. The start of the
+subscription covers a node that joined later, and the regular re-check covers
+a retry after a failure.
 
 A snapshot is eligible when all of these conditions hold:
 
@@ -392,35 +391,79 @@ Processing one snapshot at a time bounds the overlap to one download. The
 readiness gate in [Graduation Criteria](#graduation-criteria) states the
 required outcomes.
 
-### External Writers
+### Copies Placed by an Administrator
 
-An external tool can publish a copy under this contract:
+An administrator can place copies in the node cache with their own tool. A
+restore uses such a copy exactly like one that preheat placed. This works with
+automatic preheat disabled.
 
-1. Resolve a live, Ready snapshot object.
-2. Write a complete local-layout copy under a temporary name, outside
-   preheat's work area.
-3. Publish by renaming on the same filesystem without overwriting an entry.
-4. Leave published files unchanged.
-5. Start restore pods only after publication completes.
+A placed copy must meet these rules:
 
-The tool owns completeness checks. A plain S3 sync is insufficient: the S3
-index also records modes and empty directories. Use the preheat command when
-the tool cannot reconstruct that layout.
+1. Its snapshot object exists in this cluster and is Ready.
+2. It has the path described in
+   [Cache Identity and Layout](#cache-identity-and-layout), and the same files
+   that a PVC installation holds for that snapshot. File modes, directory
+   modes, and empty directories are preserved.
+3. It is written under a temporary name on the same disk, outside preheat's
+   work area, and then renamed into place without overwriting an entry.
+4. It is not changed after it is published.
+5. Restore pods start only after the rename.
+
+The supported way to obtain a correct copy is to preheat one node, then copy
+that snapshot's directory to other nodes with a tool that keeps modes. A plain
+S3 sync is not enough: the layout in S3 differs, and its index holds the modes
+and the empty directories.
+
+Snapshot treats a placed copy like any other. It removes the copy when its
+snapshot is deleted, and it does not verify the content. Automatic preheat
+fills only missing copies and never overwrites a placed one. A copy made for a
+snapshot in another cluster is not accepted, since that snapshot has a
+different ID.
 
 ### API
 
-This proposal adds no new Kubernetes API or CRD. It adds an administrator
-command and Helm values, which are public interfaces. Exact command, flag,
-value, result, and event names remain review decisions.
+This proposal adds no new Kubernetes API or CRD. Its public interfaces are the
+Helm values, the preheat command, and the node cache layout. The names remain
+review decisions.
 
-The command selects a snapshot by namespace and name. Running it in a node's
-agent pod selects that node. It reports ready, skipped, or failed results with
-reasons.
+**Helm values.** The proposed values are:
 
-Preheat adds one request between the node agent and PageBroker. It is
-internal and not a public interface. This proposal adds no agent endpoint or
-cancellation command. Automatic preheat needs no new agent permission: the
-agent can already list and watch snapshot objects and create events.
+- `storage.nodeCache.enabled`: disabled by default; S3 installations only.
+- `storage.nodeCache.hostPath`: the local cache directory.
+- `storage.nodeCache.minFreeSpace`: space to retain after a preheat copy.
+- `storage.nodeCache.preheat.enabled`: disabled by default; when enabled with
+  the cache, each agent preheats every eligible snapshot.
+
+Units, required values, and defaults other than enablement are open.
+A free-space check does not reserve disk space against other writers.
+
+**Node preparation.** The participating nodes are the nodes where the agent
+runs with the cache enabled. The chart's existing agent placement settings
+choose those nodes. The chart mounts the `hostPath` directory into the agent
+pod. Before enabling the cache, an administrator prepares each node that
+should hold copies:
+
+1. Format the NVMe and mount it on the node.
+2. Use the same path on every such node. The setting is one value for the
+   installation.
+3. Confirm that the path is on the NVMe and not on the root disk.
+
+Snapshot never creates the cache directory, and it does not format or mount
+disks.
+
+**Mount path.** The proposed mount path is `/checkpoints`, which reuses the
+local restore path. A dedicated path adds mount-helper changes. Resolve this
+choice against related storage designs before implementation.
+
+**Preheat command.** It selects a snapshot by namespace and name, runs in a
+node's agent pod, and reports ready, skipped, or failed results with reasons.
+
+**Node cache layout.** It is a public interface for copies placed by an
+administrator; see
+[Copies Placed by an Administrator](#copies-placed-by-an-administrator).
+
+The request that preheat adds between the node agent and PageBroker is
+internal. Automatic preheat needs no new agent permission.
 
 ### Security
 
@@ -444,37 +487,6 @@ that is not acceptable.
 Cleanup removes copies after snapshot deletion. Disabling the feature leaves
 copies behind, so removal instructions are required. Filesystem deletion is
 not a promise of secure erasure.
-
-### Configuration
-
-The proposed Helm values are:
-
-- `storage.nodeCache.enabled`: disabled by default; S3 installations only.
-- `storage.nodeCache.hostPath`: the local cache directory.
-- `storage.nodeCache.minFreeSpace`: space to retain after a preheat copy.
-- `storage.nodeCache.preheat.enabled`: disabled by default; when enabled with
-  the cache, each agent preheats every eligible snapshot.
-
-Units, required values, and defaults other than enablement are open.
-A free-space check does not reserve disk space against other writers.
-
-The participating nodes are the nodes where the agent runs with the cache
-enabled. The chart's existing agent placement settings choose those nodes.
-
-The chart mounts the `hostPath` directory into the agent pod. Before enabling
-the cache, an administrator prepares each node that should hold copies:
-
-1. Format the NVMe and mount it on the node.
-2. Use the same path on every such node. The setting is one value for the
-   installation.
-3. Confirm that the path is on the NVMe and not on the root disk.
-
-Snapshot never creates the cache directory, and it does not format or mount
-disks.
-
-The proposed mount path is `/checkpoints`, which reuses the local restore
-path. A dedicated path adds mount-helper changes. Resolve this choice against
-related storage designs before implementation.
 
 ### Performance and Scalability
 
@@ -630,7 +642,7 @@ Reviewers need to settle these points:
 
 1. Accept the S3-first scope and the operating restrictions.
 2. Choose the mount path and finalize configuration and command names.
-3. Confirm deletion of externally prepared copies.
+3. Confirm deletion of copies placed by an administrator.
 4. Agree the import contract and shared-store cleanup ownership.
 5. Decide how preheat downloads are isolated from restores in PageBroker. The
    candidate is an isolated preheat download mechanism; implementation to be
