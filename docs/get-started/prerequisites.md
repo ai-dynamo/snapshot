@@ -56,15 +56,8 @@ restore fails at
 
 ### Multi-GPU Workloads
 
-Requires the baseline if the workload holds no multicast groups. If it holds
-multicast groups, requires CUDA user-mode driver (`libcuda.so`) 595 or newer,
-also when the workload sets `nvidia.com/snapshot-multi-gpu: enabled`.
-
-Restore on drivers older than 595 may fail with `CUDA_ERROR_INVALID_DEVICE` when
-the workload holds
-[multicast groups](../design/multi-gpu/README.md#multicast-mappings), for
-example through NCCL NVLS, even with multi-GPU support enabled. To select a
-newer user-mode driver, see
+Requires [GPU CustomStorage](#gpu-customstorage), so CUDA user-mode driver
+(`libcuda.so`) 615 or newer. To select a newer user-mode driver, see
 [Check the CUDA User-Mode Driver](../operate/cuda-driver.md). See also
 [Multi-GPU Workloads](../reference/workload-contract.md#multi-gpu-workloads).
 
