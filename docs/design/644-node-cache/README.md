@@ -172,9 +172,9 @@ The open decisions are part of the readiness gate in
 ### Components
 
 The node agent selects the source and coordinates restore. CRIU reads process
-state. PageBroker downloads from S3 and restores GPU memory. For preheat, the
-node agent decides what to download and publishes the result. PageBroker
-downloads from S3 straight into the node cache.
+state. PageBroker downloads from S3. For preheat, the node agent decides what
+to download and publishes the result. PageBroker downloads from S3 straight
+into the node cache.
 
 The cache is mounted read-write into the node agent. PageBroker gets the cache
 read-only, plus write access to its work directory only. Local restore uses
