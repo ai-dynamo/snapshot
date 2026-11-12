@@ -40,7 +40,7 @@ and does not describe automatic preheat.
   - [Dependencies](#dependencies)
   - [Test Plan](#test-plan)
   - [Graduation Criteria](#graduation-criteria)
-  - [Later Phases](#later-phases)
+  - [Future Work](#future-work)
 - [Implementation History](#implementation-history)
 - [Alternatives](#alternatives)
 - [Appendix](#appendix)
@@ -69,8 +69,8 @@ first.
 
 ### Goals
 
-Phase 1 has five goals. Each one maps to a requirement of issue #644, with S3
-as the shared store in place of a PVC:
+This proposal has five goals. Each one maps to a requirement of issue #644,
+with S3 as the shared store in place of a PVC:
 
 - **Local restore (requirement 2):** restore from a usable local copy without
   staging it into RAM.
@@ -84,23 +84,23 @@ as the shared store in place of a PVC:
 - **Cleanup (requirement 6, in part):** remove local copies after their
   snapshot is deleted. Manual deletion and per-node status are not included.
 
-Phase 1 also meets requirements 7 and 8 in part. See
+This proposal also meets requirements 7 and 8 in part. See
 [Cache Identity and Layout](#cache-identity-and-layout) and
 [Configuration](#configuration).
 
 ### Non-Goals
 
-Phase 1 excludes these features. Each one is a requirement of issue #644 that
-this proposal defers:
+This proposal excludes these features. Each one is a requirement of issue
+#644 that is deferred:
 
 - **Lazy pull-through (requirement 3):** filling the cache during a restore.
 - **Cache-aware placement (requirement 4):** preferring nodes that already
   hold a copy when a restore pod is scheduled. The scheduler chooses the node
   as it does today.
 - **Pre-staging on selected nodes (requirement 5):** choosing which nodes
-  receive copies. Phase 1 copies to every participating node.
-- **A shared PVC as the source of truth (requirement 1):** phase 1 covers S3
-  installations only.
+  receive copies. This proposal copies to every participating node.
+- **A shared PVC as the source of truth (requirement 1):** this proposal
+  covers S3 installations only.
 
 Multi-cluster support is also excluded. Issue #644 does not request it.
 
@@ -135,7 +135,7 @@ Another tool can prepare copies if it follows the contract in
 
 ### Limitations, Risks, and Mitigations
 
-Phase 1 accepts these limits. Each one states its effect and what an
+This proposal accepts these limits. Each one states its effect and what an
 administrator does about it.
 
 - **Snapshot does not know which copies are in use.** Deleting a snapshot or
@@ -211,7 +211,7 @@ artifacts/<snapshot-uid>/containers/<container>/
 ```
 
 Resolve `PodSnapshot.status.boundSnapshotContentName` to its
-`PodSnapshotContent`. In phase 1, use that object's UID.
+`PodSnapshotContent`. Use that object's UID.
 
 Restore rejects symlinks and non-directories at the selected entry. It checks
 the manifest's UID and container, then checks for a bad-copy marker.
@@ -220,7 +220,7 @@ Validation has three separate meanings:
 
 - **Identity:** checked at each local restore.
 - **Completeness:** file lists, sizes, and modes are checked during preheat.
-- **Content integrity:** checksums are not included in phase 1.
+- **Content integrity:** checksums are not included.
 
 An immutable snapshot does not need freshness updates. Immutability does not
 prove that a local copy is complete or undamaged.
@@ -298,8 +298,8 @@ invalid.
 
 ### Replace a Copy
 
-Replacement requires the phase 1 restriction on active restores. The new copy
-must be complete and flushed before the operations in I3 begin.
+Replacement requires that no restore is using the copy. The new copy must be
+complete and flushed before the operations in I3 begin.
 
 **Illustration 3 (I3): Replace a Copy**
 
@@ -398,7 +398,7 @@ temporary work and old copies.
 
 Automatic preheat runs in the node agent when
 `storage.nodeCache.preheat.enabled` is set. It reuses the periodic pass that
-[Cleanup](#cleanup) introduces in phase 1. One rule covers a newly Ready
+[Cleanup](#cleanup) introduces. One rule covers a newly Ready
 snapshot, a node that joined later, and a retry after a failure.
 
 On each pass, the agent lists snapshots and selects those without a local
@@ -475,9 +475,9 @@ the tool cannot reconstruct that layout.
 
 ### API
 
-Phase 1 adds no new Kubernetes API or CRD. It adds an administrator command
-and Helm values, which are public interfaces. Exact command, flag, value,
-result, and event names remain review decisions.
+This proposal adds no new Kubernetes API or CRD. It adds an administrator
+command and Helm values, which are public interfaces. Exact command, flag,
+value, result, and event names remain review decisions.
 
 The command selects a snapshot by namespace and name. Running it in a node's
 agent pod selects that node. It supports replacing an existing copy and
@@ -485,7 +485,7 @@ reports ready, skipped, or failed results with reasons. Cleanup failures must
 remain visible even when a copy was successfully published.
 
 Preheat adds one request between the node agent and PageBroker. It is
-internal and not a public interface. Phase 1 adds no agent endpoint or
+internal and not a public interface. This proposal adds no agent endpoint or
 cancellation command. Automatic preheat
 needs no new agent permission: the agent can already list snapshot objects and
 create events.
@@ -517,7 +517,7 @@ not a promise of secure erasure.
 
 The proposed Helm values are:
 
-- `storage.nodeCache.enabled`: disabled by default; phase 1 supports S3 only.
+- `storage.nodeCache.enabled`: disabled by default; S3 installations only.
 - `storage.nodeCache.hostPath`: the local cache directory.
 - `storage.nodeCache.minFreeSpace`: space to retain after a preheat copy.
 - `storage.nodeCache.preheat.enabled`: disabled by default; when enabled with
@@ -560,7 +560,7 @@ Automatic preheat emits an event when it skips or fails a snapshot, naming the
 node and the reason. It rate-limits repeated events for the same snapshot and
 reason. It logs each completed copy.
 
-Phase 1 has no cluster-wide cache inventory or per-node API status.
+This proposal has no cluster-wide cache inventory or per-node API status.
 
 ### Dependencies
 
@@ -611,7 +611,7 @@ The implementation needs these tests:
 
 These are proposed evidence gates, not release dates:
 
-- **Initial opt-in use:** the layout proof passes, phase 1 tests pass, resource
+- **Initial opt-in use:** the layout proof passes, the tests pass, resource
   use is measured, and administrators can follow the documented restrictions.
 - **Broader use:** reader coordination, interrupted-operation handling, and
   disk checks have qualified tests.
@@ -632,33 +632,34 @@ outcomes are shown:
 
 Maintainers must agree the maturity labels and thresholds during review.
 
-### Later Phases
+### Future Work
 
 A preheat node selector is a possible enhancement. It limits copies to a
 group of nodes, which helps clusters with mixed GPU models. It does not change
 workload scheduling.
 
-Phase 2 adds a preheat object for per-snapshot node choice, with per-node
-status. It also tracks readers and checks the intended disk. Retention or
-eviction of live copies is a candidate for a later phase.
+A preheat object can add per-snapshot node choice, with per-node status.
+Later work can also track readers and check the intended disk. Retention or
+eviction of live copies is another candidate.
 
-Phase 3 depends on imports preserving snapshot identity, store binding, and
-container handles. Readiness must reflect available snapshot data. Shared
-stores need deletion and orphan-sweep rules that protect other clusters.
-Cross-cluster tests are required. These dependencies are not resolved here.
+Multi-cluster support depends on imports preserving snapshot identity, store
+binding, and container handles. Readiness must reflect available snapshot
+data. Shared stores need deletion and orphan-sweep rules that protect other
+clusters. Cross-cluster tests are required. These dependencies are not
+resolved here.
 
 ## Implementation History
 
 On 2026-11-11, the source plan was adapted into this illustrated draft for
-author review. On 2026-11-12, the draft added automatic preheat to phase 1 and
-changed preheat to download straight to the node cache. No feature
+author review. On 2026-11-12, the draft added automatic preheat and changed
+preheat to download straight to the node cache. No feature
 implementation or runtime validation is recorded.
 
 ## Alternatives
 
 The source plan and its review considered these alternatives:
 
-- **Command-only preheat in phase 1:** smaller, but an administrator must run
+- **Command-only preheat:** smaller, but an administrator must run
   it on each node for each snapshot. Preparing copies before applications
   start is the required initial functionality.
 - **Administrator-selected nodes:** limits disk use on mixed clusters, but
@@ -667,7 +668,7 @@ The source plan and its review considered these alternatives:
 - **Every node that can restore the snapshot:** a node cannot know this before
   the restore pod exists.
 - **A preheat object with a controller:** gives per-snapshot node choice and
-  status, but adds an API. Defer it to phase 2.
+  status, but adds an API. Defer it.
 - **Download into RAM, then copy in the agent:** reuses the existing download
   request unchanged. It limits a snapshot to the staging RAM, takes that RAM
   from restores, and adds a second copy.
@@ -682,7 +683,7 @@ The source plan and its review considered these alternatives:
 
 Reviewers need to settle these points:
 
-1. Accept the S3-first phases and phase 1 operating restrictions.
+1. Accept the S3-first scope and the operating restrictions.
 2. Choose the mount path and finalize configuration and command names.
 3. Confirm bad-copy marking and deletion of externally prepared copies.
 4. Define command results for published copies with pending cleanup.
