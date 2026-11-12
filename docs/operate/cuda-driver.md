@@ -110,7 +110,3 @@ If PageBroker meets the CustomStorage minimum but the workload does not, a
 checkpoint stops responding in `cuCheckpointProcessLock`. When it times out, it
 fails with `CUDA_ERROR_OPERATING_SYSTEM`. See
 [checkpointing GPU state](../troubleshooting/checkpoints.md#checkpointing-gpu-state).
-
-A restore of a workload that holds multicast groups may fail with
-`CUDA_ERROR_INVALID_DEVICE` below the minimum. See
-[restoring CUDA state](../troubleshooting/restores.md#restoring-cuda-state).
