@@ -95,6 +95,7 @@ def source_pod(
     memory_limit: str | None = None,
     handle_sigterm: bool = False,
     hooks_server: bool = False,
+    anon_ballast_mb: int | None = None,
 ) -> dict[str, Any]:
     metadata = {
         "name": run.source_pod,
@@ -105,7 +106,13 @@ def source_pod(
     spec = base_pod_spec(
         config,
         run,
-        source_command(run.image, gpu, handle_sigterm=handle_sigterm, hooks_server=hooks_server),
+        source_command(
+            run.image,
+            gpu,
+            handle_sigterm=handle_sigterm,
+            hooks_server=hooks_server,
+            anon_ballast_mb=anon_ballast_mb,
+        ),
         gpu,
         memory_limit,
     )
@@ -413,7 +420,29 @@ def same_node_affinity(node: str) -> dict[str, Any]:
     }
 
 
-def source_command(image: str, gpu: bool, *, handle_sigterm: bool = False, hooks_server: bool = False) -> str:
+# ANON_BALLAST holds megabytes of anonymous memory in the checkpointed tree, so
+# a test knows roughly how large the CRIU image will be. Perl because the
+# workload image has it and has no Python; the pages are touched, since a
+# reservation CRIU never dumps would defeat the point. Substituted rather than
+# formatted, because the snippet is full of Perl braces. It runs in the
+# background and is never reaped, so it is part of the tree the dump walks.
+ANON_BALLAST = """perl -e '
+  my $mb = $ARGV[0];
+  my @held = map { "x" x (1024 * 1024) } 1 .. $mb;
+  print "[source] holding ${mb}MiB\\n";
+  sleep while 1;
+' __BALLAST_MB__ &
+"""
+
+
+def source_command(
+    image: str,
+    gpu: bool,
+    *,
+    handle_sigterm: bool = False,
+    hooks_server: bool = False,
+    anon_ballast_mb: int | None = None,
+) -> str:
     # handle_sigterm makes the CPU loop exit with SIGTERM_EXIT on SIGTERM. Off
     # by default, so every other test keeps a workload that only SIGKILL ends.
     if handle_sigterm and gpu:
@@ -425,10 +454,15 @@ def source_command(image: str, gpu: bool, *, handle_sigterm: bool = False, hooks
         if gpu:
             raise ValueError("the lifecycle hooks server runs only in the CPU source")
         server = HOOKS_SERVER
+    ballast = ""
+    if anon_ballast_mb:
+        if gpu:
+            raise ValueError("only the CPU source carries anonymous ballast")
+        ballast = ANON_BALLAST.replace("__BALLAST_MB__", str(anon_ballast_mb))
     return f"""set -euo pipefail
 echo "[source] image={image}"
 mkdir -p {STATE_DIR}
-{on_sigterm}{server}{state_loop}
+{on_sigterm}{ballast}{server}{state_loop}
 """
 
 

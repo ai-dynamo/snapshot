@@ -89,6 +89,7 @@ def create_podsnapshot(
     container: str = CONTAINER,
     *,
     containers: list[dict[str, Any]] | None = None,
+    retry_limit: int | None = None,
 ) -> dict[str, Any]:
     body = {
         "apiVersion": f"{GROUP}/{VERSION}",
@@ -106,6 +107,8 @@ def create_podsnapshot(
     }
     if containers is not None:
         body["spec"]["containers"] = containers
+    if retry_limit is not None:
+        body["spec"]["checkpointRetryLimit"] = retry_limit
     return client.CustomObjectsApi().create_namespaced_custom_object(
         GROUP,
         VERSION,
@@ -1171,6 +1174,53 @@ def create_artifact_staging_file(
         f"mkdir -p {checkpoint_artifact_root(content_uid)}/.tmp && "
         f"printf orphan > {checkpoint_artifact_root(content_uid)}/.tmp/partial",
         container=AGENT_CONTAINER,
+    )
+
+
+# Where the chart mounts the memory-backed staging volume in both containers.
+STAGING_DIR = "/pagebroker/staging"
+STAGING_BALLAST = f"{STAGING_DIR}/e2e-ballast"
+
+
+def fill_staging(config: k8s.E2EConfig, node: str, *, leave_bytes: int) -> str:
+    """Fills the node's staging volume, leaving ``leave_bytes`` free.
+
+    Staging is memory-backed and shared by every capture on the node, so a test
+    that does this must run alone. The chart caps the volume below the writing
+    container's memory limit precisely so filling it reports ENOSPC rather than
+    killing the agent, which is what makes this usable as a fault.
+    """
+    return k8s.exec_command(
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        "set -eu; "
+        f"avail=$(df -B1 --output=avail {STAGING_DIR} | tail -1); "
+        f"size=$((avail - {leave_bytes})); "
+        '[ "$size" -gt 0 ] || { echo "staging already fuller than the test wants" >&2; exit 1; }; '
+        f"fallocate -l $size {STAGING_BALLAST} 2>/dev/null || "
+        f"dd if=/dev/zero of={STAGING_BALLAST} bs=1M count=$((size / 1048576)) status=none; "
+        f"df -B1 --output=avail {STAGING_DIR} | tail -1",
+        container=AGENT_CONTAINER,
+    )
+
+
+def drain_staging(config: k8s.E2EConfig, node: str) -> None:
+    """Removes the ballast. Safe to call when there is none."""
+    k8s.exec_command(
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        f"rm -f {STAGING_BALLAST}",
+        container=AGENT_CONTAINER,
+    )
+
+
+def agent_startup_log(config: k8s.E2EConfig, node: str) -> str:
+    """The agent's own startup line, which records what it will run with."""
+    return k8s.pod_logs(
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        container=AGENT_CONTAINER,
+        tail_lines=None,
     )
 
 
