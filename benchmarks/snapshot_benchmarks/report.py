@@ -105,6 +105,15 @@ def _cold_phases(measured):
     return raw
 
 
+def _criu_read(capture: dict) -> float | None:
+    """memdump minus memwrite, computed here so results saved before the
+    ``criu_read`` property existed still render it."""
+    memdump, memwrite = capture.get("criu_memdump"), capture.get("criu_memwrite")
+    if memdump is None or memwrite is None or memwrite > memdump:
+        return None
+    return memdump - memwrite
+
+
 def _capture_sections(results: list[dict]) -> list[str]:
     """Capture breakdown. Skips results that have no checkpoint agent log."""
     lines = [
@@ -143,7 +152,7 @@ def _capture_sections(results: list[dict]) -> list[str]:
                 freeze=_fmt(capture.get("criu_freezing")),
                 memdump=_fmt(capture.get("criu_memdump")),
                 memwrite=_fmt(capture.get("criu_memwrite")),
-                read=_fmt(capture.get("criu_read")),
+                read=_fmt(_criu_read(capture)),
                 overlay=_fmt(phases.get("overlay_capture")),
                 api=_fmt(checkpoint.get("checkpoint_seconds")),
             )

@@ -169,3 +169,20 @@ def test_report_skips_capture_tables_without_agent_log() -> None:
 
     assert "## Where the capture time goes" not in text
     assert "## How the pages were written" not in text
+
+
+def test_report_computes_criu_read_for_results_saved_without_it() -> None:
+    saved = _to_json_value(
+        CheckpointAgentLog(log_line_found=True, criu_memdump=4.5, criu_memwrite=0.4)
+    )
+    del saved["criu_read"]
+
+    text = report.render([_v2_result_from(saved)])
+
+    assert "4.100" in text
+
+
+def _v2_result_from(saved: dict) -> dict:
+    result = _v2_result(CheckpointAgentLog())
+    result["checkpoint_agent_log"] = saved
+    return result
