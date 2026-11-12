@@ -49,16 +49,21 @@ user-mode driver 615.71.09.
 inspect. Check the `agent` container's library path instead:
 
 ```bash
-kubectl -n <namespace> get pods -o wide -l app.kubernetes.io/component=snapshot-agent
-kubectl -n <namespace> exec <agent-pod> -c agent -- printenv LD_LIBRARY_PATH
+kubectl -n <snapshot-namespace> get pods -o wide -l app.kubernetes.io/component=snapshot-agent
+kubectl -n <snapshot-namespace> exec <agent-pod> -c agent -- printenv LD_LIBRARY_PATH
 ```
 
 At restore, the helper searches those directories inside the restore Pod, and
-loads the first `libcuda.so` it finds. List each directory in the restore Pod:
+loads the first `libcuda.so` it finds. List each directory in the restore Pod's
+destination container:
 
 ```bash
-kubectl -n <namespace> exec <restore-pod> -- ls <directory>
+kubectl -n <workload-namespace> exec <restore-pod> -c <restore-container> -- ls <directory>
 ```
+
+The command needs a running container. If a failed restore stopped the
+container, check the restore Pod's spec instead: each directory must come from
+the image or from a volume mounted in the destination container.
 
 The workload, PageBroker, and the `agent` container must use the same version.
 
@@ -88,8 +93,8 @@ The chart has no setting for the `agent` and `pagebroker` environment. Find the
 agent DaemonSet, and set it there, for example:
 
 ```bash
-kubectl -n <namespace> get daemonset -l app.kubernetes.io/component=snapshot-agent
-kubectl -n <namespace> set env daemonset/<agent-daemonset> -c pagebroker \
+kubectl -n <snapshot-namespace> get daemonset -l app.kubernetes.io/component=snapshot-agent
+kubectl -n <snapshot-namespace> set env daemonset/<agent-daemonset> -c pagebroker \
   LD_LIBRARY_PATH=/usr/local/cuda-13.4/compat:/usr/local/lib
 ```
 
