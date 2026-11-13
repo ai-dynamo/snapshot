@@ -237,14 +237,10 @@ func formatContainerMappings(mappings []ContainerMapping) (string, bool) {
 	}
 	formatted := make([]string, 0, len(mappings))
 	for _, mapping := range mappings {
-		formatted = append(formatted, formatContainerMapping(mapping))
+		formatted = append(formatted, mapping.String())
 	}
 	sort.Strings(formatted)
 	return strings.Join(formatted, ","), true
-}
-
-func formatContainerMapping(mapping ContainerMapping) string {
-	return mapping.Source + "=" + mapping.Destination
 }
 
 func sameContainerMappings(left, right []ContainerMapping) bool {

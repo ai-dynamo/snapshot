@@ -470,7 +470,7 @@ func TestRestoreGroupClaimRoundTrip(t *testing.T) {
 		{Source: "main", Destination: "server"},
 		{Source: "main", Destination: "main"},
 	} {
-		t.Run(formatContainerMapping(mapping), func(t *testing.T) {
+		t.Run(mapping.String(), func(t *testing.T) {
 			pod := restorePodFixture()
 			pod.Spec.Containers[0].Name = mapping.Destination
 			pod, err := BuildGroupTarget(pod, GroupTargetRequest{DestinationContainer: mapping.Destination}, Options{})
