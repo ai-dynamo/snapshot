@@ -25,9 +25,10 @@ def step(job: dict, name: str) -> dict:
     return matches[0]
 
 
-def test_gpu_suites_wait_for_the_verified_candidate(jobs):
+def test_gpu_suites_wait_for_the_verified_candidate_and_make_check(jobs):
     for suite in GPU_SUITES:
-        assert "candidate" in jobs[suite]["needs"]
+        assert {"candidate", "check"} <= set(jobs[suite]["needs"])
+    assert step(jobs["check"], "Run make check")["run"] == "make check"
 
 
 def test_gpu_suites_check_the_running_images_against_the_candidate(jobs):

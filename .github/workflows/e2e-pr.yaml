@@ -80,6 +80,35 @@ jobs:
               # The framework workloads' programs and manifests.
               - "docs/using-snapshot/**"
 
+  # The pull_request run of ci.yml checks the same commit, but this run cannot
+  # wait on another workflow, and a commit failing lint or govulncheck must not
+  # reach the GPU runners. Runs alongside the CPU suite and the image builds.
+  check:
+    name: Validate repository
+    needs: changes
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.work
+          cache: true
+          cache-dependency-path: |
+            **/go.sum
+            go.work.sum
+
+      - name: Run make check
+        run: make check
+
   cpu:
     name: CPU
     needs: changes
@@ -241,7 +270,7 @@ jobs:
 
   gpu:
     name: GPU
-    needs: [cpu, images, candidate]
+    needs: [check, cpu, images, candidate]
     uses: ./.github/workflows/e2e.yaml
     with:
       snapshot_tag: ${{ needs.images.outputs.tag }}
@@ -252,7 +281,7 @@ jobs:
 
   frameworks:
     name: Frameworks
-    needs: [cpu, images, candidate]
+    needs: [check, cpu, images, candidate]
     uses: ./.github/workflows/e2e-frameworks.yaml
     with:
       snapshot_tag: ${{ needs.images.outputs.tag }}
@@ -268,7 +297,7 @@ jobs:
   # cancelled or a job it depends on did not succeed.
   pr-e2e:
     name: PR E2E
-    needs: [changes, cpu, images, candidate, gpu, frameworks]
+    needs: [changes, check, cpu, images, candidate, gpu, frameworks]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -283,7 +312,7 @@ jobs:
           set -euo pipefail
           jq -e --arg e2e "${E2E}" '
             .changes.result == "success" and
-            ([.cpu, .images, .candidate, .gpu, .frameworks] | if $e2e == "true"
+            ([.check, .cpu, .images, .candidate, .gpu, .frameworks] | if $e2e == "true"
                then all(.result == "success")
                else all(.result == "skipped") end)
           ' <<< "${RESULTS}"
