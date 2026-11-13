@@ -31,6 +31,7 @@ func main() {
 		"Container runtime backend: containerd or crio")
 	runtimeSocket := flag.String("runtime-socket", os.Getenv("RUNTIME_SOCKET"),
 		"Path to the container runtime socket (defaults to per-runtime convention)")
+	podGroups := bindPodGroupFlags(flag.CommandLine)
 	flag.Parse()
 
 	rootLog := logging.ConfigureLogger("stdout")
@@ -86,6 +87,14 @@ func main() {
 	nodeController, err := controller.NewNodeController(cfg, rt, rootLog.WithName("controller"))
 	if err != nil {
 		fatal(agentLog, err, "Failed to create snapshot node controller")
+	}
+	if podGroups.enabled {
+		locator, err := podGroups.locator(rootLog.WithName("podgroups"))
+		if err != nil {
+			fatal(agentLog, err, "Invalid pod group configuration")
+		}
+		nodeController.EnablePodGroups(locator)
+		agentLog.Info("Pod groups enabled", "coordinator_port", locator.Port)
 	}
 	// The controller, and the plugin when it registers, run until shutdown. If
 	// either stops early, the agent exits and the DaemonSet restarts it.
