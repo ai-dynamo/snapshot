@@ -759,9 +759,9 @@ The coordinator of the lowest rank leads the group. It validates the group's rec
 Every operation of a mode is one round:
 
 1. The leader inserts the round's command, `<mode>.<k>.cmd`, which names the step and its arguments.
-   Arguments meant for one rank, such as the carrier bytes and owners of `SAVE_ALLOCATIONS`, are keyed by rank.
-2. Every coordinator runs the step on its own processes, and each one except the leader inserts its reply under `<mode>.<k>.reply.<rank>`.
-3. The leader reads every reply, folds the results into the group state, and removes the round's keys.
+   A command carries only its step's arguments: `SAVE_ALLOCATIONS` the owners of each process, keyed by rank and PID, and `RESTORE_UNICAST` and `RESTORE_MULTICAST_IMPORTERS` the old and new FABRIC handles so far.
+2. Every coordinator runs the step on its own processes, and each one except the leader inserts its reply under `<mode>.<k>.reply.<rank>`: its Pod's records, or each process's reply.
+3. The leader reads every reply, checks each process's reply and carrier bytes against the topology, folds the results into the group state, and removes the round's keys.
 
 The modes run these steps, with `<mode>` set to `inspect`, `prepare`, or `restore`:
 
@@ -771,7 +771,7 @@ The modes run these steps, with `<mode>` set to `inspect`, `prepare`, or `restor
 | `prepare` | `BEGIN_CHECKPOINT` with validation, `PREPARE_MULTICAST`, `SAVE_ALLOCATIONS`, `PREPARE_UNICAST` |
 | `restore` | `INSPECT` with the saved records, `LOAD_ALLOCATIONS`, `RESTORE_UNICAST`, the four multicast phases, and a final `INSPECT` |
 
-After the last step, the leader inserts `{done: true}` as the next command, and every coordinator exits.
+After the last step, the leader inserts `DONE` as the next command, and every coordinator exits.
 At prepare, each coordinator writes its own Pod's `cuinterpose.state` when the mode ends.
 
 The deadline bounds the first round, because at restore each coordinator starts only after its own Pod's CRIU and CUDA restores.
@@ -1207,7 +1207,7 @@ Separate `multicast`, `multicast_device`, and `multicast_mapping` records descri
 
 [FABRIC sharing](#fabric-handles) adds a `fabric_export` record to the creator and a `fabric_import` record to each importer.
 Both hold an allocation reference and the 64-byte handle as MessagePack binary data.
-Requests and replies carry the old and new handles of a restore only when the process has any, so state and messages without FABRIC sharing keep their format.
+An operation carries only the arguments of its step, and a process replies with only that step's result: `saved` with its carrier bytes, `loaded` with its carrier bytes and the FABRIC handles that it replaced, `multicast_recreated` with the multicast handles that it replaced, and `completed` for every other step.
 
 ### Further reading
 
