@@ -27,7 +27,7 @@ COPY operator/compliance/gen-attribution.sh /tmp/gen-attribution.sh
 COPY hack/compliance/go-licenses.sh /tmp/go-licenses.sh
 RUN sh /tmp/gen-attribution.sh /sources/go/vendor /legal/THIRD-PARTY.txt /tmp/go-licenses.sh
 
-FROM nvcr.io/nvidia/distroless/go:v4.1.8@sha256:676c150ccfb5987f58bbee9accfa506d5519d4acf4252f799d311476a0a7f1b5
+FROM nvcr.io/nvidia/distroless/go:v4.2.0@sha256:10b47941ea75fbc48c2777d6652d028c9ff92b43eaca3a50ee32ff98a9ae9015
 COPY --from=builder /workspace/operator/bin/manager /manager
 COPY --from=builder /workspace/operator/bin/crd-installer /crd-installer
 COPY --from=sources /sources /legal/source
