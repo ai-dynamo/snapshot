@@ -14,7 +14,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -72,6 +72,9 @@ class AgentTimingSummary:
     duration_seconds: float
     phases_seconds: dict[str, float]
     started_to_complete_seconds: float | None
+    # Durations nested under cuda/criu. They split a phase; they are not
+    # additional phases and must not be added to the phase total.
+    nested_seconds: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -722,6 +725,27 @@ def parse_go_duration(value: str) -> float:
     )
 
 
+# Durations the agent nests under "cuda" and "criu" in its timing summary.
+# CRIU's memwrite runs inside memdump, so these split a phase rather than add
+# to it. Counters (page and byte totals) are not durations and are not listed.
+_NESTED_DURATION_KEYS = {
+    "cuda": ("lock", "copy", "job_file"),
+    "criu": ("freezing", "frozen", "memdump", "memwrite"),
+}
+
+
+def _nested_durations(summary: Mapping[str, Any]) -> dict[str, float]:
+    found: dict[str, float] = {}
+    for group, keys in _NESTED_DURATION_KEYS.items():
+        values = summary.get(group)
+        if not isinstance(values, dict):
+            continue
+        for key in keys:
+            if key in values:
+                found[f"{group}.{key}"] = parse_go_duration(str(values[key]))
+    return found
+
+
 def parse_agent_timing_summary(
     logs: str,
     *,
@@ -765,6 +789,7 @@ def parse_agent_timing_summary(
                 if started_to_complete is not None
                 else None
             ),
+            nested_seconds=_nested_durations(summary),
         )
     match_text = ", ".join(f"{key}={value!r}" for key, value in matches.items())
     raise ValueError(f"no {message!r} agent timing summary matched {match_text}")

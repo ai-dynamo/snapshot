@@ -108,6 +108,8 @@ func BuildDumpOptions(
 }
 
 // ExecuteDump opens the image directory FD, runs the CRIU dump, and cleans up.
+// It returns the wall time of the dump RPC. CRIU's own memdump/memwrite timers
+// are read afterwards from stats-dump; see DumpStats.
 func ExecuteDump(
 	criuOpts *criurpc.CriuOpts,
 	checkpointDir string,
@@ -121,7 +123,6 @@ func ExecuteDump(
 	defer imageDir.Close()
 	criuOpts.ImagesDirFd = proto.Int32(imageDirFD)
 
-	criuDumpStart := time.Now()
 	criuClient := criulib.MakeCriu()
 	if settings != nil && strings.TrimSpace(settings.BinaryPath) != "" {
 		if _, err := os.Stat(settings.BinaryPath); err != nil {
@@ -129,20 +130,22 @@ func ExecuteDump(
 		}
 		criuClient.SetCriuPath(settings.BinaryPath)
 	}
-	if err := criuClient.Dump(criuOpts, nil); err != nil {
-		dumpDuration := time.Since(criuDumpStart)
+
+	criuDumpStart := time.Now()
+	dumpErr := criuClient.Dump(criuOpts, nil)
+	criuDumpDuration := time.Since(criuDumpStart)
+	if dumpErr != nil {
 		dumpLogPath := filepath.Join(checkpointDir, dumpLogFilename)
-		log.Error(err, "CRIU dump failed",
-			"duration", dumpDuration,
+		log.Error(dumpErr, "CRIU dump failed",
+			"duration", criuDumpDuration,
 			"checkpoint_dir", checkpointDir,
 			"dump_log_path", dumpLogPath,
 			"skip_mnt", criuOpts.GetSkipMnt(),
 			"dump_log_tail", readLogTail(dumpLogPath),
 		)
-		return 0, withFullDiskErrno(fmt.Errorf("CRIU dump failed: %w", err))
+		return 0, withFullDiskErrno(fmt.Errorf("CRIU dump failed: %w", dumpErr))
 	}
 
-	criuDumpDuration := time.Since(criuDumpStart)
 	log.Info("CRIU dump completed", "duration", criuDumpDuration)
 	return criuDumpDuration, nil
 }
