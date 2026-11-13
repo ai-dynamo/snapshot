@@ -71,6 +71,12 @@ rules:
   - apiGroups: ["nvidia.com"]
     resources: ["podgrouprestores/finalizers"]
     verbs: ["update"]
+  # Used only to claim PodGroupRestore targets: one update, conditional on the
+  # Pod's resourceVersion, that writes the Pod's binding and container map and
+  # removes Snapshot's scheduling gate.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["update"]
   {{- end }}
   {{- if .Values.crdUpgrade.enabled }}
   - apiGroups: ["apiextensions.k8s.io"]
