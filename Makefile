@@ -52,11 +52,13 @@ test:
 	$(MAKE) -C operator test
 
 # The envtest-backed tests, which the integration build tag keeps out of make
-# test: the operator's admission tests, and the coordinator's tests of its
-# authorizer, its sessions and its host against an API server.
+# test: the operator's admission tests, the coordinator's tests of its
+# authorizer, its sessions and its host against an API server, and the agent's
+# fenced status writes on a pod group's restore Pods.
 test-integration:
 	$(MAKE) -C operator test-integration
 	$(MAKE) -C coordinator test-integration
+	$(MAKE) -C agent test-integration
 
 build:
 	$(MAKE) -C coordinator build
