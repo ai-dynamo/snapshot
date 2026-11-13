@@ -100,6 +100,45 @@ type podGroupMemberView struct {
 	reason, message string
 }
 
+// isIrreversiblePodGroupChange reports whether recording a derived status over
+// the persisted one would make a decision that can never be undone, so that
+// the controller observes again through the API server before it records
+// anything:
+//
+//   - a member's phase becomes final;
+//   - the group's Failed or Ready condition turns True;
+//   - or, for a group being deleted, the reconcile would release the
+//     finalizer, which releases says.
+//
+// It does not tell an outcome the operator imposes from one a member
+// reported: confirming a reported one costs a few reads and is harmless.
+// Members are matched by ID, so a member the persisted status lacks counts as
+// unfinished.
+func isIrreversiblePodGroupChange(
+	persistedMembers, derivedMembers []podGroupMemberView,
+	persistedConditions, derivedConditions []metav1.Condition,
+	releases bool,
+) bool {
+	if releases {
+		return true
+	}
+	for _, condType := range []string{snapshotv1alpha1.PodGroupConditionFailed, snapshotv1alpha1.PodGroupConditionReady} {
+		if !meta.IsStatusConditionTrue(persistedConditions, condType) && meta.IsStatusConditionTrue(derivedConditions, condType) {
+			return true
+		}
+	}
+	final := make(map[string]bool, len(persistedMembers))
+	for _, m := range persistedMembers {
+		final[m.id] = m.done || m.failed
+	}
+	for _, m := range derivedMembers {
+		if (m.done || m.failed) && !final[m.id] {
+			return true
+		}
+	}
+	return false
+}
+
 // podGroupAttempt is what the shared rules read of one group in one reconcile.
 // newPodGroupAttempt takes the members' views once, before the operator's own
 // causes fail the unfinished members, so every rule reads what the members

@@ -142,3 +142,67 @@ func TestPodGroupRequeuePollsOnlyForUnwatchedWaits(t *testing.T) {
 		})
 	}
 }
+
+func TestIsIrreversiblePodGroupChange(t *testing.T) {
+	admitted := podGroupMemberView{id: "a", hasWork: true}
+	running := podGroupMemberView{id: "a", hasWork: true, started: true}
+	done := podGroupMemberView{id: "a", hasWork: true, started: true, done: true}
+	failed := failedView("a", 0, true, "CriuDumpFailed")
+	cond := func(condType string, status metav1.ConditionStatus, reason string) metav1.Condition {
+		return metav1.Condition{Type: condType, Status: status, Reason: reason}
+	}
+	failedCond := cond(snapshotv1alpha1.PodGroupConditionFailed, metav1.ConditionTrue, snapshotv1alpha1.PodGroupReasonMemberFailed)
+	readyCond := cond(snapshotv1alpha1.PodGroupConditionReady, metav1.ConditionTrue, "Checkpointed")
+	withdrawn := cond(snapshotv1alpha1.PodGroupConditionReady, metav1.ConditionFalse, snapshotv1alpha1.PodGroupReasonArtifactUnavailable)
+	committed := cond(snapshotv1alpha1.PodGroupConditionAdmitted, metav1.ConditionTrue, snapshotv1alpha1.PodGroupReasonCommitted)
+
+	for _, tc := range []struct {
+		name                string
+		persisted, derived  []podGroupMemberView
+		persistedConditions []metav1.Condition
+		derivedConditions   []metav1.Condition
+		releases            bool
+		want                bool
+	}{
+		{name: "a member succeeds", persisted: []podGroupMemberView{running}, derived: []podGroupMemberView{done}, want: true},
+		{name: "a member fails", persisted: []podGroupMemberView{running}, derived: []podGroupMemberView{failed}, want: true},
+		{name: "a member the persisted status lacks is final", derived: []podGroupMemberView{failed}, want: true},
+		{
+			name: "Failed turns True", persisted: []podGroupMemberView{failed}, derived: []podGroupMemberView{failed},
+			derivedConditions: []metav1.Condition{failedCond}, want: true,
+		},
+		{
+			name: "Ready turns True", persisted: []podGroupMemberView{done}, derived: []podGroupMemberView{done},
+			persistedConditions: []metav1.Condition{withdrawn}, derivedConditions: []metav1.Condition{readyCond}, want: true,
+		},
+		{
+			name: "the finalizer would be released", persisted: []podGroupMemberView{failed}, derived: []podGroupMemberView{failed},
+			persistedConditions: []metav1.Condition{failedCond}, derivedConditions: []metav1.Condition{failedCond},
+			releases: true, want: true,
+		},
+		{name: "nothing changes", persisted: []podGroupMemberView{running}, derived: []podGroupMemberView{running}},
+		{name: "a member starts", persisted: []podGroupMemberView{admitted}, derived: []podGroupMemberView{running}},
+		{
+			name:      "a final member stays final, and Failed stays True",
+			persisted: []podGroupMemberView{failed}, derived: []podGroupMemberView{failed},
+			persistedConditions: []metav1.Condition{failedCond}, derivedConditions: []metav1.Condition{failedCond},
+		},
+		{
+			name: "Admitted turns True", persisted: []podGroupMemberView{admitted}, derived: []podGroupMemberView{running},
+			derivedConditions: []metav1.Condition{committed},
+		},
+		{
+			name: "Ready is withdrawn", persisted: []podGroupMemberView{done}, derived: []podGroupMemberView{done},
+			persistedConditions: []metav1.Condition{readyCond}, derivedConditions: []metav1.Condition{withdrawn},
+		},
+		{
+			name: "Ready appears False", persisted: []podGroupMemberView{done}, derived: []podGroupMemberView{done},
+			derivedConditions: []metav1.Condition{withdrawn},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, isIrreversiblePodGroupChange(tc.persisted, tc.derived,
+				tc.persistedConditions, tc.derivedConditions, tc.releases))
+		})
+	}
+}

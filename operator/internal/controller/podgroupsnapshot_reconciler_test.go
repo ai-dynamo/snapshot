@@ -556,9 +556,11 @@ func TestPodGroupSnapshotReconciler_RestartMidwayCreatesTheRest(t *testing.T) {
 }
 
 // TestPodGroupSnapshotReconciler_NeverRefusesAGroupWhoseMemberWorkExists
-// confirms a refusal against member work first. The cache has not seen member
-// a's PodSnapshot yet, and shows a's source Pod recreated, which alone would
-// refuse the group; the API server has the PodSnapshot, and no source Pod.
+// confirms a refusal through the API server. The cache has not seen member a's
+// PodSnapshot yet, and shows a's source Pod recreated, which alone would refuse
+// the group; the API server has the PodSnapshot, and no source Pod. The pass
+// through the API server is the one recorded and acted on, so member a is
+// pinned and the rest of the member work is created at once.
 func TestPodGroupSnapshotReconciler_NeverRefusesAGroupWhoseMemberWorkExists(t *testing.T) {
 	group := pgGroup("a", "b")
 	memberA := buildMemberPodSnapshot(group, 0)
@@ -578,17 +580,21 @@ func TestPodGroupSnapshotReconciler_NeverRefusesAGroupWhoseMemberWorkExists(t *t
 	for _, m := range got.Status.Members {
 		assert.NotEqual(t, snapshotv1alpha1.CheckpointPhaseFailed, m.Phase, m.ID)
 	}
-	assert.Empty(t, listMemberPodSnapshots(t, r), "nothing is created before the cache shows member work")
+	assert.Equal(t, snapshotv1alpha1.CheckpointPhaseAdmitted, got.Status.Members[0].Phase)
+	assert.Equal(t, &snapshotv1alpha1.ObjectIdentity{Name: "group-a", UID: "group-a-uid"}, got.Status.Members[0].PodSnapshot)
+	snaps := listMemberPodSnapshots(t, r)
+	require.Len(t, snaps, 1, "member a's PodSnapshot is the API server's; only member b's is created")
+	assert.Equal(t, "group-b", snaps[0].Name)
 	assert.Empty(t, drainEvents(recorder))
 
-	// The cache catches up: the PodSnapshot is adopted, and the rest created.
+	// The cache catches up: nothing changes.
 	require.NoError(t, r.Create(context.Background(), memberA.DeepCopy()))
 	reconcileGroup(t, r)
 	got = getGroup(t, r)
 	assert.Nil(t, groupCondition(t, got, snapshotv1alpha1.PodGroupConditionFailed))
 	assert.Equal(t, snapshotv1alpha1.CheckpointPhaseAdmitted, got.Status.Members[0].Phase)
 	assert.Equal(t, &snapshotv1alpha1.ObjectIdentity{Name: "group-a", UID: "group-a-uid"}, got.Status.Members[0].PodSnapshot)
-	assert.Len(t, listMemberPodSnapshots(t, r), 2, "the other member's PodSnapshot is created")
+	assert.Len(t, listMemberPodSnapshots(t, r), 2)
 }
 
 func TestPodGroupSnapshotReconciler_KeepsTheReadErrorAfterANameRace(t *testing.T) {
@@ -964,4 +970,236 @@ func TestPodGroupSnapshotReconciler_HeldByUnfinishedRestores(t *testing.T) {
 		podGroupRestoreToPodGroupSnapshot(ctx, running), "the restore's event reconciles its snapshot")
 	reconcileGroup(t, r)
 	assert.True(t, gone(), "released once its last unfinished restore has finished")
+}
+
+// makeLaggingPodGroupReconciler returns a reconciler whose cache holds cached
+// while the API server holds live: the cache lags behind the API server. Status
+// is recorded in the cache's client.
+func makeLaggingPodGroupReconciler(t *testing.T, cached, live []client.Object) (*PodGroupSnapshotReconciler, *record.FakeRecorder) {
+	t.Helper()
+	r, recorder := makePodGroupReconciler(t, cached...)
+	api, _ := makePodGroupReconciler(t, live...)
+	r.NonCacheReadClient = api.Client
+	return r, recorder
+}
+
+// pgMemberObjects returns the PodSnapshot of the member at rank, as the
+// controller builds it and pinned as pgPinned pins it, and the content bound to
+// it, with the given conditions. Each call returns new objects.
+func pgMemberObjects(group *snapshotv1alpha1.PodGroupSnapshot, rank int, snapConditions, contentConditions []metav1.Condition) []client.Object {
+	id := group.Spec.Members[rank].ID
+	snap := buildMemberPodSnapshot(group, rank)
+	snap.UID = types.UID("snap-uid-" + id)
+	snap.Status = snapshotv1alpha1.PodSnapshotStatus{
+		BoundPodSnapshotContentName: ptr.To("content-" + id),
+		Conditions:                  snapConditions,
+	}
+	content := &snapshotv1alpha1.PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "content-" + id, UID: types.UID("content-uid-" + id)},
+		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
+			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: pgNamespace, Name: snap.Name, UID: snap.UID},
+			Source:         snapshotv1alpha1.PodSnapshotContentSource{PodRef: snap.Spec.Source.PodRef, NodeName: "node-1"},
+		},
+		Status: snapshotv1alpha1.PodSnapshotContentStatus{Conditions: contentConditions},
+	}
+	return []client.Object{snap, content}
+}
+
+// pgObjects joins groups of objects, copying each, so that two fake clients
+// never share one.
+func pgObjects(sets ...[]client.Object) []client.Object {
+	var out []client.Object
+	for _, set := range sets {
+		for _, obj := range set {
+			out = append(out, obj.DeepCopyObject().(client.Object))
+		}
+	}
+	return out
+}
+
+// pgGroupPastDeadline is a committed group created an hour ago, so past its
+// deadline, whose persisted status holds members, as an earlier reconcile
+// recorded them.
+func pgGroupPastDeadline(members ...snapshotv1alpha1.PodGroupSnapshotMemberStatus) *snapshotv1alpha1.PodGroupSnapshot {
+	ids := make([]string, len(members))
+	for i, m := range members {
+		ids[i] = m.ID
+	}
+	group := pgGroup(ids...)
+	group.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
+	group.Status.Members = members
+	group.Status.Conditions = []metav1.Condition{{
+		Type: snapshotv1alpha1.PodGroupConditionAdmitted, Status: metav1.ConditionTrue,
+		Reason:             snapshotv1alpha1.PodGroupReasonCommitted,
+		Message:            podGroupSnapshotKind.committedMessage,
+		LastTransitionTime: metav1.NewTime(group.CreationTimestamp.Add(time.Second)),
+	}}
+	return group
+}
+
+// TestPodGroupSnapshotReconciler_ConfirmsTheDeadline: at the deadline, the
+// cache still shows member a checkpointing, while the API server has it
+// Checkpointed. The status is derived again from the persisted one, so the
+// cached pass's DeadlineExceeded for a does not stick; b, unfinished on both,
+// still fails.
+func TestPodGroupSnapshotReconciler_ConfirmsTheDeadline(t *testing.T) {
+	group := pgGroupPastDeadline(
+		pgPinned("a", 0, snapshotv1alpha1.CheckpointPhaseCheckpointing),
+		pgPinned("b", 1, snapshotv1alpha1.CheckpointPhaseCheckpointing),
+	)
+	started := []metav1.Condition{pgStarted}
+	r, recorder := makeLaggingPodGroupReconciler(t,
+		pgObjects([]client.Object{group}, pgMemberObjects(group, 0, nil, started), pgMemberObjects(group, 1, nil, started)),
+		pgObjects([]client.Object{group},
+			pgMemberObjects(group, 0, []metav1.Condition{pgReady}, []metav1.Condition{pgStarted, pgReady}),
+			pgMemberObjects(group, 1, nil, started)),
+	)
+
+	reconcileGroup(t, r)
+
+	got := getGroup(t, r)
+	assert.Equal(t, snapshotv1alpha1.CheckpointPhaseCheckpointed, got.Status.Members[0].Phase, "not failed from the stale view")
+	assert.Equal(t, &snapshotv1alpha1.ObjectIdentity{Name: "content-a", UID: "content-uid-a"}, got.Status.Members[0].Content)
+	assert.Equal(t, snapshotv1alpha1.CheckpointPhaseFailed, got.Status.Members[1].Phase)
+	assert.Equal(t, snapshotv1alpha1.PodGroupReasonDeadlineExceeded, got.Status.Members[1].Reason)
+	failed := groupCondition(t, got, snapshotv1alpha1.PodGroupConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, snapshotv1alpha1.PodGroupReasonDeadlineExceeded, failed.Reason)
+	assert.Equal(t, []string{"Warning DeadlineExceeded " + failed.Message}, drainEvents(recorder))
+}
+
+// TestPodGroupSnapshotReconciler_ConfirmsAMemberOfAFailedGroup: the group
+// already failed on member a. At the deadline, the cache still shows member b
+// checkpointing, while the API server has it Checkpointed. The group's Failed
+// condition does not change, yet b's final phase is still confirmed.
+func TestPodGroupSnapshotReconciler_ConfirmsAMemberOfAFailedGroup(t *testing.T) {
+	memberA := pgPinned("a", 0, snapshotv1alpha1.CheckpointPhaseFailed)
+	memberA.StartedAt = pgStartedAt.DeepCopy()
+	memberA.Reason, memberA.Message = "CriuDumpFailed", "CriuDumpFailed message"
+	group := pgGroupPastDeadline(memberA, pgPinned("b", 1, snapshotv1alpha1.CheckpointPhaseCheckpointing))
+	firstCause := metav1.Condition{
+		Type: snapshotv1alpha1.PodGroupConditionFailed, Status: metav1.ConditionTrue,
+		Reason: snapshotv1alpha1.PodGroupReasonMemberFailed, Message: "the first cause",
+		LastTransitionTime: metav1.NewTime(time.Now().Add(-time.Minute).Truncate(time.Second)),
+	}
+	group.Status.Conditions = append(group.Status.Conditions, firstCause)
+	failedA := pgMemberObjects(group, 0, []metav1.Condition{pgFailed("CriuDumpFailed")},
+		[]metav1.Condition{pgStarted, pgFailed("CriuDumpFailed")})
+	r, recorder := makeLaggingPodGroupReconciler(t,
+		pgObjects([]client.Object{group}, failedA, pgMemberObjects(group, 1, nil, []metav1.Condition{pgStarted})),
+		pgObjects([]client.Object{group}, failedA,
+			pgMemberObjects(group, 1, []metav1.Condition{pgReady}, []metav1.Condition{pgStarted, pgReady})),
+	)
+
+	reconcileGroup(t, r)
+
+	got := getGroup(t, r)
+	assert.Equal(t, snapshotv1alpha1.CheckpointPhaseCheckpointed, got.Status.Members[1].Phase, "not failed from the stale view")
+	failed := groupCondition(t, got, snapshotv1alpha1.PodGroupConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, firstCause.Reason, failed.Reason)
+	assert.Equal(t, firstCause.Message, failed.Message)
+	assert.Empty(t, drainEvents(recorder))
+}
+
+func TestPodGroupSnapshotReconciler_ConfirmsADeletion(t *testing.T) {
+	deleting := func() *snapshotv1alpha1.PodGroupSnapshot {
+		group := pgGroup("a", "b")
+		group.DeletionTimestamp = ptr.To(metav1.Now())
+		group.Status.Members = []snapshotv1alpha1.PodGroupSnapshotMemberStatus{
+			pgPinned("a", 0, snapshotv1alpha1.CheckpointPhaseAdmitted),
+			pgPinned("b", 1, snapshotv1alpha1.CheckpointPhaseAdmitted),
+		}
+		return group
+	}
+
+	t.Run("a member the cache has not seen start keeps the group", func(t *testing.T) {
+		group := deleting()
+		r, recorder := makeLaggingPodGroupReconciler(t,
+			pgObjects([]client.Object{group}, pgMemberObjects(group, 0, nil, nil), pgMemberObjects(group, 1, nil, nil)),
+			pgObjects([]client.Object{group},
+				pgMemberObjects(group, 0, nil, []metav1.Condition{pgStarted}), pgMemberObjects(group, 1, nil, nil)),
+		)
+
+		res := reconcileGroup(t, r)
+
+		got := getGroup(t, r)
+		assert.Contains(t, got.Finalizers, snapshotv1alpha1.PodGroupInUseFinalizer, "the finalizer is kept")
+		assert.Nil(t, groupCondition(t, got, snapshotv1alpha1.PodGroupConditionFailed), "no Cancelled")
+		assert.Equal(t, snapshotv1alpha1.CheckpointPhaseCheckpointing, got.Status.Members[0].Phase)
+		assert.NotNil(t, got.Status.Members[0].StartedAt)
+		assert.Positive(t, res.RequeueAfter, "the deadline still applies")
+		assert.Equal(t, []string{"Normal Committed every member passed admission, and the checkpoint has started"},
+			drainEvents(recorder))
+	})
+
+	t.Run("a group no member started is cancelled and released", func(t *testing.T) {
+		group := deleting()
+		members := func() []client.Object {
+			return pgObjects([]client.Object{group}, pgMemberObjects(group, 0, nil, nil), pgMemberObjects(group, 1, nil, nil))
+		}
+		r, recorder := makeLaggingPodGroupReconciler(t, members(), members())
+
+		reconcileGroup(t, r)
+
+		err := r.Get(context.Background(), types.NamespacedName{Namespace: pgNamespace, Name: "group"}, &snapshotv1alpha1.PodGroupSnapshot{})
+		assert.True(t, apierrors.IsNotFound(err), "released: %v", err)
+		assert.Equal(t, []string{"Warning Cancelled " + podGroupCancelledMessage}, drainEvents(recorder))
+	})
+}
+
+// TestPodGroupSnapshotReconciler_ActsOnTheConfirmedPass: the cache has not seen
+// member b's source Pod, which alone would refuse the group; the API server
+// has it. The confirmed pass admits the group, and the act step creates the
+// member work from it in the same reconcile.
+func TestPodGroupSnapshotReconciler_ActsOnTheConfirmedPass(t *testing.T) {
+	group := pgGroup("a", "b")
+	agent := pgAgent("node-1", true, ptr.To("v1"))
+	r, recorder := makeLaggingPodGroupReconciler(t,
+		pgObjects([]client.Object{group, pgSourcePod("a", "node-1"), agent}),
+		pgObjects([]client.Object{group, pgSourcePod("a", "node-1"), pgSourcePod("b", "node-1"), agent}),
+	)
+
+	reconcileGroup(t, r)
+
+	got := getGroup(t, r)
+	assert.Nil(t, groupCondition(t, got, snapshotv1alpha1.PodGroupConditionFailed), "not refused from the stale view")
+	admitted := groupCondition(t, got, snapshotv1alpha1.PodGroupConditionAdmitted)
+	require.NotNil(t, admitted)
+	assert.Equal(t, snapshotv1alpha1.PodGroupReasonAdmitting, admitted.Reason)
+	assert.Len(t, listMemberPodSnapshots(t, r), 2, "the member work is created")
+	assert.Empty(t, drainEvents(recorder))
+}
+
+// TestPodGroupSnapshotReconciler_RecordsNothingWhenTheConfirmationFails: a
+// live read fails while confirming the deadline, so nothing is recorded.
+func TestPodGroupSnapshotReconciler_RecordsNothingWhenTheConfirmationFails(t *testing.T) {
+	group := pgGroupPastDeadline(
+		pgPinned("a", 0, snapshotv1alpha1.CheckpointPhaseCheckpointing),
+		pgPinned("b", 1, snapshotv1alpha1.CheckpointPhaseCheckpointing),
+	)
+	started := []metav1.Condition{pgStarted}
+	objs := func() []client.Object {
+		return pgObjects([]client.Object{group}, pgMemberObjects(group, 0, nil, started), pgMemberObjects(group, 1, nil, started))
+	}
+	r, recorder := makeLaggingPodGroupReconciler(t, objs(), objs())
+	r.NonCacheReadClient = interceptor.NewClient(r.NonCacheReadClient.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*snapshotv1alpha1.PodSnapshot); ok {
+				return apierrors.NewInternalError(errors.New("unavailable"))
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	before := getGroup(t, r)
+
+	_, err := r.Reconcile(context.Background(),
+		ctrl.Request{NamespacedName: types.NamespacedName{Namespace: pgNamespace, Name: "group"}})
+
+	require.Error(t, err)
+	assert.True(t, apierrors.IsInternalError(err), "the live read's error is returned: %v", err)
+	after := getGroup(t, r)
+	assert.Equal(t, before.ResourceVersion, after.ResourceVersion, "nothing is recorded")
+	assert.Equal(t, before.Status, after.Status)
+	assert.Empty(t, drainEvents(recorder))
 }

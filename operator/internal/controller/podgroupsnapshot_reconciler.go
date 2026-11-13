@@ -71,6 +71,16 @@ const podGroupRestoreSnapshotUIDField = "spec.snapshotRef.uid"
 // creating the members' PodSnapshots or, for a group being deleted, releasing
 // its finalizer. Recording comes first, so a Cancelled group is recorded
 // before it disappears.
+//
+// Every irreversible decision is made from the API server. The reconciler
+// observes through the cache first. When the status derived from that would
+// make a change that can never be undone (podGroupSnapshotChangeIsIrreversible),
+// it observes again through the API server and derives again from the
+// persisted status, never from the first derived one, whose final phases would
+// stick. It records only the second pass, and acts on that pass's observation
+// and status. This keeps cache lag out of every final decision; it does not
+// make the reads and the status write atomic, so a report that lands in
+// between is the next reconcile's.
 func (r *PodGroupSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	group := &snapshotv1alpha1.PodGroupSnapshot{}
 	if err := r.Get(ctx, req.NamespacedName, group); err != nil {
@@ -87,11 +97,17 @@ func (r *PodGroupSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	now := time.Now()
-	observed, err := r.observe(ctx, group, now)
+	observed, err := r.observe(ctx, r.Client, group, now)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	desired := derivePodGroupSnapshotStatus(&group.Spec, observed, group.Status, now)
+	if podGroupSnapshotChangeIsIrreversible(observed, &group.Status, &desired, deleting) {
+		if observed, err = r.observe(ctx, r.NonCacheReadClient, group, now); err != nil {
+			return ctrl.Result{}, err
+		}
+		desired = derivePodGroupSnapshotStatus(&group.Spec, observed, group.Status, now)
+	}
 	if err := r.recordStatus(ctx, group, desired); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -107,12 +123,20 @@ func (r *PodGroupSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	return ctrl.Result{RequeueAfter: podGroupSnapshotRequeue(observed, &group.Status, now)}, nil
 }
 
-// observe reads each member's PodSnapshot, its bound content and its source
-// Pod's node, and, for a group being deleted, the PodGroupRestores that
-// reference it, then runs admission if no member work exists yet. Once any
-// member's PodSnapshot exists, admission never runs again, so an attempt with
-// some members already created is never refused halfway.
-func (r *PodGroupSnapshotReconciler) observe(ctx context.Context, group *snapshotv1alpha1.PodGroupSnapshot, now time.Time) (podGroupSnapshotObservation, error) {
+// observe reads, through reader, each member's PodSnapshot, its bound content
+// and its source Pod's node, and, for a group being deleted, the
+// PodGroupRestores that reference it, then runs admission if no member work
+// exists yet. Once any member's PodSnapshot exists, admission never runs
+// again, so an attempt with some members already created is never refused
+// halfway. Reconcile passes the cache first, and the API server when the
+// result would make an irreversible decision, such as a refusal or the
+// release of the finalizer.
+func (r *PodGroupSnapshotReconciler) observe(
+	ctx context.Context,
+	reader client.Reader,
+	group *snapshotv1alpha1.PodGroupSnapshot,
+	now time.Time,
+) (podGroupSnapshotObservation, error) {
 	observed := podGroupSnapshotObservation{
 		members:  make([]podGroupMemberObservation, len(group.Spec.Members)),
 		deleting: !group.DeletionTimestamp.IsZero(),
@@ -126,7 +150,7 @@ func (r *PodGroupSnapshotReconciler) observe(ctx context.Context, group *snapsho
 		previous[m.ID] = m
 	}
 	for rank := range group.Spec.Members {
-		member, err := r.observeMember(ctx, group, rank, previous[group.Spec.Members[rank].ID])
+		member, err := r.observeMember(ctx, reader, group, rank, previous[group.Spec.Members[rank].ID])
 		if err != nil {
 			return podGroupSnapshotObservation{}, err
 		}
@@ -135,26 +159,25 @@ func (r *PodGroupSnapshotReconciler) observe(ctx context.Context, group *snapsho
 	}
 
 	if observed.deleting {
+		// The API server cannot select PodGroupRestores by
+		// spec.snapshotRef.uid, which the CRD does not declare as a selectable
+		// field, so the restores are listed and filtered here, in both passes.
 		restores := &snapshotv1alpha1.PodGroupRestoreList{}
-		if err := r.List(ctx, restores, client.InNamespace(group.Namespace),
-			client.MatchingFields{podGroupRestoreSnapshotUIDField: string(group.UID)}); err != nil {
+		if err := reader.List(ctx, restores, client.InNamespace(group.Namespace)); err != nil {
 			return podGroupSnapshotObservation{}, fmt.Errorf("list the PodGroupRestores of PodGroupSnapshot %q: %w", group.Name, err)
 		}
-		observed.restores = restores.Items
+		for i := range restores.Items {
+			if restores.Items[i].Spec.SnapshotRef.UID == group.UID {
+				observed.restores = append(observed.restores, restores.Items[i])
+			}
+		}
 	}
 
 	if memberWorkExists || observed.deleting || !now.Before(observed.deadline) ||
 		meta.IsStatusConditionTrue(group.Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed) {
 		return observed, nil
 	}
-	admission, err := r.admit(ctx, r.Client, group)
-	if err == nil && admission.state == podGroupAdmissionRefused {
-		// A refusal is final, so confirm it against the API server: the cache
-		// may lag behind a new source Pod, a deleted PodSnapshot, or a member
-		// PodSnapshot just created, which admit finds first and which turns the
-		// refusal into no result.
-		admission, err = r.admit(ctx, r.NonCacheReadClient, group)
-	}
+	admission, err := r.admit(ctx, reader, group)
 	if err != nil {
 		return podGroupSnapshotObservation{}, err
 	}
@@ -162,13 +185,14 @@ func (r *PodGroupSnapshotReconciler) observe(ctx context.Context, group *snapsho
 	return observed, nil
 }
 
-// observeMember reads one member's PodSnapshot, adopting only one that is
-// this group's own (see isMemberPodSnapshot), then its bound content and the
-// source Pod's node. previous is the member's status entry, if any: when the
-// PodSnapshot it pins is missing from the cache while the member is
-// unfinished, the API server confirms whether it is gone.
+// observeMember reads, through reader, one member's PodSnapshot, adopting only
+// one that is this group's own (see isMemberPodSnapshot), then its bound
+// content and the source Pod's node. previous is the member's status entry, if
+// any: an unfinished member whose pinned PodSnapshot reader finds gone, or
+// replaced, is observed deleted.
 func (r *PodGroupSnapshotReconciler) observeMember(
 	ctx context.Context,
+	reader client.Reader,
 	group *snapshotv1alpha1.PodGroupSnapshot,
 	rank int,
 	previous *snapshotv1alpha1.PodGroupSnapshotMemberStatus,
@@ -178,7 +202,7 @@ func (r *PodGroupSnapshotReconciler) observeMember(
 
 	snap := &snapshotv1alpha1.PodSnapshot{}
 	key := client.ObjectKey{Namespace: group.Namespace, Name: podGroupMemberPodSnapshotName(group, member)}
-	switch err := r.Get(ctx, key, snap); {
+	switch err := reader.Get(ctx, key, snap); {
 	case apierrors.IsNotFound(err):
 		snap = nil
 	case err != nil:
@@ -186,18 +210,12 @@ func (r *PodGroupSnapshotReconciler) observeMember(
 	case isMemberPodSnapshot(group, rank, snap):
 		observed.podSnapshot = snap
 	}
-	if previous != nil && previous.PodSnapshot != nil && !isCheckpointPhaseFinal(previous.Phase) &&
-		(snap == nil || snap.UID != previous.PodSnapshot.UID) {
-		deleted, err := r.pinnedPodSnapshotDeleted(ctx, key, previous.PodSnapshot.UID)
-		if err != nil {
-			return observed, err
-		}
-		observed.podSnapshotDeleted = deleted
-	}
+	observed.podSnapshotDeleted = previous != nil && previous.PodSnapshot != nil && !isCheckpointPhaseFinal(previous.Phase) &&
+		(snap == nil || snap.UID != previous.PodSnapshot.UID)
 
 	if contentName := boundContentName(observed.podSnapshot); contentName != "" {
 		content := &snapshotv1alpha1.PodSnapshotContent{}
-		switch err := r.Get(ctx, client.ObjectKey{Name: contentName}, content); {
+		switch err := reader.Get(ctx, client.ObjectKey{Name: contentName}, content); {
 		case apierrors.IsNotFound(err):
 		case err != nil:
 			return observed, fmt.Errorf("get PodSnapshotContent %q of member %q: %w", contentName, member.ID, err)
@@ -208,7 +226,7 @@ func (r *PodGroupSnapshotReconciler) observeMember(
 
 	pod := &corev1.Pod{}
 	podKey := client.ObjectKey{Namespace: group.Namespace, Name: member.Source.PodRef.Name}
-	switch err := r.Get(ctx, podKey, pod); {
+	switch err := reader.Get(ctx, podKey, pod); {
 	case apierrors.IsNotFound(err):
 	case err != nil:
 		return observed, fmt.Errorf("get source Pod %q of member %q: %w", podKey.Name, member.ID, err)
@@ -220,22 +238,6 @@ func (r *PodGroupSnapshotReconciler) observeMember(
 		observed.nodeName = observed.content.Spec.Source.NodeName
 	}
 	return observed, nil
-}
-
-// pinnedPodSnapshotDeleted confirms against the API server that the
-// PodSnapshot pinned with uid is gone: absent, or replaced by another object
-// of the same name. Failing the member is final, so the cache alone is not
-// enough.
-func (r *PodGroupSnapshotReconciler) pinnedPodSnapshotDeleted(ctx context.Context, key client.ObjectKey, uid types.UID) (bool, error) {
-	snap := &snapshotv1alpha1.PodSnapshot{}
-	switch err := r.NonCacheReadClient.Get(ctx, key, snap); {
-	case apierrors.IsNotFound(err):
-		return true, nil
-	case err != nil:
-		return false, fmt.Errorf("confirm PodSnapshot %q is gone: %w", key.Name, err)
-	default:
-		return snap.UID != uid, nil
-	}
 }
 
 // boundContentName returns the name of the content bound to snap, or "".
