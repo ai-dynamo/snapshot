@@ -27,7 +27,7 @@ use std::{
 #[doc(inline)]
 pub use transport::{connect, receive, send};
 
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 // Limit allocations requested by socket frame prefixes and checkpoint files. Protocol
 // messages contain metadata, never allocation contents.
 pub const MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
@@ -98,18 +98,45 @@ pub fn decode_virtual_shareable_handle(
     Ok(AllocationReference { id, creator_pid })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// One lifecycle step on one process, with the arguments that step needs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
     PrepareMulticast,
-    SaveAllocations,
+    /// Save each host-carrier allocation that the process owns. `owners` names the owner
+    /// of every host-carrier allocation that the process holds.
+    SaveAllocations {
+        owners: Vec<AllocationOwner>,
+    },
     PrepareUnicast,
     LoadAllocations,
-    RestoreUnicast,
+    /// Import the allocations that another process owns. FABRIC holders import the
+    /// handle that replaced the one they recorded.
+    RestoreUnicast {
+        replacements: Vec<FabricReplacement>,
+    },
     RestoreMulticastCreators,
-    RestoreMulticastImporters,
+    RestoreMulticastImporters {
+        replacements: Vec<FabricReplacement>,
+    },
     RestoreMulticastDevices,
     RestoreMulticastBindings,
+}
+
+impl std::fmt::Display for Operation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::PrepareMulticast => "PrepareMulticast",
+            Self::SaveAllocations { .. } => "SaveAllocations",
+            Self::PrepareUnicast => "PrepareUnicast",
+            Self::LoadAllocations => "LoadAllocations",
+            Self::RestoreUnicast { .. } => "RestoreUnicast",
+            Self::RestoreMulticastCreators => "RestoreMulticastCreators",
+            Self::RestoreMulticastImporters { .. } => "RestoreMulticastImporters",
+            Self::RestoreMulticastDevices => "RestoreMulticastDevices",
+            Self::RestoreMulticastBindings => "RestoreMulticastBindings",
+        })
+    }
 }
 
 /// Which existing holder saves and recreates one shared backing allocation.
@@ -123,7 +150,7 @@ pub struct AllocationOwner {
 /// A fabric handle that a restored creator exported in place of the one it exported
 /// before the checkpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct FabricUpdate {
+pub struct FabricReplacement {
     pub old: FabricHandle,
     pub new: FabricHandle,
 }
@@ -142,14 +169,6 @@ pub enum Request {
     Execute {
         namespace_pid: NamespacePid,
         operation: Operation,
-        /// Replacements for the fabric handles that restore operations import. An empty
-        /// list is not encoded, so requests without fabric handles keep their format.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        imports: Vec<FabricUpdate>,
-    },
-    SaveAllocations {
-        namespace_pid: NamespacePid,
-        owners: Vec<AllocationOwner>,
     },
     Export {
         namespace_pid: NamespacePid,
@@ -169,13 +188,23 @@ pub enum Reply {
     Inspection {
         records: Vec<Record>,
     },
-    Completed {
-        operation: Operation,
+    /// SaveAllocations copied `bytes` into the host carrier.
+    Saved {
         bytes: u64,
-        /// Fabric handles that this process exported in place of checkpointed ones.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        exports: Vec<FabricUpdate>,
     },
+    /// LoadAllocations copied `bytes` back from the host carrier, and the process exported
+    /// `replacements` for the FABRIC allocations that it recreated.
+    Loaded {
+        bytes: u64,
+        replacements: Vec<FabricReplacement>,
+    },
+    /// RestoreMulticastCreators exported `replacements` for the FABRIC multicast objects
+    /// that the process recreated.
+    MulticastRecreated {
+        replacements: Vec<FabricReplacement>,
+    },
+    /// Any other operation completed.
+    Completed,
     UnicastExport {
         size: u64,
         location: MemoryLocation,
@@ -230,9 +259,9 @@ pub fn control_timeout() -> Duration {
     timeout("SNAPSHOT_CONTROL_TIMEOUT_SECONDS", 10)
 }
 
-pub fn operation_timeout(operation: Operation) -> Duration {
+pub fn operation_timeout(operation: &Operation) -> Duration {
     match operation {
-        Operation::SaveAllocations | Operation::LoadAllocations => {
+        Operation::SaveAllocations { .. } | Operation::LoadAllocations => {
             timeout("SNAPSHOT_CARRIER_TIMEOUT_SECONDS", 3600)
         }
         _ => control_timeout(),
