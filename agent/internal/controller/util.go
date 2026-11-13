@@ -35,6 +35,15 @@ const (
 	eventReportingInstanceLengthLimit = 128
 )
 
+// eventWriteTimeout bounds one best-effort event write. The agent's in-cluster
+// client sets no request timeout, so an API server that stalls would otherwise
+// block the caller for as long as the stall lasts — and the callers here are
+// holding things that cannot wait, a capture with a suspended workload most of
+// all. An event nobody can write is worth less than the work it would hold up.
+//
+// A var so a test does not have to wait out the real bound.
+var eventWriteTimeout = 10 * time.Second
+
 func emitPodEvent(ctx context.Context, clientset kubernetes.Interface, log logr.Logger, pod *corev1.Pod, component, eventType, reason, message string) {
 	now := time.Now()
 	reportingInstance := pod.Spec.NodeName
@@ -69,7 +78,9 @@ func emitPodEvent(ctx context.Context, clientset kubernetes.Interface, log logr.
 		ReportingInstance:   reportingInstance,
 	}
 
-	if _, err := clientset.CoreV1().Events(pod.Namespace).Create(ctx, event, metav1.CreateOptions{}); err != nil {
+	writeCtx, cancel := context.WithTimeout(ctx, eventWriteTimeout)
+	defer cancel()
+	if _, err := clientset.CoreV1().Events(pod.Namespace).Create(writeCtx, event, metav1.CreateOptions{}); err != nil {
 		log.Error(err, "Failed to create event",
 			"pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name),
 			"reason", reason,
