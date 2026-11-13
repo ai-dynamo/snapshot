@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/netip"
 	"strings"
 	"sync"
@@ -24,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/fake"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	clientgotesting "k8s.io/client-go/testing"
@@ -800,4 +803,164 @@ func TestEnqueueGroupTargets(t *testing.T) {
 	require.Equal(t, 1, w.restoreQueue.Len(), "only the targets on this node are queued")
 	key, _ := w.restoreQueue.Get()
 	assert.Equal(t, client.ObjectKeyFromObject(rg.pods[0]), key)
+}
+
+// markStarted makes pod a target whose member had started when the agent
+// restarted: RestoreStarted, and Restored still in progress.
+func markStarted(pod *corev1.Pod) {
+	pod.Status.Conditions = []corev1.PodCondition{
+		{Type: podcontract.RestoreStartedCondition, Status: corev1.ConditionTrue, Reason: "RestoreStarted"},
+		{Type: podcontract.RestoredCondition, Status: corev1.ConditionFalse, Reason: podcontract.RestoreReasonInProgress},
+	}
+}
+
+// withPostRestore gives the leader's checkpoint an HTTP post-restore action on
+// port.
+func withPostRestore(rg *restoreGroup, port intstr.IntOrString) {
+	rg.contents[0].Spec.Containers = []snapshotv1alpha1.ContainerSnapshotConfig{{Name: "main",
+		Lifecycle: &snapshotv1alpha1.SnapshotLifecycle{PostRestore: &snapshotv1alpha1.PostRestoreAction{
+			PostRestoreHandler: snapshotv1alpha1.PostRestoreHandler{HTTPPost: &snapshotv1alpha1.HTTPPostAction{
+				Path: "/resume", Port: port,
+			}},
+		}},
+	}}
+}
+
+// notifications counts the post-restore requests a test's controller sends,
+// and answers each with 200.
+func notifications(w *NodeController) *atomic.Int32 {
+	calls := &atomic.Int32{}
+	w.hookHTTP = &http.Client{Transport: roundTrip(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(""))}, nil
+	})}
+	return calls
+}
+
+type roundTrip func(*http.Request) (*http.Response, error)
+
+func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestGroupRestoreRecoveryTrustsOnlyThePinnedContainer(t *testing.T) {
+	rg := newRestoreGroup(t)
+	markStarted(rg.pods[0])
+	// The kubelet restarted the container after the release. The control
+	// volume is an emptyDir, so the old restore-complete is still there.
+	rg.pods[0].Status.ContainerStatuses[0].ContainerID = "containerd://replacement-container"
+	restoreFn := &memberRestore{}
+	w, k, s := groupRestoreController(t, nil, rg, restoreFn.fn)
+	s.complete = true
+
+	assert.False(t, serveTarget(t, w, rg.pods[0]))
+
+	restored := podCondition(t, w, "target-0", podcontract.RestoredCondition)
+	require.NotNil(t, restored)
+	assert.Equal(t, corev1.ConditionFalse, restored.Status, "an old restore-complete in a new container proves nothing")
+	assert.Equal(t, podcontract.RestoreReasonFailed, restored.Reason)
+	assert.Nil(t, podCondition(t, w, "target-0", podcontract.GroupRestoreFailedCondition), "a reason of the member's own")
+	events := eventsForReason(w.clientset.(*fake.Clientset), reasonRestoreInterrupted)
+	require.Len(t, events, 1)
+	assert.Contains(t, events[0].Message, "was replaced")
+	assert.Empty(t, restoreFn.steps(), "CRIU never runs again into a started Pod")
+	assert.Empty(t, k.list(), "nothing restored runs in the replacement")
+}
+
+func TestGroupRestoreRecoveryNeverSkipsARequiredNotification(t *testing.T) {
+	for name, tc := range map[string]struct {
+		port  intstr.IntOrString
+		reads func(client.Object) error
+	}{
+		"its PodGroupSnapshot is gone": {
+			port: intstr.FromInt32(8000),
+			reads: func(obj client.Object) error {
+				if _, ok := obj.(*snapshotv1alpha1.PodGroupSnapshot); ok {
+					return apierrors.NewNotFound(schema.GroupResource{Group: "nvidia.com", Resource: "podgroupsnapshots"}, "pair")
+				}
+				return nil
+			},
+		},
+		"its PodSnapshot is gone": {
+			port: intstr.FromInt32(8000),
+			reads: func(obj client.Object) error {
+				if _, ok := obj.(*snapshotv1alpha1.PodSnapshot); ok {
+					return apierrors.NewNotFound(schema.GroupResource{Group: "nvidia.com", Resource: "podsnapshots"}, obj.GetName())
+				}
+				return nil
+			},
+		},
+		"its action cannot be planned": {port: intstr.FromString("no-such-port")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rg := newRestoreGroup(t)
+			markStarted(rg.pods[0])
+			withPostRestore(rg, tc.port)
+			w, k, s := groupRestoreController(t, nil, rg, (&memberRestore{}).fn)
+			s.complete = true
+			calls := notifications(w)
+			if tc.reads != nil {
+				failReads(w, tc.reads)
+			}
+
+			assert.False(t, serveTarget(t, w, rg.pods[0]))
+
+			restored := podCondition(t, w, "target-0", podcontract.RestoredCondition)
+			require.NotNil(t, restored)
+			assert.Equal(t, corev1.ConditionFalse, restored.Status, "a notification that never ran is not a success")
+			assert.Equal(t, podcontract.RestoreReasonFailed, restored.Reason)
+			assert.Contains(t, restored.Message, "post-restore action")
+			assert.Nil(t, podCondition(t, w, "target-0", podcontract.GroupRestoreFailedCondition))
+			assert.Zero(t, calls.Load())
+			// As a post-restore action that failed: the workload ends.
+			assert.Equal(t, string(restoreFailedSentinelContents), s.get("7/"+podcontract.RestoreFailedFile))
+			assert.Equal(t, []int{7}, k.list())
+		})
+	}
+
+	t.Run("an action that can be read runs", func(t *testing.T) {
+		rg := newRestoreGroup(t)
+		markStarted(rg.pods[0])
+		withPostRestore(rg, intstr.FromInt32(8000))
+		w, k, s := groupRestoreController(t, nil, rg, (&memberRestore{}).fn)
+		s.complete = true
+		calls := notifications(w)
+
+		assert.False(t, serveTarget(t, w, rg.pods[0]))
+		assert.Equal(t, int32(1), calls.Load())
+		assert.Equal(t, podcontract.RestoreReasonSucceeded, podCondition(t, w, "target-0", podcontract.RestoredCondition).Reason)
+		assert.Empty(t, k.list())
+	})
+}
+
+func TestGroupRestoreRecoveryKeepsTheAttemptsDeadline(t *testing.T) {
+	for name, tc := range map[string]struct {
+		created    time.Duration
+		wantCalls  int32
+		wantReason string
+		wantKills  []int
+	}{
+		"past the deadline": {
+			created: -20 * time.Minute, wantReason: podcontract.RestoreReasonFailed,
+			// As without the restart: the action failed, so the member does.
+			wantKills: []int{7},
+		},
+		"within the deadline": {created: -time.Minute, wantCalls: 1, wantReason: podcontract.RestoreReasonSucceeded},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rg := newRestoreGroup(t)
+			rg.restore.CreationTimestamp = metav1.NewTime(time.Now().Add(tc.created)) // a 10-minute deadline
+			markStarted(rg.pods[0])
+			withPostRestore(rg, intstr.FromInt32(8000))
+			w, k, s := groupRestoreController(t, nil, rg, (&memberRestore{}).fn)
+			s.complete = true
+			calls := notifications(w)
+
+			assert.False(t, serveTarget(t, w, rg.pods[0]))
+
+			assert.Equal(t, tc.wantCalls, calls.Load(), "a restart never renews the attempt's budget for the notification")
+			restored := podCondition(t, w, "target-0", podcontract.RestoredCondition)
+			require.NotNil(t, restored)
+			assert.Equal(t, tc.wantReason, restored.Reason)
+			assert.Equal(t, tc.wantKills, k.list())
+		})
+	}
 }
