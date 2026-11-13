@@ -5,6 +5,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -400,6 +401,31 @@ func TestPodGroupRestoreReconciler_ClaimsAgainAfterAConflict(t *testing.T) {
 	reconcileRestore(t, r)
 	assertClaimed(t, r, "b", "restore-uid", beforeB)
 	assert.Contains(t, rgPod(t, r, "b").Status.Conditions, gatedCondition)
+}
+
+// TestPodGroupRestoreReconciler_ClaimsTargetsTheCacheHasNotSeen: both target
+// Pods were just created, so the cache does not hold them yet. The claim stage
+// reads the API server, which has them, and claims both in this reconcile
+// rather than waiting with TargetPodPending for the cache.
+func TestPodGroupRestoreReconciler_ClaimsTargetsTheCacheHasNotSeen(t *testing.T) {
+	cached := fake.NewClientBuilder().WithScheme(snapshotReconcilerScheme()).
+		WithObjects(pgObjects([]client.Object{rgSnapshot("a", "b"), rgRestore("a", "b")})...).Build()
+	r, _ := makePodGroupRestoreReconciler(t, pgObjects(rgGatedCluster("a", "b"), []client.Object{rgRestore("a", "b")})...)
+	before := map[string]*corev1.Pod{"a": rgPod(t, r, "a"), "b": rgPod(t, r, "b")}
+	// Reads come from the lagging cache; writes reach the API server.
+	r.Client = interceptor.NewClient(r.NonCacheReadClient.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, _ client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			return cached.Get(ctx, key, obj, opts...)
+		},
+		List: func(ctx context.Context, _ client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			return cached.List(ctx, list, opts...)
+		},
+	})
+
+	reconcileRestore(t, r)
+
+	assertClaimed(t, r, "a", "restore-uid", before["a"])
+	assertClaimed(t, r, "b", "restore-uid", before["b"])
 }
 
 // TestPodGroupRestoreReconciler_ResumesAfterACrashBetweenClaims finds target
@@ -800,6 +826,172 @@ func TestPodGroupRestoreReconciler_RefusesAfterTheClaim(t *testing.T) {
 			wantMsg:    `target "a": Pod "restore-a" is claimed by another PodGroupRestore, with UID "earlier-restore-uid"`,
 		},
 	})
+}
+
+// makeLaggingPodGroupRestoreReconciler returns a reconciler whose cache serves
+// cached, as rgCache serves it, while the API server holds live: the cache
+// lags behind the API server. Status is recorded in the cache's client.
+func makeLaggingPodGroupRestoreReconciler(t *testing.T, cached, live []client.Object) (*PodGroupRestoreReconciler, *record.FakeRecorder) {
+	t.Helper()
+	r, recorder := makePodGroupRestoreReconciler(t, cached...)
+	api, _ := makePodGroupRestoreReconciler(t, live...)
+	r.NonCacheReadClient = api.NonCacheReadClient
+	return r, recorder
+}
+
+// rgPinnedMember is target id's member status as an earlier reconcile pinned
+// it to rgTargetPod(id, "node-1"), in phase.
+func rgPinnedMember(id string, phase snapshotv1alpha1.RestorePhase) snapshotv1alpha1.PodGroupRestoreMemberStatus {
+	pod := rgTargetPod(id, "node-1")
+	m := snapshotv1alpha1.PodGroupRestoreMemberStatus{
+		ID: id, Phase: phase,
+		Pod:         &snapshotv1alpha1.ObjectIdentity{Name: pod.Name, UID: pod.UID},
+		NodeName:    "node-1",
+		Containers:  []snapshotv1alpha1.PodGroupRestoreContainerStatus{{Name: "main", ContainerID: "containerd://" + id}},
+		TargetPodIP: pod.Status.PodIP,
+	}
+	if phase == snapshotv1alpha1.RestorePhaseRestoring {
+		m.StartedAt = pgStartedAt.DeepCopy()
+	}
+	return m
+}
+
+// rgCommittedRestore is "restore" with members, as earlier reconciles recorded
+// them, committed, and created age ago.
+func rgCommittedRestore(age time.Duration, members ...snapshotv1alpha1.PodGroupRestoreMemberStatus) *snapshotv1alpha1.PodGroupRestore {
+	ids := make([]string, len(members))
+	for i, m := range members {
+		ids[i] = m.ID
+	}
+	restore := rgRestore(ids...)
+	restore.CreationTimestamp = metav1.NewTime(time.Now().Add(-age).Truncate(time.Second))
+	restore.Status.Members = members
+	restore.Status.Conditions = []metav1.Condition{{
+		Type: snapshotv1alpha1.PodGroupConditionAdmitted, Status: metav1.ConditionTrue,
+		Reason: snapshotv1alpha1.PodGroupReasonCommitted, Message: podGroupRestoreKind.committedMessage,
+		LastTransitionTime: metav1.NewTime(restore.CreationTimestamp.Add(time.Second)),
+	}}
+	return restore
+}
+
+// rgReported is target id's running Pod carrying conditions.
+func rgReported(id string, conditions ...corev1.PodCondition) *corev1.Pod {
+	pod := rgTargetPod(id, "node-1")
+	pod.Status.Conditions = conditions
+	return pod
+}
+
+// TestPodGroupRestoreReconciler_ConfirmsTheDeadline: at the deadline, member
+// a is Released on the API server, while the cache misses its Pod or holds a
+// copy from before the release, also when the restore already failed because
+// of member b. The status is derived again from the persisted one, so the
+// cached pass's TargetPodDeleted or DeadlineExceeded for a does not stick.
+func TestPodGroupRestoreReconciler_ConfirmsTheDeadline(t *testing.T) {
+	firstCause := metav1.Condition{
+		Type: snapshotv1alpha1.PodGroupConditionFailed, Status: metav1.ConditionTrue,
+		Reason: snapshotv1alpha1.PodGroupReasonMemberFailed, Message: "the first cause", LastTransitionTime: metav1.Now(),
+	}
+	failedB := rgPinnedMember("b", snapshotv1alpha1.RestorePhaseRestoring)
+	failedB.Phase, failedB.Reason, failedB.Message = snapshotv1alpha1.RestorePhaseFailed, podcontract.RestoreReasonFailed, "b failed"
+	for _, tc := range []struct {
+		name      string
+		restore   func() *snapshotv1alpha1.PodGroupRestore
+		cachedPod []client.Object
+		podB      corev1.PodCondition
+	}{
+		{
+			name: "the cache misses the Pod",
+			restore: func() *snapshotv1alpha1.PodGroupRestore {
+				return rgCommittedRestore(time.Hour, rgPinnedMember("a", snapshotv1alpha1.RestorePhaseRestoring),
+					rgPinnedMember("b", snapshotv1alpha1.RestorePhaseRestoring))
+			},
+		},
+		{
+			name: "the cache holds a stale copy",
+			restore: func() *snapshotv1alpha1.PodGroupRestore {
+				return rgCommittedRestore(time.Hour, rgPinnedMember("a", snapshotv1alpha1.RestorePhaseRestoring),
+					rgPinnedMember("b", snapshotv1alpha1.RestorePhaseRestoring))
+			},
+			cachedPod: []client.Object{rgReported("a", prStarted)},
+		},
+		{
+			name: "the restore already failed because of another member",
+			restore: func() *snapshotv1alpha1.PodGroupRestore {
+				restore := rgCommittedRestore(time.Hour, rgPinnedMember("a", snapshotv1alpha1.RestorePhaseRestoring), failedB)
+				restore.Status.Conditions = append(restore.Status.Conditions, firstCause)
+				return restore
+			},
+			cachedPod: []client.Object{rgReported("a", prStarted)},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			podB := rgReported("b", prStarted)
+			r, _ := makeLaggingPodGroupRestoreReconciler(t,
+				pgObjects([]client.Object{rgSnapshot("a", "b"), tc.restore(), podB}, tc.cachedPod),
+				pgObjects([]client.Object{rgSnapshot("a", "b"), tc.restore(), podB, rgReported("a", prStarted, prReleased)}),
+			)
+
+			reconcileRestore(t, r)
+
+			got := getRestore(t, r)
+			assert.Equal(t, snapshotv1alpha1.RestorePhaseReleased, got.Status.Members[0].Phase, "not failed from the stale view")
+			assert.Equal(t, snapshotv1alpha1.RestorePhaseFailed, got.Status.Members[1].Phase)
+			failed := rgCondition(got.Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed)
+			require.NotNil(t, failed)
+			assert.Equal(t, metav1.ConditionTrue, failed.Status)
+		})
+	}
+}
+
+// TestPodGroupRestoreReconciler_ConfirmsACancellation deletes a restore whose
+// member a started on the API server only. The cached pass would cancel it
+// and release its finalizer; the API server's pass keeps both.
+func TestPodGroupRestoreReconciler_ConfirmsACancellation(t *testing.T) {
+	restore := func() *snapshotv1alpha1.PodGroupRestore {
+		restore := rgRestore("a", "b")
+		restore.DeletionTimestamp = ptr.To(metav1.Now())
+		restore.Status.Members = []snapshotv1alpha1.PodGroupRestoreMemberStatus{
+			rgPinnedMember("a", snapshotv1alpha1.RestorePhaseAdmitted), rgPinnedMember("b", snapshotv1alpha1.RestorePhaseAdmitted),
+		}
+		return restore
+	}
+	r, recorder := makeLaggingPodGroupRestoreReconciler(t,
+		pgObjects([]client.Object{rgSnapshot("a", "b"), restore(), rgReported("a"), rgReported("b")}),
+		pgObjects([]client.Object{rgSnapshot("a", "b"), restore(), rgReported("a", prStarted), rgReported("b")}),
+	)
+
+	reconcileRestore(t, r)
+
+	require.False(t, restoreGone(t, r), "the finalizer stays")
+	got := getRestore(t, r)
+	assert.Contains(t, got.Finalizers, snapshotv1alpha1.PodGroupInUseFinalizer)
+	assert.Nil(t, rgCondition(got.Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed), "not cancelled")
+	assert.Equal(t, snapshotv1alpha1.RestorePhaseRestoring, got.Status.Members[0].Phase)
+	assert.Equal(t, []string{"Normal Committed every member passed admission, and the restore has started"}, drainEvents(recorder))
+}
+
+// TestPodGroupRestoreReconciler_RecordsNothingWhenTheLiveReadFails: at the
+// deadline, the API server's pass fails, so nothing is recorded.
+func TestPodGroupRestoreReconciler_RecordsNothingWhenTheLiveReadFails(t *testing.T) {
+	restore := rgCommittedRestore(time.Hour, rgPinnedMember("a", snapshotv1alpha1.RestorePhaseRestoring))
+	r, recorder := makePodGroupRestoreReconciler(t, rgSnapshot("a"), restore, rgReported("a", prStarted))
+	r.NonCacheReadClient = interceptor.NewClient(r.NonCacheReadClient.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*corev1.Pod); ok {
+				return apierrors.NewInternalError(errors.New("the API server is down"))
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	before := getRestore(t, r)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: pgNamespace, Name: "restore"}})
+
+	require.Error(t, err)
+	assert.True(t, apierrors.IsInternalError(err), "the live read's error is returned: %v", err)
+	after := getRestore(t, r)
+	assert.Equal(t, before.ResourceVersion, after.ResourceVersion, "nothing is recorded")
+	assert.Empty(t, drainEvents(recorder))
 }
 
 // TestPodGroupRestoreReconciler_ConfirmsARefusal sees target b with an IPv6

@@ -784,3 +784,45 @@ func TestPodGroupRestoreReportOf(t *testing.T) {
 		groupFailed: &pod.Status.Conditions[3]}, podGroupRestoreReportOf(pod))
 	assert.Equal(t, podGroupRestoreReport{}, podGroupRestoreReportOf(prReportedPod("a")), "a Pod with no report")
 }
+
+func TestPodGroupRestoreChangeIsIrreversible(t *testing.T) {
+	failed := metav1.Condition{Type: snapshotv1alpha1.PodGroupConditionFailed, Status: metav1.ConditionTrue, Reason: "MemberFailed"}
+	ready := metav1.Condition{Type: snapshotv1alpha1.PodGroupConditionReady, Status: metav1.ConditionTrue, Reason: "Released"}
+	status := func(conditions []metav1.Condition, members ...snapshotv1alpha1.PodGroupRestoreMemberStatus) *snapshotv1alpha1.PodGroupRestoreStatus {
+		return &snapshotv1alpha1.PodGroupRestoreStatus{Members: members, Conditions: conditions}
+	}
+	pending := func(id string) snapshotv1alpha1.PodGroupRestoreMemberStatus {
+		return prPinned(id, snapshotv1alpha1.RestorePhasePending)
+	}
+	finished := status([]metav1.Condition{failed},
+		prFailed(prPinned("a", snapshotv1alpha1.RestorePhaseAdmitted), "RestoreFailed"),
+		prFailed(prPinned("b", snapshotv1alpha1.RestorePhaseAdmitted), "RestoreFailed"))
+	for _, tc := range []struct {
+		name               string
+		persisted, derived *snapshotv1alpha1.PodGroupRestoreStatus
+		deleting           bool
+		want               bool
+	}{
+		{"nothing changes", status(nil, pending("a")), status(nil, pending("a")), false, false},
+		{"the members are pinned", status(nil, pending("a"), pending("b")),
+			status(nil, prPinned("a", snapshotv1alpha1.RestorePhaseAdmitted), prPinned("b", snapshotv1alpha1.RestorePhaseAdmitted)),
+			false, true},
+		{"pinned members stay pinned", status(nil, prPinned("a", snapshotv1alpha1.RestorePhaseAdmitted)),
+			status(nil, prPinned("a", snapshotv1alpha1.RestorePhaseRestoring)), false, false},
+		{"a member is released", status(nil, prPinned("a", snapshotv1alpha1.RestorePhaseRestoring)),
+			status(nil, prPinned("a", snapshotv1alpha1.RestorePhaseReleased)), false, true},
+		{"a member fails", status(nil, prPinned("a", snapshotv1alpha1.RestorePhaseRestoring)),
+			status(nil, prFailed(prPinned("a", snapshotv1alpha1.RestorePhaseRestoring), "RestoreFailed")), false, true},
+		{"Failed turns True", status(nil, pending("a")), status([]metav1.Condition{failed}, pending("a")), false, true},
+		{"Ready turns True", status(nil, prPinned("a", snapshotv1alpha1.RestorePhaseReleased)),
+			status([]metav1.Condition{ready}, prPinned("a", snapshotv1alpha1.RestorePhaseReleased)), false, true},
+		{"a finished restore being deleted releases its finalizer", finished, finished, true, true},
+		{"a finished restore not being deleted", finished, finished, false, false},
+		{"a restore being deleted that has not finished", status(nil, prPinned("a", snapshotv1alpha1.RestorePhaseRestoring)),
+			status(nil, prPinned("a", snapshotv1alpha1.RestorePhaseRestoring)), true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, podGroupRestoreChangeIsIrreversible(tc.persisted, tc.derived, tc.deleting))
+		})
+	}
+}

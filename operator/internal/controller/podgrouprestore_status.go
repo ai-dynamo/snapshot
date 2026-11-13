@@ -20,12 +20,14 @@ import (
 // podGroupRestoreMemberObservation is what one reconcile saw of one pinned
 // target.
 type podGroupRestoreMemberObservation struct {
-	// report is what this restore's agent reported on the member's pinned
-	// Pod; empty when the member is not pinned, the cache holds no such Pod,
-	// or the Pod carries no report of this attempt.
+	// report is what the member's agent reported on its pinned Pod; empty
+	// when the member is not pinned, the observation found no such Pod, or the
+	// Pod carries no report yet.
 	report podGroupRestoreReport
-	// podDeleted is true when the API server confirmed that the member's
-	// pinned Pod is gone, or replaced by another Pod.
+	// podDeleted is true when the observation found the member's pinned Pod
+	// gone, or replaced by another Pod, while the member was unfinished. It
+	// fails the member for good, so Reconcile records it only from an
+	// observation through the API server.
 	podDeleted bool
 }
 
@@ -237,6 +239,31 @@ func findPodCondition(pod *corev1.Pod, condType string) *corev1.PodCondition {
 		}
 	}
 	return nil
+}
+
+// podGroupRestoreChangeIsIrreversible reports whether recording derived over
+// the persisted status of a PodGroupRestore would make a decision that can
+// never be undone, so that Reconcile observes again through the API server
+// before it records anything: one that isIrreversiblePodGroupChange finds, or
+// a member pinned, since the pins start the members' work. deleting says
+// whether the restore is being deleted, so that Reconcile would release its
+// finalizer once derived is recorded and the restore has finished. Members are
+// matched by ID.
+func podGroupRestoreChangeIsIrreversible(persisted, derived *snapshotv1alpha1.PodGroupRestoreStatus, deleting bool) bool {
+	pinned := make(map[string]bool, len(persisted.Members))
+	for _, m := range persisted.Members {
+		pinned[m.ID] = m.Pod != nil
+	}
+	for _, m := range derived.Members {
+		if m.Pod != nil && !pinned[m.ID] {
+			return true
+		}
+	}
+	return isIrreversiblePodGroupChange(
+		podGroupRestoreMemberViews(persisted.Members, nil), podGroupRestoreMemberViews(derived.Members, nil),
+		persisted.Conditions, derived.Conditions,
+		deleting && podGroupRestoreFinished(derived),
+	)
 }
 
 // podGroupRestoreMemberViews returns the shared rules' view of each member, in

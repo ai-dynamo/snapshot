@@ -64,6 +64,15 @@ type PodGroupRestoreReconciler struct {
 // its finalizer once it has finished, and send the claims that admission
 // prepared. Recording comes first, so a Cancelled restore is recorded before
 // it disappears.
+//
+// Every irreversible decision is made from the API server, by the rule both
+// kinds share. The reconciler observes through the cache first. When the
+// status derived from that would make a change that can never be undone
+// (podGroupRestoreChangeIsIrreversible), pins included, it observes again
+// through the API server and derives again from the persisted status, never
+// from the first derived one, whose final phases and pins would stick. It
+// records only the second pass, and acts on that pass's observation and
+// status. If a live read fails, it returns the error and records nothing.
 func (r *PodGroupRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	restore := &snapshotv1alpha1.PodGroupRestore{}
 	if err := r.Get(ctx, req.NamespacedName, restore); err != nil {
@@ -80,11 +89,17 @@ func (r *PodGroupRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	now := time.Now()
-	observed, err := r.observe(ctx, restore, now)
+	observed, err := r.observe(ctx, r.Client, restore, now)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	desired := derivePodGroupRestoreStatus(&restore.Spec, observed, restore.Status, now)
+	if podGroupRestoreChangeIsIrreversible(&restore.Status, &desired, deleting) {
+		if observed, err = r.observe(ctx, r.NonCacheReadClient, restore, now); err != nil {
+			return ctrl.Result{}, err
+		}
+		desired = derivePodGroupRestoreStatus(&restore.Spec, observed, restore.Status, now)
+	}
 	if err := r.recordStatus(ctx, restore, desired); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -117,12 +132,15 @@ func (r *PodGroupRestoreReconciler) claim(ctx context.Context, claims []targetCl
 	return nil
 }
 
-// observe reads the PodGroupSnapshot's ranks and each pinned member's report,
-// then runs admission while no member is pinned (admit). Every member is
-// pinned in the same status patch, so once any is, admission never runs
-// again, and a restore whose members wait for their pins is never refused.
+// observe reads, through reader, the PodGroupSnapshot's ranks and each pinned
+// member's report, then runs admission while no member is pinned (admit).
+// Every member is pinned in the same status patch, so once any is, admission
+// never runs again, and a restore whose members wait for their pins is never
+// refused. Reconcile passes the cache first, and the API server when the
+// result would make an irreversible decision.
 func (r *PodGroupRestoreReconciler) observe(
 	ctx context.Context,
+	reader client.Reader,
 	restore *snapshotv1alpha1.PodGroupRestore,
 	now time.Time,
 ) (podGroupRestoreObservation, error) {
@@ -132,7 +150,7 @@ func (r *PodGroupRestoreReconciler) observe(
 		deadline: restore.CreationTimestamp.Add(time.Duration(restore.Spec.DeadlineSeconds) * time.Second),
 	}
 	snapshot := &snapshotv1alpha1.PodGroupSnapshot{}
-	switch err := r.Get(ctx, client.ObjectKey{Namespace: restore.Namespace, Name: restore.Spec.SnapshotRef.Name}, snapshot); {
+	switch err := reader.Get(ctx, client.ObjectKey{Namespace: restore.Namespace, Name: restore.Spec.SnapshotRef.Name}, snapshot); {
 	case apierrors.IsNotFound(err):
 	case err != nil:
 		return podGroupRestoreObservation{}, fmt.Errorf("get PodGroupSnapshot %q: %w", restore.Spec.SnapshotRef.Name, err)
@@ -151,7 +169,7 @@ func (r *PodGroupRestoreReconciler) observe(
 	}
 	for i, target := range restore.Spec.Targets {
 		if m := pinned[target.ID]; m != nil {
-			member, err := r.observeMember(ctx, restore, m)
+			member, err := r.observeMember(ctx, reader, restore, m)
 			if err != nil {
 				return podGroupRestoreObservation{}, err
 			}
@@ -163,7 +181,7 @@ func (r *PodGroupRestoreReconciler) observe(
 		meta.IsStatusConditionTrue(restore.Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed) {
 		return observed, nil
 	}
-	admission, err := r.admit(ctx, restore)
+	admission, err := r.admit(ctx, reader, restore)
 	if err != nil {
 		return podGroupRestoreObservation{}, err
 	}
@@ -171,38 +189,30 @@ func (r *PodGroupRestoreReconciler) observe(
 	return observed, nil
 }
 
-// observeMember reads a pinned member's Pod from the cache and, when it is the
-// pinned Pod, takes the member's report from it (podGroupRestoreReportOf), so
-// the status reads no other Pod's conditions. When
-// the cache does not hold the pinned Pod while the member is unfinished, the
-// API server confirms whether it is gone: failing the member is final, so the
-// cache alone is not enough.
+// observeMember reads, through reader, a pinned member's Pod and, when it is
+// the pinned Pod, takes the member's report from it (podGroupRestoreReportOf),
+// so the status reads no other Pod's conditions. An unfinished member whose
+// pinned Pod reader finds gone, or replaced, is observed deleted, which fails
+// it for good: Reconcile confirms that through the API server, which also
+// reads the report the cache may have missed.
 func (r *PodGroupRestoreReconciler) observeMember(
 	ctx context.Context,
+	reader client.Reader,
 	restore *snapshotv1alpha1.PodGroupRestore,
 	m *snapshotv1alpha1.PodGroupRestoreMemberStatus,
 ) (podGroupRestoreMemberObservation, error) {
 	var observed podGroupRestoreMemberObservation
 	key := client.ObjectKey{Namespace: restore.Namespace, Name: m.Pod.Name}
 	pod := &corev1.Pod{}
-	switch err := r.Get(ctx, key, pod); {
+	switch err := reader.Get(ctx, key, pod); {
 	case apierrors.IsNotFound(err):
+		observed.podDeleted = !isRestorePhaseFinal(m.Phase)
 	case err != nil:
 		return observed, fmt.Errorf("get Pod %q of member %q: %w", key.Name, m.ID, err)
-	case pod.UID == m.Pod.UID:
-		observed.report = podGroupRestoreReportOf(pod)
-		return observed, nil
-	}
-	if isRestorePhaseFinal(m.Phase) {
-		return observed, nil
-	}
-	switch err := r.NonCacheReadClient.Get(ctx, key, pod); {
-	case apierrors.IsNotFound(err):
-		observed.podDeleted = true
-	case err != nil:
-		return observed, fmt.Errorf("confirm Pod %q is gone: %w", key.Name, err)
+	case pod.UID != m.Pod.UID:
+		observed.podDeleted = !isRestorePhaseFinal(m.Phase)
 	default:
-		observed.podDeleted = pod.UID != m.Pod.UID
+		observed.report = podGroupRestoreReportOf(pod)
 	}
 	return observed, nil
 }
@@ -230,10 +240,6 @@ func podGroupRestoreRequeue(observed podGroupRestoreObservation, status *snapsho
 	return podGroupRequeue(observed.admission, observed.deadline, now, podGroupRestoreMemberViews(status.Members, observed.ranks))
 }
 
-// podGroupRestoreTargetPodField indexes PodGroupRestores by the names of their
-// target Pods.
-const podGroupRestoreTargetPodField = "spec.targets.podRef.name"
-
 // SetupWithManager watches the restore and every Pod, mapped through the
 // podGroupRestoreTargetPodField index to the restores whose targets name it:
 // target Pods appear, get claimed, scheduled, their addresses and containers,
@@ -255,6 +261,10 @@ func (r *PodGroupRestoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.podToPodGroupRestores)).
 		Complete(r)
 }
+
+// podGroupRestoreTargetPodField indexes PodGroupRestores by the names of their
+// target Pods.
+const podGroupRestoreTargetPodField = "spec.targets.podRef.name"
 
 // podGroupRestoreTargetPods is the podGroupRestoreTargetPodField index's
 // values of a PodGroupRestore: the name of every target Pod.

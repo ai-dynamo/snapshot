@@ -40,43 +40,41 @@ type targetClaim struct {
 	original, claimed *corev1.Pod
 }
 
-// admit runs restore admission in two stages. In each, every refusal is
-// checked before any wait, so a restore that can never pass is refused at
-// once rather than after its Pods or agents are ready, and a refusal before
-// the claim leaves every target gated.
+// admit runs restore admission in two stages, reading through reader, which
+// is the cache or, when Reconcile confirms an irreversible decision, the API
+// server. In each stage, every refusal is checked before any wait, so a
+// restore that can never pass is refused at once rather than after its Pods
+// or agents are ready, and a refusal before the claim leaves every target
+// gated. Both stages start from readRestoreTargets: the PodGroupSnapshot, the
+// spec, and each target's Pod, its UID and its row in the claim table.
 //
-//  1. Claim, while any target is not claimed in the cache. Everything is
-//     read from the API server, since the trimmed cache holds no containers
-//     and a claim must start from the whole Pod. The PodGroupSnapshot and the
-//     spec are checked (readRestoreTargets), then each target
-//     (claimVerdict): a missing Pod waits with TargetPodPending; a Pod with
-//     another UID than its podRef names (readRestoreTargets, which both
-//     stages start from), one claimed by another restore
+//  1. Claim, while any target is not claimed in what reader shows. This stage
+//     reads only the API server, whatever reader is, since the trimmed cache
+//     holds no containers and a claim must start from the whole Pod. Each
+//     target (claimVerdict): a missing Pod waits with TargetPodPending; a Pod
+//     with another UID than its podRef names, one claimed by another restore
 //     (TargetInUse), one in any other state that the claim table refuses,
 //     and one that podcontract.ClaimGroupTarget refuses are refused. Only
 //     when every target is claimed or ready to be does admit return the
 //     claims, which the reconcile sends.
-//  2. Pin, once every target is claimed. It reads the cache, and confirms a
-//     refusal or a pass against the API server. The claim table still
-//     applies first: a target that something else changed is no longer
-//     claimed, so stage 1 refuses it. Each target (pinVerdict) waits with
-//     TargetPodUnscheduled while it has no node, and with TargetPodPending
-//     while it has no address or destination container ID; an address that
-//     is not IPv4 is refused. The agent on every target's node must then be
-//     ready for groups (AgentNotReady), and admit returns the pins.
+//  2. Pin, once every target is claimed, through reader. Each target
+//     (pinVerdict) waits with TargetPodUnscheduled while it has no node, and
+//     with TargetPodPending while it has no address or destination container
+//     ID; an address that is not IPv4 is refused. The agent on every target's
+//     node must then be ready for groups (AgentNotReady), and admit returns
+//     the pins. A pass pins, and a refusal fails the restore, so Reconcile
+//     confirms either through the API server before it records it.
 func (r *PodGroupRestoreReconciler) admit(
 	ctx context.Context,
+	reader client.Reader,
 	restore *snapshotv1alpha1.PodGroupRestore,
 ) (podGroupRestoreAdmission, error) {
-	cached, err := readRestoreTargets(ctx, r.Client, restore)
+	read, err := readRestoreTargets(ctx, reader, restore)
 	if err != nil {
 		return podGroupRestoreAdmission{}, err
 	}
-	if cached.allClaimed() {
-		result, err := r.pinTargets(ctx, r.Client, cached.targets)
-		if err != nil || result.state == podGroupAdmissionWaiting {
-			return result, err
-		}
+	if read.allClaimed() {
+		return r.pinTargets(ctx, reader, read.targets)
 	}
 
 	live, err := readRestoreTargets(ctx, r.NonCacheReadClient, restore)
@@ -419,7 +417,7 @@ func claimVerdict(target restoreTarget) podGroupRestoreTargetVerdict {
 
 // pinTargets is stage 2 on claimed targets read through reader: the first
 // refusal, in spec order; else a wait; else AgentNotReady for the nodes'
-// agents; else a pass with the pins.
+// agents, read through reader; else a pass with the pins.
 func (r *PodGroupRestoreReconciler) pinTargets(
 	ctx context.Context,
 	reader client.Reader,
