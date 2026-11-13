@@ -64,8 +64,8 @@ func BuildGroupTarget(pod *corev1.Pod, request GroupTargetRequest, options Optio
 // the control mount and environment and the canonical restore startup probe.
 // Like Validate, it leaves the seccomp profile to the producer. It checks
 // neither RestoreGroupSchedulingGate nor the claim, which change during the
-// Pod's life. The operator calls it on a target before it claims the Pod. It
-// performs no API read and never mutates the Pod.
+// Pod's life. It is for owners and tests: ClaimGroupTarget makes the same
+// check. It performs no API read and never mutates the Pod.
 func ValidateGroupTarget(pod *corev1.Pod, request GroupTargetRequest) error {
 	if pod == nil {
 		return fmt.Errorf("restore pod is nil")
@@ -123,8 +123,11 @@ type RestoreGroupClaim struct {
 // RestoreContainerMapAnnotation are written, and RestoreGroupSchedulingGate is
 // removed. Other scheduling gates, such as a gang scheduler's, stay. It refuses
 // a Pod without the gate, a Pod that already carries a binding, a map or
-// RestoreFromAnnotation, an empty UID, and a mapping whose names are not valid
-// container names.
+// RestoreFromAnnotation, an empty UID, a mapping whose names are not valid
+// container names, and a Pod that ValidateGroupTarget refuses for the
+// mapping's destination. Once the gate is gone the Pod can run, and the NRI
+// plugin can prepare only a destination that exists and is shaped, so a claim
+// never leaves a Pod that would run its original command instead.
 //
 // It performs no API call. The operator sends the result as an update
 // conditional on the Pod's resourceVersion, so the binding, the map and the
@@ -147,6 +150,10 @@ func ClaimGroupTarget(pod *corev1.Pod, claim RestoreGroupClaim) (*corev1.Pod, er
 	}
 	if err := validateContainerMappingNames(claim.Mapping); err != nil {
 		return nil, err
+	}
+	if err := validateGroupTarget(&pod.Spec, []string{claim.Mapping.Destination},
+		Options{EnableStartupGate: true}); err != nil {
+		return nil, fmt.Errorf("the claim's destination is not a group target's: %w", err)
 	}
 
 	result := pod.DeepCopy()

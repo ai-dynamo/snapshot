@@ -364,6 +364,23 @@ func TestClaimGroupTarget(t *testing.T) {
 			claim:   RestoreGroupClaim{UID: claim.UID, Mapping: ContainerMapping{Source: "main", Destination: ""}},
 			refusal: "invalid restore destination container",
 		},
+		{
+			name:    "a missing destination",
+			claim:   RestoreGroupClaim{UID: claim.UID, Mapping: ContainerMapping{Source: "main", Destination: "missing"}},
+			refusal: "no destination container named",
+		},
+		{
+			name:    "a destination without the control mount",
+			mutate:  func(pod *corev1.Pod) { pod.Spec.Containers[0].VolumeMounts = nil },
+			claim:   claim,
+			refusal: "is missing " + SnapshotControlVolumeName,
+		},
+		{
+			name:    "a destination without the startup probe",
+			mutate:  func(pod *corev1.Pod) { pod.Spec.Containers[0].StartupProbe = nil },
+			claim:   claim,
+			refusal: "restore startup gate",
+		},
 	} {
 		t.Run("refuses "+tc.name, func(t *testing.T) {
 			pod := gatedGroupTarget(t)
@@ -454,7 +471,9 @@ func TestRestoreGroupClaimRoundTrip(t *testing.T) {
 		{Source: "main", Destination: "main"},
 	} {
 		t.Run(formatContainerMapping(mapping), func(t *testing.T) {
-			pod, err := BuildGroupTarget(restorePodFixture(), GroupTargetRequest{DestinationContainer: "main"}, Options{})
+			pod := restorePodFixture()
+			pod.Spec.Containers[0].Name = mapping.Destination
+			pod, err := BuildGroupTarget(pod, GroupTargetRequest{DestinationContainer: mapping.Destination}, Options{})
 			if err != nil {
 				t.Fatalf("BuildGroupTarget() failed: %v", err)
 			}
