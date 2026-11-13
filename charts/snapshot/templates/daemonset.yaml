@@ -40,16 +40,22 @@ spec:
         # change, so an upgrade doesn't leave it running on stale config.
         # User-supplied podAnnotations cannot override this key.
         checksum/config: {{ include "snapshot.operatorConfigChecksum" . }}
+        {{- if .Values.podGroups.enabled }}
+        # The pod group protocol versions this agent speaks. The operator
+        # places a group's members only on nodes whose agent lists a version
+        # it speaks too. User-supplied podAnnotations cannot override this key.
+        nvidia.com/snapshot-podgroup-protocols: v1
+        {{- end }}
         {{- if .Values.openshift.enabled }}
         # Pin this DS to the built-in "privileged" SCC even if a higher-priority
         # custom SCC is added later. See openshift/enhancements custom-scc-preemption-prevention.
         # User-supplied podAnnotations cannot override this key or checksum/config.
         openshift.io/required-scc: privileged
-        {{- with omit (.Values.daemonset.podAnnotations | default dict) "openshift.io/required-scc" "kubectl.kubernetes.io/default-container" "checksum/config" }}
+        {{- with omit (.Values.daemonset.podAnnotations | default dict) "openshift.io/required-scc" "kubectl.kubernetes.io/default-container" "checksum/config" "nvidia.com/snapshot-podgroup-protocols" }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- else }}
-        {{- with omit (.Values.daemonset.podAnnotations | default dict) "kubectl.kubernetes.io/default-container" "checksum/config" }}
+        {{- with omit (.Values.daemonset.podAnnotations | default dict) "kubectl.kubernetes.io/default-container" "checksum/config" "nvidia.com/snapshot-podgroup-protocols" }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- end }}
@@ -112,6 +118,16 @@ spec:
             - {{ .Values.runtime.type | quote }}
             - "--runtime-socket"
             - {{ $socket | quote }}
+            {{- if .Values.podGroups.enabled }}
+            # How this agent reaches the coordinator of a pod group: the agent
+            # Pod, selected as the DaemonSet selects it, on the node of the
+            # group's rank-0 member, at that node's IP and coordinator.port.
+            - --enable-pod-groups
+            - --agent-namespace=$(POD_NAMESPACE)
+            - {{ printf "--agent-selector=%s" (include "snapshot.agentPodSelector" .) | quote }}
+            - {{ printf "--coordinator-server-name=%s" (include "snapshot.coordinatorServerName" .) | quote }}
+            - {{ printf "--coordinator-port=%d" (int64 .Values.coordinator.port) | quote }}
+            {{- end }}
           securityContext:
             privileged: true
           env:
@@ -120,6 +136,12 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            {{- if .Values.podGroups.enabled }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- end }}
             - name: SNAPSHOT_LOG_LEVEL
               value: {{ .Values.daemonset.snapshotLogLevel | quote }}
             {{- with .Values.daemonset.nriHostNamespace }}
@@ -177,6 +199,19 @@ spec:
             # Mount docker config for OCI registry auth
             - name: docker-config
               mountPath: /root/.docker
+              readOnly: true
+            {{- end }}
+            {{- if .Values.podGroups.enabled }}
+            # The CA bundle that verifies the coordinators' certificate, read
+            # on every connect, so a replaced CA is trusted once the kubelet
+            # refreshes the file.
+            - name: coordinator-ca
+              mountPath: /etc/snapshot-coordinator/ca
+              readOnly: true
+            # The token the coordinators admit, read on every connect, so the
+            # kubelet's rotation is picked up.
+            - name: coordinator-token
+              mountPath: /var/run/secrets/snapshot-coordinator
               readOnly: true
             {{- end }}
           resources:
@@ -488,6 +523,37 @@ spec:
         - name: coordinator-tmp
           emptyDir:
             sizeLimit: 16Mi
+        # The trust bundle agents verify the coordinators with, as ca.crt:
+        # the operator's ConfigMap, or coordinator.tls.trust's ConfigMap or
+        # Secret. Optional, like the serving certificate: until it exists the
+        # file is missing, and a member's connection fails until it appears.
+        {{- $trust := .Values.coordinator.tls.trust }}
+        - name: coordinator-ca
+          {{- if $trust.secretName }}
+          secret:
+            secretName: {{ $trust.secretName | quote }}
+            optional: true
+            items:
+              - key: {{ $trust.key | quote }}
+                path: ca.crt
+          {{- else }}
+          configMap:
+            name: {{ $trust.configMapName | default (include "snapshot.coordinatorCABundleName" .) | quote }}
+            optional: true
+            items:
+              - key: {{ $trust.key | quote }}
+                path: ca.crt
+          {{- end }}
+        # A ServiceAccount token for the coordinators' audience alone, so it
+        # is useless against the API server. The kubelet renews it before it
+        # expires.
+        - name: coordinator-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: {{ include "snapshot.coordinatorTokenAudience" . | quote }}
+                  expirationSeconds: 3600
+                  path: token
         {{- end }}
       {{- with .Values.daemonset.imagePullSecrets }}
       imagePullSecrets:
