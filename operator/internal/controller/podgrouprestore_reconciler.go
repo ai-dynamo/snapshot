@@ -29,10 +29,10 @@ import (
 // +kubebuilder:rbac:groups=nvidia.com,resources=podgrouprestores/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=podgrouprestores/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=podgroupsnapshots,verbs=get;list;watch
-// The update on Pods serves only to claim a restore target: one update,
+// The patch on Pods serves only to claim a restore target: one patch,
 // conditional on the Pod's resourceVersion, that writes its binding and its
 // container map and removes Snapshot's scheduling gate.
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 // PodGroupRestoreReconciler reconciles a PodGroupRestore: it admits the
@@ -44,10 +44,9 @@ import (
 // the pins, since each agent waits for its member's pins before it restores.
 // The reconciler therefore decides every refusal before it pins any member,
 // pins every member in one status patch, and from then on only records what
-// the members report. A claim alone starts nothing, and a claimed Pod serves
-// only its restore: each agent reports on its Pod's conditions, and the
-// status reads them only while the Pod's binding, nvidia.com/restore-group-uid,
-// holds this restore's UID.
+// the members report. A claim alone starts nothing. A claimed Pod serves
+// only the restore that claimed it and is never rebound, so the conditions
+// that each agent reports on its pinned Pod are this restore's.
 type PodGroupRestoreReconciler struct {
 	client.Client
 	NonCacheReadClient client.Reader
@@ -99,17 +98,20 @@ func (r *PodGroupRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return ctrl.Result{RequeueAfter: podGroupRestoreRequeue(observed, &restore.Status, now)}, nil
 }
 
-// claim sends each claim that admission prepared as an update of the Pod,
-// conditional on the resourceVersion admission read it at. It stops at the
+// claim sends each claim that admission prepared as a merge patch of the
+// Pod, conditional on the resourceVersion admission read it at. The patch
+// carries only the two annotations and the scheduling gates, so fields that
+// this API version does not know stay on the Pod as they are. It stops at the
 // first error. A conflict proves nothing, since the kubelet and other
 // controllers also write the Pod: the reconcile ends, and the next one reads
 // the Pods again and applies the claim table. A claim that landed stays, so a
 // restart between two claims finds the first Pod claimed and the second still
 // gated.
-func (r *PodGroupRestoreReconciler) claim(ctx context.Context, pods []*corev1.Pod) error {
-	for _, pod := range pods {
-		if err := r.Update(ctx, pod); err != nil {
-			return fmt.Errorf("claim Pod %q: %w", pod.Name, err)
+func (r *PodGroupRestoreReconciler) claim(ctx context.Context, claims []targetClaim) error {
+	for _, c := range claims {
+		patch := client.MergeFromWithOptions(c.original, client.MergeFromWithOptimisticLock{})
+		if err := r.Patch(ctx, c.claimed, patch); err != nil {
+			return fmt.Errorf("claim Pod %q: %w", c.claimed.Name, err)
 		}
 	}
 	return nil
@@ -170,8 +172,8 @@ func (r *PodGroupRestoreReconciler) observe(
 }
 
 // observeMember reads a pinned member's Pod from the cache and, when it is the
-// pinned Pod, takes this restore's report from it (podGroupRestoreReportOf), so
-// the status reads neither another Pod nor another attempt's conditions. When
+// pinned Pod, takes the member's report from it (podGroupRestoreReportOf), so
+// the status reads no other Pod's conditions. When
 // the cache does not hold the pinned Pod while the member is unfinished, the
 // API server confirms whether it is gone: failing the member is final, so the
 // cache alone is not enough.
@@ -188,7 +190,7 @@ func (r *PodGroupRestoreReconciler) observeMember(
 	case err != nil:
 		return observed, fmt.Errorf("get Pod %q of member %q: %w", key.Name, m.ID, err)
 	case pod.UID == m.Pod.UID:
-		observed.report = podGroupRestoreReportOf(pod, restore.UID)
+		observed.report = podGroupRestoreReportOf(pod)
 		return observed, nil
 	}
 	if isRestorePhaseFinal(m.Phase) {

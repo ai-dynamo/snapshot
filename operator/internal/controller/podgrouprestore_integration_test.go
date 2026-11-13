@@ -107,11 +107,11 @@ func longestPodGroupRestoreTargets(n int) []snapshotv1alpha1.PodGroupRestoreTarg
 
 // TestPodGroupRestoreClaimsAndPins runs a restore of two gated targets against
 // a real API server, which refuses a gated Pod with a node, so the Pods are
-// created without one. The claim writes both annotations, removes Snapshot's
-// gate, keeps a gang scheduler's, and changes nothing else. Once the Pods are
-// bound to a node through pods/binding and run, every member is pinned. A
-// report written as the contract requires, a fenced write of the Pod's
-// status, then fails its member.
+// created without one. The claim's patch writes both annotations, removes
+// Snapshot's gate, keeps a gang scheduler's, and changes nothing else. Once
+// the Pods are bound to a node through pods/binding and run, every member is
+// pinned. A report written as the contract requires, a fenced write of the
+// Pod's status, then fails its member.
 func TestPodGroupRestoreClaimsAndPins(t *testing.T) {
 	cl := startPodGroupEnvtest(t)
 	ctx := t.Context()

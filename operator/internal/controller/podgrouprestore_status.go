@@ -12,7 +12,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -30,23 +29,17 @@ type podGroupRestoreMemberObservation struct {
 	podDeleted bool
 }
 
-// podGroupRestoreReport is one attempt's report on its restore Pod: the
+// podGroupRestoreReport is a member's report on its restore Pod: the
 // conditions its agent writes. Each is nil when the report lacks it.
 type podGroupRestoreReport struct {
 	started, restored, groupFailed *corev1.PodCondition
 }
 
-// podGroupRestoreReportOf returns the report of the attempt with uid on pod:
-// its RestoreStarted, Restored and GroupRestoreFailed conditions, only while
-// the Pod's binding, read by podcontract.RestoreGroupClaimOf, holds uid. A
-// claimed Pod serves only the attempt its binding names, so its conditions
-// need no identity of their own; a Pod bound to another attempt, or whose
-// claim is invalid, yields an empty report.
-func podGroupRestoreReportOf(pod *corev1.Pod, uid types.UID) podGroupRestoreReport {
-	claim, bound, err := podcontract.RestoreGroupClaimOf(pod.Annotations)
-	if uid == "" || !bound || err != nil || claim.UID != uid {
-		return podGroupRestoreReport{}
-	}
+// podGroupRestoreReportOf returns the report on a member's pinned Pod: its
+// RestoreStarted, Restored and GroupRestoreFailed conditions. The pinned Pod
+// was claimed by the member's restore and is never rebound, so its conditions
+// are that restore's and need no identity of their own.
+func podGroupRestoreReportOf(pod *corev1.Pod) podGroupRestoreReport {
 	return podGroupRestoreReport{
 		started:     findPodCondition(pod, podcontract.RestoreStartedCondition),
 		restored:    findPodCondition(pod, podcontract.RestoredCondition),
@@ -66,10 +59,9 @@ type podGroupRestoreObservation struct {
 	// pins holds, once admission passed, what to pin for each spec target, in
 	// spec order: pod, nodeName, containers and targetPodIP.
 	pins []snapshotv1alpha1.PodGroupRestoreMemberStatus
-	// claims holds the target Pods that admission prepared to claim, which
-	// the reconcile sends after it records the status. The status does not
-	// read them.
-	claims []*corev1.Pod
+	// claims holds the claims that admission prepared, which the reconcile
+	// sends after it records the status. The status does not read them.
+	claims []targetClaim
 	// deleting is true once the restore has a deletion timestamp.
 	deleting bool
 	// deadline is the restore's creation time plus spec.deadlineSeconds.
@@ -113,10 +105,9 @@ var podGroupRestoreKind = podGroupKind{
 //
 // The status lists the members in spec order. When admission passes, it pins
 // every member at once, in the one status patch this status becomes. A member
-// reads only its report: the conditions this attempt's agent wrote on the
-// pinned Pod, while the Pod's binding holds this restore's UID (see
-// podGroupRestoreReportOf). Each member's phase then comes from the first
-// matching row:
+// reads only its report: the conditions its agent wrote on the pinned Pod
+// (see podGroupRestoreReportOf). Each member's phase then comes from the
+// first matching row:
 //
 //	Failed     its report's nvidia.com/Restored is False with RestoreFailed or
 //	           RestoreIncompatible: the reason and message of the report's

@@ -26,11 +26,18 @@ type podGroupRestoreAdmission struct {
 	// pins holds, once admission passed, what to pin for each spec target, in
 	// spec order.
 	pins []snapshotv1alpha1.PodGroupRestoreMemberStatus
-	// claims holds the target Pods to claim, each read from the API server
-	// and with the claim applied, once every target is claimed or ready to
-	// be. Admission then has no state: the claims make progress, and the
+	// claims holds the claims to send, once every target is claimed or ready
+	// to be. Admission then has no state: the claims make progress, and the
 	// next reconcile reads the claimed Pods.
-	claims []*corev1.Pod
+	claims []targetClaim
+}
+
+// targetClaim is one target Pod to claim: the Pod as admission read it from
+// the API server, and the same Pod with the claim applied
+// (podcontract.ClaimGroupTarget). The reconcile sends the difference as a
+// patch conditional on original's resourceVersion.
+type targetClaim struct {
+	original, claimed *corev1.Pod
 }
 
 // admit runs restore admission in two stages. In each, every refusal is
@@ -45,19 +52,17 @@ type podGroupRestoreAdmission struct {
 //     (claimVerdict): a missing Pod waits with TargetPodPending; a Pod with
 //     another UID than its podRef names, one claimed by another restore
 //     (TargetInUse), one in any other state that the claim table refuses,
-//     one that carries nvidia.com/RestoreStarted, and one that
-//     podcontract.ClaimGroupTarget refuses are refused. Only when every
-//     target is claimed or ready to be does admit return the claims, which
-//     the reconcile sends.
+//     and one that podcontract.ClaimGroupTarget refuses are refused. Only
+//     when every target is claimed or ready to be does admit return the
+//     claims, which the reconcile sends.
 //  2. Pin, once every target is claimed. It reads the cache, and confirms a
 //     refusal or a pass against the API server. The claim table still
 //     applies first: a target that something else changed is no longer
 //     claimed, so stage 1 refuses it. Each target (pinVerdict) waits with
 //     TargetPodUnscheduled while it has no node, and with TargetPodPending
 //     while it has no address or destination container ID; an address that
-//     is not IPv4, or a running Pod without the destination container, is
-//     refused. The agent on every target's node must then be ready for
-//     groups (AgentNotReady), and admit returns the pins.
+//     is not IPv4 is refused. The agent on every target's node must then be
+//     ready for groups (AgentNotReady), and admit returns the pins.
 func (r *PodGroupRestoreReconciler) admit(
 	ctx context.Context,
 	restore *snapshotv1alpha1.PodGroupRestore,
@@ -288,9 +293,11 @@ const (
 //	ungated, bound to want's UID, with want's map    claimed
 //	anything else                                    refused
 //
-// Only the operator writes a claim, so a binding whose claim
-// podcontract.RestoreGroupClaimOf rejects is refused too. The table never
-// repairs a Pod.
+// Only the operator writes a claim, in the patch that removes the gate, and a
+// gate never comes back once removed. So a binding whose claim
+// podcontract.RestoreGroupClaimOf rejects, and a binding on a Pod that still
+// carries the gate, were written by something else, and are refused too. The
+// table never repairs a Pod.
 func classifyRestoreTarget(pod *corev1.Pod, want podcontract.RestoreGroupClaim) (restoreTargetClaim, string) {
 	gated := podcontract.HasRestoreGroupGate(pod)
 	claim, bound, err := podcontract.RestoreGroupClaimOf(pod.Annotations)
@@ -305,19 +312,13 @@ func classifyRestoreTarget(pod *corev1.Pod, want podcontract.RestoreGroupClaim) 
 		return restoreTargetRefused, fmt.Sprintf("is not a group target: it has neither the %s scheduling gate nor a claim",
 			podcontract.RestoreGroupSchedulingGate)
 	case gated:
-		return restoreTargetRefused, fmt.Sprintf("is claimed by this PodGroupRestore but carries the %s scheduling gate again",
-			podcontract.RestoreGroupSchedulingGate)
+		return restoreTargetRefused, fmt.Sprintf("is bound to this PodGroupRestore but still carries the %s scheduling gate: "+
+			"something other than Snapshot wrote its binding", podcontract.RestoreGroupSchedulingGate)
 	case claim.Mapping != want.Mapping:
 		return restoreTargetRefused, fmt.Sprintf("is claimed by this PodGroupRestore with the container map %s, not %s",
-			formatRestoreMapping(claim.Mapping), formatRestoreMapping(want.Mapping))
+			claim.Mapping, want.Mapping)
 	}
 	return restoreTargetClaimed, ""
-}
-
-// formatRestoreMapping formats a mapping as nvidia.com/restore-container-map
-// holds it.
-func formatRestoreMapping(mapping podcontract.ContainerMapping) string {
-	return mapping.Source + "=" + mapping.Destination
 }
 
 // podGroupRestoreTargetVerdict is one stage's verdict on one target: at most
@@ -328,8 +329,8 @@ type podGroupRestoreTargetVerdict struct {
 	refusal *podGroupAdmission
 	// wait is what the target waits for, with its reason.
 	wait *podGroupAdmission
-	// claim is the target's Pod with the claim applied.
-	claim *corev1.Pod
+	// claim is the target's claim, ready to send.
+	claim *targetClaim
 	// pin is what to pin for a target that is ready.
 	pin *snapshotv1alpha1.PodGroupRestoreMemberStatus
 }
@@ -353,7 +354,7 @@ func targetMessage(target restoreTarget, format string, args ...any) string {
 // the claims of every unclaimed target.
 func claimTargets(targets []restoreTarget) podGroupRestoreAdmission {
 	var waits []podGroupAdmission
-	var claims []*corev1.Pod
+	var claims []targetClaim
 	for _, target := range targets {
 		verdict := claimVerdict(target)
 		switch {
@@ -362,7 +363,7 @@ func claimTargets(targets []restoreTarget) podGroupRestoreAdmission {
 		case verdict.wait != nil:
 			waits = append(waits, *verdict.wait)
 		case verdict.claim != nil:
-			claims = append(claims, verdict.claim)
+			claims = append(claims, *verdict.claim)
 		}
 	}
 	if wait := targetsWait(waits); wait != nil {
@@ -377,12 +378,15 @@ func claimTargets(targets []restoreTarget) podGroupRestoreAdmission {
 //  1. its Pod does not exist yet: it waits, with TargetPodPending;
 //  2. its Pod's UID is not the one its podRef names, if any: Refused;
 //  3. the claim table says it is in use (TargetInUse) or refused (Refused);
-//  4. it carries nvidia.com/RestoreStarted: an earlier restore changed it,
-//     Refused;
-//  5. it is claimed already: nothing to do;
-//  6. podcontract.ClaimGroupTarget refuses it, typically because its
+//  4. it is claimed already: nothing to do;
+//  5. podcontract.ClaimGroupTarget refuses it, typically because its
 //     destination is not shaped as one: Refused;
-//  7. otherwise its claim is ready to send.
+//  6. otherwise its claim is ready to send.
+//
+// Nothing can have started in a target that stage 1 claims: a gated Pod has
+// never run, since Kubernetes never adds a scheduling gate to an existing
+// Pod, and a Pod this restore claimed is not pinned yet, while agents act only
+// on pins.
 func claimVerdict(target restoreTarget) podGroupRestoreTargetVerdict {
 	pod := target.pod
 	if pod == nil {
@@ -397,10 +401,6 @@ func claimVerdict(target restoreTarget) podGroupRestoreTargetVerdict {
 	case restoreTargetRefused:
 		return targetRefusal(target, snapshotv1alpha1.PodGroupReasonRefused, "%s", target.why)
 	}
-	if findPodCondition(pod, podcontract.RestoreStartedCondition) != nil {
-		return targetRefusal(target, snapshotv1alpha1.PodGroupReasonRefused,
-			"carries %s: an earlier restore changed it, so restoring needs a new Pod", podcontract.RestoreStartedCondition)
-	}
 	if target.claim == restoreTargetClaimed {
 		return podGroupRestoreTargetVerdict{}
 	}
@@ -408,7 +408,7 @@ func claimVerdict(target restoreTarget) podGroupRestoreTargetVerdict {
 	if err != nil {
 		return targetRefusal(target, snapshotv1alpha1.PodGroupReasonRefused, "cannot be claimed: %v", err)
 	}
-	return podGroupRestoreTargetVerdict{claim: claimed}
+	return podGroupRestoreTargetVerdict{claim: &targetClaim{original: pod, claimed: claimed}}
 }
 
 // pinTargets is stage 2 on claimed targets read through reader: the first
@@ -450,13 +450,16 @@ func (r *PodGroupRestoreReconciler) pinTargets(
 // pinVerdict decides stage 2 for one claimed target. Every refusal comes
 // before any wait:
 //
-//  1. its address is not IPv4, or it runs without the destination
-//     container: Refused;
+//  1. its address is not IPv4: Refused;
 //  2. it is not scheduled to a node yet: it waits, with
 //     TargetPodUnscheduled;
 //  3. it has no address, or its destination container has no ID yet: it
 //     waits, with TargetPodPending;
 //  4. otherwise it is ready, with its pin.
+//
+// The claim checked that the destination is in the Pod's spec, and a Pod's
+// containers never change, so a running Pod always reports its status; only
+// its ID may be missing yet.
 func pinVerdict(target restoreTarget) podGroupRestoreTargetVerdict {
 	pod := target.pod
 	destination := target.want.Mapping.Destination
@@ -466,9 +469,6 @@ func pinVerdict(target restoreTarget) podGroupRestoreTargetVerdict {
 			return targetRefusal(target, snapshotv1alpha1.PodGroupReasonRefused,
 				"has the address %q, but a group restore supports only IPv4", ip)
 		}
-	}
-	if pod.Status.Phase == corev1.PodRunning && container == nil {
-		return targetRefusal(target, snapshotv1alpha1.PodGroupReasonRefused, "runs but has no container %q to restore into", destination)
 	}
 	switch {
 	case pod.Spec.NodeName == "":
