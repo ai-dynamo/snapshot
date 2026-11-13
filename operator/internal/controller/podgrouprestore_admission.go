@@ -50,7 +50,8 @@ type targetClaim struct {
 //     and a claim must start from the whole Pod. The PodGroupSnapshot and the
 //     spec are checked (readRestoreTargets), then each target
 //     (claimVerdict): a missing Pod waits with TargetPodPending; a Pod with
-//     another UID than its podRef names, one claimed by another restore
+//     another UID than its podRef names (readRestoreTargets, which both
+//     stages start from), one claimed by another restore
 //     (TargetInUse), one in any other state that the claim table refuses,
 //     and one that podcontract.ClaimGroupTarget refuses are refused. Only
 //     when every target is claimed or ready to be does admit return the
@@ -119,16 +120,20 @@ type restoreTarget struct {
 	want podcontract.RestoreGroupClaim
 	// pod is the target's Pod, or nil when it does not exist.
 	pod *corev1.Pod
-	// claim is the Pod's row in the claim table, and why says why a Pod is
-	// in use or refused.
+	// claim is the Pod's row in the claim table, refused too when the Pod's
+	// UID is not the one its podRef names, and why says why a Pod is in use
+	// or refused.
 	claim restoreTargetClaim
 	why   string
 }
 
 // readRestoreTargets reads, through reader, the restore's PodGroupSnapshot
-// and every target Pod, and applies the claim table to each Pod. It returns a
-// refusal instead when the snapshot or the spec fails its checks
-// (admitPodGroupRestoreSnapshot, podGroupRestoreSpecRefusal).
+// and every target Pod. It refuses a Pod whose UID is not the one its podRef
+// names, if any, since a recreated Pod's claim says nothing about the Pod the
+// spec meant, and applies the claim table to every other Pod. Both stages
+// start from it, so both apply the check. It returns a refusal instead when
+// the snapshot or the spec fails its checks (admitPodGroupRestoreSnapshot,
+// podGroupRestoreSpecRefusal).
 func readRestoreTargets(
 	ctx context.Context,
 	reader client.Reader,
@@ -153,7 +158,11 @@ func readRestoreTargets(
 			return restoreTargets{}, fmt.Errorf("get Pod %q of target %q: %w", spec.PodRef.Name, spec.ID, err)
 		default:
 			target.pod = pod
-			target.claim, target.why = classifyRestoreTarget(pod, target.want)
+			if uid := spec.PodRef.UID; uid != "" && pod.UID != uid {
+				target.claim, target.why = restoreTargetRefused, fmt.Sprintf("has UID %q, not %q: it was recreated", pod.UID, uid)
+			} else {
+				target.claim, target.why = classifyRestoreTarget(pod, target.want)
+			}
 		}
 		targets[i] = target
 	}
@@ -376,12 +385,12 @@ func claimTargets(targets []restoreTarget) podGroupRestoreAdmission {
 // decides:
 //
 //  1. its Pod does not exist yet: it waits, with TargetPodPending;
-//  2. its Pod's UID is not the one its podRef names, if any: Refused;
-//  3. the claim table says it is in use (TargetInUse) or refused (Refused);
-//  4. it is claimed already: nothing to do;
-//  5. podcontract.ClaimGroupTarget refuses it, typically because its
+//  2. its Pod's UID is not the one its podRef names (readRestoreTargets), or
+//     the claim table says it is in use (TargetInUse) or refused (Refused);
+//  3. it is claimed already: nothing to do;
+//  4. podcontract.ClaimGroupTarget refuses it, typically because its
 //     destination is not shaped as one: Refused;
-//  6. otherwise its claim is ready to send.
+//  5. otherwise its claim is ready to send.
 //
 // Nothing can have started in a target that stage 1 claims: a gated Pod has
 // never run, since Kubernetes never adds a scheduling gate to an existing
@@ -391,9 +400,6 @@ func claimVerdict(target restoreTarget) podGroupRestoreTargetVerdict {
 	pod := target.pod
 	if pod == nil {
 		return targetWait(target, snapshotv1alpha1.PodGroupReasonTargetPodPending, "does not exist yet")
-	}
-	if uid := target.spec.PodRef.UID; uid != "" && pod.UID != uid {
-		return targetRefusal(target, snapshotv1alpha1.PodGroupReasonRefused, "has UID %q, not %q: it was recreated", pod.UID, uid)
 	}
 	switch target.claim {
 	case restoreTargetInUse:

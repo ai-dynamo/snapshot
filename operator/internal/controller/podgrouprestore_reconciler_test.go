@@ -768,6 +768,12 @@ func TestPodGroupRestoreReconciler_RefusesAfterTheClaim(t *testing.T) {
 	claimedPods := func() []client.Object { return []client.Object{rgTargetPod("a", "node-1"), rgTargetPod("b", "node-1")} }
 	runRefusals(t, claimedPods, []rgRefusalCase{
 		{
+			name:       "a claimed Pod whose UID is not the one the spec names",
+			restore:    func(r *snapshotv1alpha1.PodGroupRestore) { r.Spec.Targets[1].PodRef.UID = "old-pod-uid" },
+			wantReason: snapshotv1alpha1.PodGroupReasonRefused,
+			wantMsg:    `target "b": Pod "restore-b" has UID "restore-pod-uid-b", not "old-pod-uid": it was recreated`,
+		},
+		{
 			name:       "an IPv6 address",
 			cluster:    onPodB(func(pod *corev1.Pod) { pod.Status.PodIP = "fd00::2" }),
 			wantReason: snapshotv1alpha1.PodGroupReasonRefused,
