@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -121,6 +122,9 @@ func TestWaitForPageBrokerCancellationDuringRetry(t *testing.T) {
 	if !errors.Is(err, syscall.ENOENT) || ctx.Err() == nil {
 		t.Fatalf("wait returned %v, context %v", err, ctx.Err())
 	}
+	if !strings.HasPrefix(err.Error(), "failed to connect to PageBroker: ") {
+		t.Fatalf("wait error missing PageBroker context: %v", err)
+	}
 	if time.Since(started) >= time.Second {
 		t.Fatal("cancellation waited for the retry timer")
 	}
@@ -136,6 +140,9 @@ func TestWaitForPageBrokerReturnsPermanentError(t *testing.T) {
 	_, err := waitForPageBroker(ctx, pagebroker.Client{ControlSocketPath: filepath.Join(path, "broker.sock")})
 	if !errors.Is(err, syscall.ENOTDIR) {
 		t.Fatalf("wait returned %v, want ENOTDIR", err)
+	}
+	if !strings.HasPrefix(err.Error(), "failed to read PageBroker capabilities: ") {
+		t.Fatalf("wait error missing PageBroker capabilities context: %v", err)
 	}
 	if ctx.Err() != nil {
 		t.Fatal("permanent error was retried until cancellation")
