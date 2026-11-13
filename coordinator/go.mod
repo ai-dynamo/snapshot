@@ -1,6 +1,6 @@
 module github.com/ai-dynamo/snapshot/coordinator
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0
