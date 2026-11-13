@@ -15,18 +15,27 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/config"
+	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/yaml"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/api/v1alpha1/crds"
 )
 
 // TestPodGroupRestoreRefusalFitsInStatus refuses the largest restore with a
@@ -290,4 +299,120 @@ func writeReport(t *testing.T, cl client.Client, pod *corev1.Pod, conditions ...
 	original := pod.DeepCopy()
 	pod.Status.Conditions = conditions
 	require.NoError(t, cl.Status().Patch(t.Context(), pod, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})))
+}
+
+// startPodGroupEnvtestConfig starts an API server with every embedded CRD
+// installed, and returns its config, for tests that run a manager.
+func startPodGroupEnvtestConfig(t *testing.T) *rest.Config {
+	t.Helper()
+	var definitions []*apiextensionsv1.CustomResourceDefinition
+	for _, manifest := range crds.All() {
+		crd := &apiextensionsv1.CustomResourceDefinition{}
+		require.NoError(t, yaml.Unmarshal([]byte(manifest), crd))
+		definitions = append(definitions, crd)
+	}
+	env := &envtest.Environment{CRDs: definitions}
+	t.Cleanup(func() { assert.NoError(t, env.Stop()) })
+	cfg, err := env.Start()
+	require.NoError(t, err, "install the embedded CRDs")
+	return cfg
+}
+
+// newPodGroupTestManager is a manager with the operator's Pod cache transform,
+// no metrics or probes, and the PodGroupRestore indexes registered as main
+// registers them.
+func newPodGroupTestManager(t *testing.T, cfg *rest.Config) ctrl.Manager {
+	t.Helper()
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme:                 snapshotReconcilerScheme(),
+		Metrics:                metricsserver.Options{BindAddress: "0"},
+		HealthProbeBindAddress: "0",
+		Controller:             config.Controller{SkipNameValidation: ptr.To(true)},
+		Cache: cache.Options{ByObject: map[client.Object]cache.ByObject{
+			&corev1.Pod{}: {Transform: TrimPodForCache},
+		}},
+	})
+	require.NoError(t, err)
+	require.NoError(t, IndexPodGroupRestores(t.Context(), mgr.GetFieldIndexer()))
+	return mgr
+}
+
+// TestPodGroupControllersRunOnTheSharedIndexes sets up both pod-group
+// controllers after IndexPodGroupRestores, as main does, then runs the
+// PodGroupRestore controller against a real API server. A restore that waits
+// for a missing target Pod does not poll, yet its snapshot's loss of Ready
+// reaches it through the watch on PodGroupSnapshots, and refuses it.
+func TestPodGroupControllersRunOnTheSharedIndexes(t *testing.T) {
+	cfg := startPodGroupEnvtestConfig(t)
+
+	t.Run("both controllers set up after the indexes", func(t *testing.T) {
+		mgr := newPodGroupTestManager(t, cfg)
+		snapshots := &PodGroupSnapshotReconciler{Client: mgr.GetClient(), NonCacheReadClient: mgr.GetAPIReader(),
+			Recorder: record.NewFakeRecorder(10), AgentNamespace: pgAgentNamespace, AgentSelector: labels.SelectorFromSet(pgAgentLabels)}
+		restores := &PodGroupRestoreReconciler{Client: mgr.GetClient(), NonCacheReadClient: mgr.GetAPIReader(),
+			Recorder: record.NewFakeRecorder(10), AgentNamespace: pgAgentNamespace, AgentSelector: labels.SelectorFromSet(pgAgentLabels)}
+		require.NoError(t, snapshots.SetupWithManager(mgr))
+		require.NoError(t, restores.SetupWithManager(mgr))
+		assert.Error(t, IndexPodGroupRestores(t.Context(), mgr.GetFieldIndexer()), "an index is registered once")
+	})
+
+	t.Run("a waiting restore wakes on its snapshot", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		mgr := newPodGroupTestManager(t, cfg)
+		restores := &PodGroupRestoreReconciler{Client: mgr.GetClient(), NonCacheReadClient: mgr.GetAPIReader(),
+			Recorder: record.NewFakeRecorder(100), AgentNamespace: pgAgentNamespace, AgentSelector: labels.SelectorFromSet(pgAgentLabels)}
+		require.NoError(t, restores.SetupWithManager(mgr))
+		cl := mgr.GetAPIReader()
+		writer, err := client.New(cfg, client.Options{Scheme: snapshotReconcilerScheme()})
+		require.NoError(t, err)
+
+		snapshot := &snapshotv1alpha1.PodGroupSnapshot{
+			ObjectMeta: metav1.ObjectMeta{Name: "group", Namespace: "default"},
+			Spec: snapshotv1alpha1.PodGroupSnapshotSpec{DeadlineSeconds: 600, Members: []snapshotv1alpha1.PodGroupSnapshotMember{{
+				ID: "a", Source: snapshotv1alpha1.PodSnapshotSource{PodRef: snapshotv1alpha1.PodReference{
+					Name: "source-a", UID: "source-uid-a", Containers: []string{"main"},
+				}},
+			}}},
+		}
+		require.NoError(t, writer.Create(ctx, snapshot))
+		snapshot.Status.Conditions = []metav1.Condition{{Type: snapshotv1alpha1.PodGroupConditionReady, Status: metav1.ConditionTrue,
+			Reason: "Checkpointed", Message: "all 1 members are checkpointed", LastTransitionTime: metav1.Now()}}
+		require.NoError(t, writer.Status().Update(ctx, snapshot))
+		restore := &snapshotv1alpha1.PodGroupRestore{
+			ObjectMeta: metav1.ObjectMeta{Name: "waiting", Namespace: "default"},
+			Spec: snapshotv1alpha1.PodGroupRestoreSpec{
+				SnapshotRef:     snapshotv1alpha1.ObjectIdentity{Name: "group", UID: snapshot.UID},
+				DeadlineSeconds: 600,
+				Targets:         []snapshotv1alpha1.PodGroupRestoreTarget{{ID: "a", PodRef: snapshotv1alpha1.TargetPodReference{Name: "missing"}}},
+			},
+		}
+		require.NoError(t, writer.Create(ctx, restore))
+
+		done := make(chan error, 1)
+		go func() { done <- mgr.Start(ctx) }()
+		t.Cleanup(func() {
+			cancel()
+			assert.NoError(t, <-done)
+		})
+		condition := func(condType string) *metav1.Condition {
+			got := &snapshotv1alpha1.PodGroupRestore{}
+			if err := cl.Get(ctx, client.ObjectKeyFromObject(restore), got); err != nil {
+				return nil
+			}
+			return meta.FindStatusCondition(got.Status.Conditions, condType)
+		}
+		require.Eventually(t, func() bool {
+			admitted := condition(snapshotv1alpha1.PodGroupConditionAdmitted)
+			return admitted != nil && admitted.Reason == snapshotv1alpha1.PodGroupReasonTargetPodPending
+		}, 30*time.Second, 100*time.Millisecond, "the restore waits for its target Pod")
+
+		snapshot.Status.Conditions = []metav1.Condition{{Type: snapshotv1alpha1.PodGroupConditionReady, Status: metav1.ConditionFalse,
+			Reason: snapshotv1alpha1.PodGroupReasonArtifactUnavailable, Message: "its PodSnapshotContent is gone",
+			LastTransitionTime: metav1.Now()}}
+		require.NoError(t, writer.Status().Update(ctx, snapshot))
+		require.Eventually(t, func() bool {
+			failed := condition(snapshotv1alpha1.PodGroupConditionFailed)
+			return failed != nil && failed.Reason == snapshotv1alpha1.PodGroupReasonArtifactUnavailable
+		}, 30*time.Second, 100*time.Millisecond, "the snapshot's event refuses the restore long before its deadline")
+	})
 }

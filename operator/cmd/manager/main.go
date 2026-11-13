@@ -199,6 +199,10 @@ func main() {
 	}
 
 	if podGroups.enabled {
+		if err := controller.IndexPodGroupRestores(context.Background(), mgr.GetFieldIndexer()); err != nil {
+			ctrl.Log.Error(err, "unable to index PodGroupRestores")
+			os.Exit(1)
+		}
 		podGroupSnapshotReconciler := &controller.PodGroupSnapshotReconciler{
 			Client:             mgr.GetClient(),
 			NonCacheReadClient: mgr.GetAPIReader(),

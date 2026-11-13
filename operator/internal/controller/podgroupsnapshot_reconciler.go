@@ -61,11 +61,6 @@ type PodGroupSnapshotReconciler struct {
 	AgentSelector  labels.Selector
 }
 
-// podGroupRestoreSnapshotUIDField indexes PodGroupRestores by the UID of the
-// PodGroupSnapshot they restore, which holds its finalizer while any of them
-// is unfinished.
-const podGroupRestoreSnapshotUIDField = "spec.snapshotRef.uid"
-
 // Reconcile is a thin sequence: observe the members and, while no member work
 // exists, run admission; derive the status; record it; then act on it, by
 // creating the members' PodSnapshots or, for a group being deleted, releasing
@@ -386,10 +381,6 @@ func (r *PodGroupSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := validatePodGroupAgents(r.AgentNamespace, r.AgentSelector); err != nil {
 		return err
 	}
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &snapshotv1alpha1.PodGroupRestore{},
-		podGroupRestoreSnapshotUIDField, podGroupRestoreSnapshotUID); err != nil {
-		return fmt.Errorf("index PodGroupRestores by PodGroupSnapshot UID: %w", err)
-	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&snapshotv1alpha1.PodGroupSnapshot{}).
 		Owns(&snapshotv1alpha1.PodSnapshot{}).
@@ -402,16 +393,6 @@ func (r *PodGroupSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(podGroupRestoreToPodGroupSnapshot),
 		).
 		Complete(r)
-}
-
-// podGroupRestoreSnapshotUID is the podGroupRestoreSnapshotUIDField index's
-// value of a PodGroupRestore.
-func podGroupRestoreSnapshotUID(obj client.Object) []string {
-	restore, ok := obj.(*snapshotv1alpha1.PodGroupRestore)
-	if !ok {
-		return nil
-	}
-	return []string{string(restore.Spec.SnapshotRef.UID)}
 }
 
 // podGroupRestoreToPodGroupSnapshot maps a PodGroupRestore to the

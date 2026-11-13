@@ -248,8 +248,8 @@ func podGroupRestoreRequeue(observed podGroupRestoreObservation, status *snapsho
 // is filtered out. A PodGroupSnapshot maps through the
 // podGroupRestoreSnapshotUIDField index to the restores that restore it, so a
 // restore that waits for its targets learns at once that its snapshot is
-// being deleted or lost Ready; the PodGroupSnapshot controller registers that
-// index.
+// being deleted or lost Ready. IndexPodGroupRestores registers both indexes;
+// it must run first.
 func (r *PodGroupRestoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.NonCacheReadClient == nil {
 		return errors.New("pod group restore reconciler requires a non-cache read client")
@@ -257,33 +257,11 @@ func (r *PodGroupRestoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := validatePodGroupAgents(r.AgentNamespace, r.AgentSelector); err != nil {
 		return err
 	}
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &snapshotv1alpha1.PodGroupRestore{},
-		podGroupRestoreTargetPodField, podGroupRestoreTargetPods); err != nil {
-		return fmt.Errorf("index PodGroupRestores by target Pod: %w", err)
-	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&snapshotv1alpha1.PodGroupRestore{}).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.podToPodGroupRestores)).
 		Watches(&snapshotv1alpha1.PodGroupSnapshot{}, handler.EnqueueRequestsFromMapFunc(r.podGroupSnapshotToPodGroupRestores)).
 		Complete(r)
-}
-
-// podGroupRestoreTargetPodField indexes PodGroupRestores by the names of their
-// target Pods.
-const podGroupRestoreTargetPodField = "spec.targets.podRef.name"
-
-// podGroupRestoreTargetPods is the podGroupRestoreTargetPodField index's
-// values of a PodGroupRestore: the name of every target Pod.
-func podGroupRestoreTargetPods(obj client.Object) []string {
-	restore, ok := obj.(*snapshotv1alpha1.PodGroupRestore)
-	if !ok {
-		return nil
-	}
-	names := make([]string, 0, len(restore.Spec.Targets))
-	for _, target := range restore.Spec.Targets {
-		names = append(names, target.PodRef.Name)
-	}
-	return names
 }
 
 // podToPodGroupRestores maps a Pod to every PodGroupRestore in its namespace
