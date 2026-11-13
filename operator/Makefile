@@ -15,12 +15,13 @@ build:
 test:
 	go test ./...
 
-# Runs admission tests requiring a real apiserver (envtest kube-apiserver/etcd),
-# gated behind the integration tag so plain `go test ./...`/`make test` stays
-# fast and dependency-free.
+# Runs tests requiring a real apiserver (envtest kube-apiserver/etcd): the
+# admission tests, and the coordinator TLS issuer's writes. They are gated
+# behind the integration tag so plain `go test ./...`/`make test` stays fast
+# and dependency-free.
 test-integration: $(SETUP_ENVTEST)
 	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
-	  go test -tags=integration ./internal/crdinstaller/...
+	  go test -tags=integration ./internal/crdinstaller/... ./internal/coordinatortls/...
 
 fmt:
 	gofmt -w .
