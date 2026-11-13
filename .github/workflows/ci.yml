@@ -125,6 +125,7 @@ jobs:
             e2e/tests/test_inference.py \
             e2e/tests/test_k8s.py \
             e2e/tests/test_pod_status_writers.py \
+            e2e/tests/test_pr_e2e_workflow.py \
             e2e/tests/test_prune_ghcr.py \
             e2e/tests/test_required_tests.py \
             e2e/tests/test_resolve_snapshot_image_tag.py \
@@ -132,6 +133,7 @@ jobs:
             e2e/tests/test_runtime_image_id.py \
             e2e/tests/test_setup_chart_command.py \
             e2e/tests/test_setup_helm_overrides.py \
+            e2e/tests/test_setup_image_digests.py \
             e2e/tests/test_upgrade_e2e_gate.py \
             e2e/tests/test_upgrade_harness.py \
             e2e/tests/test_workload_node_targeting.py \
@@ -200,10 +202,13 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - run: |
-          set -euo pipefail
-          # Assigned, not inlined into the argument: a command substitution
-          # that fails inside a simple command does not trip `set -e`, so an
-          # inline call would drop the cache flags and still build.
-          cache_flags="$(hack/ci-cache-flags.sh read pagebroker "${CACHE_BRANCH}")"
-          make docker-build-pagebroker REGISTRY=local VERSION=ci DOCKER_BUILD_ARGS="${cache_flags} --load"
+      - uses: ./.github/actions/build-image
+        with:
+          image: pagebroker
+          registry: local
+          tags: ci
+          push: "false"
+          build_args: --load
+          cache_mode: read
+          cache_branch: ${{ env.CACHE_BRANCH }}
+          cache_ref_prefix: ${{ env.CACHE_REF_PREFIX }}
