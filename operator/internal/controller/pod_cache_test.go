@@ -4,10 +4,13 @@
 package controller
 
 import (
+	"slices"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 func TestTrimPodForCacheKeepsWhatControllersRead(t *testing.T) {
@@ -24,16 +27,24 @@ func TestTrimPodForCacheKeepsWhatControllersRead(t *testing.T) {
 			ManagedFields:     []metav1.ManagedFieldsEntry{{Manager: "kubelet"}},
 		},
 		Spec: corev1.PodSpec{
-			NodeName:   "node-1",
-			Containers: []corev1.Container{{Name: "main", Image: "img", Env: []corev1.EnvVar{{Name: "K", Value: "V"}}}},
-			Volumes:    []corev1.Volume{{Name: "v"}},
+			NodeName:        "node-1",
+			SchedulingGates: []corev1.PodSchedulingGate{{Name: podcontract.RestoreGroupSchedulingGate}, {Name: "example.com/gang"}},
+			Containers:      []corev1.Container{{Name: "main", Image: "img", Env: []corev1.EnvVar{{Name: "K", Value: "V"}}}},
+			Volumes:         []corev1.Volume{{Name: "v"}},
 		},
 		Status: corev1.PodStatus{
-			Phase: corev1.PodRunning,
+			Phase:  corev1.PodRunning,
+			PodIP:  "10.0.0.7",
+			PodIPs: []corev1.PodIP{{IP: "10.0.0.7"}},
+			HostIP: "192.168.0.1",
 			Conditions: []corev1.PodCondition{
 				{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
 				{Type: corev1.PodReady, Status: corev1.ConditionTrue, Reason: "r"},
 				{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+				{Type: podcontract.RestoreStartedCondition, Status: corev1.ConditionTrue},
+				{Type: podcontract.RestoredCondition, Status: corev1.ConditionFalse, Reason: podcontract.RestoreReasonFailed},
+				{Type: podcontract.GroupRestoreFailedCondition, Status: corev1.ConditionTrue, Reason: "PodIPChanged"},
+				{Type: "example.com/Other", Status: corev1.ConditionTrue},
 			},
 			ContainerStatuses:     []corev1.ContainerStatus{{Name: "main", Ready: true}},
 			InitContainerStatuses: []corev1.ContainerStatus{{Name: "init"}},
@@ -53,16 +64,26 @@ func TestTrimPodForCacheKeepsWhatControllersRead(t *testing.T) {
 	if got.ManagedFields != nil {
 		t.Fatalf("managedFields kept")
 	}
-	if got.Spec.NodeName != "node-1" || got.Spec.Containers != nil || got.Spec.Volumes != nil {
-		t.Fatalf("spec = %+v, want only nodeName", got.Spec)
+	// The claim table reads the scheduling gates, every one of them.
+	if got.Spec.NodeName != "node-1" || len(got.Spec.SchedulingGates) != 2 || !podcontract.HasRestoreGroupGate(got) ||
+		got.Spec.Containers != nil || got.Spec.Volumes != nil {
+		t.Fatalf("spec = %+v, want only nodeName and schedulingGates", got.Spec)
 	}
-	if got.Status.Phase != corev1.PodRunning || !containerReady(got, "main") ||
-		len(got.Status.InitContainerStatuses) != 1 {
+	if got.Status.Phase != corev1.PodRunning || got.Status.PodIP != "10.0.0.7" || !containerReady(got, "main") ||
+		len(got.Status.InitContainerStatuses) != 1 || got.Status.PodIPs != nil || got.Status.HostIP != "" {
 		t.Fatalf("status = %+v", got.Status)
 	}
-	// Only the Ready condition survives, for the agent gate of PodGroupSnapshot admission.
-	if len(got.Status.Conditions) != 1 || got.Status.Conditions[0].Type != corev1.PodReady || !isPodReady(got) {
-		t.Fatalf("conditions = %+v, want only Ready", got.Status.Conditions)
+	// Only the conditions the pod-group controllers read survive: Ready, for
+	// the agent gate of admission, and the restore conditions a
+	// PodGroupRestore aggregates.
+	var kept []corev1.PodConditionType
+	for _, c := range got.Status.Conditions {
+		kept = append(kept, c.Type)
+	}
+	want := []corev1.PodConditionType{corev1.PodReady, podcontract.RestoreStartedCondition,
+		podcontract.RestoredCondition, podcontract.GroupRestoreFailedCondition}
+	if !slices.Equal(kept, want) || !isPodReady(got) || got.Status.Conditions[2].Reason != podcontract.RestoreReasonFailed {
+		t.Fatalf("conditions = %+v, want %v", got.Status.Conditions, want)
 	}
 }
 

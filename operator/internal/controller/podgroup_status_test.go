@@ -97,16 +97,22 @@ func TestPodGroupAttemptAdmittedTakesTheFailure(t *testing.T) {
 	})
 }
 
-func TestPodGroupAttemptDeadlineWhileATargetPodIsPending(t *testing.T) {
-	conditions := []metav1.Condition{{Type: snapshotv1alpha1.PodGroupConditionAdmitted, Status: metav1.ConditionFalse,
-		Reason: snapshotv1alpha1.PodGroupReasonTargetPodPending, Message: `target "a": Pod "pod-a" does not exist yet`}}
-	newPodGroupAttempt(&podGroupSnapshotKind, 600, podGroupAdmission{}, false, true, []podGroupMemberView{{id: "a"}}).
-		updateConditions(&conditions, pgNow)
+func TestPodGroupAttemptDeadlineWhileATargetPodWaits(t *testing.T) {
+	for reason, wait := range map[string]string{
+		snapshotv1alpha1.PodGroupReasonTargetPodPending:     `target "a": Pod "pod-a" does not exist yet`,
+		snapshotv1alpha1.PodGroupReasonTargetPodUnscheduled: `target "a": Pod "pod-a" is not scheduled to a node yet`,
+	} {
+		t.Run(reason, func(t *testing.T) {
+			conditions := []metav1.Condition{{Type: snapshotv1alpha1.PodGroupConditionAdmitted, Status: metav1.ConditionFalse,
+				Reason: reason, Message: wait}}
+			newPodGroupAttempt(&podGroupSnapshotKind, 600, podGroupAdmission{}, false, true, []podGroupMemberView{{id: "a"}}).
+				updateConditions(&conditions, pgNow)
 
-	failed := meta.FindStatusCondition(conditions, snapshotv1alpha1.PodGroupConditionFailed)
-	require.NotNil(t, failed)
-	assert.Equal(t, `the deadline of 600 seconds passed while admission was waiting: target "a": Pod "pod-a" does not exist yet`,
-		failed.Message)
+			failed := meta.FindStatusCondition(conditions, snapshotv1alpha1.PodGroupConditionFailed)
+			require.NotNil(t, failed)
+			assert.Equal(t, "the deadline of 600 seconds passed while admission was waiting: "+wait, failed.Message)
+		})
+	}
 }
 
 func TestPodGroupTransitionsReleased(t *testing.T) {
@@ -128,6 +134,7 @@ func TestPodGroupRequeuePollsOnlyForUnwatchedWaits(t *testing.T) {
 		{snapshotv1alpha1.PodGroupReasonSourcePodUnscheduled, podGroupAdmissionRequeue},
 		{snapshotv1alpha1.PodGroupReasonPreviousGroupCleanup, time.Hour},
 		{snapshotv1alpha1.PodGroupReasonTargetPodPending, time.Hour},
+		{snapshotv1alpha1.PodGroupReasonTargetPodUnscheduled, time.Hour},
 	} {
 		t.Run(tc.reason, func(t *testing.T) {
 			admission := podGroupAdmission{podGroupAdmissionWaiting, tc.reason, ""}

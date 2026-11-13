@@ -10,7 +10,7 @@ release:
   name: snapshot
   namespace: snapshot-system
 tests:
-  - it: leaves the PodGroupSnapshot controller off by default
+  - it: leaves the pod-group controllers off by default
     template: templates/operator-deployment.yaml
     asserts:
       - notContains:
@@ -20,7 +20,7 @@ tests:
           path: spec.template.spec.containers[0].args
           content: --agent-namespace=snapshot-system
 
-  - it: grants no PodGroupSnapshot access by default
+  - it: grants no PodGroupSnapshot or PodGroupRestore access by default
     template: templates/operator-rbac.yaml
     documentSelector:
       path: kind
@@ -32,8 +32,27 @@ tests:
             apiGroups: ["nvidia.com"]
             resources: ["podgroupsnapshots"]
             verbs: ["get", "list", "watch", "update", "patch"]
+      - notContains:
+          path: rules
+          content:
+            apiGroups: ["nvidia.com"]
+            resources: ["podgrouprestores"]
+            verbs: ["get", "list", "watch", "update", "patch"]
 
-  - it: runs the controller and points it at this release's node agents
+  - it: grants no patch on Pods by default
+    template: templates/operator-rbac.yaml
+    documentSelector:
+      path: kind
+      value: ClusterRole
+    asserts:
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["pods"]
+            verbs: ["patch"]
+
+  - it: runs the controllers and points them at this release's node agents
     template: templates/operator-deployment.yaml
     set:
       podGroups.enabled: true
@@ -75,8 +94,62 @@ tests:
             resources: ["podgroupsnapshots/finalizers"]
             verbs: ["update"]
 
-  # The agent does not support pod groups yet, so groups stay at AgentNotReady
-  # until the agent advertises a group protocol.
+  - it: grants the operator access to PodGroupRestores, their status and finalizers
+    template: templates/operator-rbac.yaml
+    documentSelector:
+      path: kind
+      value: ClusterRole
+    set:
+      podGroups.enabled: true
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["nvidia.com"]
+            resources: ["podgrouprestores"]
+            verbs: ["get", "list", "watch", "update", "patch"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["nvidia.com"]
+            resources: ["podgrouprestores/status"]
+            verbs: ["get", "update", "patch"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["nvidia.com"]
+            resources: ["podgrouprestores/finalizers"]
+            verbs: ["update"]
+
+  - it: grants the operator patch on Pods, to claim restore targets, and no update
+    template: templates/operator-rbac.yaml
+    documentSelector:
+      path: kind
+      value: ClusterRole
+    set:
+      podGroups.enabled: true
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["pods"]
+            verbs: ["patch"]
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["pods"]
+            verbs: ["update"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["pods"]
+            verbs: ["get", "list", "watch"]
+
+  # The agent does not support pod groups yet, so groups and restores stay at
+  # AgentNotReady until the agent advertises a group protocol.
   - it: does not mark the node agent Pods as group-capable
     template: templates/daemonset.yaml
     set:

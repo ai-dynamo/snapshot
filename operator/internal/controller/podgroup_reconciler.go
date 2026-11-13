@@ -114,13 +114,15 @@ func podGroupRequeue(admission podGroupAdmission, deadline, now time.Time, membe
 //     PodSnapshots, and the owner handler maps an owned object's events by its
 //     owner's kind and name, not its UID, so the deletion of an earlier
 //     group's PodSnapshot reconciles the group of the same name;
-//   - TargetPodPending: the PodGroupRestore controller maps the events of every
-//     Pod that names a restore in nvidia.com/restore-group to that restore.
+//   - TargetPodPending and TargetPodUnscheduled: the PodGroupRestore
+//     controller maps the events of every Pod to the restores whose targets
+//     name it, through an index on spec.targets[].podRef.name.
 //
 // Admission polls for every other wait: AgentNotReady and SourcePodUnscheduled.
 func isWatchedPodGroupAdmissionWait(reason string) bool {
 	return reason == snapshotv1alpha1.PodGroupReasonPreviousGroupCleanup ||
-		reason == snapshotv1alpha1.PodGroupReasonTargetPodPending
+		reason == snapshotv1alpha1.PodGroupReasonTargetPodPending ||
+		reason == snapshotv1alpha1.PodGroupReasonTargetPodUnscheduled
 }
 
 // validatePodGroupAgents refuses a reconciler set up without the node agent
@@ -199,4 +201,57 @@ func splitProtocols(value string) []string {
 		protocols[i] = strings.TrimSpace(protocols[i])
 	}
 	return protocols
+}
+
+// The field indexes on PodGroupRestores, which the PodGroupRestore controller
+// reads to map the events of the objects it watches to restores.
+const (
+	// podGroupRestoreTargetPodField indexes PodGroupRestores by the names of
+	// their target Pods.
+	podGroupRestoreTargetPodField = "spec.targets.podRef.name"
+	// podGroupRestoreSnapshotUIDField indexes PodGroupRestores by the UID of
+	// the PodGroupSnapshot they restore. The API server cannot select
+	// PodGroupRestores by it, since the CRD does not declare it a selectable
+	// field, so only the cache answers it.
+	podGroupRestoreSnapshotUIDField = "spec.snapshotRef.uid"
+)
+
+// IndexPodGroupRestores registers the field indexes on PodGroupRestores that
+// the pod-group controllers read: podGroupRestoreTargetPodField and
+// podGroupRestoreSnapshotUIDField. A field can be indexed only once, so main
+// calls it once, before it sets up either controller.
+func IndexPodGroupRestores(ctx context.Context, indexer client.FieldIndexer) error {
+	if err := indexer.IndexField(ctx, &snapshotv1alpha1.PodGroupRestore{},
+		podGroupRestoreTargetPodField, podGroupRestoreTargetPods); err != nil {
+		return fmt.Errorf("index PodGroupRestores by target Pod: %w", err)
+	}
+	if err := indexer.IndexField(ctx, &snapshotv1alpha1.PodGroupRestore{},
+		podGroupRestoreSnapshotUIDField, podGroupRestoreSnapshotUID); err != nil {
+		return fmt.Errorf("index PodGroupRestores by PodGroupSnapshot UID: %w", err)
+	}
+	return nil
+}
+
+// podGroupRestoreTargetPods is the podGroupRestoreTargetPodField index's
+// values of a PodGroupRestore: the name of every target Pod.
+func podGroupRestoreTargetPods(obj client.Object) []string {
+	restore, ok := obj.(*snapshotv1alpha1.PodGroupRestore)
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(restore.Spec.Targets))
+	for _, target := range restore.Spec.Targets {
+		names = append(names, target.PodRef.Name)
+	}
+	return names
+}
+
+// podGroupRestoreSnapshotUID is the podGroupRestoreSnapshotUIDField index's
+// value of a PodGroupRestore.
+func podGroupRestoreSnapshotUID(obj client.Object) []string {
+	restore, ok := obj.(*snapshotv1alpha1.PodGroupRestore)
+	if !ok {
+		return nil
+	}
+	return []string{string(restore.Spec.SnapshotRef.UID)}
 }

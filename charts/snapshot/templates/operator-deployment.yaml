@@ -102,8 +102,10 @@ spec:
             # on each member's node, selected as the agent DaemonSet selects them.
             {{- /* Inert until the node agent supports pod groups: this chart does
             not mark the agent Pods as group-capable yet, so every
-            PodGroupSnapshot waits with Admitted=False, reason AgentNotReady,
-            until its deadline, and no PodSnapshot is created for it. */}}
+            PodGroupSnapshot, and every PodGroupRestore that passes its other
+            checks, waits with Admitted=False, reason AgentNotReady, until its
+            deadline. No PodSnapshot is created and no restore Pod is pinned
+            meanwhile. */}}
             - --enable-pod-groups=true
             - {{ printf "--agent-namespace=%s" .Release.Namespace | quote }}
             - {{ printf "--agent-selector=app.kubernetes.io/component=snapshot-agent,app.kubernetes.io/instance=%s" .Release.Name | quote }}

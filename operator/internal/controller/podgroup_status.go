@@ -387,6 +387,7 @@ func isPodGroupAdmissionWaitReason(reason string) bool {
 	case snapshotv1alpha1.PodGroupReasonPreviousGroupCleanup,
 		snapshotv1alpha1.PodGroupReasonSourcePodUnscheduled,
 		snapshotv1alpha1.PodGroupReasonTargetPodPending,
+		snapshotv1alpha1.PodGroupReasonTargetPodUnscheduled,
 		snapshotv1alpha1.PodGroupReasonAgentNotReady:
 		return true
 	}
