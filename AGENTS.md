@@ -57,7 +57,7 @@ all four.
 
 ## Build and test
 
-Run everything from the repository root. Go 1.27.3 — the version is pinned in
+Run everything from the repository root. Go 1.27.4 — the version is pinned in
 `hack/tools.mk`, `go.work`, all four `go.mod` files, `agent/Dockerfile`, and
 the workflows, and they must agree.
 
