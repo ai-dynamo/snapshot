@@ -291,3 +291,116 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 - name: NVIDIA_DRIVER_CAPABILITIES
   value: compute,utility
 {{- end -}}
+
+{{/* The coordinator of pod groups (podGroups.enabled), a container in each
+     agent Pod.
+
+     The TLS contract is the mounted files, the same in every mode, so neither
+     the coordinator nor the agent knows who made them:
+       - the coordinator serves tls.crt and tls.key from the serving Secret,
+         mounted at snapshot.coordinatorTLSDir;
+       - the agent trusts ca.crt, the trust bundle's key, for the server name.
+     By default the operator issues all three (snapshot.coordinatorBuiltInIssuer):
+     the CA Secret that only it reads, the serving Secret and the trust bundle
+     ConfigMap, in the release's namespace. Setting any coordinator.tls value
+     but trust.key brings your own instead, and gives the operator neither the
+     issuer's flags nor its RBAC.
+
+     How an agent reaches the coordinator of a group, for the agent's side:
+       - Address: tls://<the agent Pod IP of the group's rank-0 member>:<coordinator.port>.
+       - Server name: snapshot.coordinatorServerName, passed to the agent as a
+         flag.
+       - CA: the selected trust bundle's key, the built-in ConfigMap's ca.crt
+         or coordinator.tls.trust's key, mounted at
+         /etc/snapshot-coordinator/ca/ca.crt.
+       - Token: a projected ServiceAccount token for
+         snapshot.coordinatorTokenAudience, with expirationSeconds: 3600, at
+         /var/run/secrets/snapshot-coordinator/token. The coordinator admits
+         it only for members on the agent's own node. */}}
+
+{{/* The name the coordinators' serving certificate carries, which agents
+     verify. It is never resolved. */}}
+{{- define "snapshot.coordinatorServerName" -}}
+{{- .Values.coordinator.tls.serverName | default (printf "%s-coordinator.%s" (include "snapshot.fullname" .) .Release.Namespace) -}}
+{{- end -}}
+
+{{/* The audience of the agents' tokens, which the coordinator admits. Its own
+     name, so it does not change with coordinator.tls.serverName. */}}
+{{- define "snapshot.coordinatorTokenAudience" -}}
+{{- printf "%s-coordinator.%s" (include "snapshot.fullname" .) .Release.Namespace -}}
+{{- end -}}
+
+{{/* The resources the operator's built-in issuer writes. Referenced from the
+     operator's flags, its RBAC Role's resourceNames, and the volumes. */}}
+{{- define "snapshot.coordinatorCASecretName" -}}
+{{- printf "%s-coordinator-ca" (include "snapshot.fullname" .) -}}
+{{- end -}}
+{{- define "snapshot.coordinatorTLSSecretName" -}}
+{{- printf "%s-coordinator-tls" (include "snapshot.fullname" .) -}}
+{{- end -}}
+{{- define "snapshot.coordinatorCABundleName" -}}
+{{- printf "%s-coordinator-ca-bundle" (include "snapshot.fullname" .) -}}
+{{- end -}}
+
+{{/* "true" when the operator issues the coordinator's certificate, empty when
+     you bring your own. */}}
+{{- define "snapshot.coordinatorBuiltInIssuer" -}}
+{{- $tls := .Values.coordinator.tls -}}
+{{- if not (or $tls.serving.secretName $tls.trust.configMapName $tls.trust.secretName $tls.serverName) -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/* The Secret whose tls.crt and tls.key the coordinator serves. */}}
+{{- define "snapshot.coordinatorServingSecretName" -}}
+{{- .Values.coordinator.tls.serving.secretName | default (include "snapshot.coordinatorTLSSecretName" .) -}}
+{{- end -}}
+
+{{/* Where the coordinator reads tls.crt and tls.key. */}}
+{{- define "snapshot.coordinatorTLSDir" -}}/etc/snapshot-coordinator/tls{{- end -}}
+
+{{/* Fails the render on a coordinator setting that is mixed or ambiguous.
+     Called once from daemonset.yaml, with podGroups.enabled. */}}
+{{- define "snapshot.validateCoordinator" -}}
+{{- $c := .Values.coordinator -}}
+{{- $tls := $c.tls -}}
+{{- if eq (int64 $c.port) (int64 $c.healthPort) -}}
+{{- fail (printf "coordinator.port and coordinator.healthPort are both %d: the coordinator needs two ports" (int64 $c.port)) -}}
+{{- end -}}
+{{- if and $tls.trust.configMapName $tls.trust.secretName -}}
+{{- fail "coordinator.tls.trust: set configMapName or secretName, not both" -}}
+{{- end -}}
+{{- $trust := or $tls.trust.configMapName $tls.trust.secretName -}}
+{{- if and $tls.serving.secretName (not $trust) -}}
+{{- fail "coordinator.tls.serving.secretName needs the CA bundle agents trust: set coordinator.tls.trust.configMapName or coordinator.tls.trust.secretName" -}}
+{{- end -}}
+{{- if and $trust (not $tls.serving.secretName) -}}
+{{- fail "coordinator.tls.trust needs the Secret the coordinator serves: set coordinator.tls.serving.secretName" -}}
+{{- end -}}
+{{- if and $tls.serverName (not $tls.serving.secretName) -}}
+{{- fail "coordinator.tls.serverName names your own serving certificate: set it with coordinator.tls.serving.secretName and coordinator.tls.trust" -}}
+{{- end -}}
+{{- if and (include "snapshot.coordinatorBuiltInIssuer" .) (ne $tls.trust.key "ca.crt") -}}
+{{- fail "coordinator.tls.trust.key names the key of your own trust bundle: set it with coordinator.tls.trust.configMapName or coordinator.tls.trust.secretName" -}}
+{{- end -}}
+{{- /* One writer per resource: your own resources must not be the ones the
+       operator's issuer writes, which an issuer still running, or enabled
+       again later, would overwrite. */ -}}
+{{- $builtInSecrets := list (include "snapshot.coordinatorCASecretName" .) (include "snapshot.coordinatorTLSSecretName" .) -}}
+{{- range $path, $name := dict "coordinator.tls.serving.secretName" $tls.serving.secretName "coordinator.tls.trust.secretName" $tls.trust.secretName -}}
+{{- if has $name $builtInSecrets -}}
+{{- fail (printf "%s %q is a Secret the operator issues: name your own Secret" $path $name) -}}
+{{- end -}}
+{{- end -}}
+{{- if eq $tls.trust.configMapName (include "snapshot.coordinatorCABundleName" .) -}}
+{{- fail (printf "coordinator.tls.trust.configMapName %q is the ConfigMap the operator issues: name your own ConfigMap" $tls.trust.configMapName) -}}
+{{- end -}}
+{{- if $tls.serverName -}}
+{{- if regexMatch "^[0-9]+(\\.[0-9]+){3}$" $tls.serverName -}}
+{{- fail (printf "coordinator.tls.serverName %q is an IP address: agents verify a DNS name" $tls.serverName) -}}
+{{- end -}}
+{{- if or (gt (len $tls.serverName) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $tls.serverName)) -}}
+{{- fail (printf "coordinator.tls.serverName %q is not a DNS name" $tls.serverName) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

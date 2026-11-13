@@ -1,0 +1,760 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: pod group coordinator
+templates:
+  - templates/daemonset.yaml
+  - templates/operator-deployment.yaml
+  - templates/coordinator-rbac.yaml
+  - templates/coordinator-issuer-rbac.yaml
+release:
+  name: snapshot
+  namespace: snapshot-system
+tests:
+  # Off by default.
+
+  - it: runs no coordinator by default
+    template: templates/daemonset.yaml
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 2
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "coordinator")]
+      - notExists:
+          path: spec.template.spec.volumes[?(@.name == "coordinator-tls")]
+      - notExists:
+          path: spec.template.spec.volumes[?(@.name == "coordinator-tmp")]
+
+  - it: gives the operator no issuer flags by default
+    template: templates/operator-deployment.yaml
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --coordinator-tls-namespace=snapshot-system
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --coordinator-ca-secret=snapshot-coordinator-ca
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --coordinator-tls-secret=snapshot-coordinator-tls
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --coordinator-ca-bundle=snapshot-coordinator-ca-bundle
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --coordinator-server-name=snapshot-coordinator.snapshot-system
+
+  - it: grants the coordinator nothing by default
+    template: templates/coordinator-rbac.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: grants the operator's issuer nothing by default
+    template: templates/coordinator-issuer-rbac.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: does not check the coordinator's values while pod groups are off
+    template: templates/daemonset.yaml
+    set:
+      coordinator.tls.serving.secretName: my-serving
+    asserts:
+      - notFailedTemplate: {}
+
+  # On, with the built-in issuer.
+
+  - it: runs the coordinator from the agent image, with its flags
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      image.agent.tag: v1.2.3
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 3
+      - equal:
+          path: spec.template.spec.containers[2].name
+          value: coordinator
+      - equal:
+          path: spec.template.spec.containers[2].image
+          value: ghcr.io/ai-dynamo/snapshot/agent:v1.2.3
+      - equal:
+          path: spec.template.spec.containers[2].imagePullPolicy
+          value: Always
+      - equal:
+          path: spec.template.spec.containers[2].command
+          value:
+            - /usr/local/bin/snapshot-coordinator
+      - equal:
+          path: spec.template.spec.containers[2].args
+          value:
+            - --node-name=$(NODE_NAME)
+            - --agent-namespace=$(POD_NAMESPACE)
+            - --agent-service-account=$(SERVICE_ACCOUNT_NAME)
+            - --listen-address=$(POD_IP)
+            - --token-audience=snapshot-coordinator.snapshot-system
+            - --tls-cert-dir=/etc/snapshot-coordinator/tls
+            - --port=4224
+            - --health-port=4225
+            - --max-memory-bytes=1073741824
+      - equal:
+          path: spec.template.spec.containers[2].env
+          value:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: SERVICE_ACCOUNT_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.serviceAccountName
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+      # The agent stays the default container, and the Pod on the host's network.
+      - equal:
+          path: spec.template.metadata.annotations["kubectl.kubernetes.io/default-container"]
+          value: agent
+      - equal:
+          path: spec.template.spec.hostNetwork
+          value: true
+
+  - it: declares both ports as host ports
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].ports
+          value:
+            - name: coordinator
+              containerPort: 4224
+              hostPort: 4224
+              protocol: TCP
+            - name: health
+              containerPort: 4225
+              hostPort: 4225
+              protocol: TCP
+
+  - it: runs the coordinator unprivileged
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].securityContext
+          value:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+
+  - it: probes readiness and liveness at the health port, and sets the resources
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].readinessProbe
+          value:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 10
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].livenessProbe
+          value:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 30
+            periodSeconds: 10
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].resources
+          value:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 2Gi
+
+  - it: mounts tls.crt and tls.key from the optional issued Secret, and a small /tmp
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].volumeMounts
+          value:
+            - name: coordinator-tls
+              mountPath: /etc/snapshot-coordinator/tls
+              readOnly: true
+            - name: coordinator-tmp
+              mountPath: /tmp
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: coordinator-tls
+            secret:
+              secretName: snapshot-coordinator-tls
+              optional: true
+              items:
+                - key: tls.crt
+                  path: tls.crt
+                - key: tls.key
+                  path: tls.key
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: coordinator-tmp
+            emptyDir:
+              sizeLimit: 16Mi
+      # Only the coordinator mounts them.
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
+          content:
+            name: coordinator-tls
+            mountPath: /etc/snapshot-coordinator/tls
+            readOnly: true
+
+  - it: takes the ports, the memory and the resources from the values
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.port: 5000
+      coordinator.healthPort: 5001
+      coordinator.maxMemoryBytes: 4294967296
+      coordinator.resources:
+        requests:
+          cpu: 200m
+          memory: 256Mi
+        limits:
+          memory: 8Gi
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --port=5000
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --health-port=5001
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --max-memory-bytes=4294967296
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].ports
+          value:
+            - name: coordinator
+              containerPort: 5000
+              hostPort: 5000
+              protocol: TCP
+            - name: health
+              containerPort: 5001
+              hostPort: 5001
+              protocol: TCP
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].resources
+          value:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              memory: 8Gi
+
+  - it: names the token audience after the release
+    template: templates/daemonset.yaml
+    release:
+      name: gpu
+      namespace: checkpoints
+    set:
+      podGroups.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --token-audience=gpu-snapshot-coordinator.checkpoints
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: coordinator-tls
+            secret:
+              secretName: gpu-snapshot-coordinator-tls
+              optional: true
+              items:
+                - key: tls.crt
+                  path: tls.crt
+                - key: tls.key
+                  path: tls.key
+
+  - it: gives the operator the issuer's flags
+    template: templates/operator-deployment.yaml
+    set:
+      podGroups.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --coordinator-tls-namespace=snapshot-system
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --coordinator-ca-secret=snapshot-coordinator-ca
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --coordinator-tls-secret=snapshot-coordinator-tls
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --coordinator-ca-bundle=snapshot-coordinator-ca-bundle
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --coordinator-server-name=snapshot-coordinator.snapshot-system
+
+  - it: lets the agents' ServiceAccount follow the groups and review tokens
+    template: templates/coordinator-rbac.yaml
+    set:
+      podGroups.enabled: true
+      serviceAccount.name: gpu-agents
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: rules
+          value:
+            - apiGroups: ["nvidia.com"]
+              resources: ["podgroupsnapshots", "podgrouprestores"]
+              verbs: ["get", "list", "watch"]
+            - apiGroups: ["authentication.k8s.io"]
+              resources: ["tokenreviews"]
+              verbs: ["create"]
+        documentSelector:
+          path: kind
+          value: ClusterRole
+      - equal:
+          path: roleRef.name
+          value: snapshot-agent-coordinator
+        documentSelector:
+          path: kind
+          value: ClusterRoleBinding
+      - equal:
+          path: subjects
+          value:
+            - kind: ServiceAccount
+              name: gpu-agents
+              namespace: snapshot-system
+        documentSelector:
+          path: kind
+          value: ClusterRoleBinding
+
+  - it: lets the operator write the three issued resources, and no others
+    template: templates/coordinator-issuer-rbac.yaml
+    set:
+      podGroups.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: metadata.namespace
+          value: snapshot-system
+      - equal:
+          path: rules
+          value:
+            - apiGroups: [""]
+              resources: ["secrets", "configmaps"]
+              verbs: ["create"]
+            - apiGroups: [""]
+              resources: ["secrets"]
+              resourceNames: ["snapshot-coordinator-ca", "snapshot-coordinator-tls"]
+              verbs: ["get", "update"]
+            - apiGroups: [""]
+              resources: ["configmaps"]
+              resourceNames: ["snapshot-coordinator-ca-bundle"]
+              verbs: ["get", "update"]
+        documentSelector:
+          path: kind
+          value: Role
+      - equal:
+          path: subjects
+          value:
+            - kind: ServiceAccount
+              name: snapshot-operator
+              namespace: snapshot-system
+        documentSelector:
+          path: kind
+          value: RoleBinding
+
+  - it: creates no coordinator RBAC without rbac.create, and still runs the coordinator
+    templates:
+      - templates/coordinator-rbac.yaml
+      - templates/coordinator-issuer-rbac.yaml
+    set:
+      podGroups.enabled: true
+      rbac.create: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: still runs the coordinator without rbac.create
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      rbac.create: false
+    asserts:
+      - exists:
+          path: spec.template.spec.containers[?(@.name == "coordinator")]
+
+  # Bring your own certificate.
+
+  - it: mounts your serving Secret, with a ConfigMap trust source
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.tls.serving.secretName: coordinator-serving
+      coordinator.tls.trust.configMapName: coordinator-trust
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: coordinator-tls
+            secret:
+              secretName: coordinator-serving
+              optional: true
+              items:
+                - key: tls.crt
+                  path: tls.crt
+                - key: tls.key
+                  path: tls.key
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --token-audience=snapshot-coordinator.snapshot-system
+
+  - it: gives the operator no issuer flags, with a ConfigMap trust source
+    template: templates/operator-deployment.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.tls.serving.secretName: coordinator-serving
+      coordinator.tls.trust.configMapName: coordinator-trust
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --coordinator-tls-namespace=snapshot-system
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --coordinator-tls-secret=snapshot-coordinator-tls
+
+  - it: grants the operator no issuer RBAC, with a ConfigMap trust source
+    template: templates/coordinator-issuer-rbac.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.tls.serving.secretName: coordinator-serving
+      coordinator.tls.trust.configMapName: coordinator-trust
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: mounts your serving Secret, with a Secret trust source
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.tls.serving.secretName: coordinator-serving
+      coordinator.tls.trust.secretName: coordinator-serving
+      coordinator.tls.serverName: coordinator.example.com
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: coordinator-tls
+            secret:
+              secretName: coordinator-serving
+              optional: true
+              items:
+                - key: tls.crt
+                  path: tls.crt
+                - key: tls.key
+                  path: tls.key
+      # The audience does not follow the server name.
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --token-audience=snapshot-coordinator.snapshot-system
+
+  - it: gives the operator no issuer flags, with a Secret trust source
+    template: templates/operator-deployment.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.tls.serving.secretName: coordinator-serving
+      coordinator.tls.trust.secretName: coordinator-ca
+      coordinator.tls.trust.key: bundle.pem
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --coordinator-tls-namespace=snapshot-system
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --coordinator-tls-secret=snapshot-coordinator-tls
+
+  - it: grants the operator no issuer RBAC, with a Secret trust source
+    template: templates/coordinator-issuer-rbac.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.tls.serving.secretName: coordinator-serving
+      coordinator.tls.trust.secretName: coordinator-ca
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: still grants the coordinator its RBAC when you bring your own
+    template: templates/coordinator-rbac.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.tls.serving.secretName: coordinator-serving
+      coordinator.tls.trust.secretName: coordinator-ca
+    asserts:
+      - hasDocuments:
+          count: 2
+
+  # Refused: mixed or ambiguous settings.
+
+  - it: refuses a serving Secret without a trust source
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.tls.serving.secretName: coordinator-serving
+    asserts:
+      - failedTemplate:
+          errorMessage: "coordinator.tls.serving.secretName needs the CA bundle agents trust: set coordinator.tls.trust.configMapName or coordinator.tls.trust.secretName"
+
+  - it: refuses a ConfigMap trust source without a serving Secret
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.tls.trust.configMapName: coordinator-trust
+    asserts:
+      - failedTemplate:
+          errorMessage: "coordinator.tls.trust needs the Secret the coordinator serves: set coordinator.tls.serving.secretName"
+
+  - it: refuses a Secret trust source without a serving Secret
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.tls.trust.secretName: coordinator-ca
+    asserts:
+      - failedTemplate:
+          errorMessage: "coordinator.tls.trust needs the Secret the coordinator serves: set coordinator.tls.serving.secretName"
+
+  - it: refuses both trust sources
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.tls.serving.secretName: coordinator-serving
+      coordinator.tls.trust.configMapName: coordinator-trust
+      coordinator.tls.trust.secretName: coordinator-ca
+    asserts:
+      - failedTemplate:
+          errorPattern: "coordinator.tls.trust.secretName: String length must be less than or equal to 0"
+
+  - it: refuses a server name without your own serving Secret
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.tls.serverName: coordinator.example.com
+    asserts:
+      - failedTemplate:
+          errorMessage: "coordinator.tls.serverName names your own serving certificate: set it with coordinator.tls.serving.secretName and coordinator.tls.trust"
+
+  - it: refuses a trust key without your own trust source
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.tls.trust.key: bundle.pem
+    asserts:
+      - failedTemplate:
+          errorMessage: "coordinator.tls.trust.key names the key of your own trust bundle: set it with coordinator.tls.trust.configMapName or coordinator.tls.trust.secretName"
+
+  - it: refuses the issued serving Secret as your serving Secret
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.tls.serving.secretName: snapshot-coordinator-tls
+      coordinator.tls.trust.configMapName: coordinator-trust
+    asserts:
+      - failedTemplate:
+          errorMessage: 'coordinator.tls.serving.secretName "snapshot-coordinator-tls" is a Secret the operator issues: name your own Secret'
+
+  - it: refuses the issued CA Secret as your serving Secret
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.tls.serving.secretName: snapshot-coordinator-ca
+      coordinator.tls.trust.configMapName: coordinator-trust
+    asserts:
+      - failedTemplate:
+          errorMessage: 'coordinator.tls.serving.secretName "snapshot-coordinator-ca" is a Secret the operator issues: name your own Secret'
+
+  - it: refuses the issued CA Secret as your trust Secret
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.tls.serving.secretName: coordinator-serving
+      coordinator.tls.trust.secretName: snapshot-coordinator-ca
+    asserts:
+      - failedTemplate:
+          errorMessage: 'coordinator.tls.trust.secretName "snapshot-coordinator-ca" is a Secret the operator issues: name your own Secret'
+
+  - it: refuses the issued serving Secret as your trust Secret
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.tls.serving.secretName: coordinator-serving
+      coordinator.tls.trust.secretName: snapshot-coordinator-tls
+    asserts:
+      - failedTemplate:
+          errorMessage: 'coordinator.tls.trust.secretName "snapshot-coordinator-tls" is a Secret the operator issues: name your own Secret'
+
+  - it: refuses the issued trust bundle as your trust ConfigMap
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.tls.serving.secretName: coordinator-serving
+      coordinator.tls.trust.configMapName: snapshot-coordinator-ca-bundle
+    asserts:
+      - failedTemplate:
+          errorMessage: 'coordinator.tls.trust.configMapName "snapshot-coordinator-ca-bundle" is the ConfigMap the operator issues: name your own ConfigMap'
+
+  - it: compares your names with the issued ones of this release
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      fullnameOverride: gpu-snapshot
+      coordinator.tls.serving.secretName: gpu-snapshot-coordinator-tls
+      coordinator.tls.trust.configMapName: coordinator-trust
+    asserts:
+      - failedTemplate:
+          errorMessage: 'coordinator.tls.serving.secretName "gpu-snapshot-coordinator-tls" is a Secret the operator issues: name your own Secret'
+
+  - it: refuses a server name that is an IP address
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.tls.serving.secretName: coordinator-serving
+      coordinator.tls.trust.configMapName: coordinator-trust
+      coordinator.tls.serverName: 10.0.0.1
+    asserts:
+      - failedTemplate:
+          errorMessage: 'coordinator.tls.serverName "10.0.0.1" is an IP address: agents verify a DNS name'
+
+  - it: refuses a server name that is not a DNS name
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.tls.serving.secretName: coordinator-serving
+      coordinator.tls.trust.configMapName: coordinator-trust
+      coordinator.tls.serverName: Coordinator_1
+    asserts:
+      - failedTemplate:
+          errorMessage: 'coordinator.tls.serverName "Coordinator_1" is not a DNS name'
+
+  - it: refuses one port for both listeners
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.healthPort: 4224
+    asserts:
+      - failedTemplate:
+          errorMessage: "coordinator.port and coordinator.healthPort are both 4224: the coordinator needs two ports"
+
+  # The schema.
+
+  - it: refuses a port above 65535
+    template: templates/daemonset.yaml
+    set:
+      coordinator.port: 65536
+    asserts:
+      - failedTemplate:
+          errorPattern: "coordinator.port: Must be less than or equal to 65535"
+
+  # The coordinator runs as non-root with no capabilities, on the host's
+  # network, so it cannot bind a port below 1024.
+  - it: refuses port 1023
+    template: templates/daemonset.yaml
+    set:
+      coordinator.port: 1023
+    asserts:
+      - failedTemplate:
+          errorPattern: "coordinator.port: Must be greater than or equal to 1024"
+
+  - it: accepts port 1024
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.port: 1024
+    asserts:
+      - notFailedTemplate: {}
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --port=1024
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].ports
+          content:
+            name: coordinator
+            containerPort: 1024
+            hostPort: 1024
+            protocol: TCP
+
+  - it: refuses a health port above 65535
+    template: templates/daemonset.yaml
+    set:
+      coordinator.healthPort: 70000
+    asserts:
+      - failedTemplate:
+          errorPattern: "coordinator.healthPort: Must be less than or equal to 65535"
+
+  - it: refuses health port 1023
+    template: templates/daemonset.yaml
+    set:
+      coordinator.healthPort: 1023
+    asserts:
+      - failedTemplate:
+          errorPattern: "coordinator.healthPort: Must be greater than or equal to 1024"
+
+  - it: accepts health port 1024
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.healthPort: 1024
+    asserts:
+      - notFailedTemplate: {}
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --health-port=1024
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].ports
+          content:
+            name: health
+            containerPort: 1024
+            hostPort: 1024
+            protocol: TCP
+
+  - it: refuses no session memory
+    template: templates/daemonset.yaml
+    set:
+      coordinator.maxMemoryBytes: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: "coordinator.maxMemoryBytes: Must be greater than or equal to 1"
+
+  - it: refuses an empty trust key
+    template: templates/daemonset.yaml
+    set:
+      coordinator.tls.trust.key: ""
+    asserts:
+      - failedTemplate:
+          errorPattern: "coordinator.tls.trust.key: String length must be greater than or equal to 1"

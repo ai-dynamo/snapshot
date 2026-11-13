@@ -72,3 +72,14 @@ On a node without NRI, or with an older runtime, the agent restores without the
 proxy. Restore pods then need an inert command, and the container does not
 follow the restored workload. See
 [Nodes Without the Restore Proxy](../reference/restore-pod-contract.md#nodes-without-the-restore-proxy).
+
+### Pod Groups
+
+Requires Kubernetes 1.32 or newer, or Kubernetes 1.30 or 1.31 with the
+`ServiceAccountTokenPodNodeInfo` feature gate on, as it is by default. Pod
+groups are alpha and off by default. See
+[Pod Groups](../reference/helm-values.md#pod-groups).
+
+The pod group coordinator admits an agent only by a ServiceAccount token that
+names the agent pod's node. On a cluster whose tokens do not name it, the
+coordinator refuses every agent and logs why.

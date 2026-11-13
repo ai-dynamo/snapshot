@@ -26,6 +26,7 @@ the restore proxy, which Snapshot injects.
 | **CRD installer** | Init container of the operator | Applies the bundled CRDs on every rollout (`crdUpgrade.enabled`). |
 | **Node agent** | DaemonSet, privileged, GPU nodes | The node-local control loop. Watches this node's work orders and restore pods, and executes CRIU and CUDA checkpoint/restore against containers on the node. |
 | **PageBroker** | Container in the agent pod, privileged | Owns the movement of snapshot data between the node and the snapshot store, including the GPU engine that reads and writes GPU payloads. |
+| **Pod group coordinator** | Container in the agent pod, unprivileged, with `podGroups.enabled` (alpha) | Holds the coordination sessions of the pod groups whose rank-0 member runs on its node, for the agents of every member. |
 | **Restore proxy** | PID 1 of each restore destination container | Injected by the agent's NRI plugin at container creation. Waits for the restore, then follows the restored process and exits with its status. |
 | **`nsrestore`** | Short-lived helper, exec'd by the agent | Performs the restore from *inside* the destination container's namespaces. |
 | **`snapshotctl`** | CLI | Lower-level checkpoint and restore from a pod manifest, without the CRDs. See [CLI](../reference/cli.md). |
@@ -284,6 +285,30 @@ its own output. Checkpointed containers need a seccomp profile
 blocking `io_uring`, which CRIU cannot checkpoint, and the chart ships one.
 A snapshot contains the workload's complete memory, so protect the store
 accordingly. See [Allow the Privileged Node Agent](../get-started/installation.md#allow-the-privileged-node-agent).
+
+The pod group coordinator, with `podGroups.enabled`, runs unprivileged and
+listens on the node's IP, at `coordinator.port` for agents and
+`coordinator.healthPort` for probes:
+
+- Agents connect over TLS. By default, the operator issues the serving
+  certificate under a private CA. You can bring your own serving Secret and
+  trust bundle instead, for example from cert-manager and trust-manager. See
+  [Pod Groups](../reference/helm-values.md#pod-groups).
+- The coordinator admits an agent by its Pod-bound ServiceAccount token, and
+  only as a member whose pod runs on that agent's node.
+- A NetworkPolicy cannot be relied on for a pod on the host's network. To limit
+  who reaches the two ports, use a host firewall that admits only the nodes'
+  addresses.
+- Every coordinator of a release serves the same certificate. It proves that a
+  peer is one of this release's coordinators, not which node it runs on.
+
+The operator replaces its CA near expiry, or when the CA Secret is lost or
+damaged. After a replacement near expiry, the trust bundle keeps the replaced
+CA until it expires; a lost or damaged CA Secret loses it. A replacement can
+disrupt group attempts that reconnect while it propagates. Recovery needs both
+sides to reload from their mounted files: each coordinator its serving
+certificate, and each agent its trust in `ca.crt`. The kubelet refreshes those
+files on each node's own schedule.
 
 ## Multi-GPU
 

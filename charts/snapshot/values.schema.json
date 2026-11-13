@@ -17,6 +17,72 @@
         }
       }
     },
+    "coordinator": {
+      "type": "object",
+      "properties": {
+        "port": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535
+        },
+        "healthPort": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535
+        },
+        "maxMemoryBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "tls": {
+          "type": "object",
+          "properties": {
+            "serving": {
+              "type": "object",
+              "properties": {
+                "secretName": {
+                  "type": "string"
+                }
+              }
+            },
+            "trust": {
+              "type": "object",
+              "properties": {
+                "configMapName": {
+                  "type": "string"
+                },
+                "secretName": {
+                  "type": "string"
+                },
+                "key": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "if": {
+                "required": ["configMapName"],
+                "properties": {
+                  "configMapName": {
+                    "minLength": 1
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "secretName": {
+                    "maxLength": 0
+                  }
+                }
+              }
+            },
+            "serverName": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
     "pageBroker": {
       "type": "object",
       "properties": {
@@ -61,6 +127,14 @@
               "type": "object"
             }
           }
+        }
+      }
+    },
+    "podGroups": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
         }
       }
     }

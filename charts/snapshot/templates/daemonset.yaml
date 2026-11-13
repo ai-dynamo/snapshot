@@ -1,4 +1,7 @@
 {{- include "snapshot.validateRuntime" . -}}
+{{- if .Values.podGroups.enabled -}}
+{{- include "snapshot.validateCoordinator" . -}}
+{{- end -}}
 {{- if hasKey .Values.image.pageBroker "tag" -}}
 {{- fail "image.pageBroker.tag is unsupported: set image.agent.tag to select matching agent and PageBroker images" -}}
 {{- end -}}
@@ -266,6 +269,90 @@ spec:
               mountPath: {{ include "snapshot.modelStreamerMountDir" . }}
               readOnly: true
             {{- end }}
+        {{- if .Values.podGroups.enabled }}
+        # The coordinator of pod groups. Unprivileged: it needs only the API
+        # server, its serving certificate and its two ports, which are on the
+        # node's IP. Its readiness is the Pod's, so a node whose coordinator
+        # does not admit agents gets no new groups.
+        - name: coordinator
+          image: {{ include "snapshot.agentImage" . | quote }}
+          imagePullPolicy: {{ .Values.image.agent.pullPolicy }}
+          command:
+            - /usr/local/bin/snapshot-coordinator
+          args:
+            - --node-name=$(NODE_NAME)
+            - --agent-namespace=$(POD_NAMESPACE)
+            - --agent-service-account=$(SERVICE_ACCOUNT_NAME)
+            - --listen-address=$(POD_IP)
+            - {{ printf "--token-audience=%s" (include "snapshot.coordinatorTokenAudience" .) | quote }}
+            - {{ printf "--tls-cert-dir=%s" (include "snapshot.coordinatorTLSDir" .) | quote }}
+            - {{ printf "--port=%d" (int64 .Values.coordinator.port) | quote }}
+            - {{ printf "--health-port=%d" (int64 .Values.coordinator.healthPort) | quote }}
+            - {{ printf "--max-memory-bytes=%d" (int64 .Values.coordinator.maxMemoryBytes) | quote }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: SERVICE_ACCOUNT_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.serviceAccountName
+            # The Pod uses the host's network, so this is the node's IP.
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          # Host ports, the Pod being on the host's network, so the scheduler
+          # keeps a second Pod that wants them off the node.
+          ports:
+            - name: coordinator
+              containerPort: {{ .Values.coordinator.port }}
+              hostPort: {{ .Values.coordinator.port }}
+              protocol: TCP
+            - name: health
+              containerPort: {{ .Values.coordinator.healthPort }}
+              hostPort: {{ .Values.coordinator.healthPort }}
+              protocol: TCP
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 10
+          # The health endpoint starts once the coordinator has read the API
+          # server's ServiceAccount issuer, which may take up to 30 seconds.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.coordinator.resources | nindent 12 }}
+          volumeMounts:
+            - name: coordinator-tls
+              mountPath: {{ include "snapshot.coordinatorTLSDir" . }}
+              readOnly: true
+            # JetStream checks that it can write here, although every session
+            # lives in memory.
+            - name: coordinator-tmp
+              mountPath: /tmp
+        {{- end }}
       volumes:
         # Configuration ConfigMap
         - name: config
@@ -383,6 +470,24 @@ spec:
         - name: docker-config
           secret:
             secretName: {{ .Values.storage.oci.credentialsSecretRef }}
+        {{- end }}
+        {{- if .Values.podGroups.enabled }}
+        # The coordinator's serving certificate. Optional, so the agent and
+        # PageBroker start before the operator has issued it; the kubelet fills
+        # the volume once the Secret exists, and the coordinator restarts until
+        # then.
+        - name: coordinator-tls
+          secret:
+            secretName: {{ include "snapshot.coordinatorServingSecretName" . | quote }}
+            optional: true
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+        - name: coordinator-tmp
+          emptyDir:
+            sizeLimit: 16Mi
         {{- end }}
       {{- with .Values.daemonset.imagePullSecrets }}
       imagePullSecrets:
