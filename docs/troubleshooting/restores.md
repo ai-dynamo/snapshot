@@ -112,6 +112,23 @@ kubectl describe pod <restore-pod> -n <ns>
 kubectl exec <restore-pod> -n <ns> -c <container> -- nvidia-smi -L
 ```
 
+### admitting the pod group
+
+For a member of a pod group, the agent checks that the checkpoint is the
+member's own part of a group capture. It publishes the restore Pod's IP and the
+capture it restores, then waits for every other member's and for every member
+to accept. Nothing has been restored yet, so the attempt ends as `Refused`. A
+member that fails at any step fails the attempt for every other member. Each of
+them then fails at the step it was waiting in, with the reason the first member
+gave, such as `Refused` or `MemberFailed`.
+
+**Likely causes:**
+
+- The checkpoint was captured on its own, or by another member of the group
+- The members restore different captures
+- Another member refused first
+- The attempt's deadline passed before every member arrived
+
 ### building GPU context
 
 The agent builds the mapping PageBroker uses to place checkpointed GPU memory
@@ -168,6 +185,25 @@ kubectl logs $agent -n <snapshot-ns> -c pagebroker
 
 The agent bind-mounts the staged or directly mapped checkpoint into the
 placeholder for nsrestore to read. Causes are the same as for the bundle mount.
+
+### keeping the connections to the pod group's other members
+
+A member of a pod group keeps its TCP connections to the other members. Before
+CRIU runs, the agent drops the packets of those connections in the restore
+Pod's network namespace. CRIU then restores the member and waits, before any
+of its processes runs, until every member has restored its sockets
+(`sockets-restored`). The agent then lifts the hold, turns `SO_KEEPALIVE` back
+on for the connections that had it, and lets CRIU continue.
+
+**Likely causes:**
+
+- Another member failed, or the attempt's deadline passed before every member restored its sockets
+- The agent could not write the hold's nftables table in the Pod's network namespace, for example on a node whose kernel lacks nf_tables
+- nsrestore exited before CRIU restored the sockets, and then the agent log also names the step nsrestore failed at
+
+```bash
+kubectl logs $agent -n <snapshot-ns> -c agent | grep -i 'pod group'
+```
 
 ### running nsrestore
 
@@ -323,6 +359,22 @@ listening port, a peer, or GPU state.
 The agent log carries the process diagnostics and the `restore.log` lines
 recorded at the failure. The workload's own output is in the restore pod's
 container logs.
+
+### waiting for the pod group's other members
+
+Once its processes are restored, a member of a pod group waits at the `release`
+barrier until every other member arrives. The step fails when the attempt ends
+first, and the agent then terminates the restored processes.
+
+**Likely causes:**
+
+- Another member failed, and its agent's log carries the step
+- The attempt's deadline passed
+- The coordinator was lost (`CoordinatorLost`)
+
+```bash
+kubectl logs $agent -n <snapshot-ns> -c agent | grep -i 'pod group'
+```
 
 ### checking the post-restore action
 
