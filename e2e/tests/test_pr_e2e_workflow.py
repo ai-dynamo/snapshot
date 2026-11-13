@@ -30,6 +30,18 @@ def test_gpu_suites_wait_for_the_verified_candidate(jobs):
         assert "candidate" in jobs[suite]["needs"]
 
 
+def test_gpu_suites_check_the_running_images_against_the_candidate(jobs):
+    verify = step(jobs["candidate"], "Check each tag resolves to the digest built here")
+    assert jobs["candidate"]["outputs"]["digests"] == f"${{{{ steps.{verify['id']}.outputs.digests }}}}"
+    assert 'echo "digests=${record}" >> "${GITHUB_OUTPUT}"' in verify["run"]
+    for suite in GPU_SUITES:
+        assert jobs[suite]["with"]["image_digests"] == "${{ needs.candidate.outputs.digests }}"
+        called = yaml.safe_load((ROOT / jobs[suite]["uses"]).read_text())
+        assert "image_digests" in called[True]["workflow_call"]["inputs"]
+        env = called["jobs"]["e2e"]["env"]
+        assert env["SNAPSHOT_E2E_IMAGE_DIGESTS"] == "${{ inputs.image_digests || '' }}"
+
+
 def test_candidate_checks_every_built_image(jobs):
     images = jobs["images"]["strategy"]["matrix"]["image"]
     script = step(jobs["candidate"], "Check each tag resolves to the digest built here")["run"]

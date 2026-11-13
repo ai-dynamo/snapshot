@@ -61,6 +61,13 @@ on:
         description: Operator/agent/pagebroker image tag to install.
         required: true
         type: string
+      image_digests:
+        description: >-
+          JSON object of the digest each image must have, keyed operator,
+          agent, and pagebroker. When set, the install pulls every image and
+          fails unless the running containers match.
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -130,6 +137,7 @@ jobs:
       SNAPSHOT_E2E_HELM_TIMEOUT: 6m
       SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "480"
       SNAPSHOT_E2E_RESULT_FILE: ${{ github.workspace }}/.snapshot-e2e-setup-result.json
+      SNAPSHOT_E2E_IMAGE_DIGESTS: ${{ inputs.image_digests || '' }}
       SNAPSHOT_E2E_FRAMEWORK: ${{ matrix.framework }}
       SNAPSHOT_E2E_STORAGE: ${{ matrix.storage }}
       SNAPSHOT_E2E_BENCHMARK_DIR: ${{ github.workspace }}/.e2e-benchmark-results

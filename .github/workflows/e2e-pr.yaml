@@ -171,8 +171,8 @@ jobs:
           overwrite: true
 
   # Records which manifests this run qualifies, and fails before any GPU time is
-  # spent if the tag no longer resolves to what was built here. The suites still
-  # install by tag; only a rebuild of the same commit can move it.
+  # spent if the tag no longer resolves to what was built here. The suites install
+  # by tag, then fail unless every running Snapshot container has these digests.
   candidate:
     name: Verify candidate images
     needs: images
@@ -180,6 +180,8 @@ jobs:
     timeout-minutes: 5
     permissions:
       packages: read
+    outputs:
+      digests: ${{ steps.verify.outputs.digests }}
     steps:
       - name: Download image digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -196,6 +198,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check each tag resolves to the digest built here
+        id: verify
         env:
           REGISTRY: ghcr.io/ai-dynamo/snapshot
           TAG: ${{ needs.images.outputs.tag }}
@@ -211,6 +214,7 @@ jobs:
             fi
             record="$(jq -c --arg image "${image}" --arg digest "${want}" '.[$image] = $digest' <<< "${record}")"
           done
+          echo "digests=${record}" >> "${GITHUB_OUTPUT}"
           jq -n \
             --arg sha "${GITHUB_SHA}" \
             --arg ref "${GITHUB_REF}" \
@@ -241,6 +245,7 @@ jobs:
     uses: ./.github/workflows/e2e.yaml
     with:
       snapshot_tag: ${{ needs.images.outputs.tag }}
+      image_digests: ${{ needs.candidate.outputs.digests }}
     permissions:
       contents: read
       packages: read
@@ -251,6 +256,7 @@ jobs:
     uses: ./.github/workflows/e2e-frameworks.yaml
     with:
       snapshot_tag: ${{ needs.images.outputs.tag }}
+      image_digests: ${{ needs.candidate.outputs.digests }}
     permissions:
       # Its benchmark comparison reads the result artifacts of this run.
       actions: read

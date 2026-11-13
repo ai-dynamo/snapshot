@@ -53,7 +53,11 @@ branched from `main`. If it does, the CPU suite runs while the operator, agent,
 and pagebroker images are built from the mirrored commit and pushed to GHCR as
 `v0.0.0-pull-request-<number>-g<sha8>`. The GPU suite in `e2e.yaml` and the
 framework suites in `e2e-frameworks.yaml` run only once both succeed, and
-install those images rather than main's.
+install those images rather than main's. Each suite receives the digests the
+build recorded in `SNAPSHOT_E2E_IMAGE_DIGESTS`, a JSON object keyed `operator`,
+`agent`, and `pagebroker`. With it set, `setup.py` pulls every image instead of
+reusing a node's cached copy, and fails the install unless each running
+Snapshot container has the recorded digest.
 
 The `PR E2E` check passes only when every suite the change needed passed, or
 when the change needed none of them. The scheduled registry prune deletes
