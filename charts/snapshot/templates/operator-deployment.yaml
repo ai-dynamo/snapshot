@@ -90,6 +90,13 @@ spec:
             - {{ printf "--artifact-cleanup-workers=%v" .Values.operator.artifactCleanup.workers | quote }}
             - {{ printf "--artifact-cleanup-backend-type=%v" .Values.storage.type | quote }}
             - {{ printf "--artifact-cleanup-task-timeout=%v" .Values.operator.artifactCleanup.taskTimeout | quote }}
+            {{- /* helm upgrade --reuse-values renders with the old release's values, which
+                   predate this key; omit the flag then so the binary's default applies,
+                   rather than passing "<nil>". A set value, even 0, still reaches the
+                   binary so it can reject it. */}}
+            {{- if not (kindIs "invalid" (.Values.operator).checkpointCompletionGrace) }}
+            - {{ printf "--checkpoint-completion-grace=%v" .Values.operator.checkpointCompletionGrace | quote }}
+            {{- end }}
             # CuInterpose libraries for opted-in workloads.
             - {{ printf "--cuinterpose-image=%s" (include "snapshot.agentImage" .) | quote }}
             - {{ printf "--cuinterpose-image-pull-policy=%s" .Values.image.agent.pullPolicy | quote }}

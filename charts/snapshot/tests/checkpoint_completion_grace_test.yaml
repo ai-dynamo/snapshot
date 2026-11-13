@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: checkpoint completion grace on the operator
+templates:
+  - templates/operator-deployment.yaml
+tests:
+  - it: defaults the grace to five minutes
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --checkpoint-completion-grace=5m
+
+  - it: passes a configured grace to the operator
+    set:
+      operator.checkpointCompletionGrace: 20m
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --checkpoint-completion-grace=20m
+
+  - it: omits the flag when reused values from an older release carry no grace
+    set:
+      operator.checkpointCompletionGrace: null
+    asserts:
+      # Any rendered form of the flag, including an empty value, would override the
+      # binary's default; an empty duration stops the operator from starting.
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[*]
+          pattern: ^--checkpoint-completion-grace=
+
+  - it: passes an explicit zero through so the operator rejects it
+    set:
+      operator.checkpointCompletionGrace: 0
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --checkpoint-completion-grace=0

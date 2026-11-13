@@ -29,6 +29,7 @@ import (
 
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/maintenance"
+	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 )
 
 const (
@@ -47,11 +48,15 @@ const (
 	// List calls using this field are also scoped to the pod's namespace.
 	podSnapshotSourcePodNameField = "spec.source.podRef.name"
 
-	// podSnapshotReasonSourcePodGone is the pending-capture failure written when the source pod
-	// turned terminal (Failed or deleting) with no capture result. It is failed only after
-	// sourcePodTerminalGrace, because a checkpoint that terminates its source produces exactly this
-	// pod state shortly before the agent writes content Ready.
+	// podSnapshotReasonSourcePodGone is the pending-checkpoint failure written when the source pod
+	// turned terminal (Failed or deleting) with no checkpoint result and the time it turned terminal
+	// is not observable, so the checkpoint completion grace cannot be timed.
 	podSnapshotReasonSourcePodGone = "SourcePodGone"
+
+	// podSnapshotReasonCheckpointResultTimeout is the pending-checkpoint failure written when the
+	// node agent publishes no checkpoint result within the checkpoint completion grace of the
+	// source pod becoming terminal.
+	podSnapshotReasonCheckpointResultTimeout = "CheckpointResultTimeout"
 
 	// podSnapshotReasonSourcePodUnscheduled is the Pending reason while the source pod waits for a
 	// node. The pod watch re-enqueues on spec.nodeName changes, so no requeue is needed.
@@ -80,6 +85,10 @@ type PodSnapshotReconciler struct {
 	// StoreID binds every new PodSnapshotContent to the configured store. Empty
 	// keeps producing legacy, path-addressed content.
 	StoreID string
+	// Checkpoint holds the operator's checkpoint settings. Its CompletionGrace must be positive;
+	// the operator sets it from the --checkpoint-completion-grace flag (default
+	// types.DefaultCheckpointCompletionGrace).
+	Checkpoint operatortypes.CheckpointConfig
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;update;patch
@@ -206,27 +215,33 @@ func (sr *PodSnapshotReconciler) confirmPendingCaptureTerminal(ctx context.Conte
 	if reason == podSnapshotReasonSourcePodGone {
 		// A checkpoint that terminates its source fails the pod before the agent
 		// writes content Ready; wait out the grace window instead of racing it.
-		if wait := sourcePodTerminalGraceRemaining(pod, time.Now()); wait > 0 {
-			return ctrl.Result{RequeueAfter: wait}, nil
-		}
+		return sr.awaitCheckpointResult(ctx, snap, content, pod, cause)
 	}
 	return sr.failPodSnapshot(ctx, snap, reason, cause)
 }
 
-// sourcePodTerminalGrace is how long a pending capture may stay unresolved
-// after its source pod turned terminal before the pod's state becomes the
-// capture failure — the backstop for an agent that never publishes a result.
-const sourcePodTerminalGrace = 5 * time.Minute
-
-// sourcePodTerminalGraceRemaining returns how much of the grace window is left
-// for a terminal source pod. An unknown transition time returns zero — failing
-// immediately — rather than requeueing on a clock that can never expire.
-func sourcePodTerminalGraceRemaining(pod *corev1.Pod, now time.Time) time.Duration {
+// awaitCheckpointResult is the timer for a pending checkpoint whose source pod is terminal. The
+// timer starts when the pod became terminal and runs for the checkpoint completion grace; the
+// agent's Ready or Failed write ends it early by resolving the content, and expiry fails the
+// PodSnapshot with CheckpointResultTimeout. The start time is read from pod status on every
+// reconcile rather than held in memory, so the timer survives operator restarts. When the pod
+// status records no termination time there is nothing to time, so sourceGone, the pod-state
+// failure, is written as SourcePodGone instead.
+func (sr *PodSnapshotReconciler) awaitCheckpointResult(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot,
+	content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod, sourceGone error) (ctrl.Result, error) {
 	terminalAt := podTerminalTime(pod)
 	if terminalAt.IsZero() {
-		return 0
+		// Requeueing on a clock with no start would never expire. Nothing was timed,
+		// so report the pod state rather than a timeout.
+		return sr.failPodSnapshot(ctx, snap, podSnapshotReasonSourcePodGone, sourceGone)
 	}
-	return sourcePodTerminalGrace - now.Sub(terminalAt)
+	grace := sr.Checkpoint.CompletionGrace
+	if remaining := time.Until(terminalAt.Add(grace)); remaining > 0 {
+		return ctrl.Result{RequeueAfter: remaining}, nil
+	}
+	return sr.failPodSnapshot(ctx, snap, podSnapshotReasonCheckpointResultTimeout,
+		fmt.Errorf("PodSnapshotContent %q reported no checkpoint result within %v of source pod %q becoming terminal",
+			content.Name, grace, client.ObjectKeyFromObject(pod).String()))
 }
 
 // podTerminalTime returns the latest observable time at which the source pod
