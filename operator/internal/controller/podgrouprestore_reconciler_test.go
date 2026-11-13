@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -37,6 +38,7 @@ func makePodGroupRestoreReconciler(t *testing.T, objs ...client.Object) (*PodGro
 	c := fake.NewClientBuilder().WithScheme(snapshotReconcilerScheme()).WithObjects(objs...).
 		WithStatusSubresource(&snapshotv1alpha1.PodGroupRestore{}, &snapshotv1alpha1.PodGroupSnapshot{}, &corev1.Pod{}).
 		WithIndex(&snapshotv1alpha1.PodGroupRestore{}, podGroupRestoreTargetPodField, podGroupRestoreTargetPods).
+		WithIndex(&snapshotv1alpha1.PodGroupRestore{}, podGroupRestoreSnapshotUIDField, podGroupRestoreSnapshotUID).
 		Build()
 	recorder := record.NewFakeRecorder(100)
 	return &PodGroupRestoreReconciler{
@@ -994,6 +996,72 @@ func TestPodGroupRestoreReconciler_RecordsNothingWhenTheLiveReadFails(t *testing
 	assert.Empty(t, drainEvents(recorder))
 }
 
+// TestPodGroupRestoreReconciler_WakesOnItsSnapshot: a restore that waits for
+// a target Pod does not poll, so its snapshot's events must reconcile it. It
+// is refused as soon as its snapshot's deletion starts, or the snapshot loses
+// Ready; a snapshot being deleted is then released.
+func TestPodGroupRestoreReconciler_WakesOnItsSnapshot(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		change     func(t *testing.T, r *PodGroupRestoreReconciler, snapshot *snapshotv1alpha1.PodGroupSnapshot)
+		wantReason string
+		wantMsg    string
+		released   bool
+	}{
+		{
+			name: "its snapshot's deletion starts",
+			change: func(t *testing.T, r *PodGroupRestoreReconciler, snapshot *snapshotv1alpha1.PodGroupSnapshot) {
+				require.NoError(t, r.Delete(context.Background(), snapshot))
+			},
+			wantReason: snapshotv1alpha1.PodGroupReasonRefused,
+			wantMsg:    `PodGroupSnapshot "group" is being deleted`,
+			released:   true,
+		},
+		{
+			name: "its snapshot loses Ready",
+			change: func(t *testing.T, r *PodGroupRestoreReconciler, snapshot *snapshotv1alpha1.PodGroupSnapshot) {
+				snapshot.Status.Conditions = []metav1.Condition{{Type: snapshotv1alpha1.PodGroupConditionReady,
+					Status: metav1.ConditionFalse, Reason: snapshotv1alpha1.PodGroupReasonArtifactUnavailable,
+					Message: "its PodSnapshotContent is gone", LastTransitionTime: metav1.Now()}}
+				require.NoError(t, r.Status().Update(context.Background(), snapshot))
+			},
+			wantReason: snapshotv1alpha1.PodGroupReasonArtifactUnavailable,
+			wantMsg:    `PodGroupSnapshot "group" is not Ready: its PodSnapshotContent is gone`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			r, _ := makePodGroupRestoreReconciler(t, rgSnapshot("a", "b"), rgGatedPod("a"), rgRestore("a", "b"))
+			snapshots := &PodGroupSnapshotReconciler{Client: r.Client, NonCacheReadClient: r.NonCacheReadClient,
+				Recorder: record.NewFakeRecorder(10), AgentNamespace: pgAgentNamespace, AgentSelector: r.AgentSelector}
+			reconcileRestore(t, r)
+			require.Equal(t, snapshotv1alpha1.PodGroupReasonTargetPodPending,
+				rgCondition(getRestore(t, r).Status.Conditions, snapshotv1alpha1.PodGroupConditionAdmitted).Reason)
+			snapshot := &snapshotv1alpha1.PodGroupSnapshot{}
+			require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: pgNamespace, Name: "group"}, snapshot))
+
+			tc.change(t, r, snapshot)
+			require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: pgNamespace, Name: "group"}, snapshot))
+			requests := r.podGroupSnapshotToPodGroupRestores(ctx, snapshot)
+			require.Equal(t, []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: pgNamespace, Name: "restore"}}},
+				requests, "the snapshot's event reconciles the restore")
+			reconcileRestore(t, r)
+
+			failed := rgCondition(getRestore(t, r).Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed)
+			require.NotNil(t, failed)
+			assert.Equal(t, tc.wantReason, failed.Reason)
+			assert.Equal(t, tc.wantMsg, failed.Message)
+			assertGated(t, r, "a")
+			if tc.released {
+				_, err := snapshots.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: pgNamespace, Name: "group"}})
+				require.NoError(t, err)
+				err = r.Get(ctx, types.NamespacedName{Namespace: pgNamespace, Name: "group"}, &snapshotv1alpha1.PodGroupSnapshot{})
+				assert.True(t, apierrors.IsNotFound(err), "the refused restore no longer holds its snapshot: %v", err)
+			}
+		})
+	}
+}
+
 // TestPodGroupRestoreReconciler_ConfirmsARefusal sees target b with an IPv6
 // address in the cache only: the API server has its IPv4 address, so the
 // restore is pinned.
@@ -1368,4 +1436,17 @@ func TestPodGroupRestoreMapsPods(t *testing.T) {
 	assert.ElementsMatch(t, []string{pgNamespace + "/restore", pgNamespace + "/other"}, requests(rgGatedPod("a")))
 	assert.Equal(t, []string{pgNamespace + "/restore"}, requests(rgTargetPod("b", "node-1")))
 	assert.Empty(t, requests(rgGatedPod("c")))
+
+	snapshot := rgSnapshot("a", "b")
+	byUID := func(uid types.UID) []string {
+		snapshot.UID = uid
+		var names []string
+		for _, request := range r.podGroupSnapshotToPodGroupRestores(context.Background(), snapshot) {
+			names = append(names, request.Namespace+"/"+request.Name)
+		}
+		return names
+	}
+	assert.ElementsMatch(t, []string{pgNamespace + "/restore", pgNamespace + "/other"}, byUID("group-uid"),
+		"a snapshot maps to the restores in its namespace that restore it")
+	assert.Empty(t, byUID("recreated-group-uid"), "a snapshot recreated under the same name restores nothing")
 }

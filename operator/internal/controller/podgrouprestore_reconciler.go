@@ -240,11 +240,16 @@ func podGroupRestoreRequeue(observed podGroupRestoreObservation, status *snapsho
 	return podGroupRequeue(observed.admission, observed.deadline, now, podGroupRestoreMemberViews(status.Members, observed.ranks))
 }
 
-// SetupWithManager watches the restore and every Pod, mapped through the
-// podGroupRestoreTargetPodField index to the restores whose targets name it:
-// target Pods appear, get claimed, scheduled, their addresses and containers,
-// and carry the agents' reports. A gated Pod carries nothing that names its
-// restore, so every target name is indexed and no Pod is filtered out.
+// SetupWithManager watches the restore, every Pod and every PodGroupSnapshot.
+// A Pod maps through the podGroupRestoreTargetPodField index to the restores
+// whose targets name it: target Pods appear, get claimed, scheduled, their
+// addresses and containers, and carry the agents' reports. A gated Pod carries
+// nothing that names its restore, so every target name is indexed and no Pod
+// is filtered out. A PodGroupSnapshot maps through the
+// podGroupRestoreSnapshotUIDField index to the restores that restore it, so a
+// restore that waits for its targets learns at once that its snapshot is
+// being deleted or lost Ready; the PodGroupSnapshot controller registers that
+// index.
 func (r *PodGroupRestoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.NonCacheReadClient == nil {
 		return errors.New("pod group restore reconciler requires a non-cache read client")
@@ -259,6 +264,7 @@ func (r *PodGroupRestoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&snapshotv1alpha1.PodGroupRestore{}).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.podToPodGroupRestores)).
+		Watches(&snapshotv1alpha1.PodGroupSnapshot{}, handler.EnqueueRequestsFromMapFunc(r.podGroupSnapshotToPodGroupRestores)).
 		Complete(r)
 }
 
@@ -283,15 +289,34 @@ func podGroupRestoreTargetPods(obj client.Object) []string {
 // podToPodGroupRestores maps a Pod to every PodGroupRestore in its namespace
 // whose targets name it.
 func (r *PodGroupRestoreReconciler) podToPodGroupRestores(ctx context.Context, obj client.Object) []reconcile.Request {
-	restores := &snapshotv1alpha1.PodGroupRestoreList{}
-	if err := r.List(ctx, restores, client.InNamespace(obj.GetNamespace()),
-		client.MatchingFields{podGroupRestoreTargetPodField: obj.GetName()}); err != nil {
+	requests, err := r.podGroupRestoreRequests(ctx, obj.GetNamespace(), podGroupRestoreTargetPodField, obj.GetName())
+	if err != nil {
 		log.FromContext(ctx).Error(err, "Failed to list the PodGroupRestores that name a Pod", "pod", client.ObjectKeyFromObject(obj))
-		return nil
+	}
+	return requests
+}
+
+// podGroupSnapshotToPodGroupRestores maps a PodGroupSnapshot to every
+// PodGroupRestore in its namespace that restores it, by its UID.
+func (r *PodGroupRestoreReconciler) podGroupSnapshotToPodGroupRestores(ctx context.Context, obj client.Object) []reconcile.Request {
+	requests, err := r.podGroupRestoreRequests(ctx, obj.GetNamespace(), podGroupRestoreSnapshotUIDField, string(obj.GetUID()))
+	if err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list the PodGroupRestores of a PodGroupSnapshot",
+			"podGroupSnapshot", client.ObjectKeyFromObject(obj))
+	}
+	return requests
+}
+
+// podGroupRestoreRequests lists the PodGroupRestores in namespace whose index
+// field holds value, as requests.
+func (r *PodGroupRestoreReconciler) podGroupRestoreRequests(ctx context.Context, namespace, field, value string) ([]reconcile.Request, error) {
+	restores := &snapshotv1alpha1.PodGroupRestoreList{}
+	if err := r.List(ctx, restores, client.InNamespace(namespace), client.MatchingFields{field: value}); err != nil {
+		return nil, err
 	}
 	requests := make([]reconcile.Request, 0, len(restores.Items))
 	for i := range restores.Items {
 		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&restores.Items[i])})
 	}
-	return requests
+	return requests, nil
 }
