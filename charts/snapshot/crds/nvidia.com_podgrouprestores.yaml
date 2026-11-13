@@ -62,8 +62,10 @@ spec:
               PodGroupSnapshot to restore, and the Pod that receives each of its members.
               The API server checks its shape. The operator checks the rest before it
               admits the restore: that the targets match the snapshot's members one to
-              one and name distinct Pods, and that each target Pod exists and is bound to
-              this PodGroupRestore. The node agents then check that each target's startup
+              one and name distinct Pods, and that each target Pod exists, is a group
+              target that no PodGroupRestore has claimed, and has the destination that its
+              mapping names. Only then does it claim each target Pod for this
+              PodGroupRestore. The node agents then check that each target's startup
               probe allows for what remains of the deadline.
             properties:
               deadlineSeconds:
@@ -103,15 +105,20 @@ spec:
                 items:
                   description: |-
                     PodGroupRestoreTarget is the restore Pod for one member of the
-                    PodGroupSnapshot. A target's rank is the rank of the snapshot member with the
-                    same ID; the restore never restates it.
+                    PodGroupSnapshot, and where its processes go. A target's rank is the rank of
+                    the snapshot member with the same ID; the restore never restates it. The
+                    operator projects the mapping onto the Pod, as its
+                    nvidia.com/restore-container-map annotation, when it claims the Pod.
                   properties:
                     containerMappings:
                       description: |-
                         ContainerMappings maps the member's checkpointed container to the
                         restore Pod's container that receives its processes. When it is
                         omitted, the checkpointed container restores into the container of the
-                        same name. It holds one entry, as PodReference.Containers does.
+                        same name. It holds one entry, as PodReference.Containers does. It is
+                        the only source of the mapping: the operator writes it onto the Pod as
+                        nvidia.com/restore-container-map, always as one pair, when it claims
+                        the Pod, and the owner never writes that annotation on a group target.
                       items:
                         description: |-
                           ContainerMapping maps a member's checkpointed container to the restore Pod's

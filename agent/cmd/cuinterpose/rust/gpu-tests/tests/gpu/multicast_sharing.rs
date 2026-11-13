@@ -4,6 +4,7 @@
 //! A multicast object shared by two processes that each bind one GPU's member.
 
 use cuinterpose_gpu_tests::process::{self, channel, pid, spawn};
+use cuinterpose_gpu_tests::sys::{self, CUresult};
 use cuinterpose_gpu_tests::{cu, cuda, shim};
 use cuinterpose_protocol::{AllocationReference, BindingVersion, Record};
 
@@ -101,6 +102,12 @@ fn bound_member(role: Role) {
             let (size, ticket) = channel().recv_fd::<usize>();
             let group = cuda::import_fd(&ticket);
             drop(ticket);
+            // CUDA refuses to export an imported handle.
+            let mut fd: i32 = -1;
+            let status = unsafe {
+                sys::cuMemExportToShareableHandle((&raw mut fd).cast(), group, cuda::POSIX_FD, 0)
+            };
+            assert_eq!(status, CUresult::CUDA_ERROR_INVALID_VALUE);
             cu!(cuMulticastAddDevice(group, device));
             channel().send(&"added");
             (group, size)

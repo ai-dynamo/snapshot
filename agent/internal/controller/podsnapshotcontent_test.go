@@ -160,6 +160,9 @@ func makeNodeController(t *testing.T, fc *fakeCheckpointer, objs ...client.Objec
 		runtime:      &fakeRuntime{},
 		log:          logr.Discard(),
 		captureQueue: newTestCaptureQueue(t),
+		// The capture path recovers the source on failure, which signals it.
+		sendSignalFn: func(logr.Logger, int, syscall.Signal, string) error { return nil },
+		hostProcPath: "/proc",
 	}
 	// Set the clock and requeue as newDefaultController does.
 	w.nowFn = time.Now
