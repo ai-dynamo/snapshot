@@ -99,6 +99,11 @@ PageBroker runs one transfer worker for every 16 slots, from 1 to 16 workers:
 must be a multiple of 134217728 (128 MiB). To trade restore speed for host
 memory, change `stagingBytesPerGPU`.
 
+`stagingBytesPerGPU` replaces `transferBufferCount`, `transferChunkBytes` and
+`maxPinnedBytes` from v0.3.0. The chart refuses to render while any of them is
+set. To keep a tuned budget, set `stagingBytesPerGPU` to the old
+`transferBufferCount` × `transferChunkBytes`.
+
 The default reserves 4 GiB per GPU, or 32 GiB for eight GPUs, plus overhead.
 PageBroker checks the memory budget before it reports GPU readiness. It checks
 manifest structure and exact extent lengths. It does not generate or verify GPU

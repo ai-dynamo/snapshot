@@ -2,6 +2,11 @@
 {{- if hasKey .Values.image.pageBroker "tag" -}}
 {{- fail "image.pageBroker.tag is unsupported: set image.agent.tag to select matching agent and PageBroker images" -}}
 {{- end -}}
+{{- range $key := list "transferBufferCount" "transferChunkBytes" "maxPinnedBytes" -}}
+{{- if hasKey $.Values.pageBroker $key -}}
+{{- fail (printf "pageBroker.%s was removed: set pageBroker.stagingBytesPerGPU, the pinned staging memory per GPU (transferBufferCount x transferChunkBytes before)" $key) -}}
+{{- end -}}
+{{- end -}}
 {{- $socket := include "snapshot.runtimeSocket" . -}}
 {{- $socketDir := $socket | dir -}}
 {{- $storageDir := include "snapshot.runtimeStorageDir" . -}}

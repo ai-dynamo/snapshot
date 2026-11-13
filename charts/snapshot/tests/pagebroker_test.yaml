@@ -206,6 +206,32 @@ tests:
       - failedTemplate:
           errorMessage: "image.pageBroker.tag is unsupported: set image.agent.tag to select matching agent and PageBroker images"
 
+  # Helm drops an unknown value silently, so without these an upgrade from
+  # v0.3.0 would replace a tuned staging budget with the default.
+  - it: refuses the removed transferBufferCount
+    set:
+      pageBroker.transferBufferCount: 8
+    template: templates/daemonset.yaml
+    asserts:
+      - failedTemplate:
+          errorPattern: "pageBroker.transferBufferCount was removed: set pageBroker.stagingBytesPerGPU"
+
+  - it: refuses the removed transferChunkBytes
+    set:
+      pageBroker.transferChunkBytes: 268435456
+    template: templates/daemonset.yaml
+    asserts:
+      - failedTemplate:
+          errorPattern: "pageBroker.transferChunkBytes was removed: set pageBroker.stagingBytesPerGPU"
+
+  - it: refuses the removed maxPinnedBytes
+    set:
+      pageBroker.maxPinnedBytes: 0
+    template: templates/daemonset.yaml
+    asserts:
+      - failedTemplate:
+          errorPattern: "pageBroker.maxPinnedBytes was removed: set pageBroker.stagingBytesPerGPU"
+
 
   - it: embeds GPU execution in the default PageBroker sidecar
     template: templates/daemonset.yaml
