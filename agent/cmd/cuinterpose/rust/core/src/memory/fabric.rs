@@ -19,7 +19,7 @@ use cudarc::driver::sys::{
     CUmemAllocationHandleType, CUmemAllocationProp, CUmemAllocationType, CUmemLocation,
     CUmemLocationType, CUmulticastObjectProp,
 };
-use cuinterpose_protocol::{AllocationReference, FabricHandle, FabricUpdate, Record};
+use cuinterpose_protocol::{AllocationReference, FabricHandle, FabricReplacement, Record};
 use std::sync::MutexGuard;
 
 pub(crate) const FABRIC: CUmemAllocationHandleType =
@@ -194,11 +194,14 @@ pub(crate) fn describe(state: &ProcessState, records: &mut Vec<Record>) {
 }
 
 /// The handle that a restored creator exported in place of `old`.
-pub(crate) fn replacement(imports: &[FabricUpdate], old: FabricHandle) -> Result<FabricHandle> {
-    imports
+pub(crate) fn replacement(
+    replacements: &[FabricReplacement],
+    old: FabricHandle,
+) -> Result<FabricHandle> {
+    replacements
         .iter()
-        .find(|update| update.old == old)
-        .map(|update| update.new)
+        .find(|replacement| replacement.old == old)
+        .map(|replacement| replacement.new)
         .ok_or(Error::MissingFabricReplacement(old))
 }
 
@@ -307,14 +310,14 @@ mod tests {
     }
 
     #[test]
-    fn replacement_requires_an_update_for_the_old_handle() {
-        let update = FabricUpdate {
+    fn replacement_requires_an_entry_for_the_old_handle() {
+        let entry = FabricReplacement {
             old: handle(1),
             new: handle(2),
         };
-        assert_eq!(replacement(&[update], handle(1)).unwrap(), handle(2));
+        assert_eq!(replacement(&[entry], handle(1)).unwrap(), handle(2));
         assert!(matches!(
-            replacement(&[update], handle(2)),
+            replacement(&[entry], handle(2)),
             Err(Error::MissingFabricReplacement(old)) if old == handle(2)
         ));
     }

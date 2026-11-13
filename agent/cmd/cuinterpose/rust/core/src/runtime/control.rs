@@ -23,8 +23,7 @@ const CONTROL_QUEUE_CAPACITY: usize = 8;
 enum ControlRequest {
     BeginCheckpoint,
     Inspect,
-    Execute(Operation, Vec<protocol::FabricUpdate>),
-    SaveAllocations(Vec<protocol::AllocationOwner>),
+    Execute(Operation),
 }
 
 /// Workers cannot handle requests until they receive the listener. Dropping this owner
@@ -234,10 +233,6 @@ fn dispatch(
             namespace_pid: target,
             ..
         }
-        | Request::SaveAllocations {
-            namespace_pid: target,
-            ..
-        }
         | Request::Export {
             namespace_pid: target,
             ..
@@ -253,10 +248,7 @@ fn dispatch(
     let request = match request {
         Request::BeginCheckpoint { .. } => ControlRequest::BeginCheckpoint,
         Request::Inspect { .. } => ControlRequest::Inspect,
-        Request::Execute {
-            operation, imports, ..
-        } => ControlRequest::Execute(operation, imports),
-        Request::SaveAllocations { owners, .. } => ControlRequest::SaveAllocations(owners),
+        Request::Execute { operation, .. } => ControlRequest::Execute(operation),
         Request::Export { allocation, .. } => {
             if super::RUNTIME_FAILED.load(Ordering::Acquire) {
                 return refuse(&socket, namespace_pid, "cuinterpose state failed");
@@ -303,15 +295,11 @@ fn serve(
     request: ControlRequest,
     namespace_pid: NamespacePid,
 ) -> protocol::Result<()> {
-    let load = matches!(
-        request,
-        ControlRequest::Execute(Operation::LoadAllocations, _)
-    );
+    let load = matches!(request, ControlRequest::Execute(Operation::LoadAllocations));
     let result = match request {
         ControlRequest::BeginCheckpoint => checkpoint::begin(),
         ControlRequest::Inspect => checkpoint::inspect(),
-        ControlRequest::Execute(operation, imports) => checkpoint::execute(operation, &imports),
-        ControlRequest::SaveAllocations(owners) => checkpoint::save_allocations(&owners),
+        ControlRequest::Execute(operation) => checkpoint::execute(&operation),
     };
     let loaded = load && result.is_ok();
     if let Err(error) = protocol::send(

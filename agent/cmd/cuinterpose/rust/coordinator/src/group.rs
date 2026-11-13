@@ -10,8 +10,9 @@
 use crate::topology::{self, AllocationSummary};
 use anyhow::{Context, Result, bail, ensure};
 use cuinterpose_protocol::{
-    AllocationId, AllocationOwner, AllocationReference, BindingSource, FabricHandle, FabricUpdate,
-    Manifest, MemberRange, MemoryLocation, MulticastProperties, NamespacePid, Operation, Record,
+    AllocationId, AllocationOwner, AllocationReference, BindingSource, FabricHandle,
+    FabricReplacement, Manifest, MemberRange, MemoryLocation, MulticastProperties, NamespacePid,
+    Operation, Record, Reply,
 };
 use std::collections::BTreeMap;
 
@@ -46,20 +47,17 @@ pub fn alone(manifest: Manifest) -> Pods {
     Pods::from([(0, manifest)])
 }
 
-/// What one process does in a phase: the carrier bytes it copies and, in
-/// SaveAllocations, the owner of each host-carrier allocation that it holds.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CarrierPlan {
-    pub bytes: u64,
-    pub owners: Vec<AllocationOwner>,
-}
-
 /// A group's records, validated as one topology.
 pub struct Topology {
     allocations: Vec<AllocationSummary>,
     /// For each process by group PID, its own reference to each allocation it holds,
     /// keyed by the allocation's ID in the group.
     references: BTreeMap<NamespacePid, BTreeMap<AllocationId, AllocationReference>>,
+    /// The bytes that each process, by group PID, copies to and from its host carrier:
+    /// the size of every host-carrier allocation that it owns.
+    carrier_bytes: BTreeMap<NamespacePid, u64>,
+    /// Whether the topology spans Pods, so messages name each process's rank.
+    grouped: bool,
 }
 
 impl Topology {
@@ -86,48 +84,116 @@ impl Topology {
                 references.insert(process, held);
             }
         }
+        let grouped = pods.len() > 1;
         let mut validated = topology::validate(&group);
-        if pods.len() > 1 {
+        if grouped {
             validated =
                 validated.context("group topology, where participant IDs are (rank << 22) | PID");
         }
+        let allocations = validated?;
+        let mut carrier_bytes: BTreeMap<_, u64> =
+            group.keys().map(|process| (*process, 0)).collect();
+        for allocation in allocations.iter().filter(|a| a.uses_host_carrier()) {
+            let bytes = carrier_bytes.entry(allocation.owner_pid).or_default();
+            *bytes = bytes.checked_add(allocation.size).with_context(|| {
+                format!(
+                    "{}: carrier size overflow",
+                    participant(grouped, allocation.owner_pid)
+                )
+            })?;
+        }
         Ok(Self {
-            allocations: validated?,
+            allocations,
             references,
+            carrier_bytes,
+            grouped,
         })
     }
 
-    /// What `pid` in `rank` does in `operation`. It copies carrier bytes in
-    /// SaveAllocations and LoadAllocations, and SaveAllocations names the owner of each
-    /// host-carrier allocation that it holds, by its own reference.
-    pub fn plan(&self, operation: Operation, rank: Rank, pid: NamespacePid) -> Result<CarrierPlan> {
+    /// The owner of each host-carrier allocation that `pid` in `rank` holds, by that
+    /// process's own reference, for SaveAllocations. An owner in another Pod is
+    /// `REMOTE_OWNER`.
+    pub fn owners(&self, rank: Rank, pid: NamespacePid) -> Vec<AllocationOwner> {
         let process = group_pid(rank, pid);
-        let mut plan = CarrierPlan::default();
-        if !matches!(
-            operation,
-            Operation::SaveAllocations | Operation::LoadAllocations
-        ) {
-            return Ok(plan);
-        }
-        for allocation in self.allocations.iter().filter(|a| a.uses_host_carrier()) {
-            if allocation.owner_pid == process {
-                plan.bytes = plan
-                    .bytes
-                    .checked_add(allocation.size)
-                    .context("allocation size overflow")?;
+        self.allocations
+            .iter()
+            .filter(|a| a.uses_host_carrier() && a.holders.contains(&process))
+            .map(|allocation| AllocationOwner {
+                allocation: self.references[&process][&allocation.reference.id],
+                owner_pid: if rank_of(allocation.owner_pid) == rank {
+                    local_pid(allocation.owner_pid)
+                } else {
+                    REMOTE_OWNER
+                },
+            })
+            .collect()
+    }
+
+    /// Check what `pid` in `rank` replied to `operation`, including the bytes that it
+    /// copied to or from its host carrier, and return the FABRIC handles that it exported
+    /// in place of checkpointed ones.
+    pub fn completed(
+        &self,
+        rank: Rank,
+        pid: NamespacePid,
+        operation: &Operation,
+        reply: Reply,
+    ) -> Result<Vec<FabricReplacement>> {
+        let process = group_pid(rank, pid);
+        let participant = participant(self.grouped, process);
+        let copied = |bytes: u64| {
+            let expected = self
+                .carrier_bytes
+                .get(&process)
+                .with_context(|| format!("{participant} is not in the topology"))?;
+            ensure!(
+                bytes == *expected,
+                "{participant}: {operation} copied {bytes} carrier bytes, expected {expected}"
+            );
+            Ok(())
+        };
+        match (operation, reply) {
+            (Operation::SaveAllocations { .. }, Reply::Saved { bytes }) => {
+                copied(bytes)?;
+                Ok(Vec::new())
             }
-            if operation == Operation::SaveAllocations && allocation.holders.contains(&process) {
-                plan.owners.push(AllocationOwner {
-                    allocation: self.references[&process][&allocation.reference.id],
-                    owner_pid: if rank_of(allocation.owner_pid) == rank {
-                        local_pid(allocation.owner_pid)
-                    } else {
-                        REMOTE_OWNER
-                    },
-                });
+            (
+                Operation::LoadAllocations,
+                Reply::Loaded {
+                    bytes,
+                    replacements,
+                },
+            ) => {
+                copied(bytes)?;
+                Ok(replacements)
             }
+            (Operation::RestoreMulticastCreators, Reply::MulticastRecreated { replacements }) => {
+                Ok(replacements)
+            }
+            (
+                Operation::PrepareMulticast
+                | Operation::PrepareUnicast
+                | Operation::RestoreUnicast { .. }
+                | Operation::RestoreMulticastImporters { .. }
+                | Operation::RestoreMulticastDevices
+                | Operation::RestoreMulticastBindings,
+                Reply::Completed,
+            ) => Ok(Vec::new()),
+            (_, reply) => bail!("{participant}: unexpected reply to {operation}: {reply:?}"),
         }
-        Ok(plan)
+    }
+}
+
+/// How messages name a process: by its PID alone, or in a group by its rank too.
+fn participant(grouped: bool, process: NamespacePid) -> String {
+    if grouped {
+        format!(
+            "rank {} participant {}",
+            rank_of(process),
+            local_pid(process)
+        )
+    } else {
+        format!("participant {process}")
     }
 }
 
@@ -307,8 +373,11 @@ pub struct HandleTable(BTreeMap<FabricHandle, FabricHandle>);
 
 impl HandleTable {
     /// Add the replacements that one restore phase returned.
-    pub fn record(&mut self, exports: impl IntoIterator<Item = FabricUpdate>) -> Result<()> {
-        for FabricUpdate { old, new } in exports {
+    pub fn record(
+        &mut self,
+        replacements: impl IntoIterator<Item = FabricReplacement>,
+    ) -> Result<()> {
+        for FabricReplacement { old, new } in replacements {
             if let Some(known) = self.0.insert(old, new)
                 && known != new
             {
@@ -318,10 +387,10 @@ impl HandleTable {
         Ok(())
     }
 
-    pub fn imports(&self) -> Vec<FabricUpdate> {
+    pub fn replacements(&self) -> Vec<FabricReplacement> {
         self.0
             .iter()
-            .map(|(old, new)| FabricUpdate {
+            .map(|(old, new)| FabricReplacement {
                 old: *old,
                 new: *new,
             })
@@ -342,11 +411,7 @@ impl HandleTable {
 pub fn verify_restored(saved: &Pods, restored: &Pods, handles: &HandleTable) -> Result<()> {
     for (rank, pod) in restored {
         for (id, actual) in pod {
-            let participant = if saved.len() > 1 {
-                format!("rank {rank} participant {id}")
-            } else {
-                format!("participant {id}")
-            };
+            let participant = participant(saved.len() > 1, group_pid(*rank, *id));
             let mut expected = saved
                 .get(rank)
                 .and_then(|saved| saved.get(id))
@@ -453,37 +518,33 @@ mod tests {
         format!("{:#}", Topology::validate(pods).err().expect("accepted"))
     }
 
-    fn plan(topology: &Topology, rank: Rank, pid: NamespacePid) -> CarrierPlan {
-        topology
-            .plan(Operation::SaveAllocations, rank, pid)
-            .unwrap()
+    /// The carrier bytes that `pid` in `rank` copies, and the owners it is told.
+    fn carrier(topology: &Topology, rank: Rank, pid: NamespacePid) -> (u64, Vec<AllocationOwner>) {
+        (
+            topology.carrier_bytes[&group_pid(rank, pid)],
+            topology.owners(rank, pid),
+        )
     }
 
     #[test]
-    fn a_pod_alone_validates_and_plans_as_before() {
+    fn a_pod_alone_validates_and_names_owners_as_before() {
         let topology = Topology::validate(&alone(Manifest::from([
             (1, vec![shared(), mapping()]),
             (2, vec![shared()]),
         ])))
         .unwrap();
         assert_eq!(
-            plan(&topology, 0, 1),
-            CarrierPlan {
-                bytes: 4096,
-                owners: vec![AllocationOwner {
+            carrier(&topology, 0, 1),
+            (
+                4096,
+                vec![AllocationOwner {
                     allocation: A,
                     owner_pid: 1
-                }],
-            }
+                }]
+            )
         );
-        assert_eq!(plan(&topology, 0, 2).owners[0].owner_pid, 1);
-        assert_eq!(plan(&topology, 0, 2).bytes, 0);
-        let load = topology.plan(Operation::LoadAllocations, 0, 1).unwrap();
-        assert_eq!((load.bytes, load.owners.len()), (4096, 0));
-        assert_eq!(
-            topology.plan(Operation::PrepareUnicast, 0, 1).unwrap(),
-            CarrierPlan::default()
-        );
+        let (bytes, owners) = carrier(&topology, 0, 2);
+        assert_eq!((bytes, owners[0].owner_pid), (0, 1));
         // A Pod alone keeps the per-Pod messages.
         let invalid = alone(Manifest::from([(
             1,
@@ -504,7 +565,7 @@ mod tests {
             (1, vec![(1, vec![other])]),
         ]))
         .unwrap();
-        assert!(plan(&topology, 0, 1).owners.is_empty());
+        assert!(topology.owners(0, 1).is_empty());
         // The same records twice name one allocation twice.
         let error = refusal(&pods([
             (0, vec![(1, vec![allocation()])]),
@@ -526,24 +587,24 @@ mod tests {
         .unwrap();
         // Only the creator saves, and the importer names the owner as remote.
         assert_eq!(
-            plan(&topology, 0, 1),
-            CarrierPlan {
-                bytes: 4096,
-                owners: vec![AllocationOwner {
+            carrier(&topology, 0, 1),
+            (
+                4096,
+                vec![AllocationOwner {
                     allocation: X,
                     owner_pid: 1
-                }],
-            }
+                }]
+            )
         );
         assert_eq!(
-            plan(&topology, 1, 1),
-            CarrierPlan {
-                bytes: 0,
-                owners: vec![AllocationOwner {
+            carrier(&topology, 1, 1),
+            (
+                0,
+                vec![AllocationOwner {
                     allocation: import(9),
                     owner_pid: REMOTE_OWNER
-                }],
-            }
+                }]
+            )
         );
     }
 
@@ -555,7 +616,7 @@ mod tests {
         ])))
         .unwrap();
         assert_eq!(
-            plan(&topology, 0, 2).owners,
+            topology.owners(0, 2),
             [AllocationOwner {
                 allocation: import(9),
                 owner_pid: 1
@@ -675,11 +736,54 @@ mod tests {
     fn multicast_team_may_span_pods() {
         let (group, creator_alone) = team(1);
         let topology = Topology::validate(&group).unwrap();
-        assert_eq!(plan(&topology, 0, 1).bytes, 4096);
-        assert_eq!(plan(&topology, 1, 1).bytes, 4096);
+        assert_eq!(carrier(&topology, 0, 1).0, 4096);
+        assert_eq!(carrier(&topology, 1, 1).0, 4096);
         let error = refusal(&creator_alone);
         assert!(
             error.contains("incomplete multicast device group"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn replies_must_match_their_step_and_the_carrier_bytes() {
+        let topology = Topology::validate(&pods([
+            (0, vec![(1, creator())]),
+            (1, vec![(1, importer(handle(1)))]),
+        ]))
+        .unwrap();
+        let save = Operation::SaveAllocations { owners: Vec::new() };
+        let saved = |rank, bytes| topology.completed(rank, 1, &save, Reply::Saved { bytes });
+        saved(0, 4096).unwrap();
+        saved(1, 0).unwrap();
+        let error = format!("{:#}", saved(1, 4096).unwrap_err());
+        assert_eq!(
+            error,
+            "rank 1 participant 1: SaveAllocations copied 4096 carrier bytes, expected 0"
+        );
+        // An owner returns the FABRIC handles that it exported when it loads.
+        let replacement = FabricReplacement {
+            old: handle(1),
+            new: handle(2),
+        };
+        let loaded = Reply::Loaded {
+            bytes: 4096,
+            replacements: vec![replacement],
+        };
+        assert_eq!(
+            topology
+                .completed(0, 1, &Operation::LoadAllocations, loaded)
+                .unwrap(),
+            [replacement]
+        );
+        let error = format!(
+            "{:#}",
+            topology
+                .completed(0, 1, &Operation::PrepareUnicast, Reply::Saved { bytes: 0 })
+                .unwrap_err()
+        );
+        assert!(
+            error.starts_with("rank 0 participant 1: unexpected reply to PrepareUnicast"),
             "{error}"
         );
     }
@@ -695,15 +799,15 @@ mod tests {
     #[test]
     fn handle_table_keeps_one_replacement_per_handle() {
         let mut table = HandleTable::default();
-        let update = FabricUpdate {
+        let replacement = FabricReplacement {
             old: handle(1),
             new: handle(2),
         };
-        table.record([update, update]).unwrap();
-        assert_eq!(table.imports(), [update]);
-        let other = FabricUpdate {
+        table.record([replacement, replacement]).unwrap();
+        assert_eq!(table.replacements(), [replacement]);
+        let other = FabricReplacement {
             new: handle(3),
-            ..update
+            ..replacement
         };
         let error = format!("{:#}", table.record([other]).unwrap_err());
         assert!(error.contains("replaced by two handles"), "{error}");
@@ -739,7 +843,7 @@ mod tests {
             "{error}"
         );
         table
-            .record([FabricUpdate {
+            .record([FabricReplacement {
                 old: handle(1),
                 new: handle(2),
             }])

@@ -12,11 +12,11 @@ mod topology;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use cuinterpose_protocol::{
-    self as protocol, FabricUpdate, Manifest, NamespacePid, Operation, Record, Reply, Request,
+    self as protocol, FabricReplacement, Manifest, NamespacePid, Operation, Record, Reply, Request,
     Response,
 };
-use group::{CarrierPlan, HandleTable, Topology};
-use std::collections::BTreeSet;
+use group::{HandleTable, Topology};
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -53,8 +53,7 @@ enum RecordRequest {
 /// can take far longer than a control request.
 fn request_timeout(request: &Request) -> Duration {
     match request {
-        Request::Execute { operation, .. } => protocol::operation_timeout(*operation),
-        Request::SaveAllocations { .. } => protocol::operation_timeout(Operation::SaveAllocations),
+        Request::Execute { operation, .. } => protocol::operation_timeout(operation),
         _ => protocol::control_timeout(),
     }
 }
@@ -107,75 +106,28 @@ impl Peer {
         }
     }
 
-    /// Run one phase and return the FABRIC handles that it exported in place of checkpointed
-    /// ones.
-    fn execute(
-        &self,
-        operation: Operation,
-        plan: CarrierPlan,
-        imports: &[FabricUpdate],
-    ) -> Result<Vec<FabricUpdate>> {
-        let expected_bytes = plan.bytes;
-        let request = if operation == Operation::SaveAllocations {
-            Request::SaveAllocations {
-                namespace_pid: self.namespace_pid,
-                owners: plan.owners,
-            }
-        } else {
-            Request::Execute {
-                namespace_pid: self.namespace_pid,
-                operation,
-                imports: imports.to_vec(),
-            }
-        };
-        match self.request(&request)? {
-            Reply::Completed {
-                operation: actual,
-                bytes,
-                exports,
-            } => {
-                ensure!(
-                    actual == operation && bytes == expected_bytes,
-                    "unexpected response or transfer size: expected operation {operation:?}, actual {actual:?}, expected_bytes {expected_bytes}, bytes {bytes}"
-                );
-                Ok(exports)
-            }
-            actual => bail!(
-                "expected {operation:?} completion with {expected_bytes} bytes, actual {actual:?}"
-            ),
-        }
+    fn execute(&self, operation: Operation) -> Result<Reply> {
+        self.request(&Request::Execute {
+            namespace_pid: self.namespace_pid,
+            operation,
+        })
     }
 }
 
 /// Every rank must reply before a phase can advance, so a bounded worker pool could
 /// deadlock a rank waiting for an exchange that has not started. Every started exchange
-/// is joined even if a participant fails. `plan` says what each participant does, and the
-/// returned FABRIC handles replace checkpointed ones.
+/// is joined even if a participant fails. Each participant runs its own entry of
+/// `operations`, which all name the same step.
 fn command_all(
     peers: &[Peer],
-    operation: Operation,
-    plan: &dyn Fn(NamespacePid) -> Result<CarrierPlan>,
-    imports: &[FabricUpdate],
-) -> Result<Vec<FabricUpdate>> {
-    let plans: Vec<_> = peers
-        .iter()
-        .map(|peer| {
-            plan(peer.namespace_pid).with_context(|| {
-                format!(
-                    "participant {} ({})",
-                    peer.namespace_pid,
-                    peer.endpoint.display()
-                )
-            })
-        })
-        .collect::<Result<_>>()?;
+    operations: &BTreeMap<NamespacePid, Operation>,
+) -> Result<BTreeMap<NamespacePid, Reply>> {
     std::thread::scope(|scope| {
         let mut jobs = Vec::with_capacity(peers.len());
         let mut failures = Vec::new();
-        for (peer, plan) in peers.iter().zip(plans) {
-            match std::thread::Builder::new()
-                .spawn_scoped(scope, move || peer.execute(operation, plan, imports))
-            {
+        for peer in peers {
+            let operation = operations[&peer.namespace_pid].clone();
+            match std::thread::Builder::new().spawn_scoped(scope, move || peer.execute(operation)) {
                 Ok(job) => jobs.push((peer, job)),
                 Err(error) => failures.push(format!(
                     "participant {} ({}): could not start exchange: {error}",
@@ -184,7 +136,7 @@ fn command_all(
                 )),
             }
         }
-        let mut exports = Vec::new();
+        let mut replies = BTreeMap::new();
         for (peer, job) in jobs {
             let participant = format!(
                 "participant {} ({})",
@@ -192,7 +144,9 @@ fn command_all(
                 peer.endpoint.display()
             );
             match job.join() {
-                Ok(Ok(exported)) => exports.extend(exported),
+                Ok(Ok(reply)) => {
+                    replies.insert(peer.namespace_pid, reply);
+                }
                 Ok(Err(error)) => {
                     failures.push(format!("{participant}: {error:#}"));
                 }
@@ -206,9 +160,33 @@ fn command_all(
                 }
             }
         }
-        ensure!(failures.is_empty(), "{}", failures.join("\n"));
-        Ok(exports)
+        let step = operations.values().next().map(ToString::to_string);
+        ensure!(
+            failures.is_empty(),
+            "{}: {}",
+            step.unwrap_or_default(),
+            failures.join("\n")
+        );
+        Ok(replies)
     })
+}
+
+/// Run one step on every participant, check each reply against the topology, and return
+/// the FABRIC handles that the participants exported in place of checkpointed ones.
+fn execute(
+    peers: &[Peer],
+    topology: &Topology,
+    operation: impl Fn(NamespacePid) -> Operation,
+) -> Result<Vec<FabricReplacement>> {
+    let operations: BTreeMap<_, _> = peers
+        .iter()
+        .map(|peer| (peer.namespace_pid, operation(peer.namespace_pid)))
+        .collect();
+    let mut replacements = Vec::new();
+    for (pid, reply) in command_all(peers, &operations)? {
+        replacements.extend(topology.completed(0, pid, &operations[&pid], reply)?);
+    }
+    Ok(replacements)
 }
 
 fn collect_records(peers: &[Peer], request: RecordRequest) -> Result<Manifest> {
@@ -298,19 +276,11 @@ fn run() -> Result<()> {
     let inspected = Topology::validate(&participants)?;
     if args.prepare {
         let topology = inspected;
-        for operation in [
-            Operation::PrepareMulticast,
-            Operation::SaveAllocations,
-            Operation::PrepareUnicast,
-        ] {
-            command_all(
-                &peers,
-                operation,
-                &|pid| topology.plan(operation, 0, pid),
-                &[],
-            )
-            .with_context(|| format!("{operation:?}"))?;
-        }
+        execute(&peers, &topology, |_| Operation::PrepareMulticast)?;
+        execute(&peers, &topology, |pid| Operation::SaveAllocations {
+            owners: topology.owners(0, pid),
+        })?;
+        execute(&peers, &topology, |_| Operation::PrepareUnicast)?;
         // Publication failure is also fail-stop, even if publication succeeded before a
         // directory sync failed. Prepared processes cannot resume safely.
         state::write_atomic(&path, participants.get_mut(&0).unwrap())
@@ -320,25 +290,24 @@ fn run() -> Result<()> {
         let topology = Topology::validate(&saved)?;
         drop(inspected);
         drop(participants);
-        // Importers need the FABRIC handles that creators export in the phase before.
+        // Importers need the FABRIC handles that creators export in the step before.
         let mut handles = HandleTable::default();
-        for operation in [
-            Operation::LoadAllocations,
-            Operation::RestoreUnicast,
-            Operation::RestoreMulticastCreators,
-            Operation::RestoreMulticastImporters,
-            Operation::RestoreMulticastDevices,
-            Operation::RestoreMulticastBindings,
-        ] {
-            let exports = command_all(
-                &peers,
-                operation,
-                &|pid| topology.plan(operation, 0, pid),
-                &handles.imports(),
-            )
-            .with_context(|| format!("{operation:?}"))?;
-            handles.record(exports)?;
-        }
+        handles.record(execute(&peers, &topology, |_| Operation::LoadAllocations)?)?;
+        let replacements = handles.replacements();
+        execute(&peers, &topology, |_| Operation::RestoreUnicast {
+            replacements: replacements.clone(),
+        })?;
+        handles.record(execute(&peers, &topology, |_| {
+            Operation::RestoreMulticastCreators
+        })?)?;
+        let replacements = handles.replacements();
+        execute(&peers, &topology, |_| {
+            Operation::RestoreMulticastImporters {
+                replacements: replacements.clone(),
+            }
+        })?;
+        execute(&peers, &topology, |_| Operation::RestoreMulticastDevices)?;
+        execute(&peers, &topology, |_| Operation::RestoreMulticastBindings)?;
         let participants = collect_records(&peers, RecordRequest::Inspect)
             .context("inspect restored participants")?;
         group::verify_restored(&saved, &group::alone(participants), &handles)?;
@@ -392,7 +361,6 @@ mod tests {
         let execute = |operation| Request::Execute {
             namespace_pid,
             operation,
-            imports: Vec::new(),
         };
         let cases = [
             (Request::BeginCheckpoint { namespace_pid }, control),
@@ -404,20 +372,26 @@ mod tests {
                 },
                 control,
             ),
+            (execute(Operation::PrepareMulticast), control),
             (
-                Request::SaveAllocations {
-                    namespace_pid,
-                    owners: Vec::new(),
-                },
+                execute(Operation::SaveAllocations { owners: Vec::new() }),
                 carrier,
             ),
-            (execute(Operation::PrepareMulticast), control),
-            (execute(Operation::SaveAllocations), carrier),
             (execute(Operation::PrepareUnicast), control),
             (execute(Operation::LoadAllocations), carrier),
-            (execute(Operation::RestoreUnicast), control),
+            (
+                execute(Operation::RestoreUnicast {
+                    replacements: Vec::new(),
+                }),
+                control,
+            ),
             (execute(Operation::RestoreMulticastCreators), control),
-            (execute(Operation::RestoreMulticastImporters), control),
+            (
+                execute(Operation::RestoreMulticastImporters {
+                    replacements: Vec::new(),
+                }),
+                control,
+            ),
             (execute(Operation::RestoreMulticastDevices), control),
             (execute(Operation::RestoreMulticastBindings), control),
         ];

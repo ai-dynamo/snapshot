@@ -16,8 +16,8 @@ use cudarc::driver::sys::CUresult::{
 };
 use cudarc::driver::sys::{CUmemAllocationHandleType, CUmulticastObjectProp};
 use cuinterpose_protocol::{
-    AllocationId, AllocationReference, BindingSource, BindingVersion, FabricHandle, FabricUpdate,
-    MemberRange, Operation, Record,
+    AllocationId, AllocationReference, BindingSource, BindingVersion, FabricHandle,
+    FabricReplacement, MemberRange, Operation, Record,
 };
 use std::ffi::c_void;
 use std::os::fd::{AsFd, AsRawFd};
@@ -521,13 +521,9 @@ pub fn prepare(state: &mut ProcessState) -> Result<()> {
 /// Application threads remain paused throughout restore. Since the peer FD service uses
 /// only the export cache, reconstruction can hold the registry lock even during driver
 /// calls that wait for other processes. Creators return the fabric handles that they
-/// export in place of checkpointed ones, and importers import those from `imports`.
-pub fn restore(
-    state: &mut ProcessState,
-    operation: Operation,
-    imports: &[FabricUpdate],
-) -> Result<Vec<FabricUpdate>> {
-    let mut exports = Vec::new();
+/// export in place of checkpointed ones, and importers import those replacements.
+pub fn restore(state: &mut ProcessState, operation: &Operation) -> Result<Vec<FabricReplacement>> {
+    let mut exported = Vec::new();
     let allocations: std::collections::BTreeMap<_, _> = state
         .memblocks
         .iter()
@@ -540,8 +536,8 @@ pub fn restore(
             continue;
         };
         let creator = object.reference.creator_pid == namespace_pid;
-        if (operation == Operation::RestoreMulticastCreators && !creator)
-            || (operation == Operation::RestoreMulticastImporters && creator)
+        if (matches!(operation, Operation::RestoreMulticastCreators) && !creator)
+            || (matches!(operation, Operation::RestoreMulticastImporters { .. }) && creator)
         {
             continue;
         }
@@ -559,7 +555,7 @@ pub fn restore(
                     object.driver = Some(driver);
                     if let Some(old) = object.fabric {
                         let new = crate::driver::export_fabric(driver)?;
-                        exports.push(FabricUpdate { old, new });
+                        exported.push(FabricReplacement { old, new });
                         object.fabric = Some(new);
                     } else if object.shared {
                         let fd = crate::driver::export_posix(driver)?;
@@ -570,12 +566,14 @@ pub fn restore(
                         )?;
                     }
                 }
-                Operation::RestoreMulticastImporters if !creator && object.fabric.is_some() => {
-                    let new = super::fabric::replacement(imports, object.fabric.unwrap())?;
+                Operation::RestoreMulticastImporters { replacements }
+                    if !creator && object.fabric.is_some() =>
+                {
+                    let new = super::fabric::replacement(replacements, object.fabric.unwrap())?;
                     object.driver = Some(crate::driver::import_fabric(&new)?);
                     object.fabric = Some(new);
                 }
-                Operation::RestoreMulticastImporters if !creator => {
+                Operation::RestoreMulticastImporters { .. } if !creator => {
                     let (fd, metadata) =
                         sharing::request_export(object.reference, object.reference.creator_pid)
                             .map_err(Error::PeerExport)?;
@@ -647,13 +645,14 @@ pub fn restore(
                         }
                     }
                 }
-                Operation::RestoreMulticastCreators | Operation::RestoreMulticastImporters => {}
+                Operation::RestoreMulticastCreators
+                | Operation::RestoreMulticastImporters { .. } => {}
                 _ => return Err(Error::from(CUDA_ERROR_INVALID_VALUE)),
             }
             Ok(())
         })?;
     }
-    Ok(exports)
+    Ok(exported)
 }
 /// The registry lock must be released around multicast creation because the CUDA call
 /// can wait for other processes.
