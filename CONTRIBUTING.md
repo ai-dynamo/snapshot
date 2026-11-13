@@ -208,6 +208,13 @@ maintainer approval is required before a pull request can merge.
 maintainer will not usually start a detailed review while CI is red, so fix
 failing checks first.
 
+**Contribution feedback.** The Contribution Guidelines Checker can add or remove
+`contribution-ready` on a pull request and comment on process gaps. The label
+records its latest completed process review. It does not replace CI or
+maintainer approval. The checker reads PR data without running PR code. It
+runs on trusted contributor events; a fork PR from an external contributor
+needs a maintainer-triggered PR event.
+
 **Turnaround.** Maintainers aim to give a first response within a week. Reviews
 are best-effort alongside other work, and larger or more invasive changes take
 longer than small ones — another reason to agree on the approach in the issue
