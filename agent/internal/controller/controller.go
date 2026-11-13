@@ -114,6 +114,10 @@ type NodeController struct {
 	// (podRefIndex). The source-pod informer uses it to map a pod event back to its work order.
 	contentIndexer cache.Indexer
 
+	// podGroups is the agent's part in pod groups, or nil when they are off
+	// (EnablePodGroups).
+	podGroups *podGroups
+
 	stopCh chan struct{}
 }
 

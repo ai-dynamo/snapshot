@@ -56,6 +56,25 @@ If a `SnapshotJob` created it, create a new `SnapshotJob` with the probe fixed
 in `podSnapshotTemplate.containers` instead: the `SnapshotJob` copies its
 template into the `PodSnapshot` it creates.
 
+## A Pod Group Member Fails Without Reaching a Step
+
+A member of a `PodGroupSnapshot` can fail before its checkpoint reaches a step.
+The reason is on the member's `PodSnapshot` and in the group's status:
+
+| Reason | Cause | What to do |
+| --- | --- | --- |
+| `InvalidPodGroupMember` | The `PodSnapshot` carries the group's labels, but the group does not control it or does not list the member | Do not create or label member `PodSnapshot`s yourself. The `PodGroupSnapshot` creates them |
+| `CoordinatorUnreachable` | The node agent could not join the group's attempt before its deadline. The agent's log shows what it waited for | Check that the agent Pod on the rank-0 member's node is Ready |
+| `CheckpointInterrupted` | The node agent restarted after the member started, so the source was terminated | Take a new `PodGroupSnapshot` |
+
+A member that fails before it starts is left as Snapshot found it. A member
+that started records it in the `Started` condition of its
+`PodSnapshotContent`, and its source ends.
+
+```bash
+kubectl get podgroupsnapshot <name> -n <ns> -o jsonpath='{.status.members}'
+```
+
 ## Checkpoint Fails at a Step
 
 ### resolving checkpoint artifact path
