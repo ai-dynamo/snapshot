@@ -236,6 +236,8 @@ RUN git init /tmp/criu \
     && git remote add origin ${CRIU_REPO} \
     && git fetch --depth 1 origin ${CRIU_REF} \
     && git checkout FETCH_HEAD \
+    && mkdir -p /criu-install/usr/local/share/snapshot \
+    && git rev-parse HEAD > /criu-install/usr/local/share/snapshot/criu-build-ref \
     && make -j${BUILD_JOBS} \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
 
@@ -247,7 +249,9 @@ RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
       /tmp/snapshot_inet_remap.c
 
 # CRIU source at the exact ref built from: this is a from-source build, and
-# CRIU_REF may be a moving branch.
+# CRIU_REF may be a moving branch. criu-build-ref, written above, names the
+# commit it resolved to — every commit on a dev branch reports the same
+# version number, so the number alone cannot identify the build.
 RUN tar -czf /criu-src.tar.gz -C /tmp --exclude-vcs criu
 
 # =============================================================================

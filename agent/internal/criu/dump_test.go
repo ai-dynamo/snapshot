@@ -5,6 +5,8 @@ package criu
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,4 +40,35 @@ func TestWithFullDiskErrno(t *testing.T) {
 			assert.Equal(t, tc.want, errors.Is(got, unix.ENOSPC))
 		})
 	}
+}
+
+// CRIU packs its version into one integer, and a bug report quoting "40100" is
+// no more use than one quoting nothing.
+func TestFormatCriuVersion(t *testing.T) {
+	for encoded, want := range map[int]string{
+		40000:  "4.0.0",
+		40100:  "4.1.0",
+		301502: "30.15.2",
+		31207:  "3.12.7",
+	} {
+		assert.Equal(t, want, formatCriuVersion(encoded))
+	}
+}
+
+// The default CRIU reference is a development branch, where every commit
+// reports the same version number. The commit the image was built from is what
+// makes a dev build identifiable at all.
+func TestWithBuildRef(t *testing.T) {
+	dir := t.TempDir()
+	recorded := filepath.Join(dir, "criu-build-ref")
+	require.NoError(t, os.WriteFile(recorded, []byte("1a2b3c4d5e6f\n"), 0o644))
+
+	assert.Equal(t, "4.3.0 (1a2b3c4d5e6f)", withBuildRef("4.3.0", recorded),
+		"a recorded commit identifies the build")
+	assert.Equal(t, "4.3.0", withBuildRef("4.3.0", filepath.Join(dir, "absent")),
+		"a release build is identified by its version alone")
+
+	empty := filepath.Join(dir, "empty")
+	require.NoError(t, os.WriteFile(empty, []byte("  \n"), 0o644))
+	assert.Equal(t, "4.3.0", withBuildRef("4.3.0", empty), "an empty file adds nothing")
 }
