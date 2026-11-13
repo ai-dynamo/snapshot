@@ -129,9 +129,12 @@ type RestoreGroupClaim struct {
 // plugin can prepare only a destination that exists and is shaped, so a claim
 // never leaves a Pod that would run its original command instead.
 //
-// It performs no API call. The operator sends the result as an update
-// conditional on the Pod's resourceVersion, so the binding, the map and the
-// gate's removal land together, before the Pod can be scheduled.
+// It performs no API call. The operator sends the difference between pod and
+// the result as a patch conditional on the Pod's resourceVersion, so the
+// binding, the map and the gate's removal land together, before the Pod can
+// be scheduled. A patch carries only what the claim changes: fields that this
+// API version does not know stay on the Pod as they are, which an update of
+// the whole Pod would drop.
 func ClaimGroupTarget(pod *corev1.Pod, claim RestoreGroupClaim) (*corev1.Pod, error) {
 	if pod == nil {
 		return nil, fmt.Errorf("restore pod is nil")
@@ -161,7 +164,7 @@ func ClaimGroupTarget(pod *corev1.Pod, claim RestoreGroupClaim) (*corev1.Pod, er
 		result.Annotations = make(map[string]string, 2)
 	}
 	result.Annotations[RestoreGroupUIDAnnotation] = string(claim.UID)
-	result.Annotations[RestoreContainerMapAnnotation] = formatContainerMapping(claim.Mapping)
+	result.Annotations[RestoreContainerMapAnnotation] = claim.Mapping.String()
 	gates := make([]corev1.PodSchedulingGate, 0, len(result.Spec.SchedulingGates))
 	for _, gate := range result.Spec.SchedulingGates {
 		if gate.Name != RestoreGroupSchedulingGate {
