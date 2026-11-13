@@ -1925,10 +1925,6 @@ const (
 	// own leaves it unset.
 	GroupRestoreFailedCondition = "nvidia.com/GroupRestoreFailed"
 
-	// RestoreGroupPending is an agent-internal wait reason on nvidia.com/Restored
-	// while a claimed group restore Pod waits to be pinned, like SnapshotPending.
-	RestoreGroupPending = "GroupPending"
-
 	// CoordinationDir is reserved in the control volume for rendezvous endpoints.
 	CoordinationDir = "coordination"
 
