@@ -131,6 +131,7 @@ jobs:
             e2e/tests/test_resolve_snapshot_image_tag.py \
             e2e/tests/test_restored_state.py \
             e2e/tests/test_runtime_image_id.py \
+            e2e/tests/test_seccomp_install.py \
             e2e/tests/test_setup_chart_command.py \
             e2e/tests/test_setup_helm_overrides.py \
             e2e/tests/test_setup_image_digests.py \
