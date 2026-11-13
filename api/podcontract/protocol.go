@@ -29,7 +29,7 @@ const (
 	// RestoreGroupSchedulingGate holds a group restore Pod until the operator
 	// claims it. The owner sets it when it creates the Pod, through
 	// BuildGroupTarget, typically in a template that every replica shares or a
-	// Pod-creation webhook. Only the operator removes it, in the same update
+	// Pod-creation webhook. Only the operator removes it, in the same patch
 	// that writes RestoreGroupUIDAnnotation and RestoreContainerMapAnnotation,
 	// so a gated Pod has never run, and a Pod created without it is never a
 	// group target.
@@ -37,13 +37,13 @@ const (
 
 	// RestoreGroupUIDAnnotation holds the UID of the PodGroupRestore that
 	// claimed the Pod. Only the operator writes it, together with the target's
-	// single-pair RestoreContainerMapAnnotation, in the update conditional on
+	// single-pair RestoreContainerMapAnnotation, in the patch conditional on
 	// the Pod's resourceVersion that removes RestoreGroupSchedulingGate, so
 	// both are on the Pod before its sandbox exists and the NRI plugin reads
 	// them without an API call. A Pod is claimed once and never rebound, so
-	// the binding also names the only attempt that may report on the Pod;
-	// every agent write checks it. ClaimGroupTarget writes it, and
-	// RestoreGroupClaimOf reads it.
+	// the binding names the only attempt that may act or report on the Pod,
+	// and the agent finds its attempt through it. ClaimGroupTarget writes it,
+	// and RestoreGroupClaimOf reads it.
 	RestoreGroupUIDAnnotation = "nvidia.com/restore-group-uid"
 
 	// SkipCompatCheckAnnotation disables compatibility checks for one restore.
@@ -231,6 +231,12 @@ func ParseRestoreComplete(data []byte) (RestoreComplete, error) {
 type ContainerMapping struct {
 	Source      string
 	Destination string
+}
+
+// String returns the mapping as source=destination, one pair of
+// RestoreContainerMapAnnotation's format.
+func (m ContainerMapping) String() string {
+	return m.Source + "=" + m.Destination
 }
 
 // GetRestoreFromSnapshotName returns the same-namespace PodSnapshot named by

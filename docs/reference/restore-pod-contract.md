@@ -241,7 +241,7 @@ group target.
 Name the destination container in the `PodGroupRestore`, in the target's
 `containerMappings`. The operator claims no target until every target passes
 its checks, so no Pod takes a node while a peer is missing or refused. It then
-claims each Pod in one update: it writes `nvidia.com/restore-group-uid` and the
+claims each Pod in one patch: it writes `nvidia.com/restore-group-uid` and the
 mapping as `nvidia.com/restore-container-map`, and removes the gate. Do not
 remove the gate yourself.
 
