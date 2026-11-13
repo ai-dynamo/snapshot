@@ -60,9 +60,9 @@ text{font-family:Helvetica,Arial,"Liberation Sans",sans-serif}
 <text x="20.0" y="807.0" class="tagt" font-size="12" font-weight="700" text-anchor="start" dominant-baseline="central">par</text>
 <line class="frm" x1="10.0" y1="932.0" x2="990.0" y2="932.0" stroke-width="1" stroke-dasharray="6 4"/>
 <text x="20.0" y="945.0" class="tagt" font-size="12" font-weight="700" text-anchor="start" dominant-baseline="central">and</text>
-<text x="163.5" y="92.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">restore Pods with the marker and container</text>
-<text x="163.5" y="108.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">map, then a PodGroupRestore naming them;</text>
-<text x="163.5" y="124.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">the operator binds and pins them</text>
+<text x="168.1" y="92.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">gated restore Pods, then a PodGroupRestore</text>
+<text x="168.1" y="108.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">naming them; the operator claims and ungates</text>
+<text x="168.1" y="124.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">them, then pins them</text>
 <line class="arw" x1="88.6" y1="136.0" x2="223.7" y2="136.0" stroke-width="1.2" marker-end="url(#ah)"/>
 <rect class="k-t" x="103.7" y="150.0" width="244.0" height="44" rx="5" stroke-width="0.8"/>
 <text x="225.7" y="164.0" class="k-t-t" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">preflight: artifact, compatibility, GPU</text>
