@@ -69,6 +69,8 @@ jobs:
               - "hack/compliance/**"
               - "hack/k3d-cpu-e2e.sh"
               - "hack/verify-bundle-glibc.sh"
+              - "hack/ci-build-image.sh"
+              - "hack/ci-prepare-cpu-e2e.sh"
               - "hack/ci-cache-flags.sh"
               - "hack/ci-phase.sh"
               - "hack/ci-phase-summary.sh"
@@ -284,6 +286,7 @@ jobs:
     needs: [check, cpu, images, candidate]
     uses: ./.github/workflows/e2e-frameworks.yaml
     with:
+      validated_sha: ${{ github.sha }}
       snapshot_tag: ${{ needs.images.outputs.tag }}
       image_digests: ${{ needs.candidate.outputs.digests }}
     permissions:
