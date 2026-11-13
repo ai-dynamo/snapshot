@@ -24,8 +24,10 @@ type podGroupMemberObservation struct {
 	content *snapshotv1alpha1.PodSnapshotContent
 	// nodeName is the node the member's source Pod runs on, when known.
 	nodeName string
-	// podSnapshotDeleted is true when the API server confirmed that the
-	// member's pinned PodSnapshot is gone, or replaced by another object.
+	// podSnapshotDeleted is true when the observation found the member's
+	// pinned PodSnapshot gone, or replaced by another object, while the member
+	// was unfinished. It fails the member for good, so Reconcile records it
+	// only from an observation through the API server.
 	podSnapshotDeleted bool
 }
 
@@ -151,6 +153,19 @@ func derivePodGroupSnapshotStatus(
 		}
 	}
 	return *next
+}
+
+// podGroupSnapshotChangeIsIrreversible reports whether recording derived over
+// the persisted status of a PodGroupSnapshot would make an irreversible
+// decision (see isIrreversiblePodGroupChange). deleting says whether the group
+// is being deleted, so that Reconcile would release its finalizer once derived
+// is recorded.
+func podGroupSnapshotChangeIsIrreversible(persisted, derived *snapshotv1alpha1.PodGroupSnapshotStatus, deleting bool) bool {
+	return isIrreversiblePodGroupChange(
+		podGroupSnapshotMemberViews(persisted.Members), podGroupSnapshotMemberViews(derived.Members),
+		persisted.Conditions, derived.Conditions,
+		deleting && podGroupSnapshotReleasable(derived),
+	)
 }
 
 // podGroupSnapshotMemberViews returns the shared rules' view of each member.
