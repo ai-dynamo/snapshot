@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The agent image builds snapshot-coordinator from this directory, its
+# coordinator build context; make build's output has no place there.
+bin/

@@ -17,6 +17,7 @@ OUT=${3:-/legal/THIRD-PARTY.txt}
 SKIPPED=${4:-/sources/dpkg/SKIPPED.txt}
 GO_LICENSES=${5:-/tmp/go-licenses.sh}
 RUST_NOTICES=${6:-/legal/cuinterpose/rust/NOTICES.txt}
+COORDINATOR_VENDOR=${7:-/sources/go/coordinator/vendor}
 
 mkdir -p "$(dirname "$OUT")"
 
@@ -77,6 +78,9 @@ HEADER
     fi
 
     sh "$GO_LICENSES" "$VENDOR"
+    # snapshot-coordinator is built from its own module, with its own module
+    # set, so its modules have a section of their own.
+    sh "$GO_LICENSES" "$COORDINATOR_VENDOR" "snapshot-coordinator"
     cat "$RUST_NOTICES"
 
     # Fold in the license texts the Dockerfile stages separately, so this file
