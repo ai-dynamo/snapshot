@@ -21,20 +21,29 @@ const (
 	// RestoreContainerMapAnnotation optionally maps the single captured source
 	// container to one or more restore destinations. Its value is a
 	// comma-separated list of source=destination pairs. When absent, restore
-	// uses the captured container name as the destination.
+	// uses the captured container name as the destination. On a group target,
+	// only the operator writes it, when it claims the Pod, and it always holds
+	// exactly one pair, even for a restore into the container of the same name.
 	RestoreContainerMapAnnotation = "nvidia.com/restore-container-map"
 
-	// RestoreGroupAnnotation marks a restore Pod as a target of the
-	// PodGroupRestore it names, in the Pod's namespace. The owner sets it when
-	// it creates the Pod. On group targets it replaces RestoreFromAnnotation and
-	// RestoreContainerMapAnnotation, and it requires the restore startup probe.
-	RestoreGroupAnnotation = "nvidia.com/restore-group"
+	// RestoreGroupSchedulingGate holds a group restore Pod until the operator
+	// claims it. The owner sets it when it creates the Pod, through
+	// BuildGroupTarget, typically in a template that every replica shares or a
+	// Pod-creation webhook. Only the operator removes it, in the same update
+	// that writes RestoreGroupUIDAnnotation and RestoreContainerMapAnnotation,
+	// so a gated Pod has never run, and a Pod created without it is never a
+	// group target.
+	RestoreGroupSchedulingGate = "nvidia.com/restore-group"
 
 	// RestoreGroupUIDAnnotation holds the UID of the PodGroupRestore that
-	// RestoreGroupAnnotation names. The owner sets it once that PodGroupRestore
-	// exists. The exact pair of name and UID is the attempt that may act on the
-	// Pod: admission waits until a target is bound to its own attempt, and every
-	// agent write checks the binding. RestoreGroupBinding reads the pair.
+	// claimed the Pod. Only the operator writes it, together with the target's
+	// single-pair RestoreContainerMapAnnotation, in the update conditional on
+	// the Pod's resourceVersion that removes RestoreGroupSchedulingGate, so
+	// both are on the Pod before its sandbox exists and the NRI plugin reads
+	// them without an API call. A Pod is claimed once and never rebound, so
+	// the binding also names the only attempt that may report on the Pod;
+	// every agent write checks it. ClaimGroupTarget writes it, and
+	// RestoreGroupClaimOf reads it.
 	RestoreGroupUIDAnnotation = "nvidia.com/restore-group-uid"
 
 	// SkipCompatCheckAnnotation disables compatibility checks for one restore.
@@ -288,21 +297,34 @@ func ValidateContainerMappings(mappings []ContainerMapping, capturedSource strin
 	}
 	destinations := make(map[string]struct{}, len(mappings))
 	for _, mapping := range mappings {
-		source := mapping.Source
-		destination := mapping.Destination
-		if errs := validation.IsDNS1123Label(source); len(errs) != 0 {
-			return fmt.Errorf("invalid restore source container %q: %s", source, strings.Join(errs, "; "))
+		if err := validateContainerMappingNames(mapping); err != nil {
+			return err
 		}
-		if errs := validation.IsDNS1123Label(destination); len(errs) != 0 {
-			return fmt.Errorf("invalid restore destination container %q: %s", destination, strings.Join(errs, "; "))
+		if mapping.Source != capturedSource {
+			return fmt.Errorf("restore source container %q does not match captured container %q",
+				mapping.Source, capturedSource)
 		}
-		if source != capturedSource {
-			return fmt.Errorf("restore source container %q does not match captured container %q", source, capturedSource)
+		if _, duplicate := destinations[mapping.Destination]; duplicate {
+			return fmt.Errorf("duplicate restore destination container %q", mapping.Destination)
 		}
-		if _, duplicate := destinations[destination]; duplicate {
-			return fmt.Errorf("duplicate restore destination container %q", destination)
-		}
-		destinations[destination] = struct{}{}
+		destinations[mapping.Destination] = struct{}{}
+	}
+	return nil
+}
+
+// validateContainerMappingNames checks that both containers of a mapping have
+// valid container names. It needs no snapshot, so a group target's claim can
+// be checked without knowing which container the member checkpointed.
+func validateContainerMappingNames(mapping ContainerMapping) error {
+	if err := validateRestoreContainerName("source", mapping.Source); err != nil {
+		return err
+	}
+	return validateRestoreContainerName("destination", mapping.Destination)
+}
+
+func validateRestoreContainerName(role, name string) error {
+	if errs := validation.IsDNS1123Label(name); len(errs) != 0 {
+		return fmt.Errorf("invalid restore %s container %q: %s", role, name, strings.Join(errs, "; "))
 	}
 	return nil
 }
