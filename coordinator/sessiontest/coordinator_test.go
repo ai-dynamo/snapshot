@@ -202,6 +202,45 @@ func TestCoordinatorFail(t *testing.T) {
 	require.ErrorIs(t, h.srv.Fail(ctx, "unknown", "Refused"), session.ErrNotFound)
 }
 
+// TestCoordinatorCancel covers the host cancelling a session once its group
+// resource's deletion starts: members that have not all passed the admitted
+// barrier learn Cancelled, and members past it carry on.
+func TestCoordinatorCancel(t *testing.T) {
+	h := newHarness(t)
+	ctx := within(t)
+
+	t.Run("before the admitted barrier completes, every member learns Cancelled", func(t *testing.T) {
+		ses := h.session(t, 2)
+		sessions := ses.connectAll(t)
+		wait := barrier(ctx, sessions[0], session.BarrierAdmitted)
+		awaitKey(t, ses.raw(t, 1), session.BarrierKey(session.BarrierAdmitted, ses.spec.Members[0].ID))
+		require.NoError(t, h.srv.Cancel(ctx, ses.spec.UID))
+		require.ErrorIs(t, <-wait, &session.AbortError{Reason: session.ReasonCancelled})
+		for _, s := range sessions {
+			awaitDone(t, s)
+			require.ErrorIs(t, s.Err(), &session.AbortError{Reason: session.ReasonCancelled})
+		}
+		assert.Equal(t, "failed "+session.ReasonCancelled, ses.awaitOutcome(t))
+	})
+
+	t.Run("once it has completed, the session stays open", func(t *testing.T) {
+		ses := h.session(t, 2)
+		sessions := ses.connectAll(t)
+		waits := []<-chan error{
+			barrier(ctx, sessions[0], session.BarrierAdmitted), barrier(ctx, sessions[1], session.BarrierAdmitted),
+		}
+		for _, wait := range waits {
+			require.NoError(t, <-wait)
+		}
+		require.NoError(t, h.srv.Cancel(ctx, ses.spec.UID))
+		requireOpen(t, sessions[0], "a committed session must stay open")
+		for _, s := range sessions {
+			require.NoError(t, s.Leave(ctx))
+		}
+		assert.Equal(t, "closed", ses.awaitOutcome(t))
+	})
+}
+
 // TestShutdown covers shutting down: every open session fails with
 // CoordinatorLost, one that ended keeps its end, and the coordinator refuses
 // everything afterwards.

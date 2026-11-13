@@ -41,6 +41,20 @@ const (
 	// agent.
 	RestoredCondition = "nvidia.com/Restored"
 
+	// RestoreStartedCondition is set to True on a group restore Pod before the
+	// node agent first changes the Pod, under a field manager of its own, and
+	// never removed; from then on the agent never replays CRIU into the Pod.
+	// Its lastTransitionTime is the member's startedAt in its PodGroupRestore.
+	RestoreStartedCondition = "nvidia.com/RestoreStarted"
+
+	// GroupRestoreFailedCondition is set to True on a group restore Pod whose
+	// member fails for a reason of the group: the session's reason, or one of
+	// the agent's group checks such as PodIPChanged or GateBudgetTooShort. The
+	// agent sets it in the same status update as nvidia.com/Restored, which
+	// stays the only signal that the member failed. A member that fails on its
+	// own leaves it unset.
+	GroupRestoreFailedCondition = "nvidia.com/GroupRestoreFailed"
+
 	// RestoreReasonInProgress marks active restore execution.
 	RestoreReasonInProgress = "RestoreInProgress"
 	// RestoreReasonSucceeded marks a terminal all-destinations success.

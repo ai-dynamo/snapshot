@@ -61,6 +61,13 @@ const (
 // either matches every barrier or every member.
 func BarrierKey(name, member string) string { return barrierPrefix + name + "." + member }
 
+// BarrierAdmitted is the barrier each member's agent arrives at once its
+// member has passed admission. The attempt commits when it completes: before
+// that, no member has crossed its point of no return, so the coordinator
+// cancels the session of a group resource whose deletion starts; after that,
+// the attempt runs to its end.
+const BarrierAdmitted = "admitted"
+
 // LeftKey is the key a member writes when it leaves. A "*" matches every
 // member.
 func LeftKey(member string) string { return leftPrefix + member }

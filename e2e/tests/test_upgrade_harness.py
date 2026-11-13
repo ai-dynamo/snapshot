@@ -241,6 +241,8 @@ def test_every_generated_crd_has_a_schema_to_compare() -> None:
     files = sorted(checks.CRD_DIR.glob("*.yaml"))
 
     assert [path.name for path in files] == [
+        "nvidia.com_podgrouprestores.yaml",
+        "nvidia.com_podgroupsnapshots.yaml",
         "nvidia.com_podsnapshotcontents.yaml",
         "nvidia.com_podsnapshots.yaml",
         "nvidia.com_snapshotjobs.yaml",
