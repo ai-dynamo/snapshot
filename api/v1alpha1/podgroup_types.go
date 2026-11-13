@@ -35,9 +35,8 @@ const (
 	// PodGroupReasonPodIPChanged means a restore Pod's IP or admitted container
 	// changed after the operator pinned it.
 	PodGroupReasonPodIPChanged = "PodIPChanged"
-	// PodGroupReasonTargetInUse means the target is bound, by name and UID, to
-	// another unfinished PodGroupRestore, or that another unfinished one has
-	// already pinned the target's UID.
+	// PodGroupReasonTargetInUse means the target Pod is already claimed by
+	// another PodGroupRestore.
 	PodGroupReasonTargetInUse = "TargetInUse"
 	// PodGroupReasonTargetPodDeleted fails a restore member whose pinned Pod is
 	// gone or was replaced. Like a deleted member PodSnapshot, it may hide the
@@ -67,11 +66,14 @@ const (
 	// member's source Pod to be scheduled to a node.
 	PodGroupReasonSourcePodUnscheduled = "SourcePodUnscheduled"
 	// PodGroupReasonTargetPodPending means admission is waiting for a restore
-	// target's Pod: it does not exist yet, is not yet bound to the attempt by
-	// name and UID, is not scheduled to a node, has no IP address yet, or its
-	// destination container has no ID yet. The condition's message names each
+	// target's Pod: it does not exist yet, or, once claimed, has no IP address
+	// or destination container ID yet. The condition's message names each
 	// target and what it waits for.
 	PodGroupReasonTargetPodPending = "TargetPodPending"
+	// PodGroupReasonTargetPodUnscheduled means admission is waiting for a
+	// claimed restore target's Pod to be scheduled to a node, typically for
+	// lack of capacity. The condition's message names each target.
+	PodGroupReasonTargetPodUnscheduled = "TargetPodUnscheduled"
 	// PodGroupReasonPreviousGroupCleanup means admission is waiting for a
 	// PodSnapshot at a member's name to be deleted: it belongs to an earlier
 	// PodGroupSnapshot of the same name, whose PodSnapshots garbage collection
