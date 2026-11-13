@@ -374,6 +374,12 @@ spec:
                 - message: metadata.labels must not set controller-owned label nvidia.com/snapshot-job-uid
                   rule: '!has(self.metadata) || !has(self.metadata.labels) || !(''nvidia.com/snapshot-job-uid''
                     in self.metadata.labels)'
+                - message: metadata.labels must not set controller-owned label nvidia.com/snapshot-podgroup
+                  rule: '!has(self.metadata) || !has(self.metadata.labels) || !(''nvidia.com/snapshot-podgroup''
+                    in self.metadata.labels)'
+                - message: metadata.labels must not set controller-owned label nvidia.com/snapshot-podgroup-member
+                  rule: '!has(self.metadata) || !has(self.metadata.labels) || !(''nvidia.com/snapshot-podgroup-member''
+                    in self.metadata.labels)'
                 - message: containers must name containers in targetContainers
                   rule: '!has(self.containers) || self.containers.all(c, c.name in
                     self.targetContainers)'
