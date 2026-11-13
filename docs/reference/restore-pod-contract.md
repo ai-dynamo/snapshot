@@ -239,9 +239,23 @@ no annotation: do not set `nvidia.com/restore-from`,
 group target.
 
 Name the destination container in the `PodGroupRestore`, in the target's
-`containerMappings`. The operator claims the Pod in one update: it writes
-`nvidia.com/restore-group-uid` and the mapping as
-`nvidia.com/restore-container-map`, and removes the gate.
+`containerMappings`. The operator claims no target until every target passes
+its checks, so no Pod takes a node while a peer is missing or refused. It then
+claims each Pod in one update: it writes `nvidia.com/restore-group-uid` and the
+mapping as `nvidia.com/restore-container-map`, and removes the gate. Do not
+remove the gate yourself.
+
+While the restore waits, its `Admitted` condition gives one of these reasons:
+
+| Reason | The restore waits for |
+| --- | --- |
+| `TargetPodPending` | A target Pod to exist, or a claimed Pod to get an IP address and a destination container ID |
+| `TargetPodUnscheduled` | A claimed Pod to be scheduled to a node, for example while the cluster lacks capacity |
+
+The restore fails with `TargetInUse` when another `PodGroupRestore` claimed a
+target Pod, and with `Refused` when a target Pod cannot be claimed, for example
+a Pod created without the gate. A restore refused before the claim leaves every
+target gated, so you can name them in a new `PodGroupRestore`.
 
 - Do not add an init container that waits for the Pod's peers. No member
   restores until every target's destination container exists.

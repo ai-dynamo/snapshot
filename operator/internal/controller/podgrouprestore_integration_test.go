@@ -105,12 +105,14 @@ func longestPodGroupRestoreTargets(n int) []snapshotv1alpha1.PodGroupRestoreTarg
 	return targets
 }
 
-// TestPodGroupRestoreReadsOnlyItsOwnReport reuses a restore Pod that still
-// carries an earlier attempt's report, against a real API server, with every
-// report written as the contract requires (writeReport). The Pod is pinned and
-// its member stays Admitted; a report under this restore's UID then fails the
-// member, and its annotation and conditions land in one write.
-func TestPodGroupRestoreReadsOnlyItsOwnReport(t *testing.T) {
+// TestPodGroupRestoreClaimsAndPins runs a restore of two gated targets against
+// a real API server, which refuses a gated Pod with a node, so the Pods are
+// created without one. The claim writes both annotations, removes Snapshot's
+// gate, keeps a gang scheduler's, and changes nothing else. Once the Pods are
+// bound to a node through pods/binding and run, every member is pinned. A
+// report written as the contract requires, a fenced write of the Pod's
+// status, then fails its member.
+func TestPodGroupRestoreClaimsAndPins(t *testing.T) {
 	cl := startPodGroupEnvtest(t)
 	ctx := t.Context()
 	const ns = "default"
@@ -118,15 +120,18 @@ func TestPodGroupRestoreReadsOnlyItsOwnReport(t *testing.T) {
 
 	snapshot := &snapshotv1alpha1.PodGroupSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "group", Namespace: ns},
-		Spec: snapshotv1alpha1.PodGroupSnapshotSpec{DeadlineSeconds: 600, Members: []snapshotv1alpha1.PodGroupSnapshotMember{{
-			ID: "a", Source: snapshotv1alpha1.PodSnapshotSource{PodRef: snapshotv1alpha1.PodReference{
-				Name: "source-a", UID: "source-uid-a", Containers: []string{"main"},
+		Spec:       snapshotv1alpha1.PodGroupSnapshotSpec{DeadlineSeconds: 600},
+	}
+	for _, id := range []string{"a", "b"} {
+		snapshot.Spec.Members = append(snapshot.Spec.Members, snapshotv1alpha1.PodGroupSnapshotMember{
+			ID: id, Source: snapshotv1alpha1.PodSnapshotSource{PodRef: snapshotv1alpha1.PodReference{
+				Name: "source-" + id, UID: types.UID("source-uid-" + id), Containers: []string{"main"},
 			}},
-		}}},
+		})
 	}
 	require.NoError(t, cl.Create(ctx, snapshot))
 	snapshot.Status.Conditions = []metav1.Condition{{Type: snapshotv1alpha1.PodGroupConditionReady, Status: metav1.ConditionTrue,
-		Reason: "Checkpointed", Message: "all 1 members are checkpointed", LastTransitionTime: metav1.Now()}}
+		Reason: "Checkpointed", Message: "all 2 members are checkpointed", LastTransitionTime: metav1.Now()}}
 	require.NoError(t, cl.Status().Update(ctx, snapshot))
 
 	restore := &snapshotv1alpha1.PodGroupRestore{
@@ -134,7 +139,11 @@ func TestPodGroupRestoreReadsOnlyItsOwnReport(t *testing.T) {
 		Spec: snapshotv1alpha1.PodGroupRestoreSpec{
 			SnapshotRef:     snapshotv1alpha1.ObjectIdentity{Name: "group", UID: snapshot.UID},
 			DeadlineSeconds: 600,
-			Targets:         []snapshotv1alpha1.PodGroupRestoreTarget{{ID: "a", PodRef: snapshotv1alpha1.TargetPodReference{Name: "target-a"}}},
+			Targets: []snapshotv1alpha1.PodGroupRestoreTarget{
+				{ID: "a", PodRef: snapshotv1alpha1.TargetPodReference{Name: "target-a"}},
+				{ID: "b", PodRef: snapshotv1alpha1.TargetPodReference{Name: "target-b"},
+					ContainerMappings: []snapshotv1alpha1.ContainerMapping{{Source: "main", Destination: "server"}}},
+			},
 		},
 	}
 	require.NoError(t, cl.Create(ctx, restore))
@@ -148,81 +157,137 @@ func TestPodGroupRestoreReadsOnlyItsOwnReport(t *testing.T) {
 	agent.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
 	require.NoError(t, cl.Status().Update(ctx, agent))
 
-	target := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "target-a", Namespace: ns, Annotations: map[string]string{
-			podcontract.RestoreGroupAnnotation:    restore.Name,
-			podcontract.RestoreGroupUIDAnnotation: string(restore.UID),
-		}},
-		Spec: corev1.PodSpec{NodeName: "node-1", Containers: []corev1.Container{{Name: "main", Image: "workload:latest"}}},
+	gang := corev1.PodSchedulingGate{Name: "example.com/gang"}
+	created := map[string]*corev1.Pod{}
+	for id, destination := range map[string]string{"a": "main", "b": "server"} {
+		owned := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "target-" + id, Namespace: ns, Labels: map[string]string{"app": "workload"}},
+			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: destination, Image: "workload:latest"}}},
+		}
+		if id == "a" {
+			owned.Spec.SchedulingGates = []corev1.PodSchedulingGate{gang}
+		}
+		target, err := podcontract.BuildGroupTarget(owned, podcontract.GroupTargetRequest{DestinationContainer: destination},
+			podcontract.Options{})
+		require.NoError(t, err)
+		require.NoError(t, cl.Create(ctx, target))
+		created[id] = target
 	}
-	require.NoError(t, cl.Create(ctx, target))
-	target.Status = corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.1.0.5", ContainerStatuses: []corev1.ContainerStatus{{
-		Name: "main", Image: "workload:latest", ImageID: "workload@sha256:0", ContainerID: "containerd://a", Ready: true,
-		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}},
-	}}}
-	require.NoError(t, cl.Status().Update(ctx, target))
-	writeReport(t, cl, target, "earlier-uid",
-		corev1.PodCondition{Type: podcontract.RestoredCondition, Status: corev1.ConditionFalse, Reason: podcontract.RestoreReasonFailed},
-		corev1.PodCondition{Type: podcontract.GroupRestoreFailedCondition, Status: corev1.ConditionTrue, Reason: snapshotv1alpha1.PodGroupReasonRefused})
 
 	r := &PodGroupRestoreReconciler{
 		Client: cl, NonCacheReadClient: cl, Recorder: record.NewFakeRecorder(10),
 		AgentNamespace: pgAgentNamespace, AgentSelector: labels.SelectorFromSet(pgAgentLabels),
 	}
 	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(restore)}
-	_, err := r.Reconcile(ctx, request) // adds the finalizer
-	require.NoError(t, err)
-	reconcile := func() *snapshotv1alpha1.PodGroupRestoreMemberStatus {
+	reconcile := func() *snapshotv1alpha1.PodGroupRestore {
 		t.Helper()
 		_, err := r.Reconcile(ctx, request)
 		require.NoError(t, err)
 		require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(restore), restore))
-		require.Len(t, restore.Status.Members, 1)
-		return &restore.Status.Members[0]
+		return restore
 	}
-	m := reconcile()
-	require.NotNil(t, m.Pod, "the reused Pod is pinned")
-	assert.Equal(t, target.UID, m.Pod.UID)
-	assert.Equal(t, snapshotv1alpha1.RestorePhaseAdmitted, m.Phase, "the earlier attempt's report is not read")
-	assert.Nil(t, meta.FindStatusCondition(restore.Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed))
+	admitted := func() *metav1.Condition {
+		t.Helper()
+		condition := meta.FindStatusCondition(restore.Status.Conditions, snapshotv1alpha1.PodGroupConditionAdmitted)
+		require.NotNil(t, condition)
+		return condition
+	}
+	pod := func(id string) *corev1.Pod {
+		t.Helper()
+		got := &corev1.Pod{}
+		require.NoError(t, cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: "target-" + id}, got))
+		return got
+	}
 
-	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(target), target))
+	reconcile() // adds the finalizer
+	reconcile() // claims
+	for id, mapping := range map[string]string{"a": "main=main", "b": "main=server"} {
+		got := pod(id)
+		assert.Equal(t, string(restore.UID), got.Annotations[podcontract.RestoreGroupUIDAnnotation], id)
+		assert.Equal(t, mapping, got.Annotations[podcontract.RestoreContainerMapAnnotation], id)
+		assert.False(t, podcontract.HasRestoreGroupGate(got), "%s: Snapshot's gate is gone", id)
+		claim, bound, err := podcontract.RestoreGroupClaimOf(got.Annotations)
+		require.NoError(t, err, id)
+		require.True(t, bound, id)
+		want, err := podcontract.ClaimGroupTarget(created[id], claim)
+		require.NoError(t, err, id)
+		assert.Equal(t, want.Spec, got.Spec, "%s: the claim changed nothing else in the spec", id)
+		assert.Equal(t, want.Labels, got.Labels, id)
+		assert.Equal(t, want.Annotations, got.Annotations, id)
+	}
+	assert.Equal(t, []corev1.PodSchedulingGate{gang}, pod("a").Spec.SchedulingGates, "the gang's gate stays")
+
+	reconcile()
+	assert.Equal(t, snapshotv1alpha1.PodGroupReasonTargetPodUnscheduled, admitted().Reason)
+
+	// The gang scheduler lets its Pods go, and the scheduler binds both.
+	a := pod("a")
+	a.Spec.SchedulingGates = nil
+	require.NoError(t, cl.Update(ctx, a))
+	for _, id := range []string{"a", "b"} {
+		require.NoError(t, cl.SubResource("binding").Create(ctx, pod(id), &corev1.Binding{
+			ObjectMeta: metav1.ObjectMeta{Name: "target-" + id},
+			Target:     corev1.ObjectReference{Kind: "Node", Name: "node-1"},
+		}))
+		assert.Equal(t, "node-1", pod(id).Spec.NodeName, id)
+	}
+	reconcile()
+	assert.Equal(t, snapshotv1alpha1.PodGroupReasonTargetPodPending, admitted().Reason)
+	assert.Empty(t, restore.Status.Members[0].NodeName, "nothing is pinned")
+
+	// The kubelet starts both.
+	for i, id := range []string{"a", "b"} {
+		running := pod(id)
+		running.Status = corev1.PodStatus{Phase: corev1.PodRunning, PodIP: fmt.Sprintf("10.1.0.%d", i+5),
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: running.Spec.Containers[0].Name, Image: "workload:latest", ImageID: "workload@sha256:0",
+				ContainerID: "containerd://" + id, Ready: false,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}},
+			}}}
+		require.NoError(t, cl.Status().Update(ctx, running))
+	}
+	reconcile()
+	assert.Equal(t, snapshotv1alpha1.PodGroupReasonAdmitting, admitted().Reason)
+	for i, want := range []struct{ id, container, ip string }{{"a", "main", "10.1.0.5"}, {"b", "server", "10.1.0.6"}} {
+		m := restore.Status.Members[i]
+		assert.Equal(t, snapshotv1alpha1.RestorePhaseAdmitted, m.Phase, want.id)
+		assert.Equal(t, &snapshotv1alpha1.ObjectIdentity{Name: "target-" + want.id, UID: pod(want.id).UID}, m.Pod, want.id)
+		assert.Equal(t, "node-1", m.NodeName, want.id)
+		assert.Equal(t, []snapshotv1alpha1.PodGroupRestoreContainerStatus{{Name: want.container, ContainerID: "containerd://" + want.id}},
+			m.Containers, want.id)
+		assert.Equal(t, want.ip, m.TargetPodIP, want.id)
+	}
+
+	target := pod("a")
 	before := target.DeepCopy()
-	writeReport(t, cl, target, string(restore.UID),
+	writeReport(t, cl, target,
 		corev1.PodCondition{Type: podcontract.RestoreStartedCondition, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now()},
 		corev1.PodCondition{Type: podcontract.RestoredCondition, Status: corev1.ConditionFalse, Reason: podcontract.RestoreReasonFailed},
 		corev1.PodCondition{Type: podcontract.GroupRestoreFailedCondition, Status: corev1.ConditionTrue,
 			Reason: snapshotv1alpha1.PodGroupReasonPodIPChanged, Message: "the Pod's IP changed"})
-
-	stored := &corev1.Pod{}
-	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(target), stored))
-	assert.Equal(t, target.ResourceVersion, stored.ResourceVersion, "nothing wrote the Pod since the report")
-	assert.Equal(t, string(restore.UID), stored.Annotations[podcontract.RestoreGroupReportUIDAnnotation],
-		"the status write persisted the annotation")
-	assert.Len(t, stored.Status.Conditions, 3, "and the conditions, in the same write")
+	assert.Equal(t, before.Annotations, target.Annotations, "a status write keeps the binding")
 
 	t.Run("a report written against a stale resourceVersion is refused", func(t *testing.T) {
 		stale := before.DeepCopy()
-		stale.Annotations[podcontract.RestoreGroupReportUIDAnnotation] = "stale-uid"
+		stale.Status.Conditions = append(stale.Status.Conditions, corev1.PodCondition{
+			Type: podcontract.RestoredCondition, Status: corev1.ConditionTrue, Reason: podcontract.RestoreReasonSucceeded})
 		err := cl.Status().Patch(ctx, stale, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 		assert.True(t, apierrors.IsConflict(err), "want Conflict, got %v", err)
 	})
 
-	m = reconcile()
+	m := reconcile().Status.Members[0]
 	assert.Equal(t, snapshotv1alpha1.RestorePhaseFailed, m.Phase)
-	assert.Equal(t, snapshotv1alpha1.PodGroupReasonPodIPChanged, m.Reason, "the reason comes from this attempt's GroupRestoreFailed")
+	assert.Equal(t, snapshotv1alpha1.PodGroupReasonPodIPChanged, m.Reason, "the reason comes from its GroupRestoreFailed")
 	assert.NotNil(t, m.StartedAt)
 }
 
-// writeReport writes a report on pod as the contract requires: the report UID
-// annotation and the conditions in one pods/status write, conditional on the
-// resourceVersion pod holds. pod then holds the written Pod. It is the test's
-// writer; the agent's own comes with the agent's group restore.
-func writeReport(t *testing.T, cl client.Client, pod *corev1.Pod, reportUID string, conditions ...corev1.PodCondition) {
+// writeReport writes a report on pod as the contract requires: the conditions
+// in one write of the Pod's status, conditional on the resourceVersion pod
+// holds. pod then holds the written Pod. It is the test's writer; the agent's
+// own comes with the agent's group restore.
+func writeReport(t *testing.T, cl client.Client, pod *corev1.Pod, conditions ...corev1.PodCondition) {
 	t.Helper()
 	original := pod.DeepCopy()
-	pod.Annotations[podcontract.RestoreGroupReportUIDAnnotation] = reportUID
 	pod.Status.Conditions = conditions
 	require.NoError(t, cl.Status().Patch(t.Context(), pod, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})))
-	require.Equal(t, reportUID, pod.Annotations[podcontract.RestoreGroupReportUIDAnnotation], "the API server kept the annotation")
 }

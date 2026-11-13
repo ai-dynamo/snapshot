@@ -114,13 +114,15 @@ func podGroupRequeue(admission podGroupAdmission, deadline, now time.Time, membe
 //     PodSnapshots, and the owner handler maps an owned object's events by its
 //     owner's kind and name, not its UID, so the deletion of an earlier
 //     group's PodSnapshot reconciles the group of the same name;
-//   - TargetPodPending: the PodGroupRestore controller maps the events of every
-//     Pod that names a restore in nvidia.com/restore-group to that restore.
+//   - TargetPodPending and TargetPodUnscheduled: the PodGroupRestore
+//     controller maps the events of every Pod to the restores whose targets
+//     name it, through an index on spec.targets[].podRef.name.
 //
 // Admission polls for every other wait: AgentNotReady and SourcePodUnscheduled.
 func isWatchedPodGroupAdmissionWait(reason string) bool {
 	return reason == snapshotv1alpha1.PodGroupReasonPreviousGroupCleanup ||
-		reason == snapshotv1alpha1.PodGroupReasonTargetPodPending
+		reason == snapshotv1alpha1.PodGroupReasonTargetPodPending ||
+		reason == snapshotv1alpha1.PodGroupReasonTargetPodUnscheduled
 }
 
 // validatePodGroupAgents refuses a reconciler set up without the node agent

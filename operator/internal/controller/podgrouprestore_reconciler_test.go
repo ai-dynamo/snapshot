@@ -23,27 +23,61 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
-// makePodGroupRestoreReconciler builds a reconciler whose cache and API server
-// are one fake client.
+// makePodGroupRestoreReconciler builds a reconciler whose API server is one
+// fake client, and whose cache serves the same objects as the operator's cache
+// does (rgCache).
 func makePodGroupRestoreReconciler(t *testing.T, objs ...client.Object) (*PodGroupRestoreReconciler, *record.FakeRecorder) {
 	t.Helper()
 	c := fake.NewClientBuilder().WithScheme(snapshotReconcilerScheme()).WithObjects(objs...).
 		WithStatusSubresource(&snapshotv1alpha1.PodGroupRestore{}, &snapshotv1alpha1.PodGroupSnapshot{}, &corev1.Pod{}).
+		WithIndex(&snapshotv1alpha1.PodGroupRestore{}, podGroupRestoreTargetPodField, podGroupRestoreTargetPods).
 		Build()
 	recorder := record.NewFakeRecorder(100)
 	return &PodGroupRestoreReconciler{
-		Client:             c,
+		Client:             rgCache(c),
 		NonCacheReadClient: c,
 		Recorder:           recorder,
 		AgentNamespace:     pgAgentNamespace,
 		AgentSelector:      labels.SelectorFromSet(pgAgentLabels),
 	}, recorder
+}
+
+// rgCache reads c's objects as the operator's cache serves them, every Pod
+// trimmed by TrimPodForCache, and writes to c.
+func rgCache(c client.WithWatch) client.WithWatch {
+	return interceptor.NewClient(c, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			_, err := TrimPodForCache(obj)
+			return err
+		},
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if err := c.List(ctx, list, opts...); err != nil {
+				return err
+			}
+			if pods, ok := list.(*corev1.PodList); ok {
+				for i := range pods.Items {
+					if _, err := TrimPodForCache(&pods.Items[i]); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+	})
+}
+
+// rgAPI is the reconciler's API server, through which a test reads and writes
+// whole Pods.
+func rgAPI(r *PodGroupRestoreReconciler) client.Client {
+	return r.NonCacheReadClient.(client.Client)
 }
 
 // rgSnapshot is a Ready PodGroupSnapshot named "group" whose members a, b, ...
@@ -57,9 +91,9 @@ func rgSnapshot(ids ...string) *snapshotv1alpha1.PodGroupSnapshot {
 	return group
 }
 
-// rgRestore is a PodGroupRestore named "restore" of rgSnapshot whose targets
-// a, b, ... name the restore Pods restore-a, restore-b, ...; it already holds
-// its finalizer.
+// rgRestore is a PodGroupRestore named "restore", with UID "restore-uid", of
+// rgSnapshot whose targets a, b, ... name the restore Pods restore-a,
+// restore-b, ...; it already holds its finalizer.
 func rgRestore(ids ...string) *snapshotv1alpha1.PodGroupRestore {
 	restore := &snapshotv1alpha1.PodGroupRestore{
 		ObjectMeta: metav1.ObjectMeta{
@@ -82,30 +116,54 @@ func rgRestore(ids ...string) *snapshotv1alpha1.PodGroupRestore {
 	return restore
 }
 
-// rgTargetPod is target id's restore Pod on node, bound to "restore", running
-// with container "main".
-func rgTargetPod(id, node string) *corev1.Pod {
-	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "restore-" + id,
-			Namespace: pgNamespace,
-			UID:       types.UID("restore-pod-uid-" + id),
-			Annotations: map[string]string{
-				podcontract.RestoreGroupAnnotation:    "restore",
-				podcontract.RestoreGroupUIDAnnotation: "restore-uid",
-			},
-		},
-		Spec: corev1.PodSpec{NodeName: node},
-		Status: corev1.PodStatus{
-			Phase:             corev1.PodRunning,
-			PodIP:             "10.1.0." + strconv.Itoa(int(id[0])),
-			ContainerStatuses: []corev1.ContainerStatus{{Name: "main", ContainerID: "containerd://" + id}},
-		},
+// rgGatedPod is target id's restore Pod, restore-<id>, as its owner creates
+// it: shaped by podcontract.BuildGroupTarget for destination container
+// "main", gated, unbound, and not scheduled.
+func rgGatedPod(id string) *corev1.Pod {
+	pod, err := podcontract.BuildGroupTarget(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "restore-" + id, Namespace: pgNamespace, UID: types.UID("restore-pod-uid-" + id)},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "workload:latest"}}},
+		Status:     corev1.PodStatus{Phase: corev1.PodPending},
+	}, podcontract.GroupTargetRequest{DestinationContainer: "main"}, podcontract.Options{})
+	if err != nil {
+		panic(err)
 	}
+	return pod
 }
 
-// rgReadyCluster returns the snapshot of ids, their target Pods on node-1, and
-// a group-capable agent there.
+// rgClaim returns pod as the operator claims it for the PodGroupRestore with
+// uid, mapping container "main" to itself.
+func rgClaim(pod *corev1.Pod, uid types.UID) *corev1.Pod {
+	claimed, err := podcontract.ClaimGroupTarget(pod, podcontract.RestoreGroupClaim{
+		UID: uid, Mapping: podcontract.ContainerMapping{Source: "main", Destination: "main"},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return claimed
+}
+
+// rgRun schedules pod to node and runs it, as the scheduler and the kubelet
+// do: with an address and a running destination container "main".
+func rgRun(pod *corev1.Pod, node string) *corev1.Pod {
+	id := strings.TrimPrefix(pod.Name, "restore-")
+	pod.Spec.NodeName = node
+	pod.Status = corev1.PodStatus{
+		Phase:             corev1.PodRunning,
+		PodIP:             "10.1.0." + strconv.Itoa(int(id[0])),
+		ContainerStatuses: []corev1.ContainerStatus{{Name: "main", ContainerID: "containerd://" + id}},
+	}
+	return pod
+}
+
+// rgTargetPod is target id's restore Pod, claimed by "restore" and running on
+// node.
+func rgTargetPod(id, node string) *corev1.Pod {
+	return rgRun(rgClaim(rgGatedPod(id), "restore-uid"), node)
+}
+
+// rgReadyCluster returns the snapshot of ids, their target Pods claimed and
+// running on node-1, and a group-capable agent there.
 func rgReadyCluster(ids ...string) []client.Object {
 	objs := []client.Object{rgSnapshot(ids...), pgAgent("node-1", true, ptr.To("v1"))}
 	for _, id := range ids {
@@ -114,33 +172,25 @@ func rgReadyCluster(ids ...string) []client.Object {
 	return objs
 }
 
-// bind sets a Pod's binding to the PodGroupRestore name and uid, leaving out
-// the UID annotation when uid is empty.
-func bind(pod *corev1.Pod, name, uid string) {
-	pod.Annotations = map[string]string{podcontract.RestoreGroupAnnotation: name}
-	if uid != "" {
-		pod.Annotations[podcontract.RestoreGroupUIDAnnotation] = uid
+// rgGatedCluster returns the snapshot of ids, their target Pods as their owner
+// created them, and a group-capable agent on node-1.
+func rgGatedCluster(ids ...string) []client.Object {
+	objs := []client.Object{rgSnapshot(ids...), pgAgent("node-1", true, ptr.To("v1"))}
+	for _, id := range ids {
+		objs = append(objs, rgGatedPod(id))
 	}
-}
-
-// rgOtherRestore is another PodGroupRestore of the same snapshot, named
-// "other" with uid, which pinned target b's Pod, restore-b; conditions are its
-// own.
-func rgOtherRestore(uid types.UID, conditions ...metav1.Condition) *snapshotv1alpha1.PodGroupRestore {
-	other := rgRestore("b")
-	other.Name, other.UID = "other", uid
-	other.Status.Conditions = conditions
-	other.Status.Members = []snapshotv1alpha1.PodGroupRestoreMemberStatus{{
-		ID: "b", Phase: snapshotv1alpha1.RestorePhaseAdmitted,
-		Pod: &snapshotv1alpha1.ObjectIdentity{Name: "restore-b", UID: "restore-pod-uid-b"},
-	}}
-	return other
+	return objs
 }
 
 func reconcileRestore(t *testing.T, r *PodGroupRestoreReconciler) ctrl.Result {
 	t.Helper()
+	return reconcileNamedRestore(t, r, "restore")
+}
+
+func reconcileNamedRestore(t *testing.T, r *PodGroupRestoreReconciler, name string) ctrl.Result {
+	t.Helper()
 	res, err := r.Reconcile(context.Background(),
-		ctrl.Request{NamespacedName: types.NamespacedName{Namespace: pgNamespace, Name: "restore"}})
+		ctrl.Request{NamespacedName: types.NamespacedName{Namespace: pgNamespace, Name: name}})
 	require.NoError(t, err)
 	return res
 }
@@ -158,30 +208,54 @@ func restoreGone(t *testing.T, r *PodGroupRestoreReconciler) bool {
 	return apierrors.IsNotFound(err)
 }
 
-// rgReport plays target id's agent: it reports conditions on the restore Pod
-// under this restore's UID.
-func rgReport(t *testing.T, r *PodGroupRestoreReconciler, id string, conditions ...corev1.PodCondition) {
+// rgPod reads target id's whole Pod from the API server.
+func rgPod(t *testing.T, r *PodGroupRestoreReconciler, id string) *corev1.Pod {
 	t.Helper()
-	rgReportAs(t, r, id, "restore-uid", conditions...)
+	pod := &corev1.Pod{}
+	require.NoError(t, rgAPI(r).Get(context.Background(), types.NamespacedName{Namespace: pgNamespace, Name: "restore-" + id}, pod))
+	return pod
 }
 
-// rgReportAs reports conditions on target id's restore Pod under reportUID,
-// or with no report UID when it is empty. The agent writes both in one update
-// of the Pod's status, which the fake client cannot: it keeps a status update's
-// metadata out, so this writes them in turn.
-func rgReportAs(t *testing.T, r *PodGroupRestoreReconciler, id, reportUID string, conditions ...corev1.PodCondition) {
+// rgWrite writes target id's Pod as change leaves it: its spec and metadata,
+// then its status, as the scheduler and the kubelet would.
+func rgWrite(t *testing.T, r *PodGroupRestoreReconciler, id string, change func(*corev1.Pod)) {
 	t.Helper()
 	ctx := context.Background()
-	pod := &corev1.Pod{}
-	require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: pgNamespace, Name: "restore-" + id}, pod))
-	if reportUID == "" {
-		delete(pod.Annotations, podcontract.RestoreGroupReportUIDAnnotation)
-	} else {
-		pod.Annotations[podcontract.RestoreGroupReportUIDAnnotation] = reportUID
-	}
-	require.NoError(t, r.Update(ctx, pod))
+	pod := rgPod(t, r, id)
+	change(pod)
+	status := pod.Status
+	require.NoError(t, rgAPI(r).Update(ctx, pod))
+	pod.Status = status
+	require.NoError(t, rgAPI(r).Status().Update(ctx, pod))
+}
+
+// rgReport plays target id's agent: it writes conditions on the restore Pod,
+// which its binding ties to the restore that claimed it.
+func rgReport(t *testing.T, r *PodGroupRestoreReconciler, id string, conditions ...corev1.PodCondition) {
+	t.Helper()
+	pod := rgPod(t, r, id)
 	pod.Status.Conditions = conditions
-	require.NoError(t, r.Status().Update(ctx, pod))
+	require.NoError(t, rgAPI(r).Status().Update(context.Background(), pod))
+}
+
+// assertGated asserts that target id's Pod is still as its owner created it:
+// gated and unbound.
+func assertGated(t *testing.T, r *PodGroupRestoreReconciler, id string) {
+	t.Helper()
+	pod := rgPod(t, r, id)
+	assert.True(t, podcontract.HasRestoreGroupGate(pod), "restore-%s keeps its gate", id)
+	_, bound, _ := podcontract.RestoreGroupClaimOf(pod.Annotations)
+	assert.False(t, bound, "restore-%s is unbound", id)
+}
+
+// assertClaimed asserts that target id's Pod was claimed for uid, and that
+// the claim changed nothing else on before, the Pod as it was read for the
+// claim.
+func assertClaimed(t *testing.T, r *PodGroupRestoreReconciler, id string, uid types.UID, before *corev1.Pod) {
+	t.Helper()
+	want, got := rgClaim(before, uid), rgPod(t, r, id)
+	want.ResourceVersion, got.ResourceVersion = "", ""
+	assert.Equal(t, want, got, "restore-%s carries the claim and nothing else changed", id)
 }
 
 // countStatusPatches makes r count its status patches.
@@ -196,22 +270,225 @@ func countStatusPatches(r *PodGroupRestoreReconciler) *int {
 	return patches
 }
 
+// rgCondition finds a condition.
+func rgCondition(conditions []metav1.Condition, condType string) *metav1.Condition {
+	for i := range conditions {
+		if conditions[i].Type == condType {
+			return &conditions[i]
+		}
+	}
+	return nil
+}
+
 func TestPodGroupRestoreReconciler_AddsFinalizerFirst(t *testing.T) {
 	restore := rgRestore("a")
 	restore.Finalizers = nil
-	r, _ := makePodGroupRestoreReconciler(t, append(rgReadyCluster("a"), restore)...)
+	r, _ := makePodGroupRestoreReconciler(t, append(rgGatedCluster("a"), restore)...)
 
 	reconcileRestore(t, r)
 
 	got := getRestore(t, r)
 	assert.Equal(t, []string{snapshotv1alpha1.PodGroupInUseFinalizer}, got.Finalizers)
 	assert.Empty(t, got.Status.Members, "the finalizer pass pins nothing")
+	assertGated(t, r, "a")
+}
+
+// TestPodGroupRestoreReconciler_ClaimsEveryTargetOnceAllPass claims every
+// target in one reconcile, each in one update that changes nothing but the
+// claim, and keeps another scheduler's gate; then waits for scheduling.
+func TestPodGroupRestoreReconciler_ClaimsEveryTargetOnceAllPass(t *testing.T) {
+	gang := corev1.PodSchedulingGate{Name: "example.com/gang"}
+	b := rgGatedPod("b")
+	b.Spec.SchedulingGates = append([]corev1.PodSchedulingGate{gang}, b.Spec.SchedulingGates...)
+	r, recorder := makePodGroupRestoreReconciler(t, rgSnapshot("a", "b"), pgAgent("node-1", true, ptr.To("v1")),
+		rgGatedPod("a"), b, rgRestore("a", "b"))
+	before := map[string]*corev1.Pod{"a": rgPod(t, r, "a"), "b": rgPod(t, r, "b")}
+
+	res := reconcileRestore(t, r)
+
+	assertClaimed(t, r, "a", "restore-uid", before["a"])
+	assertClaimed(t, r, "b", "restore-uid", before["b"])
+	assert.Equal(t, "main=main", rgPod(t, r, "a").Annotations[podcontract.RestoreContainerMapAnnotation])
+	assert.Equal(t, []corev1.PodSchedulingGate{gang}, rgPod(t, r, "b").Spec.SchedulingGates, "another scheduler's gate stays")
+	got := getRestore(t, r)
+	for _, m := range got.Status.Members {
+		assert.Equal(t, snapshotv1alpha1.RestorePhasePending, m.Phase, m.ID)
+		assert.Nil(t, m.Pod, "a claim pins nothing")
+	}
+	assert.Nil(t, rgCondition(got.Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed))
+	assert.Positive(t, res.RequeueAfter)
+	assert.Empty(t, drainEvents(recorder))
+
+	t.Run("then waits for the claimed Pods to be scheduled", func(t *testing.T) {
+		reconcileRestore(t, r)
+		admitted := rgCondition(getRestore(t, r).Status.Conditions, snapshotv1alpha1.PodGroupConditionAdmitted)
+		require.NotNil(t, admitted)
+		assert.Equal(t, snapshotv1alpha1.PodGroupReasonTargetPodUnscheduled, admitted.Reason)
+		assert.Equal(t, `target "a": Pod "restore-a" is not scheduled to a node yet; `+
+			`target "b": Pod "restore-b" is not scheduled to a node yet`, admitted.Message)
+	})
+}
+
+// TestPodGroupRestoreReconciler_ClaimsNothingUntilEveryTargetPasses keeps
+// every target gated while a peer is missing or refused.
+func TestPodGroupRestoreReconciler_ClaimsNothingUntilEveryTargetPasses(t *testing.T) {
+	t.Run("a missing target", func(t *testing.T) {
+		r, _ := makePodGroupRestoreReconciler(t, rgSnapshot("a", "b"), pgAgent("node-1", true, ptr.To("v1")),
+			rgGatedPod("a"), rgRestore("a", "b"))
+
+		res := reconcileRestore(t, r)
+
+		admitted := rgCondition(getRestore(t, r).Status.Conditions, snapshotv1alpha1.PodGroupConditionAdmitted)
+		require.NotNil(t, admitted)
+		assert.Equal(t, snapshotv1alpha1.PodGroupReasonTargetPodPending, admitted.Reason)
+		assert.Equal(t, `target "b": Pod "restore-b" does not exist yet`, admitted.Message)
+		assert.InDelta(t, time.Until(getRestore(t, r).CreationTimestamp.Add(600*time.Second)).Seconds(), res.RequeueAfter.Seconds(), 5,
+			"the Pod's creation wakes it, not polling")
+		assertGated(t, r, "a")
+
+		require.NoError(t, rgAPI(r).Create(context.Background(), rgGatedPod("b")))
+		reconcileRestore(t, r)
+		_, bound, _ := podcontract.RestoreGroupClaimOf(rgPod(t, r, "a").Annotations)
+		assert.True(t, bound, "both are claimed once both exist")
+	})
+
+	t.Run("a refused target", func(t *testing.T) {
+		ungated := rgGatedPod("b")
+		ungated.Spec.SchedulingGates = nil
+		r, _ := makePodGroupRestoreReconciler(t, rgSnapshot("a", "b"), rgGatedPod("a"), ungated, rgRestore("a", "b"))
+
+		reconcileRestore(t, r)
+
+		failed := rgCondition(getRestore(t, r).Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed)
+		require.NotNil(t, failed)
+		assert.Equal(t, snapshotv1alpha1.PodGroupReasonRefused, failed.Reason)
+		assertGated(t, r, "a")
+	})
+}
+
+// TestPodGroupRestoreReconciler_ClaimsAgainAfterAConflict makes the scheduler
+// write target b's status between admission's read and the claim, as it does
+// for a gated Pod. The claim of b conflicts, and the next reconcile reads b
+// again and claims it, keeping the scheduler's condition.
+func TestPodGroupRestoreReconciler_ClaimsAgainAfterAConflict(t *testing.T) {
+	r, _ := makePodGroupRestoreReconciler(t, append(rgGatedCluster("a", "b"), rgRestore("a", "b"))...)
+	before := rgPod(t, r, "a")
+	gatedCondition := corev1.PodCondition{Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: "SchedulingGated"}
+	written := false
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if pod, ok := obj.(*corev1.Pod); ok && pod.Name == "restore-b" && !written {
+				written = true
+				scheduler := rgPod(t, r, "b")
+				scheduler.Status.Conditions = append(scheduler.Status.Conditions, gatedCondition)
+				require.NoError(t, rgAPI(r).Status().Update(ctx, scheduler))
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+	})
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: pgNamespace, Name: "restore"}})
+
+	require.True(t, apierrors.IsConflict(err), "the reconcile ends with the conflict: %v", err)
+	assertClaimed(t, r, "a", "restore-uid", before)
+	assertGated(t, r, "b")
+	assert.Nil(t, rgCondition(getRestore(t, r).Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed),
+		"a conflict alone proves nothing")
+
+	beforeB := rgPod(t, r, "b")
+	reconcileRestore(t, r)
+	assertClaimed(t, r, "b", "restore-uid", beforeB)
+	assert.Contains(t, rgPod(t, r, "b").Status.Conditions, gatedCondition)
+}
+
+// TestPodGroupRestoreReconciler_ResumesAfterACrashBetweenClaims finds target
+// a claimed and b still gated, as a crash between the two claims leaves them,
+// and claims b alone.
+func TestPodGroupRestoreReconciler_ResumesAfterACrashBetweenClaims(t *testing.T) {
+	r, _ := makePodGroupRestoreReconciler(t, rgSnapshot("a", "b"), pgAgent("node-1", true, ptr.To("v1")),
+		rgClaim(rgGatedPod("a"), "restore-uid"), rgGatedPod("b"), rgRestore("a", "b"))
+	a, b := rgPod(t, r, "a"), rgPod(t, r, "b")
+
+	reconcileRestore(t, r)
+
+	assert.Equal(t, a.ResourceVersion, rgPod(t, r, "a").ResourceVersion, "the claimed Pod is not written again")
+	assertClaimed(t, r, "b", "restore-uid", b)
+	assert.Nil(t, rgCondition(getRestore(t, r).Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed))
+}
+
+// TestPodGroupRestoreReconciler_TwoRestoresNameTheSamePod lets one restore
+// claim a Pod, and refuses the other with TargetInUse, without reading it.
+func TestPodGroupRestoreReconciler_TwoRestoresNameTheSamePod(t *testing.T) {
+	other := rgRestore("a")
+	other.Name, other.UID = "other", "other-uid"
+	r, recorder := makePodGroupRestoreReconciler(t, append(rgGatedCluster("a"), other, rgRestore("a"))...)
+	before := rgPod(t, r, "a")
+
+	reconcileNamedRestore(t, r, "other")
+	reconcileRestore(t, r)
+
+	assertClaimed(t, r, "a", "other-uid", before)
+	failed := rgCondition(getRestore(t, r).Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, snapshotv1alpha1.PodGroupReasonTargetInUse, failed.Reason)
+	assert.Equal(t, `target "a": Pod "restore-a" is claimed by another PodGroupRestore, with UID "other-uid"`, failed.Message)
+	assert.Equal(t, []string{"Warning TargetInUse " + failed.Message}, drainEvents(recorder))
+}
+
+// TestPodGroupRestoreReconciler_PinsOnceEveryClaimedPodRuns follows claimed
+// Pods through scheduling, one of them held by a gang's gate, to the pins:
+// TargetPodUnscheduled, then TargetPodPending, then one status patch.
+func TestPodGroupRestoreReconciler_PinsOnceEveryClaimedPodRuns(t *testing.T) {
+	gang := corev1.PodSchedulingGate{Name: "example.com/gang"}
+	b := rgClaim(rgGatedPod("b"), "restore-uid")
+	b.Spec.SchedulingGates = []corev1.PodSchedulingGate{gang}
+	r, _ := makePodGroupRestoreReconciler(t, rgSnapshot("a", "b"), pgAgent("node-1", true, ptr.To("v1")),
+		pgAgent("node-2", true, ptr.To("v1")), rgClaim(rgGatedPod("a"), "restore-uid"), b, rgRestore("a", "b"))
+	admitted := func() *metav1.Condition {
+		t.Helper()
+		condition := rgCondition(getRestore(t, r).Status.Conditions, snapshotv1alpha1.PodGroupConditionAdmitted)
+		require.NotNil(t, condition)
+		return condition
+	}
+	scheduled := func(node string) func(*corev1.Pod) {
+		return func(pod *corev1.Pod) { pod.Spec.SchedulingGates, pod.Spec.NodeName = nil, node }
+	}
+
+	res := reconcileRestore(t, r)
+	assert.Equal(t, snapshotv1alpha1.PodGroupReasonTargetPodUnscheduled, admitted().Reason)
+	assert.InDelta(t, time.Until(getRestore(t, r).CreationTimestamp.Add(600*time.Second)).Seconds(), res.RequeueAfter.Seconds(), 5,
+		"a Pod's scheduling wakes it, not polling")
+
+	rgWrite(t, r, "a", scheduled("node-1"))
+	reconcileRestore(t, r)
+	assert.Equal(t, `target "b": Pod "restore-b" is not scheduled to a node yet`, admitted().Message,
+		"the gang's gate still holds b")
+
+	rgWrite(t, r, "b", scheduled("node-2"))
+	reconcileRestore(t, r)
+	assert.Equal(t, snapshotv1alpha1.PodGroupReasonTargetPodPending, admitted().Reason)
+	assert.Equal(t, `target "a": Pod "restore-a" has no IP address yet; target "b": Pod "restore-b" has no IP address yet`,
+		admitted().Message)
+
+	rgWrite(t, r, "a", func(pod *corev1.Pod) { rgRun(pod, "node-1") })
+	rgWrite(t, r, "b", func(pod *corev1.Pod) { rgRun(pod, "node-2") })
+	patches := countStatusPatches(r)
+	reconcileRestore(t, r)
+	assert.Equal(t, 1, *patches, "every member is pinned in one status patch")
+	got := getRestore(t, r)
+	assert.Equal(t, snapshotv1alpha1.PodGroupReasonAdmitting, admitted().Reason)
+	for i, node := range []string{"node-1", "node-2"} {
+		m := got.Status.Members[i]
+		assert.Equal(t, snapshotv1alpha1.RestorePhaseAdmitted, m.Phase, m.ID)
+		assert.Equal(t, node, m.NodeName, m.ID)
+		assert.Equal(t, rgPod(t, r, m.ID).UID, m.Pod.UID, m.ID)
+	}
 }
 
 // TestPodGroupRestoreReconciler_Lifecycle pins two members on different nodes,
-// targets listed out of rank order, in one patch, then follows their agents' reports to Ready, checking at every
-// step that a freshly started reconciler derives the same status and emits
-// nothing.
+// targets listed out of rank order, in one patch, then follows their agents'
+// reports to Ready, checking at every step that a freshly started reconciler
+// derives the same status and emits nothing.
 func TestPodGroupRestoreReconciler_Lifecycle(t *testing.T) {
 	restore := rgRestore("b", "a") // targets in another order than the snapshot's ranks
 	objs := []client.Object{rgSnapshot("a", "b"), restore, rgTargetPod("a", "node-1"), rgTargetPod("b", "node-2"),
@@ -286,45 +563,91 @@ func TestPodGroupRestoreReconciler_Lifecycle(t *testing.T) {
 	restartChecks("ready")
 }
 
-// rgCondition finds a condition.
-func rgCondition(conditions []metav1.Condition, condType string) *metav1.Condition {
-	for i := range conditions {
-		if conditions[i].Type == condType {
-			return &conditions[i]
+// onPodB returns a change of the cluster that changes target b's Pod.
+func onPodB(change func(pod *corev1.Pod)) func(objs []client.Object) {
+	return func(objs []client.Object) {
+		for _, obj := range objs {
+			if pod, ok := obj.(*corev1.Pod); ok && pod.Name == "restore-b" {
+				change(pod)
+			}
 		}
 	}
-	return nil
 }
 
-func TestPodGroupRestoreReconciler_RefusesBeforePinningAnything(t *testing.T) {
-	// otherRestore is an unfinished restore that pinned member b's target Pod.
-	otherRestore := func() *snapshotv1alpha1.PodGroupRestore { return rgOtherRestore("other-uid") }
-	onB := func(change func(pod *corev1.Pod)) func(objs []client.Object) {
-		return func(objs []client.Object) {
-			for _, obj := range objs {
-				if pod, ok := obj.(*corev1.Pod); ok && pod.Name == "restore-b" {
-					change(pod)
-				}
+// rgRefusalCase is a restore of targets a and b that admission refuses.
+type rgRefusalCase struct {
+	name       string
+	restore    func(restore *snapshotv1alpha1.PodGroupRestore)
+	cluster    func(objs []client.Object)
+	wantReason string
+	wantMsg    string
+	// wantPrefix, when set, replaces wantMsg with a prefix of the message.
+	wantPrefix string
+}
+
+// runRefusals runs each refusal case on the restore of a and b and the given
+// Pods, with no agent anywhere, since a refusal never waits for one. Each is
+// refused with nothing pinned and one warning event, leaves every Pod as it
+// was, and stays as it is on the next pass.
+func runRefusals(t *testing.T, pods func() []client.Object, cases []rgRefusalCase) {
+	t.Helper()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			restore := rgRestore("a", "b")
+			if tc.restore != nil {
+				tc.restore(restore)
 			}
-		}
-	}
-	started := func(reportUID string) func(objs []client.Object) {
-		return onB(func(pod *corev1.Pod) {
-			pod.Status.Conditions = []corev1.PodCondition{{Type: podcontract.RestoreStartedCondition, Status: corev1.ConditionFalse}}
-			if reportUID != "" {
-				pod.Annotations[podcontract.RestoreGroupReportUIDAnnotation] = reportUID
+			objs := append([]client.Object{rgSnapshot("a", "b")}, pods()...)
+			if tc.cluster != nil {
+				tc.cluster(objs)
 			}
+			r, recorder := makePodGroupRestoreReconciler(t, append(objs, restore)...)
+			before := map[string]*corev1.Pod{"a": rgPod(t, r, "a"), "b": rgPod(t, r, "b")}
+
+			res := reconcileRestore(t, r)
+
+			assert.Zero(t, res.RequeueAfter)
+			got := getRestore(t, r)
+			failed := rgCondition(got.Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed)
+			require.NotNil(t, failed)
+			assert.Equal(t, tc.wantReason, failed.Reason)
+			if tc.wantPrefix != "" {
+				assert.True(t, strings.HasPrefix(failed.Message, tc.wantPrefix), failed.Message)
+			} else {
+				assert.Equal(t, tc.wantMsg, failed.Message)
+			}
+			admitted := rgCondition(got.Status.Conditions, snapshotv1alpha1.PodGroupConditionAdmitted)
+			require.NotNil(t, admitted)
+			assert.Equal(t, metav1.ConditionFalse, admitted.Status)
+			assert.Equal(t, tc.wantReason, admitted.Reason)
+			require.Len(t, got.Status.Members, len(restore.Spec.Targets))
+			for _, m := range got.Status.Members {
+				assert.Equal(t, snapshotv1alpha1.RestorePhaseFailed, m.Phase, m.ID)
+				assert.Equal(t, tc.wantReason, m.Reason, m.ID)
+				assert.Equal(t, podGroupRestoreRefusedMemberMessage, m.Message, m.ID)
+				assert.Nil(t, m.Pod, "nothing is pinned")
+				assert.Empty(t, m.TargetPodIP, "nothing is pinned")
+			}
+			assert.True(t, podGroupRestoreFinished(&got.Status))
+			for id, pod := range before {
+				assert.Equal(t, pod, rgPod(t, r, id), "restore-%s is left as it was: never claimed, never repaired", id)
+			}
+			events := drainEvents(recorder)
+			require.Len(t, events, 1)
+			assert.True(t, strings.HasPrefix(events[0], "Warning "+tc.wantReason+" "), events[0])
+
+			// A refusal is final: nothing changes on the next pass.
+			reconcileRestore(t, r)
+			assert.Equal(t, got.ResourceVersion, getRestore(t, r).ResourceVersion)
 		})
 	}
+}
 
-	for _, tc := range []struct {
-		name       string
-		restore    func(restore *snapshotv1alpha1.PodGroupRestore)
-		cluster    func(objs []client.Object)
-		extra      []client.Object
-		wantReason string
-		wantMsg    string
-	}{
+func TestPodGroupRestoreReconciler_RefusesBeforeClaimingAnything(t *testing.T) {
+	gatedPods := func() []client.Object { return []client.Object{rgGatedPod("a"), rgGatedPod("b")} }
+	started := corev1.PodCondition{Type: podcontract.RestoreStartedCondition, Status: corev1.ConditionFalse}
+	const claimRefusal = `target "b": Pod "restore-b" cannot be claimed: `
+	runRefusals(t, gatedPods, []rgRefusalCase{
 		{
 			name:       "the snapshot is missing",
 			restore:    func(r *snapshotv1alpha1.PodGroupRestore) { r.Spec.SnapshotRef.Name = "missing" },
@@ -338,10 +661,8 @@ func TestPodGroupRestoreReconciler_RefusesBeforePinningAnything(t *testing.T) {
 			wantMsg:    `PodGroupSnapshot "group" has UID "group-uid", not "old-group-uid": it was recreated`,
 		},
 		{
-			name: "the snapshot is being deleted",
-			cluster: func(objs []client.Object) {
-				objs[0].SetDeletionTimestamp(ptr.To(metav1.Now()))
-			},
+			name:       "the snapshot is being deleted",
+			cluster:    func(objs []client.Object) { objs[0].SetDeletionTimestamp(ptr.To(metav1.Now())) },
 			wantReason: snapshotv1alpha1.PodGroupReasonRefused,
 			wantMsg:    `PodGroupSnapshot "group" is being deleted`,
 		},
@@ -383,41 +704,35 @@ func TestPodGroupRestoreReconciler_RefusesBeforePinningAnything(t *testing.T) {
 			wantMsg:    `target "b" maps container "sidecar", but member "b" was checkpointed from container "main"`,
 		},
 		{
-			name:       "a target Pod without the annotation",
-			cluster:    onB(func(pod *corev1.Pod) { pod.Annotations = nil }),
+			name:       "a Pod created without the gate",
+			cluster:    onPodB(func(pod *corev1.Pod) { pod.Spec.SchedulingGates = nil }),
 			wantReason: snapshotv1alpha1.PodGroupReasonRefused,
-			wantMsg:    `target "b": Pod "restore-b" is not a group target: it has no nvidia.com/restore-group annotation`,
+			wantMsg: `target "b": Pod "restore-b" is not a group target: ` +
+				`it has neither the nvidia.com/restore-group scheduling gate nor a claim`,
 		},
 		{
-			name:       "a target Pod bound to another unfinished restore",
-			cluster:    onB(func(pod *corev1.Pod) { bind(pod, "other", "other-uid") }),
-			extra:      []client.Object{otherRestore()},
+			name: "a Pod another restore claimed",
+			cluster: onPodB(func(pod *corev1.Pod) {
+				*pod = *rgClaim(pod, "other-uid")
+			}),
 			wantReason: snapshotv1alpha1.PodGroupReasonTargetInUse,
-			wantMsg:    `target "b": Pod "restore-b" is bound to PodGroupRestore "other", which has not finished`,
+			wantMsg:    `target "b": Pod "restore-b" is claimed by another PodGroupRestore, with UID "other-uid"`,
 		},
 		{
-			name:       "a target Pod an earlier restore started on, with no report UID",
-			cluster:    started(""),
+			name: "a Pod an earlier restore started on, still claimed by it",
+			cluster: onPodB(func(pod *corev1.Pod) {
+				*pod = *rgClaim(pod, "earlier-uid")
+				pod.Status.Conditions = []corev1.PodCondition{started}
+			}),
+			wantReason: snapshotv1alpha1.PodGroupReasonTargetInUse,
+			wantMsg:    `target "b": Pod "restore-b" is claimed by another PodGroupRestore, with UID "earlier-uid"`,
+		},
+		{
+			name:       "a gated Pod that carries RestoreStarted",
+			cluster:    onPodB(func(pod *corev1.Pod) { pod.Status.Conditions = []corev1.PodCondition{started} }),
 			wantReason: snapshotv1alpha1.PodGroupReasonRefused,
 			wantMsg: `target "b": Pod "restore-b" carries nvidia.com/RestoreStarted: an earlier restore changed it, ` +
 				`so restoring needs a new Pod`,
-		},
-		{
-			name:       "a target Pod an earlier restore started on, under its own report UID",
-			cluster:    started("earlier-uid"),
-			wantReason: snapshotv1alpha1.PodGroupReasonRefused,
-			wantMsg: `target "b": Pod "restore-b" carries nvidia.com/RestoreStarted: an earlier restore changed it, ` +
-				`so restoring needs a new Pod`,
-		},
-		{
-			name: "a target Pod an earlier restore started on, bound to another unfinished restore",
-			cluster: func(objs []client.Object) {
-				onB(func(pod *corev1.Pod) { bind(pod, "other", "other-uid") })(objs)
-				started("other-uid")(objs)
-			},
-			extra:      []client.Object{otherRestore()},
-			wantReason: snapshotv1alpha1.PodGroupReasonTargetInUse,
-			wantMsg:    `target "b": Pod "restore-b" is bound to PodGroupRestore "other", which has not finished`,
 		},
 		{
 			name:       "a stale UID",
@@ -426,91 +741,92 @@ func TestPodGroupRestoreReconciler_RefusesBeforePinningAnything(t *testing.T) {
 			wantMsg:    `target "b": Pod "restore-b" has UID "restore-pod-uid-b", not "old-pod-uid": it was recreated`,
 		},
 		{
-			name:       "a UID another unfinished restore pinned",
-			extra:      []client.Object{otherRestore()},
-			wantReason: snapshotv1alpha1.PodGroupReasonTargetInUse,
-			wantMsg:    `target "b": Pod "restore-b" is pinned by PodGroupRestore "other", which has not finished`,
-		},
-		{
-			name:       "an IPv6 address",
-			cluster:    onB(func(pod *corev1.Pod) { pod.Status.PodIP = "fd00::2" }),
-			wantReason: snapshotv1alpha1.PodGroupReasonRefused,
-			wantMsg:    `target "b": Pod "restore-b" has the address "fd00::2", but a group restore supports only IPv4`,
-		},
-		{
-			name: "an IPv6 address on a Pod not bound to this restore yet",
-			cluster: onB(func(pod *corev1.Pod) {
-				bind(pod, "restore", "")
-				pod.Status.PodIP = "fd00::2"
+			name: "a destination that is not shaped as one",
+			cluster: onPodB(func(pod *corev1.Pod) {
+				pod.Spec.Containers[0].StartupProbe = nil
 			}),
 			wantReason: snapshotv1alpha1.PodGroupReasonRefused,
-			wantMsg:    `target "b": Pod "restore-b" has the address "fd00::2", but a group restore supports only IPv4`,
+			wantPrefix: claimRefusal + "the claim's destination is not a group target's: ",
 		},
 		{
-			name: "a running Pod without the destination container",
+			name: "a mapping into a container the Pod lacks",
 			restore: func(r *snapshotv1alpha1.PodGroupRestore) {
 				r.Spec.Targets[1].ContainerMappings = []snapshotv1alpha1.ContainerMapping{{Source: "main", Destination: "server"}}
 			},
 			wantReason: snapshotv1alpha1.PodGroupReasonRefused,
-			wantMsg:    `target "b": Pod "restore-b" runs but has no container "server" to restore into`,
+			wantMsg: claimRefusal + `the claim's destination is not a group target's: ` +
+				`restore pod has no destination container named "server"`,
 		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			restore := rgRestore("a", "b")
-			if tc.restore != nil {
-				tc.restore(restore)
-			}
-			// No agent runs anywhere: a refusal never waits for one.
-			objs := []client.Object{rgSnapshot("a", "b"), rgTargetPod("a", "node-1"), rgTargetPod("b", "node-1")}
-			if tc.cluster != nil {
-				tc.cluster(objs)
-			}
-			r, recorder := makePodGroupRestoreReconciler(t, append(append(objs, restore), tc.extra...)...)
-
-			res := reconcileRestore(t, r)
-
-			assert.Zero(t, res.RequeueAfter)
-			got := getRestore(t, r)
-			failed := rgCondition(got.Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed)
-			require.NotNil(t, failed)
-			assert.Equal(t, tc.wantReason, failed.Reason)
-			assert.Equal(t, tc.wantMsg, failed.Message)
-			admitted := rgCondition(got.Status.Conditions, snapshotv1alpha1.PodGroupConditionAdmitted)
-			require.NotNil(t, admitted)
-			assert.Equal(t, metav1.ConditionFalse, admitted.Status)
-			assert.Equal(t, tc.wantReason, admitted.Reason)
-			require.Len(t, got.Status.Members, len(restore.Spec.Targets))
-			for _, m := range got.Status.Members {
-				assert.Equal(t, snapshotv1alpha1.RestorePhaseFailed, m.Phase, m.ID)
-				assert.Equal(t, tc.wantReason, m.Reason, m.ID)
-				assert.Equal(t, podGroupRestoreRefusedMemberMessage, m.Message, m.ID)
-				assert.Nil(t, m.Pod, "nothing is pinned")
-				assert.Empty(t, m.TargetPodIP, "nothing is pinned")
-			}
-			assert.True(t, podGroupRestoreFinished(&got.Status))
-			events := drainEvents(recorder)
-			require.Len(t, events, 1)
-			assert.True(t, strings.HasPrefix(events[0], "Warning "+tc.wantReason+" "), events[0])
-
-			// A refusal is final: nothing changes on the next pass.
-			reconcileRestore(t, r)
-			assert.Equal(t, got.ResourceVersion, getRestore(t, r).ResourceVersion)
-		})
-	}
+		{
+			name: "a gated Pod whose owner wrote a container map",
+			cluster: onPodB(func(pod *corev1.Pod) {
+				pod.Annotations = map[string]string{podcontract.RestoreContainerMapAnnotation: "main=main"}
+			}),
+			wantReason: snapshotv1alpha1.PodGroupReasonRefused,
+			wantMsg:    claimRefusal + "a group target to claim must not carry nvidia.com/restore-container-map",
+		},
+	})
 }
 
+func TestPodGroupRestoreReconciler_RefusesAfterTheClaim(t *testing.T) {
+	claimedPods := func() []client.Object { return []client.Object{rgTargetPod("a", "node-1"), rgTargetPod("b", "node-1")} }
+	runRefusals(t, claimedPods, []rgRefusalCase{
+		{
+			name:       "an IPv6 address",
+			cluster:    onPodB(func(pod *corev1.Pod) { pod.Status.PodIP = "fd00::2" }),
+			wantReason: snapshotv1alpha1.PodGroupReasonRefused,
+			wantMsg:    `target "b": Pod "restore-b" has the address "fd00::2", but a group restore supports only IPv4`,
+		},
+		{
+			name:       "a running Pod without the destination container",
+			cluster:    onPodB(func(pod *corev1.Pod) { pod.Status.ContainerStatuses[0].Name = "sidecar" }),
+			wantReason: snapshotv1alpha1.PodGroupReasonRefused,
+			wantMsg:    `target "b": Pod "restore-b" runs but has no container "main" to restore into`,
+		},
+		{
+			name: "a claimed Pod whose container map something else changed",
+			cluster: onPodB(func(pod *corev1.Pod) {
+				pod.Annotations[podcontract.RestoreContainerMapAnnotation] = "main=sidecar"
+			}),
+			wantReason: snapshotv1alpha1.PodGroupReasonRefused,
+			wantMsg:    `target "b": Pod "restore-b" is claimed by this PodGroupRestore with the container map main=sidecar, not main=main`,
+		},
+		{
+			name: "a claimed Pod gated again",
+			cluster: onPodB(func(pod *corev1.Pod) {
+				pod.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: podcontract.RestoreGroupSchedulingGate}}
+			}),
+			wantReason: snapshotv1alpha1.PodGroupReasonRefused,
+			wantMsg: `target "b": Pod "restore-b" is claimed by this PodGroupRestore ` +
+				`but carries the nvidia.com/restore-group scheduling gate again`,
+		},
+		{
+			name: "Pods claimed by an earlier PodGroupRestore of the same name",
+			cluster: func(objs []client.Object) {
+				for _, obj := range objs {
+					if pod, ok := obj.(*corev1.Pod); ok {
+						pod.Annotations[podcontract.RestoreGroupUIDAnnotation] = "earlier-restore-uid"
+					}
+				}
+			},
+			wantReason: snapshotv1alpha1.PodGroupReasonTargetInUse,
+			wantMsg:    `target "a": Pod "restore-a" is claimed by another PodGroupRestore, with UID "earlier-restore-uid"`,
+		},
+	})
+}
+
+// TestPodGroupRestoreReconciler_ConfirmsARefusal sees target b with an IPv6
+// address in the cache only: the API server has its IPv4 address, so the
+// restore is pinned.
 func TestPodGroupRestoreReconciler_ConfirmsARefusal(t *testing.T) {
-	objs := rgReadyCluster("a")
-	r, _ := makePodGroupRestoreReconciler(t, append(objs, rgRestore("a"))...)
-	// The cache has not seen the target Pod's annotation yet.
-	live := r.Client
-	r.Client = interceptor.NewClient(live.(client.WithWatch), interceptor.Funcs{
+	r, _ := makePodGroupRestoreReconciler(t, append(rgReadyCluster("a", "b"), rgRestore("a", "b"))...)
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 			if err := c.Get(ctx, key, obj, opts...); err != nil {
 				return err
 			}
-			if pod, ok := obj.(*corev1.Pod); ok && pod.Name == "restore-a" {
-				pod.Annotations = nil
+			if pod, ok := obj.(*corev1.Pod); ok && pod.Name == "restore-b" {
+				pod.Status.PodIP = "fd00::2"
 			}
 			return nil
 		},
@@ -519,175 +835,124 @@ func TestPodGroupRestoreReconciler_ConfirmsARefusal(t *testing.T) {
 	reconcileRestore(t, r)
 
 	got := getRestore(t, r)
-	assert.Nil(t, rgCondition(got.Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed), "the API server has the annotation")
-	assert.Equal(t, snapshotv1alpha1.RestorePhaseAdmitted, got.Status.Members[0].Phase)
+	assert.Nil(t, rgCondition(got.Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed), "the API server has an IPv4 address")
+	assert.Equal(t, snapshotv1alpha1.RestorePhaseAdmitted, got.Status.Members[1].Phase)
+	assert.Equal(t, rgTargetPod("b", "").Status.PodIP, got.Status.Members[1].TargetPodIP)
 }
 
-// TestPodGroupRestoreReconciler_ConfirmsAPass confirms a pass against the API
-// server before it pins anything: the cache has not seen restore "other" pin
-// target a's Pod, which the API server has, so the restore is refused with
-// TargetInUse although its target is bound to it.
+// TestPodGroupRestoreReconciler_ConfirmsAPass sees target b claimed with this
+// restore's map in the cache only: the API server shows the map that
+// something else wrote since, so the restore is refused with nothing pinned.
 func TestPodGroupRestoreReconciler_ConfirmsAPass(t *testing.T) {
-	other := rgOtherRestore("other-uid")
-	other.Status.Members[0].ID = "a"
-	other.Status.Members[0].Pod = &snapshotv1alpha1.ObjectIdentity{Name: "restore-a", UID: "restore-pod-uid-a"}
-	unpinned := other.DeepCopy()
-	unpinned.Status.Members = nil
-	r, recorder := makePodGroupRestoreReconciler(t, append(rgReadyCluster("a"), rgRestore("a"), unpinned)...)
-	live, _ := makePodGroupRestoreReconciler(t, append(rgReadyCluster("a"), rgRestore("a"), other)...)
-	r.NonCacheReadClient = live.Client
+	r, recorder := makePodGroupRestoreReconciler(t, append(rgReadyCluster("a", "b"), rgRestore("a", "b"))...)
+	rgWrite(t, r, "b", func(pod *corev1.Pod) { pod.Annotations[podcontract.RestoreContainerMapAnnotation] = "main=sidecar" })
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if pod, ok := obj.(*corev1.Pod); ok && pod.Name == "restore-b" {
+				pod.Annotations[podcontract.RestoreContainerMapAnnotation] = "main=main"
+			}
+			return nil
+		},
+	})
 
 	reconcileRestore(t, r)
 
 	got := getRestore(t, r)
 	failed := rgCondition(got.Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed)
 	require.NotNil(t, failed)
-	assert.Equal(t, snapshotv1alpha1.PodGroupReasonTargetInUse, failed.Reason)
-	assert.Equal(t, `target "a": Pod "restore-a" is pinned by PodGroupRestore "other", which has not finished`, failed.Message)
+	assert.Equal(t, snapshotv1alpha1.PodGroupReasonRefused, failed.Reason)
+	assert.Equal(t, `target "b": Pod "restore-b" is claimed by this PodGroupRestore with the container map main=sidecar, not main=main`,
+		failed.Message)
 	assert.Nil(t, got.Status.Members[0].Pod, "nothing is pinned")
-	assert.Equal(t, []string{"Warning TargetInUse " + failed.Message}, drainEvents(recorder))
+	assert.Equal(t, []string{"Warning Refused " + failed.Message}, drainEvents(recorder))
 }
 
-// TestPodGroupRestoreReconciler_ReadsOnlyThisAttemptsReport reuses a Pod that
-// still carries an earlier attempt's report: it is pinned, and its member
-// reads nothing until this restore's agent reports under this restore's UID.
-func TestPodGroupRestoreReconciler_ReadsOnlyThisAttemptsReport(t *testing.T) {
-	reused := rgTargetPod("a", "node-1")
-	reused.Annotations[podcontract.RestoreGroupReportUIDAnnotation] = "earlier-uid"
-	reused.Status.Conditions = []corev1.PodCondition{
-		prRestoreError, prGroupFailed(snapshotv1alpha1.PodGroupReasonRefused),
-	}
-	r, _ := makePodGroupRestoreReconciler(t, rgSnapshot("a"), pgAgent("node-1", true, ptr.To("v1")), reused, rgRestore("a"))
-
+// TestPodGroupRestoreReconciler_ReadsOnlyPodsBoundToIt ignores the conditions
+// of a pinned Pod while its binding names another restore.
+func TestPodGroupRestoreReconciler_ReadsOnlyPodsBoundToIt(t *testing.T) {
+	r, _ := makePodGroupRestoreReconciler(t, append(rgReadyCluster("a"), rgRestore("a"))...)
 	reconcileRestore(t, r)
-	got := getRestore(t, r)
-	require.NotNil(t, got.Status.Members[0].Pod, "the reused Pod is pinned")
-	assert.Equal(t, snapshotv1alpha1.RestorePhaseAdmitted, got.Status.Members[0].Phase, "the earlier report is not read")
-	assert.Nil(t, rgCondition(got.Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed))
+	require.NotNil(t, getRestore(t, r).Status.Members[0].Pod)
+	bindTo := func(uid string) func(*corev1.Pod) {
+		return func(pod *corev1.Pod) { pod.Annotations[podcontract.RestoreGroupUIDAnnotation] = uid }
+	}
 
-	t.Run("a report with no report UID is ignored", func(t *testing.T) {
-		rgReportAs(t, r, "a", "", prStarted, prRestoreError)
-		reconcileRestore(t, r)
-		m := getRestore(t, r).Status.Members[0]
-		assert.Equal(t, snapshotv1alpha1.RestorePhaseAdmitted, m.Phase)
-		assert.Nil(t, m.StartedAt)
-	})
+	rgWrite(t, r, "a", bindTo("other-uid"))
+	rgReport(t, r, "a", prStarted, prRestoreError)
+	reconcileRestore(t, r)
+	m := getRestore(t, r).Status.Members[0]
+	assert.Equal(t, snapshotv1alpha1.RestorePhaseAdmitted, m.Phase, "another restore's conditions are not read")
+	assert.Nil(t, m.StartedAt)
 
-	t.Run("a report under this restore's UID is read", func(t *testing.T) {
-		rgReport(t, r, "a", prStarted, prRestoreError, prGroupFailed(snapshotv1alpha1.PodGroupReasonPodIPChanged))
-		reconcileRestore(t, r)
-		m := getRestore(t, r).Status.Members[0]
-		assert.Equal(t, snapshotv1alpha1.RestorePhaseFailed, m.Phase)
-		assert.Equal(t, snapshotv1alpha1.PodGroupReasonPodIPChanged, m.Reason)
-		assert.NotNil(t, m.StartedAt)
-	})
+	rgWrite(t, r, "a", bindTo("restore-uid"))
+	reconcileRestore(t, r)
+	m = getRestore(t, r).Status.Members[0]
+	assert.Equal(t, snapshotv1alpha1.RestorePhaseFailed, m.Phase, "its own conditions are read")
+	assert.NotNil(t, m.StartedAt)
 }
 
 func TestPodGroupRestoreReconciler_Waits(t *testing.T) {
-	pod := func(mutate func(*corev1.Pod)) []client.Object {
+	podB := func(mutate func(*corev1.Pod)) []client.Object {
 		p := rgTargetPod("b", "node-1")
 		mutate(p)
 		return []client.Object{p}
 	}
-	bound := func(name, uid string) []client.Object {
-		return pod(func(p *corev1.Pod) { bind(p, name, uid) })
-	}
-	finished := metav1.Condition{Type: snapshotv1alpha1.PodGroupConditionFailed, Status: metav1.ConditionTrue,
-		Reason: "Refused", LastTransitionTime: metav1.Now()}
-	const notBoundYet = `target "b": Pod "restore-b" is not bound to this PodGroupRestore yet: `
+	groupAgent := []client.Object{pgAgent("node-1", true, ptr.To("v1"))}
 	for _, tc := range []struct {
 		name        string
 		targetB     []client.Object
 		agents      []client.Object
-		extra       []client.Object
 		wantReason  string
 		wantMsg     string
 		wantRequeue func(deadline time.Duration) time.Duration
 	}{
 		{
-			name:       "a target Pod bound to this restore's name without a UID",
-			targetB:    bound("restore", ""),
-			agents:     []client.Object{pgAgent("node-1", true, ptr.To("v1"))},
-			wantReason: snapshotv1alpha1.PodGroupReasonTargetPodPending,
-			wantMsg:    notBoundYet + `it names PodGroupRestore "restore" without a UID`,
-		},
-		{
-			name:       "a target Pod bound to an earlier PodGroupRestore that this one recreated under its name",
-			targetB:    bound("restore", "earlier-restore-uid"),
-			agents:     []client.Object{pgAgent("node-1", true, ptr.To("v1"))},
-			wantReason: snapshotv1alpha1.PodGroupReasonTargetPodPending,
-			wantMsg: notBoundYet + `it is bound to PodGroupRestore "restore" with UID "earlier-restore-uid", ` +
-				`an attempt that has finished or no longer exists`,
-		},
-		{
-			name:       "a target Pod bound to a finished restore",
-			targetB:    bound("other", "other-uid"),
-			extra:      []client.Object{rgOtherRestore("other-uid", finished)},
-			agents:     []client.Object{pgAgent("node-1", true, ptr.To("v1"))},
-			wantReason: snapshotv1alpha1.PodGroupReasonTargetPodPending,
-			wantMsg: notBoundYet + `it is bound to PodGroupRestore "other" with UID "other-uid", ` +
-				`an attempt that has finished or no longer exists`,
-		},
-		{
-			name:       "a target Pod bound to a missing restore",
-			targetB:    bound("other", "other-uid"),
-			agents:     []client.Object{pgAgent("node-1", true, ptr.To("v1"))},
-			wantReason: snapshotv1alpha1.PodGroupReasonTargetPodPending,
-			wantMsg: notBoundYet + `it is bound to PodGroupRestore "other" with UID "other-uid", ` +
-				`an attempt that has finished or no longer exists`,
-		},
-		{
-			name:    "a target Pod bound to a restore since recreated under the same name",
-			targetB: bound("other", "other-uid"),
-			extra: []client.Object{func() client.Object {
-				recreated := rgOtherRestore("recreated-other-uid")
-				recreated.Status.Members = nil // it has pinned nothing yet
-				return recreated
-			}()},
-			agents:     []client.Object{pgAgent("node-1", true, ptr.To("v1"))},
-			wantReason: snapshotv1alpha1.PodGroupReasonTargetPodPending,
-			wantMsg: notBoundYet + `it is bound to PodGroupRestore "other" with UID "other-uid", ` +
-				`an attempt that has finished or no longer exists`,
-		},
-		{
 			name:       "a target Pod that does not exist yet",
-			agents:     []client.Object{pgAgent("node-1", true, ptr.To("v1"))},
+			agents:     groupAgent,
 			wantReason: snapshotv1alpha1.PodGroupReasonTargetPodPending,
 			wantMsg:    `target "b": Pod "restore-b" does not exist yet`,
 		},
 		{
-			name:       "an unscheduled target Pod",
-			targetB:    pod(func(p *corev1.Pod) { p.Spec.NodeName, p.Status = "", corev1.PodStatus{Phase: corev1.PodPending} }),
-			agents:     []client.Object{pgAgent("node-1", true, ptr.To("v1"))},
-			wantReason: snapshotv1alpha1.PodGroupReasonTargetPodPending,
+			name:       "a claimed target Pod that is not scheduled",
+			targetB:    []client.Object{rgClaim(rgGatedPod("b"), "restore-uid")},
+			agents:     groupAgent,
+			wantReason: snapshotv1alpha1.PodGroupReasonTargetPodUnscheduled,
 			wantMsg:    `target "b": Pod "restore-b" is not scheduled to a node yet`,
 		},
 		{
 			name:       "a target Pod with no address yet",
-			targetB:    pod(func(p *corev1.Pod) { p.Status = corev1.PodStatus{Phase: corev1.PodPending} }),
-			agents:     []client.Object{pgAgent("node-1", true, ptr.To("v1"))},
+			targetB:    podB(func(p *corev1.Pod) { p.Status = corev1.PodStatus{Phase: corev1.PodPending} }),
+			agents:     groupAgent,
 			wantReason: snapshotv1alpha1.PodGroupReasonTargetPodPending,
 			wantMsg:    `target "b": Pod "restore-b" has no IP address yet`,
 		},
 		{
-			name: "a pending target Pod with no container status yet",
-			targetB: pod(func(p *corev1.Pod) {
-				p.Status.Phase, p.Status.ContainerStatuses = corev1.PodPending, nil
-			}),
-			agents:     []client.Object{pgAgent("node-1", true, ptr.To("v1"))},
+			name:       "a pending target Pod with no container status yet",
+			targetB:    podB(func(p *corev1.Pod) { p.Status.Phase, p.Status.ContainerStatuses = corev1.PodPending, nil }),
+			agents:     groupAgent,
 			wantReason: snapshotv1alpha1.PodGroupReasonTargetPodPending,
-			wantMsg:    `target "b": container "main" of Pod "restore-b" has no ID yet`,
+			wantMsg:    `target "b": Pod "restore-b" has no ID yet for container "main"`,
 		},
 		{
 			name:       "a destination container with no ID yet",
-			targetB:    pod(func(p *corev1.Pod) { p.Status.ContainerStatuses[0].ContainerID = "" }),
-			agents:     []client.Object{pgAgent("node-1", true, ptr.To("v1"))},
+			targetB:    podB(func(p *corev1.Pod) { p.Status.ContainerStatuses[0].ContainerID = "" }),
+			agents:     groupAgent,
 			wantReason: snapshotv1alpha1.PodGroupReasonTargetPodPending,
-			wantMsg:    `target "b": container "main" of Pod "restore-b" has no ID yet`,
+			wantMsg:    `target "b": Pod "restore-b" has no ID yet for container "main"`,
+		},
+		{
+			name:        "no agent on the claimed Pods' node",
+			targetB:     podB(func(*corev1.Pod) {}),
+			wantReason:  snapshotv1alpha1.PodGroupReasonAgentNotReady,
+			wantMsg:     `waiting for the node agent on 1 node(s): node "node-1": no node agent Pod runs on it`,
+			wantRequeue: func(time.Duration) time.Duration { return podGroupAdmissionRequeue },
 		},
 		{
 			name:        "an agent that does not support pod groups",
-			targetB:     pod(func(*corev1.Pod) {}),
+			targetB:     podB(func(*corev1.Pod) {}),
 			agents:      []client.Object{pgAgent("node-1", true, nil)},
 			wantReason:  snapshotv1alpha1.PodGroupReasonAgentNotReady,
 			wantMsg:     `waiting for the node agent on 1 node(s): node "node-1": agent Pod "agent-node-1" does not support pod groups`,
@@ -696,8 +961,7 @@ func TestPodGroupRestoreReconciler_Waits(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			objs := append([]client.Object{rgSnapshot("a", "b"), rgRestore("a", "b"), rgTargetPod("a", "node-1")}, tc.targetB...)
-			objs = append(append(objs, tc.extra...), tc.agents...)
-			r, recorder := makePodGroupRestoreReconciler(t, objs...)
+			r, recorder := makePodGroupRestoreReconciler(t, append(objs, tc.agents...)...)
 
 			res := reconcileRestore(t, r)
 
@@ -721,24 +985,6 @@ func TestPodGroupRestoreReconciler_Waits(t *testing.T) {
 			assert.Empty(t, drainEvents(recorder))
 		})
 	}
-}
-
-func TestPodGroupRestoreReconciler_AFinishedRestoreReleasesItsPods(t *testing.T) {
-	other := rgRestore("a")
-	other.Name, other.UID = "other", "other-uid"
-	other.Status = snapshotv1alpha1.PodGroupRestoreStatus{
-		Members: []snapshotv1alpha1.PodGroupRestoreMemberStatus{{
-			ID: "a", Phase: snapshotv1alpha1.RestorePhaseFailed, Reason: "Refused",
-			Pod: &snapshotv1alpha1.ObjectIdentity{Name: "restore-a", UID: "restore-pod-uid-a"},
-		}},
-		Conditions: []metav1.Condition{{Type: snapshotv1alpha1.PodGroupConditionFailed, Status: metav1.ConditionTrue,
-			Reason: "Refused", LastTransitionTime: metav1.Now()}},
-	}
-	r, _ := makePodGroupRestoreReconciler(t, append(rgReadyCluster("a"), rgRestore("a"), other)...)
-
-	reconcileRestore(t, r)
-
-	assert.Equal(t, snapshotv1alpha1.RestorePhaseAdmitted, getRestore(t, r).Status.Members[0].Phase)
 }
 
 func TestPodGroupRestoreReconciler_MemberReasons(t *testing.T) {
@@ -787,8 +1033,8 @@ func TestPodGroupRestoreReconciler_DeletedTargetPodFailsItsMember(t *testing.T) 
 	ctx := context.Background()
 
 	t.Run("a cache miss alone changes nothing", func(t *testing.T) {
-		live := r.Client
-		r.Client = interceptor.NewClient(live.(client.WithWatch), interceptor.Funcs{
+		cache := r.Client
+		r.Client = interceptor.NewClient(cache.(client.WithWatch), interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 				if _, ok := obj.(*corev1.Pod); ok && key.Name == "restore-b" {
 					return apierrors.NewNotFound(corev1.Resource("pods"), key.Name)
@@ -796,7 +1042,7 @@ func TestPodGroupRestoreReconciler_DeletedTargetPodFailsItsMember(t *testing.T) 
 				return c.Get(ctx, key, obj, opts...)
 			},
 		})
-		defer func() { r.Client = live }()
+		defer func() { r.Client = cache }()
 
 		reconcileRestore(t, r)
 		assert.Equal(t, snapshotv1alpha1.RestorePhaseAdmitted, getRestore(t, r).Status.Members[1].Phase)
@@ -869,6 +1115,17 @@ func TestPodGroupRestoreReconciler_Deletion(t *testing.T) {
 		assert.Equal(t, []string{"Warning Cancelled " + podGroupRestoreCancelledMessage}, drainEvents(recorder))
 	})
 
+	t.Run("a restore deleted before its claim claims nothing", func(t *testing.T) {
+		r, _ := makePodGroupRestoreReconciler(t, append(rgGatedCluster("a", "b"), rgRestore("a", "b"))...)
+		deleteRestore(t, r)
+
+		reconcileRestore(t, r)
+
+		assert.True(t, restoreGone(t, r))
+		assertGated(t, r, "a")
+		assertGated(t, r, "b")
+	})
+
 	t.Run("held while a member is Restoring", func(t *testing.T) {
 		r := setup(t)
 		rgReport(t, r, "a", prStarted)
@@ -916,6 +1173,9 @@ func TestPodGroupRestoreRequeue(t *testing.T) {
 			[]snapshotv1alpha1.RestorePhase{"Pending"}, 3 * time.Second},
 		{"waits for a target Pod", waiting(snapshotv1alpha1.PodGroupReasonTargetPodPending), time.Hour, nil,
 			[]snapshotv1alpha1.RestorePhase{"Pending"}, time.Hour},
+		{"waits for a target Pod to be scheduled", waiting(snapshotv1alpha1.PodGroupReasonTargetPodUnscheduled), time.Hour, nil,
+			[]snapshotv1alpha1.RestorePhase{"Pending"}, time.Hour},
+		{"claimed its targets", podGroupAdmission{}, time.Hour, nil, []snapshotv1alpha1.RestorePhase{"Pending"}, time.Hour},
 		{"a member restores", podGroupAdmission{}, time.Hour, nil, []snapshotv1alpha1.RestorePhase{"Restoring"}, time.Hour},
 		{"failed while a member restores", podGroupAdmission{}, time.Hour, []metav1.Condition{failed},
 			[]snapshotv1alpha1.RestorePhase{"Failed", "Restoring"}, time.Hour},
@@ -933,10 +1193,24 @@ func TestPodGroupRestoreRequeue(t *testing.T) {
 	}
 }
 
+// TestPodGroupRestoreMapsPods maps a Pod to every restore in its namespace
+// whose targets name it, whatever the Pod carries: a gated Pod names no
+// restore.
 func TestPodGroupRestoreMapsPods(t *testing.T) {
-	pod := rgTargetPod("a", "node-1")
-	assert.Equal(t, []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: pgNamespace, Name: "restore"}}},
-		restoreGroupPodToPodGroupRestore(context.Background(), pod))
-	pod.Annotations = nil
-	assert.Empty(t, restoreGroupPodToPodGroupRestore(context.Background(), pod))
+	other := rgRestore("a")
+	other.Name, other.UID = "other", "other-uid"
+	elsewhere := rgRestore("a", "b")
+	elsewhere.Namespace = "elsewhere"
+	r, _ := makePodGroupRestoreReconciler(t, rgRestore("a", "b"), other, elsewhere)
+	requests := func(pod *corev1.Pod) []string {
+		var names []string
+		for _, request := range r.podToPodGroupRestores(context.Background(), pod) {
+			names = append(names, request.Namespace+"/"+request.Name)
+		}
+		return names
+	}
+
+	assert.ElementsMatch(t, []string{pgNamespace + "/restore", pgNamespace + "/other"}, requests(rgGatedPod("a")))
+	assert.Equal(t, []string{pgNamespace + "/restore"}, requests(rgTargetPod("b", "node-1")))
+	assert.Empty(t, requests(rgGatedPod("c")))
 }

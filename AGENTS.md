@@ -248,9 +248,9 @@ sees describes the capability, not the mechanism behind it.
   coverage; follow the existing patterns rather than inventing new harnesses.
 - The operator's Pod informer cache is trimmed. `TrimPodForCache` in
   `operator/internal/controller/pod_cache.go` keeps metadata (minus
-  `managedFields`), `spec.nodeName`, `status.phase`, `status.podIP`, the
-  container and init-container statuses, and four conditions: `Ready`,
-  `nvidia.com/RestoreStarted`, `nvidia.com/Restored` and
+  `managedFields`), `spec.nodeName`, `spec.schedulingGates`, `status.phase`,
+  `status.podIP`, the container and init-container statuses, and four
+  conditions: `Ready`, `nvidia.com/RestoreStarted`, `nvidia.com/Restored` and
   `nvidia.com/GroupRestoreFailed`. It clears the rest of spec and status. A
   controller that reads any other Pod field from the cache gets a zero value,
   so extend the transform and its test in the same change.

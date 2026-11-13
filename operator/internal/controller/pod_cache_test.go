@@ -27,9 +27,10 @@ func TestTrimPodForCacheKeepsWhatControllersRead(t *testing.T) {
 			ManagedFields:     []metav1.ManagedFieldsEntry{{Manager: "kubelet"}},
 		},
 		Spec: corev1.PodSpec{
-			NodeName:   "node-1",
-			Containers: []corev1.Container{{Name: "main", Image: "img", Env: []corev1.EnvVar{{Name: "K", Value: "V"}}}},
-			Volumes:    []corev1.Volume{{Name: "v"}},
+			NodeName:        "node-1",
+			SchedulingGates: []corev1.PodSchedulingGate{{Name: podcontract.RestoreGroupSchedulingGate}, {Name: "example.com/gang"}},
+			Containers:      []corev1.Container{{Name: "main", Image: "img", Env: []corev1.EnvVar{{Name: "K", Value: "V"}}}},
+			Volumes:         []corev1.Volume{{Name: "v"}},
 		},
 		Status: corev1.PodStatus{
 			Phase:  corev1.PodRunning,
@@ -63,8 +64,10 @@ func TestTrimPodForCacheKeepsWhatControllersRead(t *testing.T) {
 	if got.ManagedFields != nil {
 		t.Fatalf("managedFields kept")
 	}
-	if got.Spec.NodeName != "node-1" || got.Spec.Containers != nil || got.Spec.Volumes != nil {
-		t.Fatalf("spec = %+v, want only nodeName", got.Spec)
+	// The claim table reads the scheduling gates, every one of them.
+	if got.Spec.NodeName != "node-1" || len(got.Spec.SchedulingGates) != 2 || !podcontract.HasRestoreGroupGate(got) ||
+		got.Spec.Containers != nil || got.Spec.Volumes != nil {
+		t.Fatalf("spec = %+v, want only nodeName and schedulingGates", got.Spec)
 	}
 	if got.Status.Phase != corev1.PodRunning || got.Status.PodIP != "10.0.0.7" || !containerReady(got, "main") ||
 		len(got.Status.InitContainerStatuses) != 1 || got.Status.PodIPs != nil || got.Status.HostIP != "" {

@@ -90,15 +90,18 @@ func prPod(id string, conditions ...corev1.PodCondition) podGroupRestoreMemberOb
 	return podGroupRestoreMemberObservation{report: podGroupRestoreReportOf(prReportedPod(id, "restore-uid", conditions...), "restore-uid")}
 }
 
-// prReportedPod is target id's restore Pod with a report of conditions under
-// reportUID, or with no report UID when it is empty.
-func prReportedPod(id, reportUID string, conditions ...corev1.PodCondition) *corev1.Pod {
+// prReportedPod is target id's restore Pod carrying conditions, claimed by
+// the PodGroupRestore with boundUID, or unbound when it is empty.
+func prReportedPod(id, boundUID string, conditions ...corev1.PodCondition) *corev1.Pod {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod-" + id, Namespace: "ns", UID: types.UID("pod-uid-" + id)},
 		Status:     corev1.PodStatus{Conditions: conditions},
 	}
-	if reportUID != "" {
-		pod.Annotations = map[string]string{podcontract.RestoreGroupReportUIDAnnotation: reportUID}
+	if boundUID != "" {
+		pod.Annotations = map[string]string{
+			podcontract.RestoreGroupUIDAnnotation:     boundUID,
+			podcontract.RestoreContainerMapAnnotation: "main=main",
+		}
 	}
 	return pod
 }
@@ -784,17 +787,23 @@ func TestPodGroupRestoreFinished(t *testing.T) {
 func TestPodGroupRestoreReportOf(t *testing.T) {
 	conditions := []corev1.PodCondition{prStarted, prRestoreError, prGroupFailed(snapshotv1alpha1.PodGroupReasonRefused)}
 	for _, tc := range []struct {
-		name      string
-		reportUID string
-		want      podGroupRestoreReport
+		name string
+		pod  *corev1.Pod
+		want podGroupRestoreReport
 	}{
-		{"a report under this restore's UID is read", "restore-uid",
+		{"the conditions of a Pod bound to this restore are read", prReportedPod("a", "restore-uid", conditions...),
 			podGroupRestoreReport{started: &conditions[0], restored: &conditions[1], groupFailed: &conditions[2]}},
-		{"an earlier attempt's report is ignored", "earlier-uid", podGroupRestoreReport{}},
-		{"a report with no report UID is ignored", "", podGroupRestoreReport{}},
+		{"the conditions of a Pod bound to another UID are ignored", prReportedPod("a", "other-uid", conditions...),
+			podGroupRestoreReport{}},
+		{"the conditions of an unbound Pod are ignored", prReportedPod("a", "", conditions...), podGroupRestoreReport{}},
+		{"the conditions of a Pod whose claim is invalid are ignored", func() *corev1.Pod {
+			pod := prReportedPod("a", "restore-uid", conditions...)
+			delete(pod.Annotations, podcontract.RestoreContainerMapAnnotation)
+			return pod
+		}(), podGroupRestoreReport{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, podGroupRestoreReportOf(prReportedPod("a", tc.reportUID, conditions...), "restore-uid"))
+			assert.Equal(t, tc.want, podGroupRestoreReportOf(tc.pod, "restore-uid"))
 		})
 	}
 }

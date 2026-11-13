@@ -30,20 +30,21 @@ type podGroupRestoreMemberObservation struct {
 	podDeleted bool
 }
 
-// podGroupRestoreReport is one attempt's report on a restore Pod: the
-// conditions the agent writes together with
-// nvidia.com/restore-group-report-uid. Each is nil when the report lacks it.
+// podGroupRestoreReport is one attempt's report on its restore Pod: the
+// conditions its agent writes. Each is nil when the report lacks it.
 type podGroupRestoreReport struct {
 	started, restored, groupFailed *corev1.PodCondition
 }
 
 // podGroupRestoreReportOf returns the report of the attempt with uid on pod:
-// its RestoreStarted, Restored and GroupRestoreFailed conditions, only when
-// the Pod's nvidia.com/restore-group-report-uid holds uid. A Pod reused from
-// an earlier attempt, or not yet reported on, yields an empty report, so the
-// status never reads another attempt's conditions.
+// its RestoreStarted, Restored and GroupRestoreFailed conditions, only while
+// the Pod's binding, read by podcontract.RestoreGroupClaimOf, holds uid. A
+// claimed Pod serves only the attempt its binding names, so its conditions
+// need no identity of their own; a Pod bound to another attempt, or whose
+// claim is invalid, yields an empty report.
 func podGroupRestoreReportOf(pod *corev1.Pod, uid types.UID) podGroupRestoreReport {
-	if uid == "" || pod.Annotations[podcontract.RestoreGroupReportUIDAnnotation] != string(uid) {
+	claim, bound, err := podcontract.RestoreGroupClaimOf(pod.Annotations)
+	if uid == "" || !bound || err != nil || claim.UID != uid {
 		return podGroupRestoreReport{}
 	}
 	return podGroupRestoreReport{
@@ -65,6 +66,10 @@ type podGroupRestoreObservation struct {
 	// pins holds, once admission passed, what to pin for each spec target, in
 	// spec order: pod, nodeName, containers and targetPodIP.
 	pins []snapshotv1alpha1.PodGroupRestoreMemberStatus
+	// claims holds the target Pods that admission prepared to claim, which
+	// the reconcile sends after it records the status. The status does not
+	// read them.
+	claims []*corev1.Pod
 	// deleting is true once the restore has a deletion timestamp.
 	deleting bool
 	// deadline is the restore's creation time plus spec.deadlineSeconds.
@@ -109,8 +114,9 @@ var podGroupRestoreKind = podGroupKind{
 // The status lists the members in spec order. When admission passes, it pins
 // every member at once, in the one status patch this status becomes. A member
 // reads only its report: the conditions this attempt's agent wrote on the
-// pinned Pod, under this restore's UID (see podGroupRestoreReportOf). Each
-// member's phase then comes from the first matching row:
+// pinned Pod, while the Pod's binding holds this restore's UID (see
+// podGroupRestoreReportOf). Each member's phase then comes from the first
+// matching row:
 //
 //	Failed     its report's nvidia.com/Restored is False with RestoreFailed or
 //	           RestoreIncompatible: the reason and message of the report's
