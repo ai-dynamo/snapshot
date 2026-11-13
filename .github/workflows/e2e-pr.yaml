@@ -159,12 +159,16 @@ jobs:
           echo "${DIGEST}" > "digest-${IMAGE}.txt"
 
       # Matrix legs share one set of job outputs, so digests travel as files.
+      # Artifacts belong to the run, not the attempt: a re-run replaces the
+      # earlier attempt's digest, and a re-run of only failed jobs still finds
+      # the one this leg recorded before.
       - name: Publish digest
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pr-e2e-digest-${{ matrix.image }}
           path: digest-${{ matrix.image }}.txt
           if-no-files-found: error
+          overwrite: true
 
   # Records which manifests this run qualifies, and fails before any GPU time is
   # spent if the tag no longer resolves to what was built here. The suites still

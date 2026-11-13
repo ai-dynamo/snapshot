@@ -38,6 +38,12 @@ def test_candidate_checks_every_built_image(jobs):
     assert record["env"]["DIGEST"] == "${{ steps.build.outputs.digest }}"
 
 
+def test_a_rerun_replaces_the_recorded_digests(jobs):
+    # Artifacts outlive an attempt, and an upload under an existing name fails.
+    publish = step(jobs["images"], "Publish digest")
+    assert publish["with"]["overwrite"] is True
+
+
 def test_pr_e2e_requires_every_other_job(jobs):
     # A job left out here could fail without failing the required check.
     aggregator = jobs["pr-e2e"]
