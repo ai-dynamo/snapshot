@@ -56,6 +56,109 @@ func TestCPUArchCheck(t *testing.T) {
 	}
 }
 
+func TestCPUFeaturesCheck(t *testing.T) {
+	features := func(flags ...string) Environment {
+		return Environment{CPUFeatures: flags}
+	}
+
+	tests := []struct {
+		name   string
+		source Environment
+		target Environment
+		want   []Mismatch
+	}{
+		{
+			name:   "same instruction sets",
+			source: features("avx2", "sse2"),
+			target: features("avx2", "sse2"),
+		},
+		{
+			name:   "target has more",
+			source: features("avx2", "sse2"),
+			target: features("avx2", "avx512f", "sse2"),
+		},
+		{
+			name:   "target is missing one",
+			source: features("avx2", "avx512f", "sse2"),
+			target: features("avx2", "sse2"),
+			want:   []Mismatch{{Check: CheckCPUFeatures, Source: "avx512f", Target: "missing"}},
+		},
+		{
+			name:   "every missing flag is named in one mismatch, sorted",
+			source: features("avx512vl", "avx512f", "avx2", "avx512bw"),
+			target: features("avx2"),
+			want:   []Mismatch{{Check: CheckCPUFeatures, Source: "avx512bw,avx512f,avx512vl", Target: "missing"}},
+		},
+		{
+			name:   "instructions CRIU's mask omits still refuse",
+			source: features("avx512ifma", "clwb", "sse2"),
+			target: features("sse2"),
+			want:   []Mismatch{{Check: CheckCPUFeatures, Source: "avx512ifma,clwb", Target: "missing"}},
+		},
+		{
+			name:   "flags that name no instruction never refuse",
+			source: features("avx2", "hypervisor", "constant_tsc"),
+			target: features("avx2"),
+		},
+		{
+			name:   "an arm64 target is missing one",
+			source: features("asimd", "fp", "sve", "sve2"),
+			target: features("asimd", "fp", "sve"),
+			want:   []Mismatch{{Check: CheckCPUFeatures, Source: "sve2", Target: "missing"}},
+		},
+		{
+			name:   "an arm64 timer event stream never refuses",
+			source: features("asimd", "evtstrm", "fp"),
+			target: features("asimd", "fp"),
+		},
+		{
+			name:   "arm64 hints never refuse",
+			source: features("asimd", "dgh", "fp", "rprfm"),
+			target: features("asimd", "fp"),
+		},
+		{
+			name:   "checkpoint taken before CPU features were recorded",
+			target: features("avx2"),
+		},
+		{
+			name:   "target CPU features unknown",
+			source: features("avx2", "avx512f"),
+		},
+		{
+			name:   "target lists no instruction set",
+			source: features("avx2", "avx512f"),
+			target: features("hypervisor", "constant_tsc"),
+		},
+		{
+			name: "neither side recorded CPU features",
+		},
+		{
+			name:   "source recorded an empty list",
+			source: Environment{CPUFeatures: []string{}},
+			target: features("avx2"),
+		},
+		{
+			name:   "target recorded an empty list",
+			source: features("avx2", "avx512f"),
+			target: Environment{CPUFeatures: []string{}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Compare(GatePreflight, tc.source, tc.target)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("Compare = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+
+	// The agent knows its own CPU before the placeholder container exists.
+	if got := Compare(GateInspect, features("avx512f"), features("sse2")); len(got) != 0 {
+		t.Errorf("the second gate repeated the CPU features check: %+v", got)
+	}
+}
+
 func TestKernelVersionCheck(t *testing.T) {
 	kernel := func(value string) Environment {
 		return Environment{KernelVersion: value}

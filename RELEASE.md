@@ -142,12 +142,12 @@ Verify by digest where you can; a tag can be repointed, a digest cannot.
 cosign verify \
   --certificate-identity-regexp "${COSIGN_IDENTITY}" \
   --certificate-oidc-issuer "${COSIGN_ISSUER}" \
-  ghcr.io/ai-dynamo/snapshot/operator:v0.2.0
+  ghcr.io/ai-dynamo/snapshot/operator:v0.3.0
 
 cosign verify \
   --certificate-identity-regexp "${COSIGN_IDENTITY}" \
   --certificate-oidc-issuer "${COSIGN_ISSUER}" \
-  ghcr.io/ai-dynamo/snapshot/agent:v0.2.0
+  ghcr.io/ai-dynamo/snapshot/agent:v0.3.0
 ```
 
 A successful run prints the signature payload and the certificate subject; a
@@ -161,7 +161,7 @@ The chart is an OCI artifact in the same registry, so it verifies the same way:
 cosign verify \
   --certificate-identity-regexp "${COSIGN_IDENTITY}" \
   --certificate-oidc-issuer "${COSIGN_ISSUER}" \
-  ghcr.io/ai-dynamo/snapshot/snapshot:0.2.0
+  ghcr.io/ai-dynamo/snapshot/snapshot:0.3.0
 ```
 
 Note the chart tag carries no `v` prefix — Helm chart versions are bare semver.
@@ -173,11 +173,11 @@ attached as OCI attestations at build time:
 
 ```bash
 docker buildx imagetools inspect \
-  ghcr.io/ai-dynamo/snapshot/operator:v0.2.0 \
+  ghcr.io/ai-dynamo/snapshot/operator:v0.3.0 \
   --format '{{ json .Provenance }}'
 
 docker buildx imagetools inspect \
-  ghcr.io/ai-dynamo/snapshot/operator:v0.2.0 \
+  ghcr.io/ai-dynamo/snapshot/operator:v0.3.0 \
   --format '{{ json .SBOM }}'
 ```
 
@@ -193,7 +193,7 @@ for — plus the packaged chart and a `SHA256SUMS` covering all of them.
 every asset:
 
 ```bash
-gh release download v0.2.0 --repo ai-dynamo/snapshot
+gh release download v0.3.0 --repo ai-dynamo/snapshot
 
 cosign verify-blob \
   --bundle SHA256SUMS.sigstore.json \

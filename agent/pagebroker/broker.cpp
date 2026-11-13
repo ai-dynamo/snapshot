@@ -25,7 +25,6 @@ namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
 namespace {
 
-constexpr char kS3StagingDirectory[] = "s3";
 constexpr char kRestoreStagingDirectory[] = "restore";
 constexpr char kCheckpointStagingDirectory[] = "checkpoint";
 
@@ -275,25 +274,16 @@ Broker::Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engin
     std::optional<S3Config> config, std::chrono::seconds lifetime, model_streamer::settings::Options model_streamer)
     : lifetime_(config ? config->transaction_lifetime : lifetime), staging_root_(fs::weakly_canonical(std::move(staging_root))), gpu_engine_(std::move(gpu_engine))
 {
-  const auto staging_base = staging_root_;
   if (config) {
     resources_ = std::make_shared<TransactionResources>(config->staging_bytes, config->active_transactions);
-    staging_root_ /= kS3StagingDirectory;
     io_engines_.push_back(std::make_unique<ModelStreamerTransferEngine>(std::move(*config), std::move(model_streamer)));
   } else {
     io_engines_.push_back(std::make_unique<PosixCopyEngine>(std::move(storage_root)));
   }
   // A new daemon starts with no transactions; discard staging from the previous
-  // instance for both storage modes without changing published artifacts.
-  for (const auto& root : {staging_base, staging_base / kS3StagingDirectory}) {
-    // Do not follow a stale S3 namespace link while cleaning its children.
-    if (fs::is_symlink(fs::symlink_status(root))) {
-      filesystem_storage::RemoveStaging(root);
-      continue;
-    }
-    filesystem_storage::RemoveStaging(root / kRestoreStagingDirectory);
-    filesystem_storage::RemoveStaging(root / kCheckpointStagingDirectory);
-  }
+  // instance without changing published artifacts.
+  filesystem_storage::RemoveStaging(staging_root_ / kRestoreStagingDirectory);
+  filesystem_storage::RemoveStaging(staging_root_ / kCheckpointStagingDirectory);
   fs::create_directories(staging_root_ / kRestoreStagingDirectory);
   fs::create_directories(staging_root_ / kCheckpointStagingDirectory);
 }

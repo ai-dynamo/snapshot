@@ -15,6 +15,8 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/prometheus/procfs"
 	"golang.org/x/sys/unix"
+
+	"github.com/ai-dynamo/snapshot/api/compat"
 )
 
 // HostProcPath is the mount point for the host's /proc in DaemonSet pods.
@@ -33,6 +35,37 @@ func ReadKernelVersion(hostProcPath string) (string, error) {
 		return "", fmt.Errorf("kernel version at %s is empty", releasePath)
 	}
 	return release, nil
+}
+
+// ReadCPUFeatures reads the instruction sets the host's CPU offers from the
+// flags in /proc/cpuinfo, reduced by compat.InstructionSetFeatures. A flag only
+// some processors report is left out, since a restored process can be scheduled
+// onto any of them.
+func ReadCPUFeatures(hostProcPath string) ([]string, error) {
+	fs, err := procfs.NewFS(hostProcPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open procfs at %s: %w", hostProcPath, err)
+	}
+	cpus, err := fs.CPUInfo()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CPU flags from %s: %w", hostProcPath, err)
+	}
+
+	counts := make(map[string]int)
+	var features []string
+	for _, cpu := range cpus {
+		for _, feature := range compat.InstructionSetFeatures(cpu.Flags) {
+			counts[feature]++
+			if counts[feature] == len(cpus) {
+				features = append(features, feature)
+			}
+		}
+	}
+	if len(features) == 0 {
+		return nil, fmt.Errorf("no instruction-set flags in %s/cpuinfo", hostProcPath)
+	}
+	sort.Strings(features)
+	return features, nil
 }
 
 // ProcessDetails captures the parent link plus the observed, outermost, and innermost

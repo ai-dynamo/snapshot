@@ -1,0 +1,186 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from contextlib import nullcontext
+
+# The benchmark wrapper supplies these hooks. Normal guide runs need no helper files.
+phase = globals().get("benchmark_phase", lambda _: nullcontext())
+mark = globals().get("benchmark_mark", lambda _: None)
+benchmark_token = globals().get("benchmark_token")
+
+import asyncio
+import os
+import sys
+import json
+import traceback
+from pathlib import Path
+from uuid import uuid4
+
+# This script calls AsyncLLM directly rather than vLLM's CLI wrapper, which
+# sets this automatically when unset. Without it, worker startup defaults to
+# fork (or switches to spawn only if vLLM detects CUDA already initialized),
+# which is unreliable across checkpoint/restore.
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
+import uvicorn
+from fastapi import FastAPI
+from pydantic import BaseModel, Field
+from vllm import SamplingParams
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.usage.usage_lib import UsageContext
+from vllm.v1.engine.async_llm import AsyncLLM
+
+CONTROL_DIR = Path(os.environ.get("SNAPSHOT_CONTROL_DIR", "/snapshot-control"))
+# Small single-GPU sizing so the example fits alongside other GPU tenants and
+# keeps the checkpoint artifact small. Override through the Pod template.
+MAX_MODEL_LEN = int(os.environ.get("VLLM_MAX_MODEL_LEN", "2048"))
+GPU_MEMORY_UTILIZATION = float(os.environ.get("VLLM_GPU_MEMORY_UTILIZATION", "0.30"))
+TRUST_REMOTE_CODE = False
+
+
+class GenerateRequest(BaseModel):
+    prompt: str = Field(min_length=1)
+
+
+async def generate_text(
+    engine: AsyncLLM,
+    prompt: str,
+    request_id: str,
+) -> str:
+    with phase("generation"):
+        result = None
+        async for output in engine.generate(
+            prompt,
+            SamplingParams(temperature=0.0, max_tokens=8),
+            request_id,
+        ):
+            result = output
+        if result is None or not result.outputs:
+            raise RuntimeError("vLLM produced no output")
+        text = result.outputs[0].text.strip()
+        if not text:
+            raise RuntimeError("vLLM produced empty output")
+        return text
+
+
+async def serve_api(engine: AsyncLLM, restored_text: str) -> None:
+    app = FastAPI()
+
+    @app.post("/generate")
+    async def generate(request: GenerateRequest) -> dict[str, str]:
+        text = await generate_text(
+            engine,
+            request.prompt,
+            f"request-{uuid4().hex}",
+        )
+        return {
+            "text": text,
+            **({"checkpoint_token": benchmark_token} if benchmark_token else {}),
+        }
+
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host="0.0.0.0",
+            port=8000,
+        )
+    )
+    server_task = asyncio.create_task(server.serve())
+    while not server.started:
+        if server_task.done():
+            await server_task
+            raise RuntimeError("API stopped before startup")
+        await asyncio.sleep(0.1)
+
+    CONTROL_DIR.joinpath("vllm-restore-ready").write_text(
+        restored_text + "\n",
+        encoding="utf-8",
+    )
+    print("vLLM API listening on port 8000", flush=True)
+    await server_task
+
+
+async def main() -> None:
+    CONTROL_DIR.joinpath("ready-for-snapshot").unlink(missing_ok=True)
+
+    engine_args = {
+        "max_model_len": MAX_MODEL_LEN,
+        "gpu_memory_utilization": GPU_MEMORY_UTILIZATION,
+        "trust_remote_code": TRUST_REMOTE_CODE,
+        # JSON keys are AsyncEngineArgs API keyword arguments, not CLI flags.
+        **json.loads(sys.argv[1]),
+        # Capture releases KV through sleep mode.
+        "enable_sleep_mode": True,
+    }
+    mark("engine_init_begin")
+    engine = AsyncLLM.from_engine_args(
+        AsyncEngineArgs(**engine_args),
+        usage_context=UsageContext.LLM_CLASS,
+    )
+    mark("engine_init_end")
+
+    text = await generate_text(
+        engine,
+        "Reply with one word: ready",
+        "snapshot-preflight",
+    )
+    print(f"vLLM pre-checkpoint output={text!r}", flush=True)
+    mark("first_inference_complete")
+    if benchmark_token:
+        for prompt, expected in [
+            ("The capital city of France is", "paris"),
+            ("The capital city of Germany is", "berlin"),
+            ("The capital city of Japan is", "tokyo"),
+        ]:
+            answer = await generate_text(engine, prompt, "precheck-" + expected)
+            print(
+                "CR_SEMANTIC_PRECHECK "
+                + json.dumps(dict(expected=expected, answer=answer)),
+                flush=True,
+            )
+            if expected not in answer.lower():
+                raise RuntimeError("Source inference check failed: " + repr(answer))
+
+    with phase("pause_generation"):
+        await engine.pause_generation()
+    with phase("release_kv_cache"):
+        await engine.release_kv_cache_memory()
+    CONTROL_DIR.joinpath("ready-for-snapshot").write_text(
+        "ready\n",
+        encoding="utf-8",
+    )
+
+    while True:
+        if CONTROL_DIR.joinpath("restore-complete").exists():
+            # The restore connects this process's output to the restore
+            # container's log. Also record a failure in the control directory,
+            # next to the success sentinel, where tools can read it.
+            try:
+                progress = CONTROL_DIR.joinpath("vllm-restore-progress")
+                with phase("wake"):
+                    await engine.wake_up()
+                progress.write_text("woken\n", encoding="utf-8")
+                with phase("resume_generation"):
+                    await engine.resume_generation()
+                await engine.check_health()
+                progress.write_text("generation-resumed\n", encoding="utf-8")
+                text = await generate_text(
+                    engine,
+                    "The capital city of Germany is",
+                    "snapshot-restore-check",
+                )
+                progress.write_text("generated\n", encoding="utf-8")
+                print(f"vLLM restored output={text!r}", flush=True)
+                await serve_api(engine, text)
+            except Exception:
+                CONTROL_DIR.joinpath("vllm-restore-error").write_text(
+                    traceback.format_exc(),
+                    encoding="utf-8",
+                )
+                raise
+        await asyncio.sleep(1)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+    os._exit(0)

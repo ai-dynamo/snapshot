@@ -40,7 +40,7 @@ func TestManifestRoundTrip(t *testing.T) {
 			ExternalPaths:  []string{"/proc/acpi"},
 			BindMountDests: []string{"/data"},
 		},
-		NewHostManifest("5.15.0-1071-aws"),
+		NewHostManifest("5.15.0-1071-aws", []string{"avx2", "avx512f", "sse2"}),
 	)
 	original.CUDA = NewCUDAManifest([]int{42, 43}, compat.GPUInfo{
 		DriverVersion: "580.65.06",
@@ -115,6 +115,7 @@ func TestManifestRoundTrip(t *testing.T) {
 	wantHost := HostManifest{
 		KernelVersion: "5.15.0-1071-aws",
 		CPUArch:       runtime.GOARCH,
+		CPUFeatures:   []string{"avx2", "avx512f", "sse2"},
 	}
 	if !reflect.DeepEqual(loaded.Host, wantHost) {
 		t.Errorf("Host = %#v, want %#v", loaded.Host, wantHost)
@@ -181,7 +182,7 @@ cudaRestore:
 	if env.Image != "" || env.ImageID != "" || env.CPULimit != "" || env.MemoryLimit != "" {
 		t.Errorf("pod env = %#v, want unknown", env)
 	}
-	if env.KernelVersion != "" || env.CPUArch != "" {
+	if env.KernelVersion != "" || env.CPUArch != "" || env.CPUFeatures != nil {
 		t.Errorf("host env = %#v, want unknown", env)
 	}
 
@@ -209,7 +210,7 @@ func TestHostManifestOmitsWhatTheAgentCouldNotRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	for _, key := range []string{"kernelVersion", "cpuArch"} {
+	for _, key := range []string{"kernelVersion", "cpuArch", "cpuFeatures"} {
 		if strings.Contains(string(content), key) {
 			t.Errorf("manifest wrote an unknown %s:\n%s", key, content)
 		}
@@ -227,9 +228,13 @@ func TestManifestEnvironmentSurvivesIntoTheComparison(t *testing.T) {
 		{
 			name: "host env",
 			manifest: &CheckpointManifest{
-				Host: NewHostManifest("5.15.0-1071-aws"),
+				Host: NewHostManifest("5.15.0-1071-aws", []string{"avx2", "avx512f"}),
 			},
-			want: compat.Environment{KernelVersion: "5.15.0-1071-aws", CPUArch: runtime.GOARCH},
+			want: compat.Environment{
+				KernelVersion: "5.15.0-1071-aws",
+				CPUArch:       runtime.GOARCH,
+				CPUFeatures:   []string{"avx2", "avx512f"},
+			},
 		},
 		{
 			name: "pod env",

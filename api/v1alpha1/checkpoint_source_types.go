@@ -3,25 +3,25 @@
 
 package v1alpha1
 
-// CheckpointSource publishes what a checkpoint was captured on, so someone
-// preparing a restore target can see it without reading the artifact. It is
-// projected from the checkpoint manifest and never read back: the restore
-// compatibility gates compare the manifest, not this status.
+// CheckpointSource publishes where a snapshot was taken, so someone preparing a
+// restore target can see it without reading the snapshot. It is projected from
+// the snapshot manifest and never read back: the restore compatibility gates
+// compare the manifest, not this status.
 //
 // Every field is optional. A value the agent could not read is absent rather
-// than empty, and an artifact captured before a value was recorded publishes
+// than empty, and a snapshot taken before a value was recorded publishes
 // without it.
 type CheckpointSource struct {
-	// Devices records the devices the capture could see, grouped by vendor.
+	// Devices records the devices the checkpoint could see, grouped by vendor.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	Devices *CheckpointSourceDevices `json:"devices,omitempty"`
 
-	// Node records the machine the checkpoint was captured on.
+	// Node records the machine the snapshot was taken on.
 	// +optional
 	Node *CheckpointSourceNode `json:"node,omitempty"`
 
-	// Pod records the container the checkpoint was captured from.
+	// Pod records the container the snapshot was taken from.
 	// +optional
 	Pod *CheckpointSourcePod `json:"pod,omitempty"`
 }
@@ -32,20 +32,20 @@ type CheckpointSource struct {
 // yet is preserved rather than pruned, so a newer agent's values survive an older
 // installed CRD.
 type CheckpointSourceDevices struct {
-	// Nvidia records the NVIDIA GPUs the capture could see.
+	// Nvidia records the NVIDIA GPUs the checkpoint could see.
 	// +optional
 	Nvidia *NvidiaCheckpointSource `json:"nvidia,omitempty"`
 }
 
-// NvidiaCheckpointSource is what the capture saw of the node's NVIDIA GPUs. The
+// NvidiaCheckpointSource is what the checkpoint saw of the node's NVIDIA GPUs. The
 // field names are the ones the NVIDIA DRA driver publishes on a ResourceSlice,
 // so the same GPU reads the same way in both places.
 type NvidiaCheckpointSource struct {
-	// DriverVersion is the NVIDIA driver the capture ran against.
+	// DriverVersion is the NVIDIA driver the checkpoint ran against.
 	// +optional
 	DriverVersion string `json:"driverVersion,omitempty"`
 
-	// Instances lists one entry per GPU the captured container could see, so
+	// Instances lists one entry per GPU the checkpointed container could see, so
 	// the count is the length of this list.
 	// +optional
 	Instances []NvidiaCheckpointSourceInstance `json:"instances,omitempty"`
@@ -60,7 +60,7 @@ type NvidiaCheckpointSourceInstance struct {
 	ProductName string `json:"productName,omitempty"`
 }
 
-// CheckpointSourceNode is the machine a checkpoint was captured on.
+// CheckpointSourceNode is the machine a snapshot was taken on.
 type CheckpointSourceNode struct {
 	// Name is the node the source pod ran on.
 	// +optional
@@ -73,16 +73,22 @@ type CheckpointSourceNode struct {
 	// KernelVersion is the node's kernel release.
 	// +optional
 	KernelVersion string `json:"kernelVersion,omitempty"`
+
+	// CPUFeatures are the instruction-set flags from the node's /proc/cpuinfo
+	// that every processor reported, sorted. A restore needs a target that
+	// offers all of them.
+	// +optional
+	CPUFeatures []string `json:"cpuFeatures,omitempty"`
 }
 
-// CheckpointSourcePod is the container a checkpoint was captured from, and what
-// it was given to run in.
+// CheckpointSourcePod is the container a snapshot was taken from, and what it
+// was given to run in.
 type CheckpointSourcePod struct {
-	// Image is the container image reference the capture ran.
+	// Image is the container image reference the checkpoint ran.
 	// +optional
 	Image string `json:"image,omitempty"`
 
-	// ImageDigest identifies which build of the container image the capture
+	// ImageDigest identifies which build of the container image the checkpoint
 	// ran, which a mutable tag does not.
 	// +optional
 	ImageDigest string `json:"imageDigest,omitempty"`

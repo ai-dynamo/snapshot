@@ -5,6 +5,11 @@
 
 #include <gtest/gtest.h>
 
+#include <fstream>
+#include <iterator>
+#include <string>
+#include <stdexcept>
+
 #include "tests/temporary_directory.hpp"
 
 namespace snapshot::pagebroker {
@@ -36,6 +41,33 @@ TEST(ModelStreamerRestoreTest, CreatesEmptyFilesAndDirectoriesWithoutReadingSour
   EXPECT_NO_THROW(restore.Stage(inventory, root.path() / "restored"));
   EXPECT_EQ(fs::file_size(root.path() / "restored/data"), 0);
   EXPECT_TRUE(fs::is_empty(root.path() / "restored/empty"));
+}
+TEST(ModelStreamerRestoreTest, ReadsOnlyTheRecordedPrefix)
+{
+  test::TemporaryDirectory root;
+  const auto source = root.path() / "source";
+  std::ofstream(source) << "checkpoint-extra";
+  ModelStreamerRestore restore;
+  CheckpointInventory inventory;
+  inventory.files.push_back({source.string(), "data", 10});
+  const auto destination = root.path() / "restored";
+  ASSERT_NO_THROW(restore.Stage(inventory, destination));
+  std::ifstream restored(destination / "data");
+  EXPECT_EQ(std::string(std::istreambuf_iterator<char>(restored), {}), "checkpoint");
+}
+
+TEST(ModelStreamerRestoreTest, RejectsMissingAndShortNonemptySources)
+{
+  test::TemporaryDirectory root;
+  const auto source = root.path() / "short";
+  std::ofstream(source) << "short";
+  ModelStreamerRestore restore;
+  for (const auto* name : {"missing", "short"}) {
+    SCOPED_TRACE(name);
+    CheckpointInventory inventory;
+    inventory.files.push_back({(root.path() / name).string(), "data", 10});
+    EXPECT_THROW(restore.Stage(inventory, root.path() / (std::string(name) + "-restore")), std::runtime_error);
+  }
 }
 }  // namespace
 }  // namespace snapshot::pagebroker

@@ -8,10 +8,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
+	"sync/atomic"
 
 	"github.com/checkpoint-restore/go-criu/v8/crit"
 	criu_core "github.com/checkpoint-restore/go-criu/v8/crit/images/criu-core"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 )
 
@@ -25,36 +26,38 @@ const (
 	coreImageMagic    = "CORE"
 	kdatCacheDir      = "run"
 	kdatCacheFilename = "criu.kdat"
+
+	coreImageReaders = 32
 )
 
-// CheckRecordedLSMLabels checks, when the restore target has a security label,
-// that the checkpoint recorded one for every restored process. CRIU applies
-// the target's label only to processes it recorded a label for.
-func CheckRecordedLSMLabels(checkpointPath, lsmProfile string) error {
-	if lsmProfile == "" || lsmProfile == LSMProfileNone {
-		return nil
-	}
-	paths, err := filepath.Glob(filepath.Join(checkpointPath, coreImagePattern))
+// RecordedLSMLabels reports whether a dump recorded a security label for every
+// process with credentials. CRIU applies a restore target's label only to
+// processes it recorded a label for, and records none when it could not see
+// the node's LSM at dump time. Capture records the answer in the manifest, so
+// a restore needs no image reads to refuse an unlabeled checkpoint.
+func RecordedLSMLabels(checkpointDir string) (bool, error) {
+	paths, err := filepath.Glob(filepath.Join(checkpointDir, coreImagePattern))
 	if err != nil {
-		return fmt.Errorf("list CRIU core images: %w", err)
+		return false, fmt.Errorf("list CRIU core images: %w", err)
 	}
-	labeled := 0
+	// A checkpoint has one core image per thread, often thousands. They are
+	// small, so reading them one at a time from network storage is bound by
+	// round trips: 1,799 images took 1.7 s serially and 0.1 s 32 at a time.
+	var withLabel, withoutLabel atomic.Int64
+	var g errgroup.Group
+	g.SetLimit(coreImageReaders)
 	for _, path := range paths {
-		withLabel, withoutLabel, err := countRecordedLSMLabels(path)
-		if err != nil {
+		g.Go(func() error {
+			labeled, unlabeled, err := countRecordedLSMLabels(path)
+			withLabel.Add(int64(labeled))
+			withoutLabel.Add(int64(unlabeled))
 			return err
-		}
-		if withoutLabel > 0 {
-			return fmt.Errorf("checkpoint recorded no security label for %s, which a restore into a "+
-				"container with %q needs; take the checkpoint again with this agent version",
-				filepath.Base(path), strings.TrimSuffix(lsmProfile, ":"))
-		}
-		labeled += withLabel
+		})
 	}
-	if labeled == 0 {
-		return fmt.Errorf("checkpoint has no CRIU process credentials to check security labels in")
+	if err := g.Wait(); err != nil {
+		return false, err
 	}
-	return nil
+	return withLabel.Load() > 0 && withoutLabel.Load() == 0, nil
 }
 
 // countRecordedLSMLabels counts the credentials in one core image with and

@@ -20,7 +20,7 @@ func validAgentConfig() *AgentConfig {
 			BasePath: "/checkpoints",
 		},
 		Restore: RestoreSpec{
-			RestoreTimeoutSeconds: 60,
+			TimeoutSeconds: 60,
 		},
 		PageBroker: PageBrokerSpec{ControlSocketPath: "/pagebroker/control/pagebroker.sock"},
 	}
@@ -30,9 +30,9 @@ func validAgentConfig() *AgentConfig {
 // and an agent whose ConfigMap predates it has to keep the gate on.
 func TestRestoreSpecParsesSkipCompatCheck(t *testing.T) {
 	cases := map[string]bool{
-		"restore:\n  skipCompatCheck: true\n":     true,
-		"restore:\n  skipCompatCheck: false\n":    false,
-		"restore:\n  restoreTimeoutSeconds: 60\n": false,
+		"restore:\n  skipCompatCheck: true\n":  true,
+		"restore:\n  skipCompatCheck: false\n": false,
+		"restore:\n  timeoutSeconds: 60\n":     false,
 	}
 	for document, want := range cases {
 		cfg := &AgentConfig{}
@@ -89,7 +89,7 @@ func TestPageBrokerRestoreMode(t *testing.T) {
 	}
 }
 
-// A config written before checkpointTimeoutSeconds existed must still load, and must come up with
+// A config written before checkpoint.timeoutSeconds existed must still load, and must come up with
 // the guard on rather than unbounded.
 func TestCheckpointSpecDefaultsWhenAbsent(t *testing.T) {
 	var spec CheckpointSpec
@@ -100,7 +100,7 @@ func TestCheckpointSpecDefaultsWhenAbsent(t *testing.T) {
 }
 
 func TestCheckpointSpecRejectsAnExplicitNonPositiveTimeout(t *testing.T) {
-	for _, raw := range []string{"checkpointTimeoutSeconds: 0\n", "checkpointTimeoutSeconds: -1\n"} {
+	for _, raw := range []string{"timeoutSeconds: 0\n", "timeoutSeconds: -1\n"} {
 		var spec CheckpointSpec
 		require.NoError(t, yaml.Unmarshal([]byte(raw), &spec))
 		require.Error(t, spec.Validate(), raw)
@@ -109,7 +109,7 @@ func TestCheckpointSpecRejectsAnExplicitNonPositiveTimeout(t *testing.T) {
 
 func TestCheckpointSpecHonoursAnExplicitTimeout(t *testing.T) {
 	var spec CheckpointSpec
-	require.NoError(t, yaml.Unmarshal([]byte("checkpointTimeoutSeconds: 45\n"), &spec))
+	require.NoError(t, yaml.Unmarshal([]byte("timeoutSeconds: 45\n"), &spec))
 
 	require.NoError(t, spec.Validate())
 	assert.Equal(t, 45*time.Second, spec.CheckpointTimeout())
@@ -122,10 +122,10 @@ func TestTimeoutsRejectValuesThatOverflowDuration(t *testing.T) {
 	require.Less(t, time.Duration(overflow)*time.Second, time.Duration(0),
 		"the test value must actually overflow, or this proves nothing")
 
-	checkpoint := CheckpointSpec{CheckpointTimeoutSeconds: &overflow}
+	checkpoint := CheckpointSpec{TimeoutSeconds: &overflow}
 	require.Error(t, checkpoint.Validate())
 
-	restore := RestoreSpec{RestoreTimeoutSeconds: overflow}
+	restore := RestoreSpec{TimeoutSeconds: overflow}
 	require.Error(t, restore.Validate())
 }
 
@@ -133,31 +133,28 @@ func TestTimeoutsAcceptTheLargestRepresentableValue(t *testing.T) {
 	limit := int(maxTimeoutSeconds)
 	require.Positive(t, time.Duration(limit)*time.Second)
 
-	checkpoint := CheckpointSpec{CheckpointTimeoutSeconds: &limit}
+	checkpoint := CheckpointSpec{TimeoutSeconds: &limit}
 	require.NoError(t, checkpoint.Validate())
 
-	restore := RestoreSpec{RestoreTimeoutSeconds: limit}
+	restore := RestoreSpec{TimeoutSeconds: limit}
 	require.NoError(t, restore.Validate())
 }
 
 // Absent and explicit zero are different answers: zero asks for no retry, absent
-// expresses no preference and defers to the cluster default.
+// expresses no preference and takes the default.
 func TestResolveRetryLimit(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		configured *int
-		requested  *int32
 		want       int
 	}{
-		{"neither set falls back to the default", nil, nil, DefaultCheckpointRetryLimit},
-		{"cluster default applies when the request is silent", ptr.To(3), nil, 3},
-		{"an explicit request wins", ptr.To(3), ptr.To(int32(1)), 1},
-		{"an explicit zero is a request, not absence", ptr.To(3), ptr.To(int32(0)), 0},
-		{"a cluster zero is honoured", ptr.To(0), nil, 0},
+		{"absent takes the default", nil, DefaultCheckpointRetryLimit},
+		{"a configured limit is honoured", ptr.To(3), 3},
+		{"a configured zero is honoured", ptr.To(0), 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &CheckpointSpec{RetryLimit: tc.configured}
-			if got := c.ResolveRetryLimit(tc.requested); got != tc.want {
+			if got := c.ResolveRetryLimit(); got != tc.want {
 				t.Errorf("ResolveRetryLimit() = %d, want %d", got, tc.want)
 			}
 		})
@@ -165,8 +162,7 @@ func TestResolveRetryLimit(t *testing.T) {
 }
 
 func TestCheckpointSpecRejectsANegativeRetryLimit(t *testing.T) {
-	c := &CheckpointSpec{RetryLimit: ptr.To(-1)}
-	if err := c.Validate(); err == nil {
+	if err := (&CheckpointSpec{RetryLimit: ptr.To(-1)}).Validate(); err == nil {
 		t.Error("a negative retryLimit should not validate")
 	}
 	if err := (&CheckpointSpec{RetryLimit: ptr.To(0)}).Validate(); err != nil {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -41,7 +42,12 @@ func makeNodeControllerWithInterceptor(t *testing.T, fc *fakeCheckpointer, funcs
 		runtime:      &fakeRuntime{},
 		log:          logr.Discard(),
 		captureQueue: newTestCaptureQueue(t),
+		sendSignalFn: func(logr.Logger, int, syscall.Signal, string) error { return nil },
+		hostProcPath: "/proc",
 	}
+	// Set the clock and requeue as newDefaultController does.
+	w.nowFn = time.Now
+	w.requeueCaptureFn = w.captureQueue.AddAfter
 	w.contentIndexer = cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{podRefIndex: podRefIndexFunc})
 	for _, o := range objs {
 		if _, ok := o.(*snapshotv1alpha1.PodSnapshotContent); ok {

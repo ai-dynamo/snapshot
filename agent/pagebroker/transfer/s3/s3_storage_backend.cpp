@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "transfer/filesystem/filesystem_storage.hpp"
 #include "transfer/engine/transfer_engine.hpp"
@@ -227,12 +229,12 @@ S3StorageBackend::LoadCheckpointInventory(const PublishedArtifact& storage, bool
     inventory.files.front().permissions = fs::perms::owner_read | fs::perms::owner_write;
   }
   for (auto& file : inventory.files) {
+    cancellation.ThrowIfCancelled();
     const auto payload = Object(storage, kPayloadPrefix + file.relative_path.generic_string());
-    const auto size = client.Head(payload, cancellation);
-    if (!size || *size != file.size_bytes)
-      throw CheckpointError(Failure::ARTIFACT_CORRUPT, "checkpoint file is absent or has the wrong size");
+    payload.Validate();
     file.source_locator = kS3UriPrefix + payload.bucket + "/" + payload.key;
   }
+  cancellation.ThrowIfCancelled();
   return inventory;
 }
 

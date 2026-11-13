@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"os"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -45,6 +47,8 @@ func main() {
 		"Name of the ConfigMap PageBroker reads its S3 configuration from")
 	releaseName := flag.String("release-name", "",
 		"Helm release name, used to label the PageBroker S3 configuration ConfigMap this binary writes outside Helm's own apply step")
+	pageBrokerS3SettingsPath := flag.String("pagebroker-s3-settings", "",
+		"Path to the PageBroker-only S3 settings (addressing, CA file, HTTP permission, limits) merged into the configuration ConfigMap")
 	flag.Parse()
 	storageCfg, storeID := mustStorageConfig(*storageConfigPath)
 	captureStoreID, err := newContentStoreID(storeID, *bindNewContents)
@@ -55,7 +59,9 @@ func main() {
 	if *pageBrokerS3ConfigNamespace == "" {
 		*pageBrokerS3ConfigNamespace = os.Getenv("POD_NAMESPACE")
 	}
+	var pageBrokerS3 pageBrokerS3Settings
 	if storageCfg.S3 != nil {
+		pageBrokerS3 = mustPageBrokerS3Settings(*pageBrokerS3SettingsPath)
 		if *pageBrokerS3ConfigNamespace == "" {
 			ctrl.Log.Error(fmt.Errorf("missing namespace"),
 				"pagebroker-s3-config-namespace is required with an S3 storage configuration "+
@@ -102,6 +108,9 @@ func main() {
 		LeaderElection:                true,
 		LeaderElectionID:              "snapshot-operator.nvidia.com",
 		LeaderElectionReleaseOnCancel: true,
+		Cache: cache.Options{ByObject: map[client.Object]cache.ByObject{
+			&corev1.Pod{}: {Transform: controller.TrimPodForCache},
+		}},
 	})
 	if err != nil {
 		ctrl.Log.Error(err, "unable to start manager")
@@ -130,7 +139,7 @@ func main() {
 			labels["app.kubernetes.io/instance"] = *releaseName
 		}
 		if err := ensurePageBrokerS3Config(context.Background(), directClient,
-			*pageBrokerS3ConfigNamespace, *pageBrokerS3ConfigName, labels, *storageCfg.S3, storeID); err != nil {
+			*pageBrokerS3ConfigNamespace, *pageBrokerS3ConfigName, labels, *storageCfg.S3, storeID, pageBrokerS3); err != nil {
 			ctrl.Log.Error(err, "unable to write PageBroker S3 configuration")
 			os.Exit(1)
 		}

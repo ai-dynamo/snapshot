@@ -264,7 +264,6 @@ TEST(BrokerStartupTest, PreservesExternalTargetsOfStagingLinks)
   fs::permissions(outside / "image", fs::perms::owner_read);
   fs::create_directories(staging / "checkpoint/stale");
   fs::create_directory_symlink(outside, staging / "restore");
-  fs::create_directory_symlink(outside, staging / "s3");
   fs::create_directory_symlink(outside, staging / "checkpoint/stale/directory");
   fs::create_symlink(outside / "image", staging / "checkpoint/stale/file");
   fs::create_hard_link(outside / "image", staging / "checkpoint/stale/hard-link");
@@ -276,36 +275,29 @@ TEST(BrokerStartupTest, PreservesExternalTargetsOfStagingLinks)
   EXPECT_EQ(fs::status(outside / "image").permissions(), fs::perms::owner_read);
   EXPECT_EQ(fs::file_size(outside / "image"), 9u);
   EXPECT_EQ(fs::file_size(outside / "restore/image"), 16u);
-  EXPECT_FALSE(fs::is_symlink(staging / "s3"));
 }
 
-TEST(BrokerStartupTest, CleansBothNamespacesWhenSwitchingStorageModes)
+TEST(BrokerStartupTest, CleansTheSameStagingForEveryStorageMode)
 {
   for (const bool use_s3 : {false, true}) {
-    SCOPED_TRACE(use_s3 ? "POSIX to S3" : "S3 to POSIX");
+    SCOPED_TRACE(use_s3 ? "S3" : "POSIX");
     test::TemporaryDirectory root;
     const auto staging = root.path() / "staging";
-    // Both namespaces can contain leftovers from earlier daemon instances.
-    for (const auto& namespace_root : {staging, staging / "s3"}) {
-      for (const auto* kind : {"restore", "checkpoint"}) {
-        const auto stale = namespace_root / kind / "interrupted";
-        fs::create_directories(stale / "nested");
-        std::ofstream(stale / "nested/image") << "unfinished";
-        fs::permissions(stale / "nested", fs::perms::none);
-        fs::permissions(stale, fs::perms::owner_read | fs::perms::owner_exec);
-      }
-      std::ofstream(namespace_root / "unrelated") << "keep";
+    for (const auto* kind : {"restore", "checkpoint"}) {
+      const auto stale = staging / kind / "interrupted";
+      fs::create_directories(stale / "nested");
+      std::ofstream(stale / "nested/image") << "unfinished";
+      fs::permissions(stale / "nested", fs::perms::none);
+      fs::permissions(stale, fs::perms::owner_read | fs::perms::owner_exec);
     }
+    std::ofstream(staging / "unrelated") << "keep";
     Broker restarted(staging, root.path() / "storage", nullptr,
                      use_s3 ? std::optional(TestS3Config()) : std::nullopt);
-    const auto active = use_s3 ? staging / "s3" : staging;
-    const auto inactive = use_s3 ? staging : staging / "s3";
     for (const auto* kind : {"restore", "checkpoint"}) {
-      EXPECT_TRUE(fs::is_empty(active / kind));
-      EXPECT_FALSE(fs::exists(inactive / kind));
+      EXPECT_TRUE(fs::is_empty(staging / kind));
     }
+    EXPECT_FALSE(fs::exists(staging / "s3"));
     EXPECT_EQ(fs::file_size(staging / "unrelated"), 4u);
-    EXPECT_EQ(fs::file_size(staging / "s3/unrelated"), 4u);
   }
 }
 
@@ -313,15 +305,12 @@ TEST(BrokerStartupTest, PreservesStagingWhenEngineConfigurationIsInvalid)
 {
   test::TemporaryDirectory root;
   const auto staging = root.path() / "staging";
-  for (const auto& namespace_root : {staging, staging / "s3"}) {
-    fs::create_directories(namespace_root / "restore");
-    std::ofstream(namespace_root / "restore/image") << "keep";
-  }
+  fs::create_directories(staging / "restore");
+  std::ofstream(staging / "restore/image") << "keep";
   auto config = TestS3Config();
   config.transfer.restore_timeout = std::chrono::milliseconds::zero();
   EXPECT_THROW((Broker(staging, root.path(), nullptr, config)), std::invalid_argument);
   EXPECT_EQ(fs::file_size(staging / "restore/image"), 4u);
-  EXPECT_EQ(fs::file_size(staging / "s3/restore/image"), 4u);
 }
 
 TEST_F(BrokerTest, RejectsUnsafeTransactionIDs)

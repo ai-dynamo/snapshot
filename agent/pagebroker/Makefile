@@ -20,8 +20,9 @@ ENGINE_SOURCES = $(COMMON_SOURCES) $(STREAMER_SOURCES) $(S3_SOURCES) transfer/en
 TRANSFER_TEST_SOURCES := tests/model_streamer_config_test.cpp tests/daemon_options_test.cpp tests/transaction_test.cpp transfer/s3/tests/checkpoint_index_test.cpp transfer/s3/tests/s3_storage_backend_test.cpp tests/s3_config_test.cpp transfer/engine/model_streamer/tests/model_streamer_restore_test.cpp transfer/s3/tests/s3_client_test.cpp tests/temporary_directory_test.cpp
 MODEL_STREAMER_RECOVERY_TEST_SOURCES = $(ENGINE_SOURCES) transfer/engine/model_streamer/tests/model_streamer_transfer_engine_test.cpp
 MODEL_STREAMER_SESSION_TEST_SOURCES := $(RESTORE_SOURCES) transfer/engine/model_streamer/tests/model_streamer_session_test.cpp
-# Inject filesystem failures and cancellation deterministically in the session tests.
-MODEL_STREAMER_SESSION_TEST_WRAP_FLAGS := -Wl,--wrap=posix_fallocate,--wrap=mmap \
+# Inject filesystem/queue failures and hold producer progress in the session tests.
+MODEL_STREAMER_SESSION_TEST_WRAP_FLAGS := -Wl,--wrap=posix_fallocate,--wrap=mmap,--wrap=_Znwm \
+	-Wl,--wrap=_ZNSt6chrono3_V212steady_clock3nowEv \
 	-Wl,--wrap=_ZNSt10filesystem16create_directoryERKNS_7__cxx114pathE \
 	-Wl,--wrap=_ZNSt10filesystem11permissionsERKNS_7__cxx114pathENS_5permsENS_12perm_optionsE
 TRANSFER_FLAGS = $(MODEL_STREAMER_FLAGS)
@@ -61,7 +62,7 @@ daemon: generate
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DAEMON_SOURCES) v1/pagebroker.pb.cc \
 		-Wl,-Bstatic -lprotobuf -Wl,-Bdynamic $(NIXL_FLAGS) $(TRANSFER_FLAGS) -ldl -o pagebroker
 
-test: rclone-process-test generate build/cancellation-test build/gpu-cuda-driver.o build/gpu-engine-test    | build
+test: s3-restore-inventory-test rclone-process-test generate build/cancellation-test build/gpu-cuda-driver.o build/gpu-engine-test    | build
 	./build/cancellation-test
 	./build/gpu-engine-test
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(PAGEBROKER_SOURCES) daemon.cpp tests/daemon_test.cpp $(BROKER_TEST_SOURCES) tests/filesystem_storage_test.cpp tests/storage_contract_test.cpp $(TRANSFER_TEST_SOURCES) v1/pagebroker.pb.cc $(BROKER_TEST_WRAP_FLAGS) -lprotobuf $(GTEST_FLAGS) $(NIXL_FLAGS) $(TRANSFER_FLAGS) -ldl -o build/pagebroker-test
@@ -117,3 +118,13 @@ rclone-process-test: build/rclone-child-helper
 	./build/rclone-process-test
 
 .PHONY: rclone-process-test
+
+# Intercept only metadata GET; payload probes must not be part of preparation.
+s3-restore-inventory-test: generate | build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(ENGINE_SOURCES) gpu/storage_manifest.cpp \
+		transfer/s3/tests/s3_restore_inventory_test.cpp v1/pagebroker.pb.cc \
+		-Wl,--wrap=_ZN8snapshot10pagebroker8S3Client3GetB5cxx11ERKNS0_16S3ObjectLocationEmNS0_12CancellationE \
+		-lprotobuf $(GTEST_FLAGS) $(TRANSFER_FLAGS) -o build/s3-restore-inventory-test
+	./build/s3-restore-inventory-test
+
+.PHONY: s3-restore-inventory-test

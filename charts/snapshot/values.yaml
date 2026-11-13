@@ -23,10 +23,10 @@ replicaCount: 1
 
 operator:
   # Empty in normal deployments. CPU conformance tests may set this to an
-  # annotation key to request a deterministic capture failure for a test pod.
+  # annotation key to request a deterministic checkpoint failure for a test pod.
   testFailCaptureSourceAnnotation: ""
 
-  # Enable only after the compatible agent/PageBroker rollout completes; see docs/operations/storage.md.
+  # Enable only after the compatible agent/PageBroker rollout completes; see docs/operate/configure-storage.md.
   bindNewContents: false
   resources:
     limits:
@@ -103,7 +103,7 @@ storage:
   pvc:
     # Create a new PVC (set to false if using existing PVC)
     create: true
-    # Checkpoint PVC name, in the Helm release namespace. Name and namespace
+    # Snapshot volume name, in the Helm release namespace. Name and namespace
     # identify the store; create/size/storageClass only control provisioning.
     name: snapshot-pvc
     # PVC size
@@ -114,9 +114,9 @@ storage:
     # use the claim root (/); the privileged helper enforces this local mount.
     basePath: /checkpoints
 
-  # S3-compatible object storage (when type=s3). Requires a PageBroker image
-  # implementing the S3 backend. Endpoint, region, bucket and prefix are
-  # identity inputs: see api/storage.S3.StoreID.
+  # S3-compatible object storage (when type=s3). Requires a Snapshot release
+  # newer than v0.2.0; see docs/get-started/prerequisites.md. Endpoint, region,
+  # bucket and prefix are identity inputs: see api/storage.S3.StoreID.
   s3:
     # S3-compatible endpoint, an absolute http(s) URL with no path, query or
     # userinfo, e.g. "https://s3.example.com".
@@ -141,22 +141,33 @@ storage:
     credentialsSecretRef: ""
     # Key inside credentialsSecretRef holding the credentials file.
     credentialsSecretKey: credentials
+    # Bucket addressing PageBroker uses against the endpoint: "virtual"
+    # (bucket.endpoint/key, PageBroker's default when empty) or "path"
+    # (endpoint/bucket/key), which most self-hosted S3-compatible stores need.
+    addressing: ""
+    # Accept a plain-http endpoint. PageBroker refuses one otherwise.
+    allowHttp: false
+    # ConfigMap holding the CA bundle that signs the endpoint's TLS certificate,
+    # at the key named by caBundleConfigMapKey. Mounted into PageBroker and the
+    # operator. Empty uses the containers' system trust store.
+    caBundleConfigMapRef: ""
+    caBundleConfigMapKey: ca.crt
 
   # Reserved for future snapshot-owned backends. Unsupported today.
   oci:
     uri: ""
 
-# PageBroker sidecar: stages checkpoint images in memory and publishes them to
-# the checkpoint PVC it shares with the agent. See docs/operations/storage.md.
+# PageBroker sidecar: stages CRIU images in memory and publishes them to
+# the snapshot volume it shares with the agent. See docs/operate/configure-storage.md.
 pageBroker:
   # Requires a PageBroker image implementing the PVC artifact backend. Roll this out before binding new contents.
   artifactAddressing: false
-  # Restore directly from the checkpoint directory, or opt into a staged copy.
+  # Restore directly from the snapshot directory, or opt into a staged copy.
   restoreMode: direct
   maxConcurrentRequests: 16
   staging:
     # RAM on the node, unbounded without this cap. Lowered to fit when it does
-    # not leave the writing container room; see docs/operations/storage.md.
+    # not leave the writing container room; see docs/operate/configure-storage.md.
     sizeLimit: 56Gi
   # Allocate and register the full ring before accepting GPU work.
   # Defaults reserve 4 GiB per visible GPU, or 32 GiB on an eight-GPU node.
@@ -165,6 +176,22 @@ pageBroker:
   transferChunkBytes: 134217728
   # Zero is uncapped. This limit includes CUDA allocation-granularity rounding.
   maxPinnedBytes: 0
+  # S3 transfer and transaction limits, written as given into PageBroker's S3
+  # configuration as its "limits" object. The keys and bounds are PageBroker's:
+  # transactionSeconds, stagingBytes, activeTransactions, uploadPartBytes,
+  # uploadBufferBytes, uploadActiveFiles, requestSeconds, uploadRequestRetries,
+  # uploadConnectSeconds. stagingBytes defaults to the
+  # staging volume cap (staging.sizeLimit), so PageBroker refuses a restore the
+  # volume cannot hold instead of filling it. Used with storage.type=s3 only.
+  s3:
+    limits: {}
+  transferEngine:
+    # S3 restore batching and reader tuning, written as given to the JSON
+    # file PageBroker reads with --model-streamer-config. Empty passes no file.
+    # Used with storage.type=s3 only.
+    # restoreBatchBytes defaults to 10000000000 (10 GB); an oversized file
+    # runs alone. This is not a limit on total checkpoint staging memory.
+    modelStreamer: {}
   # Requires 32 GiB of free allocatable memory, plus the agent request.
   # Override for each node profile. Budget 4 GiB per GPU plus process and staging
   # overhead. A lower request does not reduce the pinned ring allocation.
@@ -198,9 +225,9 @@ daemonset:
   # such RuntimeClass exists; the field is then left out of the pod spec.
   runtimeClassName: nvidia
 
-  # Resource limits and requests. CRIU writes the checkpoint image into the
+  # Resource limits and requests. CRIU writes its image into the
   # memory-backed PageBroker staging volume from this container, so
-  # limits.memory also bounds the largest checkpoint image.
+  # limits.memory also bounds the largest CRIU image.
   resources:
     limits:
       cpu: 4
@@ -228,7 +255,8 @@ daemonset:
   # Pod annotations
   podAnnotations: {}
 
-  # Affinity rules
+  # Affinity rules. The chart adds kubernetes.io/arch In (amd64, arm64) to every
+  # non-empty required node selector term.
   affinity: {}
 
   # Init container configuration
@@ -295,17 +323,16 @@ config:
 
   checkpoint:
     # Maximum seconds before the agent marks a checkpoint failed.
-    checkpointTimeoutSeconds: 3600
-    # Times a failed capture may be retried in place, beyond the first attempt.
-    # A PodSnapshot can override it with spec.checkpointRetryLimit; 0 keeps
-    # retry opt-in, so upgrading changes no existing capture's behaviour.
+    timeoutSeconds: 3600
+    # Times a failed checkpoint may be retried, beyond the first attempt. 0 keeps
+    # retry opt-in, so upgrading changes no existing checkpoint's behaviour.
     retryLimit: 0
 
   restore:
     # Maximum seconds to allow a restore attempt before the agent marks it failed
-    restoreTimeoutSeconds: 7200
+    timeoutSeconds: 7200
     # Skip the restore compatibility check on every restore this agent handles.
-    # The gate refuses a restore whose checkpoint was captured somewhere the
+    # The gate refuses a restore whose snapshot was taken somewhere the
     # target node cannot reproduce; turning it off means those restores are
     # attempted and fail inside CRIU instead. Per-node escape hatch; a single
     # restore can opt out with the nvidia.com/snapshot-skip-compat-check
@@ -316,7 +343,7 @@ config:
     # Path to the criu binary
     binaryPath: /usr/local/sbin/criu
     # Ghost file size limit in bytes. Deleted-but-open files smaller than this
-    # are saved inline in the checkpoint image as ghost files.
+    # are saved inline in the snapshot as ghost files.
     ghostLimit: 536870912
     # CRIU logging verbosity (0-4)
     logLevel: 4

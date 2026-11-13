@@ -160,7 +160,13 @@ func makeNodeController(t *testing.T, fc *fakeCheckpointer, objs ...client.Objec
 		runtime:      &fakeRuntime{},
 		log:          logr.Discard(),
 		captureQueue: newTestCaptureQueue(t),
+		// The capture path recovers the source on failure, which signals it.
+		sendSignalFn: func(logr.Logger, int, syscall.Signal, string) error { return nil },
+		hostProcPath: "/proc",
 	}
+	// Set the clock and requeue as newDefaultController does.
+	w.nowFn = time.Now
+	w.requeueCaptureFn = w.captureQueue.AddAfter
 	w.contentIndexer = cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{podRefIndex: podRefIndexFunc})
 	for _, o := range objs {
 		if _, ok := o.(*snapshotv1alpha1.PodSnapshotContent); ok {
@@ -214,7 +220,9 @@ func makeSourcePod() *corev1.Pod {
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
 			ContainerStatuses: []corev1.ContainerStatus{
-				{Name: "main", Ready: true, ContainerID: "containerd://abc123"},
+				// Kubelet reports a container Ready only while it runs.
+				{Name: "main", Ready: true, ContainerID: "containerd://abc123",
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
 			},
 		},
 	}
@@ -1066,13 +1074,13 @@ func TestReconcileCapture_IndexErrorReturned(t *testing.T) {
 }
 
 // TestRunCheckpoint_TimeoutFailsTheWorkOrder covers the hang guard: a dump that outlives
-// checkpointTimeoutSeconds must end as a terminal CheckpointTimeout rather than holding its queue
+// checkpoint.timeoutSeconds must end as a terminal CheckpointTimeout rather than holding its queue
 // worker until the agent restarts.
 func TestRunCheckpoint_TimeoutFailsTheWorkOrder(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content)
-	w.config.Checkpoint = snapshottypes.CheckpointSpec{CheckpointTimeoutSeconds: ptr.To(1)}
+	w.config.Checkpoint = snapshottypes.CheckpointSpec{TimeoutSeconds: ptr.To(1)}
 	w.checkpointFn = func(ctx context.Context, _ CheckpointParams) (*pagebroker.PublishedArtifact, error) {
 		<-ctx.Done() // a dump that honours cancellation, e.g. cuda-checkpoint
 		return nil, ctx.Err()
@@ -1092,7 +1100,7 @@ func TestRunCheckpoint_TimeoutFailsTheWorkOrder(t *testing.T) {
 func TestRunCheckpoint_OverrunButSuccessfulDumpIsStillReady(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
-	w.config.Checkpoint = snapshottypes.CheckpointSpec{CheckpointTimeoutSeconds: ptr.To(1)}
+	w.config.Checkpoint = snapshottypes.CheckpointSpec{TimeoutSeconds: ptr.To(1)}
 	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
 		time.Sleep(1200 * time.Millisecond)
 		return nil, nil // overran the deadline but reports success

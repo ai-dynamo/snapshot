@@ -68,25 +68,32 @@ func NewCheckpointManifest(
 // agent could not read is left out rather than written empty, so it reads as
 // unknown instead of as a value that happens to be blank.
 type HostManifest struct {
-	KernelVersion string `yaml:"kernelVersion,omitempty"`
-	CPUArch       string `yaml:"cpuArch,omitempty"`
+	KernelVersion string   `yaml:"kernelVersion,omitempty"`
+	CPUArch       string   `yaml:"cpuArch,omitempty"`
+	CPUFeatures   []string `yaml:"cpuFeatures,omitempty"`
 }
 
 // NewHostManifest takes the architecture from the agent binary rather than
 // asking the node: this binary is running on that node, so they agree.
-func NewHostManifest(kernelVersion string) HostManifest {
+func NewHostManifest(kernelVersion string, cpuFeatures []string) HostManifest {
 	return HostManifest{
 		KernelVersion: kernelVersion,
 		CPUArch:       runtime.GOARCH,
+		CPUFeatures:   cpuFeatures,
 	}
 }
 
-// CRIUDumpManifest stores the resolved dump-time CRIU mount plan used for restore.
+// CRIUDumpManifest stores the resolved dump-time CRIU mount plan used for
+// restore, and what the dump recorded about security labels.
 type CRIUDumpManifest struct {
 	CRIU     CRIUSettings      `yaml:"criu"`
 	ExtMnt   map[string]string `yaml:"extMnt,omitempty"`
 	External []string          `yaml:"external,omitempty"`
 	SkipMnt  []string          `yaml:"skipMnt,omitempty"`
+	// LSMLabels is set when the dump recorded a security label for every
+	// process with credentials, as criu.RecordedLSMLabels reads the images.
+	// A checkpoint captured before it was recorded reads as unlabeled.
+	LSMLabels bool `yaml:"lsmLabels,omitempty"`
 }
 
 func NewCRIUDumpManifest(criuOpts *criurpc.CriuOpts, settings CRIUSettings) CRIUDumpManifest {
@@ -296,6 +303,7 @@ func (m *CheckpointManifest) CompatEnvironment() compat.Environment {
 	return compat.Environment{
 		KernelVersion:      m.Host.KernelVersion,
 		CPUArch:            m.Host.CPUArch,
+		CPUFeatures:        m.Host.CPUFeatures,
 		Image:              m.K8s.Image,
 		ImageID:            m.K8s.ImageID,
 		CPULimit:           m.K8s.CPULimit,

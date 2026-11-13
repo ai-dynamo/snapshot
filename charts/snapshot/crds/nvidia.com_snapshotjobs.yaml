@@ -37,8 +37,8 @@ spec:
       openAPIV3Schema:
         description: |-
           SnapshotJob is the Schema for the snapshotjobs API. It fuses running a
-          checkpoint-ready workload pod and capturing it into a PodSnapshot into one
-          declarative, capture-only object. SnapshotJob has zero awareness of any
+          checkpoint-ready workload pod and checkpointing it into a PodSnapshot into one
+          declarative, checkpoint-only object. SnapshotJob has zero awareness of any
           specific consumer (Dynamo, GMS, or otherwise).
 
           No conversion: this type exists only in v1alpha1 (no other API version), so
@@ -76,7 +76,7 @@ spec:
                 description: |-
                   NonTargetArtifacts declares regular non-target writers and their opt-in
                   failed-attempt cleanup policy. Omission retains their bytes and does not
-                  change capture-artifact or source-object deletion. The controller derives
+                  change snapshot or source-object deletion. The controller derives
                   the source Pod annotation from this typed declaration.
                 properties:
                   containers:
@@ -105,15 +105,216 @@ spec:
                   PodSnapshotTemplate defines the properties of the PodSnapshot produced by
                   this job. The controller fills in spec.source from the pod it creates.
                 properties:
-                  checkpointRetryLimit:
+                  containers:
                     description: |-
-                      CheckpointRetryLimit is copied to the generated PodSnapshot: how many
-                      times a failed capture may be retried in place, over and above the first
-                      attempt. Unset defers to the agent's cluster-wide default, which is
-                      distinct from an explicit 0 asking for no retry.
-                    format: int32
-                    minimum: 0
-                    type: integer
+                      Containers is copied to the generated PodSnapshot: settings for the
+                      checkpointed containers, matched by name to targetContainers.
+                    items:
+                      description: |-
+                        ContainerSnapshotConfig holds the settings for one checkpointed container,
+                        matched to it by name. Snapshot copies them into the PodSnapshotContent at
+                        checkpoint time, and every restore of that snapshot uses that copy.
+                      properties:
+                        checkpointReadinessProbe:
+                          description: |-
+                            CheckpointReadinessProbe tells when the application is safe to
+                            checkpoint. When it is set, Snapshot waits for it instead of the
+                            container's Ready condition. When it is omitted, Snapshot waits for the
+                            container to be Ready, as before.
+                          properties:
+                            file:
+                              description: |-
+                                File succeeds when a regular file exists at the path, inside the
+                                container. Like an exec probe, Snapshot checks it by running a shell
+                                in the container, as the container's user, so the image needs a shell.
+                              properties:
+                                path:
+                                  description: |-
+                                    Path is an absolute, clean path inside the container: no empty, "." or
+                                    ".." parts and no trailing slash, so two paths name the same file only
+                                    if they are equal. Any path the container's user can reach works,
+                                    volumes included, except the files Snapshot itself writes in the
+                                    snapshot-control volume. A file on a volume that outlives the Pod stays
+                                    there for the next checkpoint or restore unless the application
+                                    removes it.
+                                  maxLength: 4096
+                                  minLength: 2
+                                  type: string
+                                  x-kubernetes-validations:
+                                  - message: 'path must be absolute and clean: no
+                                      empty, . or .. parts and no trailing slash'
+                                    rule: self.startsWith('/') && !self.endsWith('/')
+                                      && !self.contains('//') && !self.contains('/./')
+                                      && !self.endsWith('/.') && !self.contains('/../')
+                                      && !self.endsWith('/..')
+                              required:
+                              - path
+                              type: object
+                            httpGet:
+                              description: |-
+                                HTTPGet succeeds when a GET to the Pod IP returns a 2xx status.
+                                Snapshot does not follow redirects, so a 3xx fails.
+                              properties:
+                                path:
+                                  description: Path of the request. Empty means "/".
+                                  type: string
+                                port:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  description: |-
+                                    Port on the Pod IP: a number from 1 to 65535, or the name of a port of
+                                    the container, resolved when the request is sent.
+                                  maxLength: 15
+                                  pattern: ^([0-9]+-)*[0-9]*[a-z][a-z0-9]*(-[a-z0-9]+)*$
+                                  x-kubernetes-int-or-string: true
+                                  x-kubernetes-validations:
+                                  - message: port must be 1-65535 or a valid port
+                                      name
+                                    rule: type(self) in [string] || (self >= 1 &&
+                                      self <= 65535)
+                              required:
+                              - port
+                              type: object
+                            initialDelaySeconds:
+                              default: 0
+                              description: |-
+                                InitialDelaySeconds is how long to wait after the container starts
+                                before the first check.
+                              format: int32
+                              minimum: 0
+                              type: integer
+                            periodSeconds:
+                              default: 1
+                              description: PeriodSeconds is the time between checks.
+                              format: int32
+                              minimum: 1
+                              type: integer
+                            successThreshold:
+                              default: 1
+                              description: SuccessThreshold is how many checks in
+                                a row must succeed.
+                              format: int32
+                              minimum: 1
+                              type: integer
+                            timeoutSeconds:
+                              default: 1
+                              description: TimeoutSeconds limits each check.
+                              format: int32
+                              minimum: 1
+                              type: integer
+                          type: object
+                          x-kubernetes-validations:
+                          - message: set exactly one of file or httpGet
+                            rule: has(self.file) != has(self.httpGet)
+                        lifecycle:
+                          description: |-
+                            Lifecycle holds actions Snapshot runs at points in the checkpoint and
+                            restore lifecycle.
+                          properties:
+                            postRestore:
+                              description: |-
+                                PostRestore tells the application, after Snapshot restored its process
+                                and GPU state, that it may resume.
+                              properties:
+                                file:
+                                  description: |-
+                                    File creates an empty regular file at the path, inside the container.
+                                    Like an exec probe, Snapshot creates it by running a shell in the
+                                    container, as the container's user, so the image needs a shell. The
+                                    parent directory must exist. The file must not exist before the
+                                    restore: Snapshot takes an existing file as the notification.
+                                  properties:
+                                    path:
+                                      description: |-
+                                        Path is an absolute, clean path inside the container: no empty, "." or
+                                        ".." parts and no trailing slash, so two paths name the same file only
+                                        if they are equal. Any path the container's user can reach works,
+                                        volumes included, except the files Snapshot itself writes in the
+                                        snapshot-control volume. A file on a volume that outlives the Pod stays
+                                        there for the next checkpoint or restore unless the application
+                                        removes it.
+                                      maxLength: 4096
+                                      minLength: 2
+                                      type: string
+                                      x-kubernetes-validations:
+                                      - message: 'path must be absolute and clean:
+                                          no empty, . or .. parts and no trailing
+                                          slash'
+                                        rule: self.startsWith('/') && !self.endsWith('/')
+                                          && !self.contains('//') && !self.contains('/./')
+                                          && !self.endsWith('/.') && !self.contains('/../')
+                                          && !self.endsWith('/..')
+                                  required:
+                                  - path
+                                  type: object
+                                httpPost:
+                                  description: |-
+                                    HTTPPost sends a POST with an empty body to the Pod IP. A 2xx status
+                                    means the application accepted the notification. Snapshot does not
+                                    follow redirects, so a 3xx fails.
+                                  properties:
+                                    path:
+                                      description: Path of the request. Empty means
+                                        "/".
+                                      type: string
+                                    port:
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                      description: |-
+                                        Port on the Pod IP: a number from 1 to 65535, or the name of a port of
+                                        the container, resolved when the request is sent.
+                                      maxLength: 15
+                                      pattern: ^([0-9]+-)*[0-9]*[a-z][a-z0-9]*(-[a-z0-9]+)*$
+                                      x-kubernetes-int-or-string: true
+                                      x-kubernetes-validations:
+                                      - message: port must be 1-65535 or a valid port
+                                          name
+                                        rule: type(self) in [string] || (self >= 1
+                                          && self <= 65535)
+                                  required:
+                                  - port
+                                  type: object
+                                periodSeconds:
+                                  default: 1
+                                  description: PeriodSeconds is the time between attempts.
+                                  format: int32
+                                  minimum: 1
+                                  type: integer
+                                timeoutSeconds:
+                                  default: 1
+                                  description: TimeoutSeconds limits each attempt.
+                                  format: int32
+                                  minimum: 1
+                                  type: integer
+                              type: object
+                              x-kubernetes-validations:
+                              - message: set exactly one of file or httpPost
+                                rule: has(self.file) != has(self.httpPost)
+                          type: object
+                        name:
+                          description: Name of the checkpointed container these settings
+                            apply to.
+                          maxLength: 63
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                      required:
+                      - name
+                      type: object
+                      x-kubernetes-validations:
+                      - message: checkpointReadinessProbe and lifecycle.postRestore
+                          must use different file paths
+                        rule: '!has(self.checkpointReadinessProbe) || !has(self.checkpointReadinessProbe.file)
+                          || !has(self.lifecycle) || !has(self.lifecycle.postRestore)
+                          || !has(self.lifecycle.postRestore.file) || self.checkpointReadinessProbe.file.path
+                          != self.lifecycle.postRestore.file.path'
+                    maxItems: 1
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
                   metadata:
                     description: |-
                       Metadata contains labels and annotations copied to the generated
@@ -151,9 +352,9 @@ spec:
                       may contain any number of additional containers (helpers, sidecars, etc.)
                       — this field controls only the CRIU dump target.
 
-                      v1alpha1: exactly one target is required. The plural form and nested
-                      placement here is intentional: future versions will support per-container
-                      config (e.g. per-container quiesceProbe) by extending this list to objects.
+                      v1alpha1: exactly one target is required. The plural form is
+                      intentional: future versions may checkpoint more than one container.
+                      Per-container settings go in containers, not here.
 
                       Defaults to ["main"]. Each entry must be a valid DNS label
                       (1-63 chars, ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$).
@@ -173,9 +374,12 @@ spec:
                 - message: metadata.labels must not set controller-owned label nvidia.com/snapshot-job-uid
                   rule: '!has(self.metadata) || !has(self.metadata.labels) || !(''nvidia.com/snapshot-job-uid''
                     in self.metadata.labels)'
+                - message: containers must name containers in targetContainers
+                  rule: '!has(self.containers) || self.containers.all(c, c.name in
+                    self.targetContainers)'
               podTemplate:
                 description: |-
-                  PodTemplate defines the workload to run and capture. The controller injects
+                  PodTemplate defines the workload to run and checkpoint. The controller injects
                   the snapshot contract (control volume, readiness probe, seccomp, sidecar
                   opt-outs) before creating the batch/v1 Job. Everything else — image,
                   command, GPU resources, sidecars, DRA claims, shared memory — is the
@@ -9039,7 +9243,7 @@ spec:
               rule: '!has(self.nonTargetArtifacts) || !has(self.podTemplate.metadata)
                 || !has(self.podTemplate.metadata.annotations) || !(''nvidia.com/snapshot-non-target-artifact-containers''
                 in self.podTemplate.metadata.annotations)'
-            - message: nonTargetArtifacts.containers must not name capture targets
+            - message: nonTargetArtifacts.containers must not name target containers
               rule: '!has(self.nonTargetArtifacts) || self.nonTargetArtifacts.containers.all(c,
                 !(c in self.podSnapshotTemplate.targetContainers))'
           status:
@@ -9121,8 +9325,8 @@ spec:
               podSnapshotUID:
                 description: |-
                   PodSnapshotUID identifies the one PodSnapshot incarnation accepted for
-                  this one-shot capture. Once set, a missing PodSnapshot or a same-name
-                  object with another UID is terminal and must never start another capture.
+                  this one-shot checkpoint. Once set, a missing PodSnapshot or a same-name
+                  object with another UID is terminal and must never start another checkpoint.
                 type: string
               sourceJobUID:
                 description: |-

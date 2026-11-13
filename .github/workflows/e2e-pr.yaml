@@ -78,8 +78,7 @@ jobs:
               - ".github/workflows/e2e.yaml"
               - ".github/workflows/e2e-frameworks.yaml"
               # The framework workloads' programs and manifests.
-              - "docs/guides/**"
-              - "hack/datadog-gpu-monitoring.py"
+              - "docs/using-snapshot/**"
 
   cpu:
     name: CPU
@@ -232,36 +231,9 @@ jobs:
           path: pr-e2e-candidate.json
           if-no-files-found: error
 
-  # Held across both GPU suites: a toggle in each would turn monitoring back on
-  # under the other while it is still capturing or restoring. The holder is the
-  # run, which hack/datadog-gpu-monitoring.py tracks on the cluster resources.
-  datadog-gate:
-    name: datadog gpu monitoring off
-    needs: [cpu, candidate]
-    runs-on: prod-deploy-tester-v1
-    # The job clock includes runner setup, which takes minutes on a busy GPU
-    # cluster.
-    timeout-minutes: 15
-    concurrency:
-      group: snapshot-e2e-frameworks-datadog-gate
-      cancel-in-progress: false
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Report Datadog GPU monitoring state
-        run: python3 hack/datadog-gpu-monitoring.py status
-
-      - name: Disable Datadog GPU monitoring for this run
-        run: python3 hack/datadog-gpu-monitoring.py disable --holder "${{ github.run_id }}-${{ github.run_attempt }}"
-
   gpu:
     name: GPU
-    needs: [cpu, images, candidate, datadog-gate]
+    needs: [cpu, images, candidate]
     uses: ./.github/workflows/e2e.yaml
     with:
       snapshot_tag: ${{ needs.images.outputs.tag }}
@@ -271,47 +243,22 @@ jobs:
 
   frameworks:
     name: Frameworks
-    needs: [cpu, images, candidate, datadog-gate]
+    needs: [cpu, images, candidate]
     uses: ./.github/workflows/e2e-frameworks.yaml
     with:
       snapshot_tag: ${{ needs.images.outputs.tag }}
-      # datadog-gate holds it for both suites. A called workflow shares this
-      # run's ID, so its own restore would release that hold early.
-      datadog_gpu_monitoring: leave
     permissions:
       # Its benchmark comparison reads the result artifacts of this run.
       actions: read
       contents: read
       packages: read
 
-  datadog-restore:
-    name: datadog gpu monitoring back on
-    needs: [datadog-gate, gpu, frameworks]
-    # Whether the suites passed, failed, or were cancelled; skipped only when
-    # the gate never disabled anything.
-    if: ${{ always() && needs.datadog-gate.result == 'success' }}
-    runs-on: prod-deploy-tester-v1
-    timeout-minutes: 15
-    concurrency:
-      group: snapshot-e2e-frameworks-datadog-gate
-      cancel-in-progress: false
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Restore Datadog GPU monitoring
-        run: python3 hack/datadog-gpu-monitoring.py restore --holder "${{ github.run_id }}-${{ github.run_attempt }}"
-
   # The one check to require. always(), never !cancelled(): a skipped required
   # check counts as passing, so this job must run -- and fail -- when the run is
   # cancelled or a job it depends on did not succeed.
   pr-e2e:
     name: PR E2E
-    needs: [changes, cpu, images, candidate, datadog-gate, gpu, frameworks, datadog-restore]
+    needs: [changes, cpu, images, candidate, gpu, frameworks]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -326,8 +273,7 @@ jobs:
           set -euo pipefail
           jq -e --arg e2e "${E2E}" '
             .changes.result == "success" and
-            ([.cpu, .images, .candidate, .["datadog-gate"], .gpu, .frameworks,
-              .["datadog-restore"]] | if $e2e == "true"
+            ([.cpu, .images, .candidate, .gpu, .frameworks] | if $e2e == "true"
                then all(.result == "success")
                else all(.result == "skipped") end)
           ' <<< "${RESULTS}"

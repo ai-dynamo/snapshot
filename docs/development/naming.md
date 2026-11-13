@@ -3,14 +3,14 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Naming conventions
+# Naming Conventions
 
 Terms and naming patterns for the API, the chart, the CLI, and the docs. Use one
 name per concept, and use it everywhere: field, value, docs, log line, event,
 error message, and test. When a concept has two names, readers assume there are
 two things.
 
-## User-facing and internal names
+## User-Facing and Internal Names
 
 Snapshot has two kinds of names. Keep them apart.
 
@@ -59,13 +59,13 @@ out of the reference.
 
 | Use | Means | Do not write |
 | --- | --- | --- |
-| checkpoint | The saved state of a pod, and the act of saving it | `snapshot` as a noun or verb, `dump`, `backup` |
-| capture | The same operation seen from the source side: the capture step, the capture Deployment, the `Captured` condition | `capture` for the saved state |
-| restore | Start a new pod from a checkpoint | `rehydrate`, `revive` |
 | Snapshot | The product. Also the prefix of the kinds `PodSnapshot` and `SnapshotJob` | `snapshot` in lowercase for the product |
-| checkpoint artifact | The files a checkpoint writes to the checkpoint store | `artifact` alone when another kind of artifact is in the sentence |
-| checkpoint store | The backend that holds checkpoint artifacts. Today it is a PVC | `checkpoint storage`, `shared volume` |
-| checkpoint volume | The shared `ReadWriteMany` PVC that is the checkpoint store today | |
+| snapshot | The saved state of a pod: the artifact a checkpoint writes to the snapshot store | `checkpoint` as a noun, `checkpoint artifact`, `dump`, `backup` |
+| checkpoint | Verb: take a snapshot of a pod. Also the `snapshotctl checkpoint` command | `snapshot` as a verb, `capture`, `dump` |
+| restore | Verb: start a new pod from a snapshot | `rehydrate`, `revive` |
+| capture | The mechanism inside a checkpoint. Internal only: code, comments, and detailed architecture pages. Every name and text a user sees says checkpoint, even where an existing name says capture | `capture` in a condition, reason, label, field, event, or message; `capture` for the act of checkpointing or for the snapshot |
+| snapshot store | The backend that holds snapshots. Today it is a PVC | `checkpoint store`, `checkpoint storage`, `shared volume` |
+| snapshot volume | The shared `ReadWriteMany` PVC that is the snapshot store today | `checkpoint volume` |
 | source Pod | The pod being checkpointed. Guides may call the serving instance a replica | `original pod`, `origin pod` |
 | restore Pod | The new pod that a restore starts | |
 | target container | The container you checkpoint from (`targetContainers`). It is a checkpoint-side term; a restore runs in a destination container | `captured container`, `main container` |
@@ -73,12 +73,12 @@ out of the reference.
 | destination container | The container in a restore Pod that you restore into. `nvidia.com/restore-container-map` maps the target container to one or more destination containers | `target container` or `restore target` for this side |
 | node agent | The per-node DaemonSet (`snapshot-agent`) that drives CRIU and `cuda-checkpoint`. After the first use, "agent" is enough | `agent` for an AI assistant |
 | PageBroker | The broker sidecar of the node agent | `pagebroker` or `page broker` in prose |
-| baseline | The minimum versions every installation needs, in the baseline row of Compatibility | `general floor`, `default requirements` |
+| baseline | The minimum versions every installation needs, in the baseline row of Prerequisites | `general floor`, `default requirements` |
 
 Add a row when a concept could be called two ways, or when one definition has to
 hold across pages. A feature name does not need a row.
 
-## Naming a user-facing thing
+## Naming a User-Facing Thing
 
 These patterns are for user-facing names. An internal name follows its package.
 
@@ -86,18 +86,18 @@ These patterns are for user-facing names. An internal name follows its package.
 | --- | --- | --- |
 | Kind | PascalCase noun | `PodSnapshot`, `SnapshotJob` |
 | Spec or status field | lowerCamelCase. A reference to an object ends in `Ref`, a name in `Name`, a UID in `UID`, a timestamp in `At`, a duration in whole seconds in `Seconds`. A list is plural | `podRef`, `boundSnapshotContentName`, `sourceJobUID`, `startedAt`, `activeDeadlineSeconds`, `targetContainers` |
-| Condition type | PascalCase adjective or past participle | `Ready`, `Running`, `Captured`, `Completed`, `Failed` |
+| Condition type | PascalCase adjective or past participle | `Ready`, `Running`, `Completed`, `Failed` |
 | Condition or event reason | PascalCase, subject then outcome, no spaces | `DeadlineExceeded`, `PodSnapshotDeleted`, `CheckpointFailed` |
 | Annotation or label that Snapshot defines | `nvidia.com/` plus kebab-case. The restore interface starts with `restore-`; the rest usually start with `snapshot-` | `nvidia.com/restore-from`, `nvidia.com/snapshot-multi-gpu`, `nvidia.com/snapshot-skip-compat-check` |
 | Finalizer | `nvidia.com/` plus the object it protects and the action, in kebab-case | `nvidia.com/podsnapshotcontent-cleanup` |
 | Pod condition type | `nvidia.com/` plus PascalCase | `nvidia.com/Restored` |
 | Environment variable | `SNAPSHOT_` plus UPPER_SNAKE. `DYN_SNAPSHOT_` is a deprecated alias; do not add new ones | `SNAPSHOT_CONTROL_DIR` |
-| Helm value | lowerCamelCase. A setting that changes what Snapshot does is nested under its capability (`config.restore`, `storage`). A setting that shapes how a component is deployed is nested under the component (`operator`, `daemonset`). Name it like its siblings: `operator.*` durations are duration strings, `config.*` durations are `…Seconds`, sizes are `…Bytes` or a Kubernetes quantity | `config.restore.restoreTimeoutSeconds`, `config.restore.skipCompatCheck`, `operator.artifactCleanup.scanInterval: 10m`, `storage.pvc.size` |
+| Helm value | lowerCamelCase. A setting that changes what Snapshot does is nested under its capability (`config.restore`, `storage`). A setting that shapes how a component is deployed is nested under the component (`operator`, `daemonset`). Name it like its siblings: `operator.*` durations are duration strings, `config.*` durations are `…Seconds`, sizes are `…Bytes` or a Kubernetes quantity | `config.restore.timeoutSeconds`, `config.restore.skipCompatCheck`, `operator.artifactCleanup.scanInterval: 10m`, `storage.pvc.size` |
 | CLI flag | Kebab-case long option, named for the feature it turns on and not for the command it runs | `--manifest`, `--snapshot` |
 | Object, volume, or file that Snapshot creates | Kebab-case | `snapshot-agent`, `snapshot-control`, `ready-for-snapshot` |
-| Docs file | Kebab-case `.md`, except `README.md`, which indexes a directory or holds a SNEP. A framework guide is `docs/guides/<framework>.md`, with its manifests in `docs/guides/<framework>/` | `tensorrt-llm.md` |
+| Docs file | Kebab-case `.md`, except `README.md`, which indexes a directory or holds a SNEP. A framework guide is `docs/using-snapshot/<framework>.md`, with its manifests in `docs/using-snapshot/<framework>/` | `tensorrt-llm.md` |
 
-## Before you add a name
+## Before You Add a Name
 
 1. Decide who sees it. If a user, workload author, integrator, or operator can
    type it, read it, or see it, it is user-facing, and the rules above apply.

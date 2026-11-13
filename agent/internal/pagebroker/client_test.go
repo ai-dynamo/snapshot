@@ -667,3 +667,69 @@ func TestUnrequestedProcessDescriptorIsRejectedAndClosed(t *testing.T) {
 		t.Fatalf("process descriptor leak: before %d, after %d", before, after)
 	}
 }
+
+// Abort retries a lost reply the same way Commit does, on its own much shorter
+// budget. Without this the retry added for cleanup had no coverage at all.
+func TestAbortRetriesLostResponses(t *testing.T) {
+	const limit = 5 * time.Second
+	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "pagebroker.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if err := listener.(*net.UnixListener).SetDeadline(time.Now().Add(limit)); err != nil {
+		t.Fatal(err)
+	}
+
+	attempts := make(chan *Request, 2)
+	server := make(chan error, 1)
+	go func() {
+		for attempt := 0; attempt < 2; attempt++ {
+			connection, err := listener.Accept()
+			if err != nil {
+				server <- err
+				return
+			}
+			if err := connection.SetDeadline(time.Now().Add(limit)); err != nil {
+				_ = connection.Close()
+				server <- err
+				return
+			}
+			request, err := readRequest(connection)
+			if err != nil {
+				_ = connection.Close()
+				server <- err
+				return
+			}
+			attempts <- request
+			// The first reply is lost; the second confirms the release.
+			if attempt == 1 {
+				if err := writeReply(connection, request, &Response_AbortComplete{AbortComplete: &AbortComplete{}}); err != nil {
+					_ = connection.Close()
+					server <- err
+					return
+				}
+			}
+			_ = connection.Close()
+		}
+		server <- nil
+	}()
+
+	if err := (Client{ControlSocketPath: listener.Addr().String()}).Abort(context.Background(), "transaction"); err != nil {
+		t.Fatalf("Abort() = %v, want success once the reply arrives", err)
+	}
+	if err := <-server; err != nil {
+		t.Fatalf("test broker: %v", err)
+	}
+	close(attempts)
+	count := 0
+	for request := range attempts {
+		if request.GetAbort() == nil {
+			t.Errorf("attempt %d was not an Abort: %v", count, request)
+		}
+		count++
+	}
+	if count != 2 {
+		t.Errorf("broker saw %d abort attempts, want 2", count)
+	}
+}

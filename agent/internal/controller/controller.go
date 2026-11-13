@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -42,7 +43,9 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
+	"github.com/ai-dynamo/snapshot/agent/internal/lifecyclehooks"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
@@ -70,16 +73,42 @@ type NodeController struct {
 	writePodControlSentinelFn func(string, string, string, []byte) error
 	controlSentinelExistsFn   func(int, string) (bool, error)
 	sendSignalFn              func(logr.Logger, int, syscall.Signal, string) error
-	restoreQueue              workqueue.TypedDelayingInterface[client.ObjectKey]
-	restorePodLister          corev1listers.PodLister
-	compareFn                 func(compat.Gate, compat.Environment, compat.Environment) []compat.Mismatch
-	withoutProxy              bool
+	// hostProcPath is where the agent reads the node's processes; tests point it elsewhere.
+	hostProcPath         string
+	stagingCapacityFn    func(string) (int64, error)
+	minimumImageSizeFn   func(string, []int) (int64, error)
+	reviveGPUProcessesFn func(context.Context, []int, string, logr.Logger) error
+	restoreQueue         workqueue.TypedDelayingInterface[client.ObjectKey]
+	restorePodLister     corev1listers.PodLister
+	compareFn            func(compat.Gate, compat.Environment, compat.Environment) []compat.Mismatch
+	withoutProxy         bool
 
 	// captureQueue holds PodSnapshotContent names. Its per-key exclusion is the capture path's only
 	// lock, which is enough because exactly one agent runs per node.
 	captureQueue workqueue.TypedRateLimitingInterface[string]
 
+	// checkpointGates holds a *checkpointGate per work order, while the agent waits for its
+	// source container to be ready for the checkpoint.
+	checkpointGates sync.Map
+	// hookExec runs a lifecycle hook's file action in its container, and
+	// hookHTTP sends its HTTP requests. Tests replace them.
+	hookExec lifecyclehooks.Execer
+	hookHTTP *http.Client
+	// nowFn and requeueCaptureFn are time.Now and captureQueue.AddAfter. Tests
+	// replace them.
+	nowFn            func() time.Time
+	requeueCaptureFn func(name string, after time.Duration)
+
+	// postRestoreWaitFn waits between post-restore attempts: waitOrDone.
+	// Tests replace it.
+	postRestoreWaitFn func(ctx context.Context, d time.Duration) error
+
 	handledRestores sync.Map
+
+	// startedRestoreContainers holds, per restoreContainerKey, the ID of a
+	// restore destination container the NRI plugin saw start, so a restore
+	// begins before kubelet publishes the container in the Pod status.
+	startedRestoreContainers sync.Map
 
 	// contentIndexer is the PodSnapshotContent informer's indexer, indexed by source pod
 	// (podRefIndex). The source-pod informer uses it to map a pod event back to its work order.
@@ -108,6 +137,11 @@ type restorePlan struct {
 	mappings []podcontract.ContainerMapping
 	// Read once in preflight, so both gates reach the same answer.
 	skipCompatCheck bool
+	// postRestore runs the checkpoint's lifecycle.postRestore action, every
+	// postRestorePeriod until it succeeds; nil without an action. The
+	// preflight already checked it against the destination containers.
+	postRestore       postRestoreHandler
+	postRestorePeriod time.Duration
 }
 
 type restoreResultState int
@@ -136,14 +170,16 @@ func (e *restorePendingError) Error() string {
 }
 
 type restoreOperation struct {
-	controller      *NodeController
-	pod             *corev1.Pod
-	artifact        *restoreArtifact
-	skipCompatCheck bool
-	destination     string
-	containerID     string
-	startedAt       time.Time
-	log             logr.Logger
+	controller        *NodeController
+	pod               *corev1.Pod
+	artifact          *restoreArtifact
+	postRestore       postRestoreHandler
+	postRestorePeriod time.Duration
+	skipCompatCheck   bool
+	destination       string
+	containerID       string
+	startedAt         time.Time
+	log               logr.Logger
 }
 
 const (
@@ -166,6 +202,10 @@ const (
 	// snapshotContentResyncInterval re-drives every PodSnapshotContent work order so a
 	// not-yet-Ready source pod is re-checked for quiesce without a busy loop.
 	snapshotContentResyncInterval = 10 * time.Second
+
+	// waitingForCheckpointReadinessReason is the Event on the source Pod when
+	// the agent starts waiting for its checkpoint readiness probe.
+	waitingForCheckpointReadinessReason = "WaitingForCheckpointReadiness"
 )
 
 // podSnapshotContentGVR is the cluster-scoped resource the capture informer watches.
@@ -240,8 +280,17 @@ func newDefaultController(
 		writePodControlSentinelFn: snapshotruntime.WritePodControlSentinel,
 		controlSentinelExistsFn:   snapshotruntime.ControlSentinelExists,
 		sendSignalFn:              snapshotruntime.SendSignalToPID,
+		hostProcPath:              snapshotruntime.HostProcPath,
+		stagingCapacityFn:         snapshotruntime.StagingCapacity,
+		minimumImageSizeFn:        snapshotruntime.MinimumImageSize,
+		reviveGPUProcessesFn:      cuda.ReviveProcessTree,
 		compareFn:                 compat.Compare,
+		hookExec:                  rt,
+		hookHTTP:                  lifecyclehooks.NewHTTPClient(),
+		nowFn:                     time.Now,
+		postRestoreWaitFn:         waitOrDone,
 	}
+	w.requeueCaptureFn = w.captureQueue.AddAfter
 	w.checkpointFn = w.executorCheckpoint
 	w.fetchManifestFn = func(ctx context.Context, artifact *pagebroker.PublishedArtifact) (*types.CheckpointManifest, error) {
 		return executor.FetchArtifactManifest(ctx, cfg.PageBroker.ControlSocketPath, artifact)
@@ -397,6 +446,35 @@ func (w *NodeController) forgetRestorePod(obj interface{}) {
 		return
 	}
 	w.handledRestores.Delete(string(pod.UID))
+	prefix := string(pod.UID) + "/"
+	w.startedRestoreContainers.Range(func(key, _ any) bool {
+		if strings.HasPrefix(key.(string), prefix) {
+			w.startedRestoreContainers.Delete(key)
+		}
+		return true
+	})
+}
+
+// RestoreContainerStarted records a restore destination's container that the
+// NRI plugin saw start, and requeues its Pod so the restore begins without
+// waiting for kubelet to publish the container in the Pod status. In a
+// vCluster tenant that status is also the only other way to find the
+// container: the runtime labels it with the host Pod's name.
+func (w *NodeController) RestoreContainerStarted(pod ktypes.NamespacedName, uid ktypes.UID, container, containerID string) {
+	w.startedRestoreContainers.Store(restoreContainerKey(uid, container), containerID)
+	w.restoreQueue.Add(pod)
+}
+
+// RestoreContainerStopped forgets a reported destination container that has
+// stopped, unless a later container already replaced the report. A restore
+// into it would fail the Pod's restore instead of waiting for the container
+// kubelet starts next.
+func (w *NodeController) RestoreContainerStopped(uid ktypes.UID, container, containerID string) {
+	w.startedRestoreContainers.CompareAndDelete(restoreContainerKey(uid, container), containerID)
+}
+
+func restoreContainerKey(uid ktypes.UID, container string) string {
+	return string(uid) + "/" + container
 }
 
 func (w *NodeController) restorePodRequested(pod *corev1.Pod) bool {
@@ -553,7 +631,20 @@ func (w *NodeController) preflightRestore(ctx context.Context, pod *corev1.Pod) 
 	if w.config.CRIU.TcpEstablished && pod.Status.PodIP == "" {
 		return nil, newRestorePendingError("PodIPPending", fmt.Sprintf("Waiting for restore Pod %s/%s to receive an IP address", pod.Namespace, pod.Name))
 	}
-	return &restorePlan{artifact: artifact, mappings: mappings, skipCompatCheck: skipCompatCheck}, nil
+	// The post-restore action is checked against the Pod spec here, so an
+	// action that can never run restores nothing.
+	postRestore, postRestorePeriod, err := planPostRestore(pod, mappings,
+		postRestoreAction(content, target.SourceContainerName), w.hookExec, w.hookHTTP)
+	if err != nil {
+		return nil, err
+	}
+	return &restorePlan{
+		artifact:          artifact,
+		mappings:          mappings,
+		skipCompatCheck:   skipCompatCheck,
+		postRestore:       postRestore,
+		postRestorePeriod: postRestorePeriod,
+	}, nil
 }
 
 func (w *NodeController) getPodSnapshotFromPod(ctx context.Context, pod *corev1.Pod) (*snapshotv1alpha1.PodSnapshot, error) {
@@ -936,6 +1027,10 @@ func (w *NodeController) restoreDestination(
 	emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeNormal, restoreRequestedReason, fmt.Sprintf("Restore requested from PodSnapshot %s for destination %s", artifact.SnapshotName, destination))
 
 	if err := w.runRestore(ctx, pod, plan, destination, containerID, startedAt, recovering); err != nil {
+		if errors.Is(err, errRestoreInterrupted) {
+			// Not an outcome: the next agent resumes the post-restore action.
+			return result
+		}
 		var incompatible *compat.IncompatibleError
 		if errors.As(err, &incompatible) {
 			result.state = restoreResultIncompatible
@@ -954,7 +1049,8 @@ func (w *NodeController) restoreDestination(
 }
 
 // resolveRestoreContainerID uses the kubelet-published status fast path, then
-// polls the node runtime inline while this Pod's queue key remains in progress.
+// polls inline while this Pod's queue key remains in progress: first for the
+// container the NRI plugin saw start, then the node runtime.
 func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *corev1.Pod, destination, podKey string) (string, bool) {
 	if containerID := restoreContainerIDFromStatus(pod, destination); containerID != "" {
 		return containerID, false
@@ -970,6 +1066,17 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
 	tick := time.NewTicker(restoreContainerResolveInterval)
 	defer tick.Stop()
 	for {
+		// Taken, not read: a restore consumes it, and a container started
+		// later is reported again.
+		if started, ok := w.startedRestoreContainers.LoadAndDelete(restoreContainerKey(pod.UID, destination)); ok {
+			w.log.V(1).Info("Resolved restore container started under NRI",
+				"pod", podKey,
+				"container", destination,
+				"container_id", started,
+			)
+			return started.(string), false
+		}
+
 		resolveCtx, cancel := restoreContainerResolveAttemptContext(ctx, deadlineAt)
 		containerID, err := w.runtime.ResolveContainerIDByPod(resolveCtx, pod.Name, pod.Namespace, destination)
 		cancel()
@@ -1005,6 +1112,10 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
 //     CRIU-restored process resumes inside the polling loop that waits on
 //     this file, exits quiescence, and resumes the engine. On failure, write
 //     restore-failed and kill the placeholder instead.
+//  3. With a lifecycle.postRestore action, notify the application within the
+//     same deadline. The restore preflight already checked its settings;
+//     nothing checks its file before step 2, so the release is not delayed.
+//     A failure here also fails the restore and kills the container.
 func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *restorePlan, destination, containerID string, startedAt time.Time, recovering bool) (retErr error) {
 	op := w.newRestoreOperation(pod, plan, destination, containerID, startedAt)
 	// Without this the placeholder keeps waiting for a restore that panicked.
@@ -1017,10 +1128,11 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 			return err
 		}
 		if completed {
-			return nil
+			return op.recoverPostRestore(ctx)
 		}
 	}
 
+	// One deadline covers the restore and its post-restore action.
 	restoreCtx := ctx
 	if timeout := w.config.Restore.RestoreTimeout(); timeout > 0 {
 		var cancel context.CancelFunc
@@ -1044,7 +1156,32 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		logWithStep(op.log, err).Error(cleanupErr, "Restore completed with cleanup errors")
 		emitPodEvent(ctx, w.clientset, op.log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreCleanupFailed", cleanupErr.Error())
 	}
-	return op.completeRestore(ctx, restored)
+	if err := op.completeRestore(ctx, restored); err != nil {
+		return err
+	}
+	if err := op.notifyPostRestore(restoreCtx); err != nil {
+		return op.failPostRestore(ctx, err)
+	}
+	return nil
+}
+
+// recoverPostRestore finishes a restore that an agent restart interrupted
+// after restore-complete: only the post-restore action can be left, and CRIU
+// must never run again. This pass's preflight already checked its settings.
+//
+// The interrupted run's deadline is gone with it, so the action gets a full
+// config.restore.timeoutSeconds again: a restart can extend it by one timeout.
+func (op *restoreOperation) recoverPostRestore(ctx context.Context) error {
+	postCtx := ctx
+	if timeout := op.controller.config.Restore.RestoreTimeout(); timeout > 0 {
+		var cancel context.CancelFunc
+		postCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	if err := op.notifyPostRestore(postCtx); err != nil {
+		return op.failPostRestore(ctx, err)
+	}
+	return nil
 }
 
 // recoverCompletedRestore avoids replaying CRIU when the destination-scoped
@@ -1079,14 +1216,16 @@ func (w *NodeController) newRestoreOperation(
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
 	artifact := plan.artifact
 	return &restoreOperation{
-		controller:      w,
-		pod:             pod,
-		artifact:        artifact,
-		skipCompatCheck: plan.skipCompatCheck,
-		destination:     destination,
-		containerID:     containerID,
-		startedAt:       startedAt,
-		log:             w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "content_uid", artifact.ContentUID, "source_container", artifact.SourceContainerName, "destination_container", destination, "container_id", containerID),
+		controller:        w,
+		pod:               pod,
+		artifact:          artifact,
+		postRestore:       plan.postRestore,
+		postRestorePeriod: plan.postRestorePeriod,
+		skipCompatCheck:   plan.skipCompatCheck,
+		destination:       destination,
+		containerID:       containerID,
+		startedAt:         startedAt,
+		log:               w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "content_uid", artifact.ContentUID, "source_container", artifact.SourceContainerName, "destination_container", destination, "container_id", containerID),
 	}
 }
 

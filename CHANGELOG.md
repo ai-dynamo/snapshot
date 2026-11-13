@@ -34,20 +34,73 @@ commit-level history for each release is on its
 
 ### Added
 
+- Lifecycle hooks: `PodSnapshot.spec.containers` and
+  `SnapshotJob.spec.podSnapshotTemplate.containers` can set a
+  `checkpointReadinessProbe`, which decides when to checkpoint instead of the
+  container's Ready condition, and a `lifecycle.postRestore` action, which
+  notifies the restored application by file or HTTP. A restore succeeds only
+  once its action succeeds. `PodSnapshotContent.spec.containers` keeps the
+  settings for every restore. CRD change: deploy the matching CRDs, operator and
+  node agent together. See
+  [Lifecycle hooks](docs/reference/workload-contract.md#lifecycle-hooks).
+
+- S3 restore tuning accepts
+  `pageBroker.transferEngine.modelStreamer.restoreBatchBytes` to control batch
+  and shared admission bytes. The default remains 10 GB; restart PageBroker
+  after changing it.
+
 - `SnapshotJob.spec.nonTargetArtifacts` lets callers declare shared-PVC writers
   and opt into cleanup after failure; omission or `Retain` preserves output.
   CRD change: deploy the matching CRD and operator together.
-- `PodSnapshotContent.status.source` records what a checkpoint was captured on:
-  the source node's name, architecture and kernel version, the captured
-  container's image, image digest and CPU and memory limits, and the NVIDIA
-  driver version and GPU models the capture could see. Informational only —
-  restore compatibility still compares the artifact's manifest. CRD change;
-  populated for captures that reach `Ready` after the upgrade, so a content
+- `PodSnapshotContent.status.source` records where a snapshot was taken:
+  the source node's name, architecture, kernel version and the instruction
+  sets its CPU offers, the checkpointed container's image, image digest and CPU
+  and memory limits, and the NVIDIA driver version and GPU models the checkpoint
+  could see. Informational only —
+  restore compatibility still compares the snapshot's manifest. CRD change;
+  populated for snapshots that reach `Ready` after the upgrade, so a content
   already `Ready` before it is not backfilled.
-- `config.checkpoint.checkpointTimeoutSeconds` (default `3600`) fails a
+- `config.checkpoint.timeoutSeconds` (default `3600`) fails a
   checkpoint that outruns it.
+- S3 connection and transfer settings for `storage.type: s3`:
+  `storage.s3.addressing`, `storage.s3.allowHttp`, a CA bundle
+  (`storage.s3.caBundleConfigMapRef`), `pageBroker.s3.limits` and
+  `pageBroker.transferEngine.modelStreamer`. Changing one restarts PageBroker.
+  An install that sets none of them is unchanged. See
+  [Storage](docs/operate/configure-storage.md#other-backends).
+- `daemonset.affinity` accepts `nodeAffinity` instead of failing the install.
+  The chart adds the agent's supported architectures to every non-empty
+  required node selector term, so a term such as
+  `example.com/pool DoesNotExist` keeps the agent off those nodes. An install
+  that sets none is unchanged. See
+  [Agent DaemonSet and Access](docs/reference/helm-values.md#agent-daemonset-and-access).
 
 ### Changed
+
+- **Breaking:** the agent timeout values lost their redundant prefixes.
+  `config.checkpoint.checkpointTimeoutSeconds` is now
+  `config.checkpoint.timeoutSeconds`, and `config.restore.restoreTimeoutSeconds`
+  is now `config.restore.timeoutSeconds`. Defaults are unchanged, so an install
+  that never set either one needs no action. Rename any value you do set: Helm
+  drops an unknown value silently and would leave you on the default, so the
+  chart refuses to render while an old name is still present. The rendered
+  ConfigMap carries both spellings for this release, so a v0.2.0 agent that
+  restarts before the DaemonSet roll reaches its node still finds the key it
+  reads; the old pair goes away in v0.3.0+.
+- The user-facing documentation, the CRD field descriptions (`kubectl explain`)
+  and the condition and failure messages follow the naming guide: the phase is
+  a **checkpoint** (the verb) and what it writes is a **snapshot** (the noun).
+  No condition type, reason or label changed, so nothing that matches on those
+  strings needs updating; only the two values above were renamed.
+- S3 restores prepare up to two batches ahead of downloads by default. Configure
+  `pageBroker.transferEngine.modelStreamer.restorePreparationSlots` in Helm
+  values, or `restorePreparationSlots` in the tuning JSON (1–20, default 3),
+  to bound retained batches per restore. Restart PageBroker after changing it.
+  Shared native admission limits remain unchanged; oversized files run alone.
+- PageBroker defaults to a 512 MiB S3 read window per client, increased from
+  128 MiB. Explicit `s3Reader.maxInflightMiB` and
+  `RUNAI_STREAMER_S3_MAX_INFLIGHT_MIB` overrides still take precedence.
+  See [Model Streamer configuration](agent/pagebroker/MODEL_STREAMER.md).
 
 - Checkpoint and restore failure messages open with the step they came from,
   as `while <step>: <cause>`, on the pod's `nvidia.com/Restored` condition, the
@@ -57,9 +110,17 @@ commit-level history for each release is on its
   troubleshooting guide has one entry per step, including the steps inside
   nsrestore.
 - Restoring into a container that has an AppArmor profile or SELinux label now
-  requires a checkpoint that saved the processes' labels. Checkpoints taken by
-  earlier agent versions on AppArmor nodes don't have them and must be taken
-  again.
+  requires a snapshot that saved the processes' labels. The checkpoint records
+  whether it did in the manifest, and a restore without that record is refused
+  up front under the new `lsm-labels` check, which the compatibility bypass does
+  not waive. Checkpoints taken by earlier agent versions don't have the record
+  and must be taken again.
+- A restore onto a node whose CPU lacks an instruction set Snapshot knows the
+  source CPU offered, such as AVX-512 on x86_64 or SVE2 on arm64, is refused up
+  front under the new `cpu-features` check rather than restoring a process that
+  dies with `SIGILL`. A snapshot taken before the upgrade recorded no CPU
+  flags and is not checked. See
+  [Runtime compatibility](docs/reference/workload-contract.md#runtime-compatibility).
 - The agent drives checkpoints from a workqueue rather than per-checkpoint
   `coordination.k8s.io` Leases, so the `LeaseCancelled` failure reason no longer
   occurs and the agent `ClusterRole`'s now-unused `leases` rule is kept for one
@@ -88,6 +149,10 @@ commit-level history for each release is on its
   NRI socket directory, `/var/run/nri`, and the new chart value
   `daemonset.nriHostNamespace` limits it to one host namespace, for clusters
   that share nodes, such as vCluster tenants: each installation sets its own.
+- Restore semantics: a restored process sees a `/proc` of its own PID
+  namespace rather than the restore container's (#593), so lookups by PID,
+  such as UCX shared-memory endpoints (#802), work after a restore. Only
+  checkpoints taken after the upgrade get it; take older ones again.
 
 ### Deprecated
 
@@ -120,7 +185,7 @@ node, cutting cold-start time for large inference workloads.
 ### Known limitations
 
 Checkpoint and restore require compatible GPU and driver versions between the
-source and target node. See [Limitations](docs/limitations.md) for the current
+source and target node. See [Limitations](docs/overview/limitations.md) for the current
 boundaries.
 
 ## [0.1.0-rc2] - 2026-09-03

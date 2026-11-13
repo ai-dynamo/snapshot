@@ -27,6 +27,7 @@ type pageBrokerS3Config struct {
 	Region   string `json:"region"`
 	Bucket   string `json:"bucket"`
 	Prefix   string `json:"prefix,omitempty"`
+	pageBrokerS3Settings
 }
 
 // PageBrokerS3ConfigKey is the ConfigMap data key the chart mounts into the
@@ -49,13 +50,14 @@ const DefaultPageBrokerS3ConfigName = "pagebroker-s3-config"
 // or visible to `helm diff`; chart-identifying labels are the extent of what
 // this function can attach without a Kubernetes ownerReference, which is not
 // wired up here.
-func ensurePageBrokerS3Config(ctx context.Context, c client.Client, namespace, name string, labels map[string]string, s3 storage.S3, storeID string) error {
+func ensurePageBrokerS3Config(ctx context.Context, c client.Client, namespace, name string, labels map[string]string, s3 storage.S3, storeID string, settings pageBrokerS3Settings) error {
 	body, err := json.Marshal(pageBrokerS3Config{
-		StoreID:  storeID,
-		Endpoint: s3.Endpoint,
-		Region:   s3.Region,
-		Bucket:   s3.Bucket,
-		Prefix:   s3.Prefix,
+		StoreID:              storeID,
+		Endpoint:             s3.Endpoint,
+		Region:               s3.Region,
+		Bucket:               s3.Bucket,
+		Prefix:               s3.Prefix,
+		pageBrokerS3Settings: settings,
 	})
 	if err != nil {
 		return fmt.Errorf("encode PageBroker S3 configuration: %w", err)

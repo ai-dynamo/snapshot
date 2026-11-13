@@ -48,6 +48,7 @@ TEST(DaemonOptionsTest, RejectsMissingDuplicateAndInvalidArguments)
   EXPECT_FALSE(Parse({"--max-concurrent-requests", "16", "--storage-config"}));
   EXPECT_FALSE(Parse({"--max-concurrent-requests", "16", "--model-streamer-config", ""}));
   EXPECT_FALSE(Parse({"--max-concurrent-requests", "16", "--unknown", "value"}));
+  EXPECT_FALSE(Parse({"--restore-preparation-slots", "3"}));
   EXPECT_FALSE(Parse({"--max-concurrent-requests", "16", "--max-concurrent-requests", "17"}));
   EXPECT_FALSE(Parse({"--max-concurrent-requests", "16", "--storage-config", "a", "--storage-config", "b"}));
   EXPECT_FALSE(Parse({"--max-concurrent-requests", "16", "--model-streamer-config", "a", "--model-streamer-config", "b"}));

@@ -14,6 +14,9 @@ import (
 	"github.com/go-logr/logr/testr"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/criu"
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
+	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
 )
 
@@ -53,7 +56,7 @@ func TestRefuseMIGCapture(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			installFakeMIGListing(t, tc.listing)
-			err := refuseMIGCapture(context.Background(), logr.Discard(), 42)
+			err := refuseMIGCapture(logr.Discard(), 42, cuda.ListVisibleGPUs(context.Background(), "/host/proc", 42, nil))
 			if tc.want == "" {
 				require.NoError(t, err)
 				return
@@ -82,7 +85,7 @@ func TestRefuseMIGRestore(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			installFakeMIGListing(t, tc.listing)
-			err := refuseMIGRestore(context.Background(), testr.New(t), 42, tc.skip)
+			err := refuseMIGRestore(testr.New(t), 42, cuda.ListVisibleGPUs(context.Background(), "/host/proc", 42, nil), tc.skip)
 			if tc.want == "" {
 				if err != nil {
 					t.Fatalf("refuseMIGRestore() = %v, want nil", err)
@@ -95,6 +98,45 @@ func TestRefuseMIGRestore(t *testing.T) {
 			}
 			if err.Error() != tc.want {
 				t.Fatalf("refuseMIGRestore() = %q, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestRefuseUnlabeledRestore(t *testing.T) {
+	const profile = "apparmor:cri-containerd.apparmor.d"
+	labeled := &types.CheckpointManifest{CRIUDump: types.CRIUDumpManifest{LSMLabels: true}}
+	unlabeled := &types.CheckpointManifest{}
+	tests := []struct {
+		name     string
+		manifest *types.CheckpointManifest
+		profile  string
+		want     string
+	}{
+		{name: "a labeled checkpoint is admitted", manifest: labeled, profile: profile},
+		{name: "a target without a label admits any checkpoint", manifest: unlabeled, profile: criu.LSMProfileNone},
+		{
+			name:     "an unlabeled checkpoint is refused",
+			manifest: unlabeled,
+			profile:  profile,
+			want:     "restore refused as incompatible: lsm-labels: source no recorded process labels, target " + profile,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := refuseUnlabeledRestore(tc.manifest, tc.profile)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("refuseUnlabeledRestore() = %v, want nil", err)
+				}
+				return
+			}
+			var incompatible *compat.IncompatibleError
+			if !errors.As(err, &incompatible) || incompatible.Gate != compat.GateInspect {
+				t.Fatalf("refuseUnlabeledRestore() = %v, want an inspect gate refusal", err)
+			}
+			if err.Error() != tc.want {
+				t.Fatalf("refuseUnlabeledRestore() = %q, want %q", err, tc.want)
 			}
 		})
 	}

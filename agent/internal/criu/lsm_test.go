@@ -4,9 +4,9 @@
 package criu
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/checkpoint-restore/go-criu/v8/crit"
@@ -50,88 +50,78 @@ func writeCoreImage(t *testing.T, dir, name string, entries ...*criu_core.CoreEn
 	}
 }
 
-func TestCheckRecordedLSMLabels(t *testing.T) {
-	const profile = "apparmor:cri-containerd.apparmor.d"
+func TestRecordedLSMLabels(t *testing.T) {
 	for name, tc := range map[string]struct {
-		images  map[string][]*criu_core.CoreEntry
-		profile string
-		wantErr string
+		images map[string][]*criu_core.CoreEntry
+		want   bool
 	}{
 		"every process labeled": {
 			images: map[string][]*criu_core.CoreEntry{
 				"core-1.img": {coreEntry(true, "cri-containerd.apparmor.d")},
-				"core-2.img": {coreEntry(true, "cri-containerd.apparmor.d")},
+				"core-2.img": {coreEntry(true, "cri-containerd.apparmor.d//restricted")},
 			},
-			profile: profile,
-		},
-		// The target's label replaces it, as it replaces any recorded label.
-		"a process in a child profile": {
-			images: map[string][]*criu_core.CoreEntry{
-				"core-1.img": {coreEntry(true, "cri-containerd.apparmor.d//restricted")},
-			},
-			profile: profile,
+			want: true,
 		},
 		"a zombie has no credentials": {
 			images: map[string][]*criu_core.CoreEntry{
 				"core-1.img": {coreEntry(true, "cri-containerd.apparmor.d")},
 				"core-2.img": {coreEntry(false, "")},
 			},
-			profile: profile,
+			want: true,
 		},
 		"one process without a label": {
 			images: map[string][]*criu_core.CoreEntry{
 				"core-1.img": {coreEntry(true, "cri-containerd.apparmor.d")},
 				"core-2.img": {coreEntry(true, "")},
 			},
-			profile: profile,
-			wantErr: "core-2.img",
 		},
 		"no credentials at all": {
-			images:  map[string][]*criu_core.CoreEntry{"core-1.img": {coreEntry(false, "")}},
-			profile: profile,
-			wantErr: "no CRIU process credentials",
+			images: map[string][]*criu_core.CoreEntry{"core-1.img": {coreEntry(false, "")}},
 		},
-		"no core images": {
-			profile: profile,
-			wantErr: "no CRIU process credentials",
-		},
-		"target without a label": {
-			images:  map[string][]*criu_core.CoreEntry{"core-1.img": {coreEntry(true, "")}},
-			profile: LSMProfileNone,
-		},
-		"no profile passed": {
-			images: map[string][]*criu_core.CoreEntry{"core-1.img": {coreEntry(true, "")}},
-		},
+		"no core images": {},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			for imageName, entries := range tc.images {
 				writeCoreImage(t, dir, imageName, entries...)
 			}
-			err := CheckRecordedLSMLabels(dir, tc.profile)
-			if tc.wantErr == "" {
-				if err != nil {
-					t.Fatalf("CheckRecordedLSMLabels: %v", err)
-				}
-				return
+			got, err := RecordedLSMLabels(dir)
+			if err != nil {
+				t.Fatalf("RecordedLSMLabels: %v", err)
 			}
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("CheckRecordedLSMLabels = %v, want an error with %q", err, tc.wantErr)
+			if got != tc.want {
+				t.Fatalf("RecordedLSMLabels = %v, want %v", got, tc.want)
 			}
 		})
 	}
 }
 
+// Images are read concurrently, and one unlabeled process among many still
+// makes the dump unlabeled.
+func TestRecordedLSMLabelsManyImages(t *testing.T) {
+	dir := t.TempDir()
+	for pid := 1; pid <= 3*coreImageReaders; pid++ {
+		writeCoreImage(t, dir, fmt.Sprintf("core-%d.img", pid), coreEntry(true, "cri-containerd.apparmor.d"))
+	}
+	if got, err := RecordedLSMLabels(dir); err != nil || !got {
+		t.Fatalf("RecordedLSMLabels = %v, %v, want true", got, err)
+	}
+	writeCoreImage(t, dir, "core-50.img", coreEntry(true, ""))
+	if got, err := RecordedLSMLabels(dir); err != nil || got {
+		t.Fatalf("RecordedLSMLabels = %v, %v, want false", got, err)
+	}
+}
+
 // A core image that is a symlink could point anywhere; it is refused, not
 // followed.
-func TestCheckRecordedLSMLabelsRefusesSymlinkedImage(t *testing.T) {
+func TestRecordedLSMLabelsRefusesSymlinkedImage(t *testing.T) {
 	dir, other := t.TempDir(), t.TempDir()
 	writeCoreImage(t, other, "elsewhere.img", coreEntry(true, "cri-containerd.apparmor.d"))
 	if err := os.Symlink(filepath.Join(other, "elsewhere.img"), filepath.Join(dir, "core-1.img")); err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckRecordedLSMLabels(dir, "apparmor:cri-containerd.apparmor.d"); err == nil {
-		t.Fatal("CheckRecordedLSMLabels followed a symlinked core image")
+	if _, err := RecordedLSMLabels(dir); err == nil {
+		t.Fatal("RecordedLSMLabels followed a symlinked core image")
 	}
 }
 

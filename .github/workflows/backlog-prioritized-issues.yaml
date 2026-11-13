@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Giving an issue a priority is the triage decision, so an issue on the Snapshot
+# project that has a Priority value or a `priority: P<n>` or `priority/P<n>`
+# label moves from Needs Triage to Backlog.
+name: Backlog prioritized issues
+
+on:
+  workflow_dispatch:
+  # Setting a project field emits no event a repository workflow can receive,
+  # so a schedule is the only way to notice a new Priority value.
+  schedule:
+    - cron: "17 5 * * *"
+
+permissions: {}
+
+env:
+  PROJECT_OWNER: ai-dynamo
+  PROJECT_NUMBER: 15
+  FROM_STATUS: Needs Triage
+  TO_STATUS: Backlog
+
+jobs:
+  backlog:
+    name: Move prioritized issues out of triage
+    concurrency:
+      group: ${{ github.workflow }}
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Move prioritized issues to Backlog
+        env:
+          # GITHUB_TOKEN cannot read or write an organization project.
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${GH_TOKEN}" ]]; then
+            echo "::error::The PROJECT_TOKEN secret is not set."
+            exit 1
+          fi
+
+          # The `gh project` commands read every field of the board's items, and the
+          # team reviewers on pull requests need a token permission this workflow
+          # has no use for, so every request here selects only what it needs.
+          project_query=$(cat <<'GRAPHQL'
+          query($owner: String!, $number: Int!) {
+            organization(login: $owner) {
+              projectV2(number: $number) {
+                id
+                field(name: "Status") { ... on ProjectV2SingleSelectField { id options { id name } } }
+              }
+            }
+          }
+          GRAPHQL
+          )
+          project=$(gh api graphql -f query="${project_query}" \
+            -f owner="${PROJECT_OWNER}" -F number="${PROJECT_NUMBER}" --jq '
+              .data.organization.projectV2
+              | [.id, .field.id, (.field.options[]? | select(.name == env.TO_STATUS) | .id)] | @tsv')
+          IFS=$'\t' read -r project_id field_id option_id <<<"${project}"
+          if [[ -z "${field_id}" || -z "${option_id}" ]]; then
+            echo "::error::Could not read the \"${TO_STATUS}\" option of the project's Status field. Check that PROJECT_TOKEN can read project ${PROJECT_NUMBER} and that the option exists."
+            exit 1
+          fi
+
+          items_query=$(cat <<'GRAPHQL'
+          query($owner: String!, $number: Int!, $endCursor: String) {
+            organization(login: $owner) {
+              projectV2(number: $number) {
+                items(first: 100, after: $endCursor) {
+                  pageInfo { hasNextPage endCursor }
+                  nodes {
+                    id
+                    status: fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+                    content { ... on Issue { url } }
+                  }
+                }
+              }
+            }
+          }
+          GRAPHQL
+          )
+
+          # The full label list is read per candidate because a label-only priority
+          # can sit anywhere in it, and the status is re-read so that a card moved
+          # since the scan is left alone.
+          item_query=$(cat <<'GRAPHQL'
+          query($id: ID!) {
+            node(id: $id) {
+              ... on ProjectV2Item {
+                status: fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+                priority: fieldValueByName(name: "Priority") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+                content { ... on Issue { labels(first: 100) { nodes { name } } } }
+              }
+            }
+          }
+          GRAPHQL
+          )
+
+          move_mutation=$(cat <<'GRAPHQL'
+          mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+            updateProjectV2ItemFieldValue(input: {
+              projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option }
+            }) { projectV2Item { id } }
+          }
+          GRAPHQL
+          )
+
+          gh api graphql --paginate -f query="${items_query}" \
+            -f owner="${PROJECT_OWNER}" -F number="${PROJECT_NUMBER}" --jq '
+              .data.organization.projectV2.items.nodes[]
+              | select(.content.url != null and .status.name == env.FROM_STATUS)
+              | [.id, .content.url] | @tsv' |
+            while IFS=$'\t' read -r item_id url; do
+              item=$(gh api graphql -f query="${item_query}" -f id="${item_id}" --jq '
+                .data.node
+                | [(.status.name // ""),
+                   ((.priority.name // "") != "" or any(.content.labels.nodes[]?; .name | test("^priority(: |/)P[0-9]+$")) | tostring)]
+                | @tsv')
+              IFS=$'\t' read -r current_status prioritized <<<"${item}"
+              if [[ "${current_status}" != "${FROM_STATUS}" ]]; then
+                echo "Skipped ${url}: its status changed to \"${current_status}\" during this run"
+                continue
+              fi
+              if [[ "${prioritized}" != "true" ]]; then
+                continue
+              fi
+              gh api graphql -f query="${move_mutation}" -f project="${project_id}" -f item="${item_id}" \
+                -f field="${field_id}" -f option="${option_id}" > /dev/null
+              echo "Moved ${url} to ${TO_STATUS}"
+            done

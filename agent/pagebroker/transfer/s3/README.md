@@ -18,7 +18,10 @@ The client exposes `UploadFiles`, `Head`, bounded `Get`, and create-only `Put`.
 `UploadFiles` runs one `copy` process for the listed payloads, preserving their
 relative paths beneath the destination prefix. It validates file types, sizes,
 keys and multipart limits before launch. The file list is bounded to 16 MiB;
-empty batches start no process. Metadata writes use `copyto`; reads use `lsjson`
+empty batches start no process. Restore uses the client only to fetch the index;
+Model Streamer reads payloads using the sizes recorded there. See the
+[restore contract](../../S3.md#layout-and-index) for limitations.
+Metadata writes use `copyto`; reads use `lsjson`
 and `cat` with exact file lists and `--no-traverse`, without listing the bucket.
 A missing-object response is distinct from access denial. Object keys must be
 canonical relative paths, since rclone normalizes paths; unsupported spellings

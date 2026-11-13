@@ -41,6 +41,10 @@ var execNSRestoreFunc = execNSRestore
 // stats the restored process through /host/proc, which only exists on a real node.
 var validateRestoredProcessFunc = validateRestoredProcess
 
+// hostProcPath is overridden in tests: GPU listing reads the host's driver
+// procfs, which only exists on a real node.
+var hostProcPath = snapshotruntime.HostProcPath
+
 // RestoreMounter installs the fixed binary bundle, the cuinterpose libraries and one
 // validated checkpoint artifact inside a placeholder container's mount namespace.
 type RestoreMounter interface {
@@ -615,6 +619,9 @@ func inspectRestore(
 
 	targetRoot := fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID)
 	lsmProfile := lsmProfileFromSpec(ociSpec)
+	if err := refuseUnlabeledRestore(manifest, lsmProfile); err != nil {
+		return nil, 0, err
+	}
 
 	var (
 		targetGPUs       compat.GPUInfo
@@ -625,16 +632,18 @@ func inspectRestore(
 		if len(manifest.CUDA.SourceGPUUUIDs) == 0 {
 			return nil, 0, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
 		}
-		if err := refuseMIGRestore(ctx, log, placeholderPID, req.SkipCompatCheck); err != nil {
+		discoverStart := time.Now()
+		// One nvidia-smi answers both the MIG check and GPU discovery.
+		visible := cuda.ListVisibleGPUs(ctx, hostProcPath, placeholderPID, ociSpec)
+		if err := refuseMIGRestore(log, placeholderPID, visible, req.SkipCompatCheck); err != nil {
 			return nil, 0, err
 		}
-		discoverStart := time.Now()
 		var env []string
 		if ociSpec != nil && ociSpec.Process != nil {
 			env = ociSpec.Process.Env
 		}
 		targetGPUs, err = cuda.DiscoverGPUs(ctx, req.Clientset, req.PodName, req.PodNamespace,
-			req.DestinationContainerName, snapshotruntime.HostProcPath, placeholderPID, env, log)
+			req.DestinationContainerName, env, visible, log)
 		discoverDuration = time.Since(discoverStart)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to get target GPU UUIDs: %w", err)

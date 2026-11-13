@@ -10,6 +10,7 @@ import (
 
 	digest "github.com/opencontainers/go-digest"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 // CheckCPUArch refuses a restore onto a different instruction set. A checkpoint
@@ -22,6 +23,28 @@ var cpuArchCheck = check{
 	name:    CheckCPUArch,
 	gate:    GatePreflight,
 	compare: func(source, target Environment) []Mismatch { return mustMatch(source.CPUArch, target.CPUArch) },
+}
+
+// CheckCPUFeatures refuses a CPU missing an instruction set the source had: the
+// restored process keeps its startup code paths and would die of SIGILL.
+const CheckCPUFeatures Check = "cpu-features"
+
+var cpuFeaturesCheck = check{
+	name: CheckCPUFeatures,
+	gate: GatePreflight,
+	compare: func(source, target Environment) []Mismatch {
+		needed := instructionSets(source.CPUFeatures)
+		offered := instructionSets(target.CPUFeatures)
+		if needed.Len() == 0 || offered.Len() == 0 {
+			return nil
+		}
+		missing := needed.Difference(offered)
+		if missing.Len() == 0 {
+			return nil
+		}
+		// One mismatch, since an AVX-512 source alone can miss a dozen flags.
+		return []Mismatch{{Source: strings.Join(sets.List(missing), ","), Target: "missing"}}
+	},
 }
 
 // CheckKernelVersion refuses a restore onto a kernel other than the captured
@@ -258,6 +281,14 @@ var gpuCountCheck = check{
 // discovery, which fails on a slice under DRA and reports its parent card
 // everywhere else.
 const CheckMIGSlice Check = "mig-slice"
+
+// CheckLSMLabels refuses a restore into a container with an AppArmor profile
+// or SELinux label from a checkpoint whose dump recorded no labels. CRIU applies
+// the target's label only to processes it recorded one for, so the workload
+// would run unconfined. It sits outside the policy table, and the compatibility
+// bypass does not waive it: skipping it would lift the Pod's security policy,
+// not accept a riskier restore.
+const CheckLSMLabels Check = "lsm-labels"
 
 // CheckDriverVersion refuses a restore on a driver build other than the captured
 // one. Build granularity is not caution for its own sake: upstream reproduces a

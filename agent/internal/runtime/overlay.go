@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"github.com/go-logr/logr"
 
@@ -369,16 +370,21 @@ func restoreTarCmd(bundleDir string, args ...string) (*exec.Cmd, error) {
 
 // ApplyRootfsDiff extracts rootfs-diff.tar into the target root.
 //
-// The archive is copied to local disk first. tar walks members with many small
-// reads; doing that directly from NFS is much slower than one sequential copy
-// plus a local extract.
+// tar reads the archive one 1 MiB record at a time. On NFS that leaves one read
+// in flight per round trip, so prefetchRootfsDiff reads ahead in parallel and
+// tar finds the archive in the page cache.
 func ApplyRootfsDiff(checkpointPath, targetRoot, bundleDir string, log logr.Logger) error {
 	rootfsDiffPath := filepath.Join(checkpointPath, rootfsDiffFilename)
-	info, err := os.Stat(rootfsDiffPath)
+	archive, err := os.Open(rootfsDiffPath)
 	if os.IsNotExist(err) {
 		log.V(1).Info("No rootfs-diff.tar, skipping")
 		return nil
 	}
+	if err != nil {
+		return fmt.Errorf("failed to open rootfs diff: %w", err)
+	}
+	defer archive.Close()
+	info, err := archive.Stat()
 	if err != nil {
 		return fmt.Errorf("failed to stat rootfs diff: %w", err)
 	}
@@ -386,12 +392,6 @@ func ApplyRootfsDiff(checkpointPath, targetRoot, bundleDir string, log logr.Logg
 		log.V(1).Info("rootfs-diff.tar is empty, skipping")
 		return nil
 	}
-
-	localPath, cleanup, err := stageRootfsDiffLocally(rootfsDiffPath)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
 
 	// --skip-old-files: silently skip files that already exist in the restore target.
 	// The rootfs diff only contains overlay upperdir changes (runtime-generated files
@@ -408,43 +408,46 @@ func ApplyRootfsDiff(checkpointPath, targetRoot, bundleDir string, log logr.Logg
 	cmd, err := restoreTarCmd(bundleDir,
 		"--xattrs", "--xattrs-include=user.*", "--xattrs-include=security.capability",
 		"--numeric-owner", "--skip-old-files", "--blocking-factor=2048",
-		"-C", targetRoot, "-xf", localPath)
+		"-C", targetRoot, "-xf", rootfsDiffPath)
 	if err != nil {
 		return err
 	}
 	// tar prefixes its messages with the path it was invoked by.
 	output := NewProcessOutput(os.Stderr, filepath.Join(bundleDir, nsmount.BundleTar)+":")
 	output.Attach(cmd)
+	prefetchRootfsDiff(archive, info.Size())
 	if err := cmd.Run(); err != nil {
 		return WithDetail(fmt.Errorf("tar extract failed: %w", err), output.Detail())
 	}
 	return nil
 }
 
-func stageRootfsDiffLocally(src string) (string, func(), error) {
-	in, err := os.Open(src)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to open rootfs diff: %w", err)
-	}
-	defer in.Close()
+// On NFS, four 4 MiB readers bring a cold 3.4 GB archive in as fast as tar
+// extracts it from the page cache.
+const (
+	prefetchReaders    = 4
+	prefetchChunkBytes = 4 << 20
+)
 
-	tmp, err := os.CreateTemp("", rootfsDiffFilename+".*.tmp")
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to create local rootfs diff: %w", err)
+// prefetchRootfsDiff reads f in the background and discards the data, so that
+// it is cached by the time tar reads it. The readers stop at the end of the
+// file or once f is closed.
+func prefetchRootfsDiff(f *os.File, size int64) {
+	var next atomic.Int64
+	for range prefetchReaders {
+		go func() {
+			buf := make([]byte, prefetchChunkBytes)
+			for {
+				off := next.Add(prefetchChunkBytes) - prefetchChunkBytes
+				if off >= size {
+					return
+				}
+				if _, err := f.ReadAt(buf, off); err != nil && !errors.Is(err, io.EOF) {
+					return
+				}
+			}
+		}()
 	}
-	tmpPath := tmp.Name()
-	cleanup := func() { _ = os.Remove(tmpPath) }
-
-	if _, err := io.Copy(tmp, in); err != nil {
-		_ = tmp.Close()
-		cleanup()
-		return "", nil, fmt.Errorf("failed to stage rootfs diff locally: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		cleanup()
-		return "", nil, fmt.Errorf("failed to close local rootfs diff: %w", err)
-	}
-	return tmpPath, cleanup, nil
 }
 
 // ApplyDeletedFiles removes files marked as deleted in the checkpoint.

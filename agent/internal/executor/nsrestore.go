@@ -108,9 +108,6 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	if err := criu.ConfigureInetRemap(m, opts.TargetPodIP, log); err != nil {
 		return nil, failStep(StepPrepareCRIURestore, err)
 	}
-	if err := criu.CheckRecordedLSMLabels(opts.CheckpointPath, opts.LSMProfile); err != nil {
-		return nil, failStep(StepPrepareCRIURestore, err)
-	}
 	criuOpts, err := criu.BuildRestoreOpts(m, opts.CgroupRoot, opts.LSMProfile, log)
 	if err != nil {
 		return nil, failStep(StepPrepareCRIURestore, err)
@@ -317,9 +314,15 @@ func executeRestore(
 			}
 		}
 		if m.CUDA.CustomStorage {
+			// Kept serial: running the CustomStorage restores in parallel slows them.
 			err = restoreCustomStorage(ctx, opts, m.CUDA.PIDs, restorePIDs, log)
 		} else {
-			_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
+			concurrency := len(restorePIDs)
+			if cudaJobFile != "" {
+				// The launch-job file is not thread safe.
+				concurrency = 1
+			}
+			_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, concurrency, log)
 		}
 		timings.cudaRestoreDuration = time.Since(cudaStart)
 		if err != nil {

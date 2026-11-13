@@ -18,6 +18,8 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import sys
+import re
+from pathlib import Path
 import uuid
 from typing import Callable
 
@@ -27,7 +29,9 @@ from kubernetes.client import ApiException
 from snapshot_e2e import k8s
 from snapshot_e2e import lifecycle
 
-from snapshot_benchmarks import logs, metadata
+from snapshot_benchmarks import logs, metadata, measurement, results
+from snapshot_benchmarks.workload import app_configmap, instrument_pod
+from snapshot_e2e.infra.preflight import load_config
 from snapshot_benchmarks.engines import Engine, ModelSpec
 from snapshot_benchmarks.schema import (
     SCHEMA_VERSION,
@@ -59,6 +63,22 @@ class BenchmarkConfig:
     release: str
     pvc_name: str
     kubeconfig: str | None
+    context: str
+    node: str
+    model_pvc: str
+    work_pvc: str
+    drop_page_cache: bool = True
+    detailed_timing: bool = False
+    restore_count: int = 3
+
+    def __post_init__(self):
+        if type(self.restore_count) is not int or self.restore_count < 1:
+            raise ValueError("restore_count must be a positive integer")
+
+    def configure(self):
+        # Supplying a path prevents the helper falling back to in-cluster access
+        # when the explicitly requested context cannot be loaded.
+        load_config(self.kubeconfig or str(Path.home() / ".kube/config"), self.context)
 
     def workload_e2e_config(self) -> k8s.E2EConfig:
         return k8s.E2EConfig(
@@ -124,26 +144,21 @@ def _container_started_at(pod, container_name: str) -> datetime.datetime | None:
     return None
 
 
-def _du_bytes(namespace: str, agent_pod: str, path: str) -> int | None:
-    output = k8s.exec_command(namespace, agent_pod, f"du -sb {path} | cut -f1")
-    stripped = output.strip().splitlines()[-1].strip() if output.strip() else ""
-    return int(stripped) if stripped.isdigit() else None
-
-
-def _validate_snapshot_agent_present(cfg: BenchmarkConfig) -> None:
-    """Fails fast, before deploying anything, if no `snapshot-agent` pod is
-    visible in `cfg.snapshot_namespace` for `cfg.release`. The most common
-    cause is simply passing the wrong `--snapshot-namespace`/`--release` --
-    without this check, that mistake is only discovered by `_checkpoint_size`
-    after cold start and checkpoint have already both succeeded, wasting
-    however long those took."""
+def _validate_snapshot_agent_present(cfg: BenchmarkConfig) -> str:
+    """Find the selected node's agent image before deploying the workload."""
     snapshot_cfg = cfg.snapshot_e2e_config()
-    agents = k8s.list_snapshot_pods(snapshot_cfg.namespace, snapshot_cfg.release, "snapshot-agent")
+    agents = k8s.list_snapshot_pods(
+        snapshot_cfg.namespace, snapshot_cfg.release, "snapshot-agent"
+    )
     if not agents:
         raise RuntimeError(
             f"no snapshot-agent pod found in namespace {snapshot_cfg.namespace!r} for "
             f"release {snapshot_cfg.release!r} -- check --snapshot-namespace and --release"
         )
+    for pod in agents:
+        if pod.spec.node_name == cfg.node:
+            return next(c.image for c in pod.spec.containers if c.name == "agent")
+    raise RuntimeError("No snapshot-agent on selected node: " + cfg.node)
 
 
 def run_benchmark(
@@ -159,15 +174,16 @@ def run_benchmark(
     timeout: int = DEFAULT_TIMEOUT,
     run_id: str | None = None,
     progress: Callable[[str], None] = print,
+    evidence_dir: Path | None = None,
 ) -> RunResult:
     """Runs one model against one engine and returns the raw `RunResult`.
 
     `mode`:
       - "cold_start": deploy the source pod, time cold start, then clean up
         (or leave it running with `keep=True`).
-      - "both" (default): cold start, checkpoint it, delete the source pod to
-        free the GPU, restore it, time the restore. This is the path that
-        produces the "Snapshot restore" vs. "vLLM wake and copy-to-GPU" split.
+      - "both" (default): measure initialization, checkpoint, delete the source,
+        and restore `cfg.restore_count` times. Each restore must preserve the process token
+        and pass inference checks. Headline timing stops at wake completion.
 
     `image_pull_policy` overrides the guide's own default (`Always`, which
     assumes `image` is pushed to a registry the cluster can reach) -- pass
@@ -181,10 +197,19 @@ def run_benchmark(
         raise ValueError(f"unsupported mode: {mode!r}")
 
     run_id = run_id or uuid.uuid4().hex[:12]
-    workload = cfg.workload_e2e_config()
-    k8s.configure(workload)
-    if mode == "both":
-        _validate_snapshot_agent_present(cfg)
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,24}", run_id):
+        raise ValueError("run_id must be DNS-safe and at most 25 characters")
+    cfg.configure()
+    if evidence_dir is None:
+        evidence_dir = results.invocation_dir(
+            results.DEFAULT_RESULTS_ROOT, git_sha=_git_sha()
+        )
+    folder = evidence_dir / run_id
+    folder.mkdir(parents=True, exist_ok=False)
+    measurement.save(folder / "settings.json", dataclasses.asdict(cfg))
+    agent_image = None
+    if mode == "both" or model.tp > 1:
+        agent_image = _validate_snapshot_agent_present(cfg)
 
     source_name = f"bench-source-{run_id}"
 
@@ -194,25 +219,18 @@ def run_benchmark(
         timestamp_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         mode=mode,
         environment=metadata.BenchmarkEnvironment(),
-        engine=BenchmarkEngine(name=engine.name),
+        engine=BenchmarkEngine(name=engine.name, image=image),
         model=ModelInfo(
             label=model.label,
             hf_id_or_path=model.hf_id_or_path,
-            reported_weights_bytes=model.reported_weights_bytes,
+            tp=model.tp,
+            ep=model.ep,
+            engine_args=dict(model.engine_args),
         ),
     )
 
-    # No try/except around the benchmark logic itself: on failure this raises
-    # straight through to the caller rather than returning a
-    # partially-populated `RunResult`. `cli.py`'s `sweep` command catches
-    # per-model, logs the error, and moves to the next model without writing
-    # a result file for it -- a half-filled JSON masquerading as a complete
-    # run would be worse than no file at all. Resource cleanup (source pod,
-    # restore pod, snapshot/content), however, is tracked and always run in
-    # the `finally` block below when `keep=False`, including when this
-    # raises -- a leaked pod from a failed run can otherwise hold a GPU and
-    # block a later run from ever scheduling. `keep=True` always preserves
-    # everything, on both the success and failure paths.
+    # Save failures below the run directory; only complete results reach the report.
+    # Cleanup errors remain distinct so a sweep stops instead of reusing busy GPUs.
     result.git_sha = _git_sha()
 
     source_created = False
@@ -221,6 +239,9 @@ def run_benchmark(
     restore_created = False
     snapshot_name: str | None = None
     content_name: str | None = None
+    content_uid: str | None = None
+    capture_node: str | None = None
+    app_created = False
 
     try:
         progress(f"[{run_id}] deploying source pod {source_name}")
@@ -232,6 +253,18 @@ def run_benchmark(
             image_pull_policy=image_pull_policy,
             tolerations=tolerations,
         )
+        source_manifest = instrument_pod(source_manifest, cfg, engine, model, run_id)
+        for container in source_manifest["spec"].get("initContainers", []):
+            if container["name"] == "snapshot-cuda-install":
+                container["image"] = agent_image
+        app = app_configmap(engine, cfg.workload_namespace, "bench-app-" + run_id)
+        measurement.save(folder / "app.json", app)
+        measurement.save(folder / "source-manifest.json", source_manifest)
+        # A unique name is create-only: never replace another run's ConfigMap.
+        client.CoreV1Api().create_namespaced_config_map(
+            namespace=cfg.workload_namespace, body=app
+        )
+        app_created = True
         k8s.create_pod(source_manifest)
         source_created = True
 
@@ -239,10 +272,24 @@ def run_benchmark(
         source_pod = _wait_for_pod_condition(
             cfg.workload_namespace, source_name, "Ready", timeout=timeout
         )
+        measurement.save(folder / "source-pod.json", source_pod)
+        if model.tp > 1:
+            main = next(
+                c for c in source_pod.spec.containers if c.name == engine.container_name
+            )
+            if not main.command or Path(main.command[0]).name != "cuinterpose-launch":
+                raise ValueError("Multi-GPU source did not use cuinterpose-launch")
+        cold_measurement, source_token = measurement.source_measurement(
+            cfg, source_pod, folder
+        )
+        result.model.reported_weights_bytes = cold_measurement["weights_bytes"]
         result.cold_start = ColdStartTiming(
             pod_created_at=source_pod.metadata.creation_timestamp,
-            container_started_at=_container_started_at(source_pod, engine.container_name),
+            container_started_at=_container_started_at(
+                source_pod, engine.container_name
+            ),
             ready_at=_pod_condition_time(source_pod, "Ready"),
+            measurement=cold_measurement,
         )
 
         capture_node = source_pod.spec.node_name
@@ -255,7 +302,10 @@ def run_benchmark(
             cfg.workload_namespace, source_name, engine.container_name, capture_node
         )
         result.engine.version = metadata.engine_version(
-            cfg.workload_namespace, source_name, engine.container_name, engine.version_probe_command
+            cfg.workload_namespace,
+            source_name,
+            engine.container_name,
+            engine.version_probe_command,
         )
 
         if mode == "both":
@@ -273,77 +323,176 @@ def run_benchmark(
             )
             content_name = content["metadata"]["name"]
             result.checkpoint = CheckpointTiming(
-                podsnapshot_created_at=_parse_iso(created_snapshot["metadata"]["creationTimestamp"]),
+                podsnapshot_created_at=_parse_iso(
+                    created_snapshot["metadata"]["creationTimestamp"]
+                ),
                 ready_at=_custom_object_condition_time(snap, "Ready"),
             )
             content_uid = content["metadata"]["uid"]
-            checkpoint_bytes, checkpoint_size_warning = _checkpoint_size(
-                cfg, capture_node, content_uid
+            measurement.save(folder / "snapshot.json", snap)
+            measurement.save(folder / "content.json", content)
+            checkpoint_bytes, checkpoint_seconds = measurement.checkpoint_measurement(
+                cfg,
+                capture_node,
+                content_uid,
+                content_name,
+                folder,
             )
             result.model.checkpoint_artifact_bytes = checkpoint_bytes
-            if checkpoint_size_warning:
-                result.warnings.append(checkpoint_size_warning)
+            result.checkpoint.agent_seconds = checkpoint_seconds
 
             progress(f"[{run_id}] deleting source pod {source_name} to free the GPU")
             k8s.delete_pod(cfg.workload_namespace, source_name)
             lifecycle.wait_for_pod_deleted(cfg.workload_namespace, source_name)
             source_deleted = True
 
-            restore_name = f"bench-restore-{run_id}"
-            progress(f"[{run_id}] deploying restore pod {restore_name}")
-            restore_manifest = engine.build_restore_pod(
-                name=restore_name,
-                namespace=cfg.workload_namespace,
-                image=image,
-                model=model,
-                snapshot_name=snapshot_name,
-                image_pull_policy=image_pull_policy,
-                tolerations=tolerations,
-            )
-            restore_created_pod = k8s.create_pod(restore_manifest)
-            restore_created = True
+            for repeat in range(1, cfg.restore_count + 1):
+                restore_name = f"bench-restore-{run_id}-{repeat}"
+                restore_folder = folder / f"restore-{repeat:02d}"
+                restore_folder.mkdir()
+                progress(f"[{run_id}] restoring {repeat}/{cfg.restore_count} as {restore_name}")
+                restore_manifest = engine.build_restore_pod(
+                    name=restore_name,
+                    namespace=cfg.workload_namespace,
+                    image=image,
+                    model=model,
+                    snapshot_name=snapshot_name,
+                    image_pull_policy=image_pull_policy,
+                    tolerations=tolerations,
+                )
+                restore_manifest = instrument_pod(
+                    restore_manifest, cfg, engine, model, run_id, restore=True
+                )
+                measurement.save(restore_folder / "manifest.json", restore_manifest)
+                restore_created_pod = k8s.create_pod(restore_manifest)
+                restore_created = True
+                timing = RestoreTiming(
+                    restore_pod_created_at=restore_created_pod.metadata.creation_timestamp,
+                )
+                result.restore_attempts.append(timing)
+                lifecycle.wait_for_pod_event(
+                    cfg.workload_namespace,
+                    restore_name,
+                    "RestoreSucceeded",
+                    pod_uid=restore_created_pod.metadata.uid,
+                    timeout=timeout,
+                )
+                restore_ready_pod = _wait_for_pod_condition(
+                    cfg.workload_namespace,
+                    restore_name,
+                    "Ready",
+                    timeout=timeout,
+                )
+                timing.restore_container_started_at = _container_started_at(
+                    restore_ready_pod, engine.container_name
+                )
+                timing.restored_condition_at = _pod_condition_time(
+                    restore_ready_pod, "nvidia.com/Restored"
+                )
+                timing.restore_ready_at = _pod_condition_time(restore_ready_pod, "Ready")
+                metrics = measurement.restored_measurement(
+                    cfg,
+                    restore_ready_pod,
+                    snapshot_name,
+                    source_token,
+                    restore_folder,
+                )
+                timing.measurement = metrics
+                if repeat == 1:
+                    # Keep the first raw record for compatibility; reports use all attempts.
+                    result.restore = timing
+                    restore_node = restore_ready_pod.spec.node_name
+                    result.environment.restore_node = restore_node
+                    result.environment.placement = metadata.placement(
+                        capture_node, restore_node
+                    )
+                    result.environment.restore = metadata.collect_gpu_identity(
+                        cfg.workload_namespace,
+                        restore_name,
+                        engine.container_name,
+                        restore_node,
+                    )
+                    warning = _heterogeneous_restore_warning(
+                        result.environment.capture, result.environment.restore
+                    )
+                    if warning:
+                        result.warnings.append(warning)
+                    result.agent_log_phases = _collect_agent_log_phases(
+                        cfg,
+                        restore_node,
+                        restore_name=restore_name,
+                        snapshot_name=snapshot_name,
+                    )
+                # Free GPUs before the next repetition, even when --keep retains the checkpoint.
+                if repeat < cfg.restore_count or not keep:
+                    k8s.delete_pod(cfg.workload_namespace, restore_name)
+                    lifecycle.wait_for_pod_deleted(cfg.workload_namespace, restore_name)
+                    restore_created = False
 
-            progress(f"[{run_id}] waiting for nvidia.com/Restored=True (Snapshot restore)")
-            restored_pod = lifecycle.wait_for_restored_condition(
-                cfg.workload_namespace,
-                restore_name,
-                "True",
-                "RestoreSucceeded",
-                timeout=timeout,
-            )
-            restore_container_started_at = _container_started_at(
-                restored_pod, engine.container_name
-            ) or _container_started_at(restore_created_pod, engine.container_name)
-
-            progress(f"[{run_id}] waiting for restore pod Ready (vLLM wake and copy-to-GPU)")
-            restore_ready_pod = _wait_for_pod_condition(
-                cfg.workload_namespace, restore_name, "Ready", timeout=timeout
-            )
-
-            result.restore = RestoreTiming(
-                restore_pod_created_at=restore_created_pod.metadata.creation_timestamp,
-                restore_container_started_at=restore_container_started_at,
-                restored_condition_at=_pod_condition_time(restored_pod, "nvidia.com/Restored"),
-                restore_ready_at=_pod_condition_time(restore_ready_pod, "Ready"),
-            )
-
-            restore_node = restore_ready_pod.spec.node_name
-            result.environment.restore_node = restore_node
-            result.environment.placement = metadata.placement(capture_node, restore_node)
-            result.environment.restore = metadata.collect_gpu_identity(
-                cfg.workload_namespace, restore_name, engine.container_name, restore_node
-            )
-            heterogeneous_warning = _heterogeneous_restore_warning(
-                result.environment.capture, result.environment.restore
-            )
-            if heterogeneous_warning:
-                result.warnings.append(heterogeneous_warning)
-
-            result.agent_log_phases = _collect_agent_log_phases(
-                cfg, restore_node, restore_name=restore_name, snapshot_name=snapshot_name
-            )
-
+        measurement.save(folder / "result.json", result.to_json_dict())
         return result
+    except BaseException as exc:
+        measurement.save(
+            folder / "failure.json",
+            dict(error=repr(exc), partial_result=result.to_json_dict()),
+        )
+        if restore_created:
+            for filename, collect in (
+                (
+                    "pod-failure.json",
+                    lambda: measurement.save(
+                        restore_folder / "pod-failure.json",
+                        k8s.read_pod(cfg.workload_namespace, restore_name),
+                    ),
+                ),
+                (
+                    "restore-failure.log",
+                    lambda: (restore_folder / "restore-failure.log").write_text(
+                        k8s.pod_logs(
+                            cfg.workload_namespace,
+                            restore_name,
+                            tail_lines=None,
+                            container=engine.container_name,
+                        )
+                    ),
+                ),
+                (
+                    "agent.log",
+                    lambda: measurement.agent_log(
+                        cfg, capture_node, restore_folder / "agent.log"
+                    ),
+                ),
+            ):
+                try:
+                    collect()
+                except Exception as log_error:
+                    (restore_folder / (filename + "-error.txt")).write_text(
+                        repr(log_error)
+                    )
+        if source_created and not source_deleted:
+            for container in ["model-weights"] + (
+                ["drop-page-cache"] if cfg.drop_page_cache else []
+            ):
+                try:
+                    (folder / (container + ".log")).write_text(
+                        k8s.pod_logs(
+                            cfg.workload_namespace,
+                            source_name,
+                            tail_lines=None,
+                            container=container,
+                        )
+                    )
+                except Exception as log_error:
+                    (folder / (container + "-log-error.txt")).write_text(
+                        repr(log_error)
+                    )
+            try:
+                (folder / "source-failure.log").write_text(
+                    k8s.pod_logs(cfg.workload_namespace, source_name, tail_lines=None)
+                )
+            except Exception as log_error:
+                (folder / "source-log-error.txt").write_text(repr(log_error))
+        raise
     finally:
         if not keep:
             cleanup_errors: list[Exception] = []
@@ -357,38 +506,61 @@ def run_benchmark(
                 progress(f"[{run_id}] cleaning up restore pod")
                 cleanup(lambda: k8s.delete_pod(cfg.workload_namespace, restore_name))
                 cleanup(
-                    lambda: lifecycle.wait_for_pod_deleted(cfg.workload_namespace, restore_name)
+                    lambda: lifecycle.wait_for_pod_deleted(
+                        cfg.workload_namespace, restore_name
+                    )
                 )
             if snapshot_name is not None:
                 cleanup(
-                    lambda: lifecycle.delete_podsnapshot(cfg.workload_namespace, snapshot_name)
+                    lambda: lifecycle.delete_podsnapshot(
+                        cfg.workload_namespace, snapshot_name
+                    )
                 )
             if content_name is not None:
                 cleanup(lambda: lifecycle.delete_podsnapshotcontent(content_name))
+                cleanup(
+                    lambda: lifecycle.wait_for_custom_object_deleted(
+                        None,
+                        content_name,
+                        plural=lifecycle.PODSNAPSHOTCONTENTS,
+                    )
+                )
+                if capture_node and content_uid:
+                    cleanup(
+                        lambda: lifecycle.wait_for_artifact_root_absent(
+                            cfg.snapshot_e2e_config(),
+                            capture_node,
+                            content_uid,
+                        )
+                    )
             if source_created and not source_deleted:
                 progress(f"[{run_id}] cleaning up source pod")
                 cleanup(lambda: k8s.delete_pod(cfg.workload_namespace, source_name))
                 cleanup(
-                    lambda: lifecycle.wait_for_pod_deleted(cfg.workload_namespace, source_name)
+                    lambda: lifecycle.wait_for_pod_deleted(
+                        cfg.workload_namespace, source_name
+                    )
                 )
 
+            if app_created:
+                cleanup(
+                    lambda: client.CoreV1Api().delete_namespaced_config_map(
+                        "bench-app-" + run_id, cfg.workload_namespace
+                    )
+                )
             if cleanup_errors:
-                # A cleanup failure here means a pod, PodSnapshot, or
-                # PodSnapshotContent from this run may still be sitting on the
-                # cluster -- holding a GPU or leaving stale checkpoint state
-                # behind for the next run to trip over. That must never be
-                # swallowed the way individual `_try_cleanup` steps are: it
-                # has to reach the caller (`cli.py`'s `sweep`) as a distinct,
-                # unmissable signal to stop rather than start another model
-                # against contaminated cluster state. `sys.exc_info()` reads
-                # whatever exception is already propagating out of the `try`
-                # block above (if any) -- raising here would otherwise
-                # silently replace it. We fold its message into the new
-                # exception and chain it with `raise ... from`, so it's
-                # visible both via `str(exc)` (e.g. `cli.py`'s plain `print`)
-                # and via the full traceback, instead of being lost.
+                # Stop the sweep if resources remain, preserving the benchmark error.
                 primary_exc = sys.exc_info()[1]
-                detail = "; ".join(f"{type(exc).__name__}: {exc}" for exc in cleanup_errors)
+                try:
+                    measurement.save(
+                        folder / "cleanup-errors.json",
+                        [repr(exc) for exc in cleanup_errors],
+                    )
+                except OSError as error:
+                    cleanup_errors.append(error)
+                detail = "; ".join(
+                    f"{type(exc).__name__}: {exc}" for exc in cleanup_errors
+                )
                 message = f"[{run_id}] cleanup failed, cluster state may be contaminated: {detail}"
                 if primary_exc is not None:
                     message += f" (after benchmark error: {primary_exc})"
@@ -430,48 +602,35 @@ def _parse_iso(value: str | None) -> datetime.datetime | None:
     return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
-def _custom_object_condition_time(obj: dict, condition_type: str) -> datetime.datetime | None:
+def _custom_object_condition_time(
+    obj: dict, condition_type: str
+) -> datetime.datetime | None:
     cond = lifecycle.condition(obj, condition_type)
     return _parse_iso(cond.get("lastTransitionTime")) if cond else None
 
 
-def _checkpoint_size(
-    cfg: BenchmarkConfig, capture_node: str | None, content_uid: str
-) -> tuple[int | None, str | None]:
-    """Returns (checkpoint_artifact_bytes, warning). Best-effort: the checkpoint
-    itself has already succeeded by the time this runs, so a failure here (the
-    agent pod lookup, or the `du` exec) must never fail the whole run -- it
-    degrades to a `None` size plus a warning explaining why, instead."""
-    if not capture_node:
-        return None, None
-    snapshot_cfg = cfg.snapshot_e2e_config()
-    try:
-        agent_pod = lifecycle.checkpoint_agent_pod(snapshot_cfg, capture_node)
-        size = _du_bytes(
-            cfg.snapshot_namespace, agent_pod, lifecycle.checkpoint_artifact_root(content_uid)
-        )
-    except AssertionError as exc:
-        return None, f"checkpoint_artifact_bytes unavailable: {exc}"
-    except Exception as exc:  # noqa: BLE001 - exec-over-websocket fails in many untyped ways
-        return None, f"checkpoint_artifact_bytes unavailable: du exec failed: {exc}"
-    return size, None
-
-
 def _collect_agent_log_phases(
-    cfg: BenchmarkConfig, restore_node: str | None, *, restore_name: str, snapshot_name: str
+    cfg: BenchmarkConfig,
+    restore_node: str | None,
+    *,
+    restore_name: str,
+    snapshot_name: str,
 ) -> AgentLogPhases:
-    """Best-effort: the restore itself has already succeeded by the time this
-    runs, so a failure here (agent pod lookup or log fetch/parse) must never
-    fail the whole run -- it degrades to a warning, same as `_checkpoint_size`."""
+    """Collect optional agent details without failing a completed restore."""
     if not restore_node:
-        return AgentLogPhases(parse_warnings=["restore pod had no node_name; cannot locate agent"])
+        return AgentLogPhases(
+            parse_warnings=["restore pod had no node_name; cannot locate agent"]
+        )
     snapshot_cfg = cfg.snapshot_e2e_config()
     try:
         agent_pod = lifecycle.checkpoint_agent_pod(snapshot_cfg, restore_node)
         log_text = k8s.pod_logs(cfg.snapshot_namespace, agent_pod, tail_lines=2000)
         restore_pod_key = f"{cfg.workload_namespace}/{restore_name}"
         return logs.parse_agent_log_phases(
-            log_text, log_source_pod=agent_pod, restore_pod=restore_pod_key, snapshot=snapshot_name
+            log_text,
+            log_source_pod=agent_pod,
+            restore_pod=restore_pod_key,
+            snapshot=snapshot_name,
         )
     except AssertionError as exc:
         return AgentLogPhases(parse_warnings=[str(exc)])
@@ -493,8 +652,14 @@ def _heterogeneous_restore_warning(
     falls back to comparing that major-only value instead of skipping the
     driver check entirely."""
     mismatches = []
-    if capture.gpu_product and restore.gpu_product and capture.gpu_product != restore.gpu_product:
-        mismatches.append(f"gpu_product {capture.gpu_product!r} -> {restore.gpu_product!r}")
+    if (
+        capture.gpu_product
+        and restore.gpu_product
+        and capture.gpu_product != restore.gpu_product
+    ):
+        mismatches.append(
+            f"gpu_product {capture.gpu_product!r} -> {restore.gpu_product!r}"
+        )
     if capture.gpu_driver_version and restore.gpu_driver_version:
         if capture.gpu_driver_version != restore.gpu_driver_version:
             mismatches.append(
@@ -523,8 +688,7 @@ def _git_sha() -> str | None:
                 text=True,
                 check=True,
                 timeout=5,
-            )
-            .stdout.strip()
+            ).stdout.strip()
             or None
         )
     except Exception:  # noqa: BLE001 - best-effort provenance, never fatal

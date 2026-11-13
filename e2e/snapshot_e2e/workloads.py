@@ -36,6 +36,20 @@ FILE_TOKEN = f"{STATE_DIR}/file-token"
 OBSERVATIONS = f"{STATE_DIR}/observations.log"
 # The CPU loop exits with the code written here, so a test can end it.
 EXIT_REQUEST = f"{STATE_DIR}/exit-request"
+# The CPU loop exits with this code on SIGTERM, when a test asks for it.
+SIGTERM_EXIT = 42
+# Lifecycle hook tests: the source never writes CHECKPOINT_READY itself, so a
+# checkpoint readiness probe on it holds the checkpoint until the test does.
+CHECKPOINT_READY = f"{STATE_DIR}/checkpoint-ready"
+HOOKS_PORT = 8000
+# The source names HOOKS_PORT, so a test can address it by name.
+HOOKS_PORT_NAME = "hooks"
+HOOKS_STATUS_PATH = "/checkpoint/status"
+HOOKS_RESUME_PATH = "/checkpoint/resume"
+# Post-restore tests: an emptyDir per container, so the marker is never
+# carried over from the source and fan-out copies don't share one.
+RELEASE_DIR = "/app-release"
+RELEASE_MARKER = f"{RELEASE_DIR}/released"
 SOURCE_TOKEN_ENV = "SNAPSHOT_E2E_SOURCE_TOKEN"
 RESTORE_TOKEN_ENV = "SNAPSHOT_E2E_RESTORE_TOKEN"
 
@@ -79,6 +93,8 @@ def source_pod(
     gpu: bool,
     annotations: dict[str, str] | None = None,
     memory_limit: str | None = None,
+    handle_sigterm: bool = False,
+    hooks_server: bool = False,
 ) -> dict[str, Any]:
     metadata = {
         "name": run.source_pod,
@@ -86,10 +102,18 @@ def source_pod(
         "labels": run.labels,
         "annotations": annotations or {},
     }
-    spec = base_pod_spec(config, run, source_command(run.image, gpu), gpu, memory_limit)
+    spec = base_pod_spec(
+        config,
+        run,
+        source_command(run.image, gpu, handle_sigterm=handle_sigterm, hooks_server=hooks_server),
+        gpu,
+        memory_limit,
+    )
     spec["containers"][0]["env"] = [
         {"name": SOURCE_TOKEN_ENV, "value": run.source_token},
     ]
+    if hooks_server:
+        spec["containers"][0]["ports"] = [{"name": HOOKS_PORT_NAME, "containerPort": HOOKS_PORT}]
     return {
         "apiVersion": "v1",
         "kind": "Pod",
@@ -181,6 +205,17 @@ def restore_pod(
         },
         "spec": spec,
     }
+
+
+def add_release_dir(pod: dict[str, Any]) -> dict[str, Any]:
+    """Mount an emptyDir at RELEASE_DIR in every container, one subPath each."""
+    spec = pod["spec"]
+    spec["volumes"].append({"name": "app-release", "emptyDir": {}})
+    for container in spec["containers"]:
+        container.setdefault("volumeMounts", []).append(
+            {"name": "app-release", "mountPath": RELEASE_DIR, "subPath": container["name"]}
+        )
+    return pod
 
 
 def multi_restore_pod(
@@ -378,12 +413,69 @@ def same_node_affinity(node: str) -> dict[str, Any]:
     }
 
 
-def source_command(image: str, gpu: bool) -> str:
+def source_command(image: str, gpu: bool, *, handle_sigterm: bool = False, hooks_server: bool = False) -> str:
+    # handle_sigterm makes the CPU loop exit with SIGTERM_EXIT on SIGTERM. Off
+    # by default, so every other test keeps a workload that only SIGKILL ends.
+    if handle_sigterm and gpu:
+        raise ValueError("only the CPU loop handles SIGTERM")
     state_loop = CUDA_SOURCE if gpu else CPU_SOURCE
+    on_sigterm = f"trap 'exit {SIGTERM_EXIT}' TERM\n" if handle_sigterm else ""
+    server = ""
+    if hooks_server:
+        if gpu:
+            raise ValueError("the lifecycle hooks server runs only in the CPU source")
+        server = HOOKS_SERVER
     return f"""set -euo pipefail
 echo "[source] image={image}"
 mkdir -p {STATE_DIR}
-{state_loop}
+{on_sigterm}{server}{state_loop}
+"""
+
+
+# HOOKS_SERVER answers the HTTP lifecycle hooks from inside the checkpointed
+# process tree, so a test also shows that its listening socket survives
+# restore at a new Pod IP. It is Perl because the workload image has Perl but
+# no Python, nc or socat; a missing perl fails the test instead of skipping it.
+# The source waits for the server to listen, so a server that can't bind its
+# port fails the source at once instead of the probe timing out.
+# SNAPSHOT_E2E_HOOKS_PORT lets the cluster-free test pick a free port.
+HOOKS_SERVER = f"""command -v perl >/dev/null || {{ echo "[source] perl is missing; the lifecycle hooks server needs it" >&2; exit 1; }}
+cat > /tmp/hooks-server.pl <<'PERL_EOF'
+use strict;
+use warnings;
+use IO::Socket::INET;
+my $port = $ENV{{SNAPSHOT_E2E_HOOKS_PORT}} || {HOOKS_PORT};
+my $server = IO::Socket::INET->new(LocalAddr => "0.0.0.0", LocalPort => $port, Listen => 16, ReuseAddr => 1)
+  or die "[hooks] listen on $port: $!\\n";
+$SIG{{PIPE}} = "IGNORE";
+$| = 1;
+print "[hooks] listening on $port\\n";
+open(my $ready, ">", "/tmp/hooks-server.ready") or die "[hooks] ready file: $!\\n";
+close $ready;
+while (my $conn = $server->accept) {{
+  my $request = <$conn> // "";
+  while (my $header = <$conn>) {{ last if $header =~ /^\\r?\\n$/; }}
+  my ($method, $path) = split / /, $request;
+  my $code = 404;
+  if (($method // "") eq "GET" && ($path // "") eq "{HOOKS_STATUS_PATH}") {{
+    $code = -e "{CHECKPOINT_READY}" ? 200 : 503;
+  }} elsif (($method // "") eq "POST" && ($path // "") eq "{HOOKS_RESUME_PATH}") {{
+    # The application's notification: leave the same marker a file action would.
+    if (open(my $marker, ">", "{RELEASE_MARKER}")) {{ close $marker; $code = 204; }} else {{ $code = 500; }}
+  }}
+  print $conn "HTTP/1.1 $code Hook\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n";
+  close $conn;
+}}
+PERL_EOF
+rm -f /tmp/hooks-server.ready
+perl /tmp/hooks-server.pl &
+hooks_pid=$!
+for _ in $(seq 50); do
+  [ -e /tmp/hooks-server.ready ] && break
+  kill -0 "$hooks_pid" 2>/dev/null || {{ echo "[source] the lifecycle hooks server failed to start" >&2; exit 1; }}
+  sleep 0.1
+done
+[ -e /tmp/hooks-server.ready ] || {{ echo "[source] the lifecycle hooks server did not listen within 5 s" >&2; exit 1; }}
 """
 
 

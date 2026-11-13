@@ -49,7 +49,7 @@ class S3StorageBackend {
   CheckpointInventory BuildCheckpointInventory(const Path& source, const PublishedArtifact& storage, Cancellation cancellation) const;
 
  private:
-  // Parses the index and checks payload sizes before assigning Model Streamer
+  // Parses the index and validates payload keys before assigning Model Streamer
   // source URLs. metadata_only selects manifest.yaml with private staging modes.
   CheckpointInventory LoadCheckpointInventory(const PublishedArtifact& storage, bool metadata_only, Cancellation cancellation) const;
 

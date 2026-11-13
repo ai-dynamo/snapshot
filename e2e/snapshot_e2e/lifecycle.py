@@ -18,16 +18,25 @@ from kubernetes import client
 from kubernetes.client import ApiException
 
 from snapshot_e2e import k8s
+from snapshot_e2e.workloads import CHECKPOINT_DIR
+from snapshot_e2e.workloads import CHECKPOINT_READY
 from snapshot_e2e.workloads import CONTAINER
 from snapshot_e2e.workloads import CONTROL_DIR
 from snapshot_e2e.workloads import CUDA_HOLD
 from snapshot_e2e.workloads import EXIT_REQUEST
 from snapshot_e2e.workloads import FILE_TOKEN
+from snapshot_e2e.workloads import HOOKS_PORT
+from snapshot_e2e.workloads import HOOKS_PORT_NAME
+from snapshot_e2e.workloads import HOOKS_RESUME_PATH
+from snapshot_e2e.workloads import HOOKS_STATUS_PATH
 from snapshot_e2e.workloads import OBSERVATIONS
+from snapshot_e2e.workloads import RELEASE_MARKER
 from snapshot_e2e.workloads import RESTORE_DONE
 from snapshot_e2e.workloads import RESTORE_PROXY
+from snapshot_e2e.workloads import SIGTERM_EXIT
 from snapshot_e2e.workloads import SOURCE_READY
 from snapshot_e2e.workloads import TestRun
+from snapshot_e2e.workloads import add_release_dir
 from snapshot_e2e.workloads import multi_restore_pod
 from snapshot_e2e.workloads import restore_pod
 from snapshot_e2e.workloads import restore_proxy
@@ -78,6 +87,8 @@ def create_podsnapshot(
     pod_name: str,
     pod_uid: str,
     container: str = CONTAINER,
+    *,
+    containers: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     body = {
         "apiVersion": f"{GROUP}/{VERSION}",
@@ -93,6 +104,8 @@ def create_podsnapshot(
             }
         },
     }
+    if containers is not None:
+        body["spec"]["containers"] = containers
     return client.CustomObjectsApi().create_namespaced_custom_object(
         GROUP,
         VERSION,
@@ -150,11 +163,14 @@ def create_snapshotjob(
     target_containers: list[str] | None = None,
     active_deadline_seconds: int | None = None,
     non_target_artifacts: dict[str, Any] | None = None,
+    containers: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     spec: dict[str, Any] = {
         "podTemplate": pod_template,
         "podSnapshotTemplate": {"targetContainers": target_containers or [CONTAINER]},
     }
+    if containers is not None:
+        spec["podSnapshotTemplate"]["containers"] = containers
     if active_deadline_seconds is not None:
         spec["activeDeadlineSeconds"] = active_deadline_seconds
     if non_target_artifacts is not None:
@@ -256,23 +272,53 @@ def wait_for_pod_ready(namespace: str, name: str, timeout: int = 600) -> client.
     return wait_for(f"pod {namespace}/{name} Ready", ready, timeout, detail=detail)
 
 
+def container_exit_code(pod: Any, container: str) -> int | None:
+    """The container's exit code, or None while it has not ended."""
+    for status in (pod.status and pod.status.container_statuses) or []:
+        if status.name == container and status.state and status.state.terminated:
+            return status.state.terminated.exit_code
+    return None
+
+
 def wait_for_container_exit(
     namespace: str, name: str, container: str = CONTAINER, timeout: int = 120
 ) -> int:
     """Wait for a container to end, and return its exit code."""
 
     def exited() -> int | None:
-        pod = k8s.read_pod(namespace, name)
-        for status in pod.status.container_statuses or []:
-            if status.name == container and status.state and status.state.terminated:
-                return status.state.terminated.exit_code
-        return None
+        return container_exit_code(k8s.read_pod(namespace, name), container)
 
     return wait_for(
         f"container {container} of pod {namespace}/{name} to exit",
         exited,
         timeout,
         poll_interval=2,
+    )
+
+
+def delete_pod_and_wait_for_exit(
+    namespace: str, name: str, container: str = CONTAINER, timeout: int = 120
+) -> int:
+    """Delete a Pod, and return the exit code its container ended with.
+
+    The Pod is removed soon after its containers stop, so polling can miss the
+    final status. kubelet posts that status before it removes the Pod, so a
+    watch started before the delete sees it.
+    """
+    resource_version = k8s.read_pod(namespace, name).metadata.resource_version
+    k8s.delete_pod(namespace, name)
+    seen = "no events"
+    for event in k8s.watch_pod(namespace, name, resource_version, timeout):
+        pod = event["object"]
+        code = container_exit_code(pod, container)
+        if code is not None:
+            return code
+        seen = f"last event {event['type']}, phase={pod.status.phase if pod.status else None}"
+        if event["type"] == "DELETED":
+            break
+    raise AssertionError(
+        f"pod {namespace}/{name} went away or timed out without an exit code "
+        f"for container {container} ({seen})"
     )
 
 
@@ -936,6 +982,32 @@ def checkpoint_manifest(
     return yaml.safe_load(checkpoint_artifact_manifest(config, node, content_uid))
 
 
+def record_cpu_feature(
+    config: k8s.E2EConfig, node: str, content_uid: str, feature: str
+) -> None:
+    """Add an instruction set to the ones the checkpoint says its source CPU had.
+
+    Edits the text rather than re-serializing it, so every other field reaches
+    the agent exactly as the agent wrote it.
+    """
+    lines = checkpoint_artifact_manifest(config, node, content_uid).splitlines(keepends=True)
+    key = next((i for i, line in enumerate(lines) if line.strip() == "cpuFeatures:"), None)
+    if key is None or key + 1 == len(lines):
+        raise AssertionError(f"checkpoint {content_uid} recorded no CPU features")
+    item = lines[key + 1]
+    lines.insert(key + 1, f"{item[: len(item) - len(item.lstrip())]}- {feature}\n")
+    k8s.exec_command(
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        f"printf '%s' {shlex.quote(''.join(lines))} > "
+        f"{checkpoint_artifact_path(content_uid)}/manifest.yaml",
+        container=AGENT_CONTAINER,
+    )
+    recorded = checkpoint_manifest(config, node, content_uid)["host"]["cpuFeatures"]
+    if feature not in recorded:
+        raise AssertionError(f"checkpoint {content_uid} still records {recorded!r}")
+
+
 def runtime_image_id(config: k8s.E2EConfig, node: str, container_id: str) -> str:
     """The optional CRI ContainerStatus.image_id that the agent records.
 
@@ -962,6 +1034,25 @@ def runtime_image_id(config: k8s.E2EConfig, node: str, container_id: str) -> str
     if not isinstance(status, dict) or not status:
         raise AssertionError(f"runtime reported no container status for {container_id!r}")
     return (status.get("imageId") or "").strip()
+
+
+def node_cpu_flags(config: k8s.E2EConfig, node: str) -> list[set[str]]:
+    """The flags each processor on the node reports in its /proc/cpuinfo, on
+    its flags line on x86_64 and its Features line on arm64."""
+    output = k8s.exec_payload(
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        "nsenter -t 1 -m -- grep -E '^(flags|Features)' /proc/cpuinfo",
+        container=AGENT_CONTAINER,
+    )
+    processors = [
+        set(line.partition(":")[2].split())
+        for line in output.splitlines()
+        if line.startswith(("flags", "Features"))
+    ]
+    if not processors:
+        raise AssertionError(f"{node} reported no CPU flags: {output!r}")
+    return processors
 
 
 def visible_gpus(namespace: str, pod: str) -> list[dict[str, str]]:
@@ -1218,8 +1309,10 @@ def assert_restored_workload_mounts(
     """Check the restored workload's mount table, not the container's.
 
     The agent mounts securityfs for CRIU while it restores, and the restored
-    workload must not see it. With empty_dir, the workload must also still
-    have its own empty mount at that path.
+    workload must not see it. The workload runs in a PID namespace nested in
+    the container's, and must see a procfs of that namespace, with /proc/sys
+    still read-only. With empty_dir, the workload must also still have its own
+    empty mount at that path.
     """
     success_marker = "__snapshot_restored_mounts_verified__"
     # Each read is its own assignment, so set -e stops the script when the
@@ -1239,6 +1332,16 @@ def assert_restored_workload_mounts(
       echo "the restored workload sees securityfs"
       exit 1
     fi
+    # Look the workload up in its own /proc by the PID it has in its own
+    # namespace, as software such as UCX does with getpid(). The entry must be
+    # the workload itself, so its start time (stat field 22) must match.
+    inner_pid="$(awk '/^NSpid:/ {{print $NF}}' {PROC_ROOT}/$restored_pid/status)"
+    started="$(sed 's/.*) //' {PROC_ROOT}/$restored_pid/stat | cut -d' ' -f20)"
+    seen="$(sed 's/.*) //' {PROC_ROOT}/$restored_pid/root/proc/$inner_pid/stat | cut -d' ' -f20)"
+    test -n "$started"
+    test "$seen" = "$started"
+    printf '%s\\n' "$mounts" | awk \\
+      '$5 == "/proc/sys" && $6 ~ /^ro(,|$)/ && / - proc / {{ found = 1 }} END {{ exit !found }}'
     {empty_dir_checks if empty_dir else ""}
     echo {success_marker}
     """

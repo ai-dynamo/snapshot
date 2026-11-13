@@ -91,6 +91,7 @@ jobs:
             --expected-case vllm \
             --expected-case sglang \
             --expected-case tensorrt-llm \
+            --expected-case vllm-s3 \
             --publish
 
       - name: Commit and push benchmark history
