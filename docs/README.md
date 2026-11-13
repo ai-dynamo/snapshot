@@ -36,6 +36,7 @@ This page lists every page in the Snapshot documentation, grouped by section.
 - [Configure Storage](operate/configure-storage.md) - The shared snapshot volume and how to configure it.
 - [Tune Storage](operate/tune-storage/README.md) - Storage option tuning and examples.
 - [Upgrade Snapshot and the CRDs](operate/upgrade.md) - Upgrade with `helm upgrade`; the operator updates the CRDs.
+- [Check the CUDA User-Mode Driver](operate/cuda-driver.md) - Find the `libcuda.so` each process loads, and select a newer one.
 
 ## Reference
 
