@@ -98,10 +98,10 @@ require (
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
-	golang.org/x/term v0.46.0 // indirect
+	golang.org/x/term v0.47.0 // indirect
 	// Pinned above the graph minimum (v0.41.0) to clear a dependency-scan
 	// finding; see #402. x/sync above follows as a requirement of this version.
-	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260706201446-f0a921348800 // indirect
@@ -123,3 +123,5 @@ require (
 replace github.com/ai-dynamo/snapshot/api => ../api
 
 replace github.com/ai-dynamo/snapshot/agent => ../agent
+
+replace github.com/ai-dynamo/snapshot/coordinator => ../coordinator
