@@ -39,7 +39,7 @@ tests:
             resources: ["podgrouprestores"]
             verbs: ["get", "list", "watch", "update", "patch"]
 
-  - it: grants no update on Pods by default
+  - it: grants no patch on Pods by default
     template: templates/operator-rbac.yaml
     documentSelector:
       path: kind
@@ -50,7 +50,7 @@ tests:
           content:
             apiGroups: [""]
             resources: ["pods"]
-            verbs: ["update"]
+            verbs: ["patch"]
 
   - it: runs the controllers and points them at this release's node agents
     template: templates/operator-deployment.yaml
@@ -121,7 +121,7 @@ tests:
             resources: ["podgrouprestores/finalizers"]
             verbs: ["update"]
 
-  - it: grants the operator update on Pods, to claim restore targets
+  - it: grants the operator patch on Pods, to claim restore targets, and no update
     template: templates/operator-rbac.yaml
     documentSelector:
       path: kind
@@ -130,6 +130,12 @@ tests:
       podGroups.enabled: true
     asserts:
       - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["pods"]
+            verbs: ["patch"]
+      - notContains:
           path: rules
           content:
             apiGroups: [""]
