@@ -128,6 +128,23 @@ reason the first member gave, such as `Refused` or `MemberFailed`.
 - Another member refused first
 - The attempt's deadline passed before every member arrived
 
+### recording that the member started
+
+Once every member of a pod group has accepted, the attempt commits, and the
+agent sets the `Started` condition on the member's `PodSnapshotContent` before
+it changes the source. If it cannot, the member fails the attempt with
+`MemberFailed`, and its own source is left as Snapshot found it. Other members
+that had already started fail with it.
+
+**Likely causes:**
+
+- The API server was unreachable or refused the status write
+- The `PodSnapshotContent` was deleted or already failed
+
+```bash
+kubectl logs $agent -n <snapshot-ns> -c agent | grep -i 'pod group'
+```
+
 ### staging CUDA job file
 
 For a driver-managed GPU checkpoint, the agent copies the CUDA checkpoint job

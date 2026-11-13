@@ -129,6 +129,22 @@ gave, such as `Refused` or `MemberFailed`.
 - Another member refused first
 - The attempt's deadline passed before every member arrived
 
+### recording that the member started
+
+Once every member of a pod group has accepted, the attempt commits, and the
+agent sets the `nvidia.com/RestoreStarted` condition on the restore Pod before
+it restores anything. If it cannot, the member fails the attempt with
+`MemberFailed`. Other members that had already started fail with it.
+
+**Likely causes:**
+
+- The API server was unreachable or refused the status write
+- The restore Pod was deleted or replaced after the operator pinned it
+
+```bash
+kubectl get pod <restore-pod> -n <ns> -o jsonpath='{.status.conditions}'
+```
+
 ### building GPU context
 
 The agent builds the mapping PageBroker uses to place checkpointed GPU memory

@@ -137,6 +137,13 @@ type RestoreRequest struct {
 	// fails the attempt for every member.
 	Group *group.Member
 
+	// Committed, for a member of a pod group, is called once the attempt has
+	// committed, right after the admitted barrier and before the member's
+	// first irreversible step, so the caller can record that the member
+	// started. An error fails the attempt: the barrier has passed, so with
+	// session.ReasonMemberFailed. Nil records nothing.
+	Committed func(context.Context) error
+
 	// PublishedArtifact, when set, switches restore to the artifact-addressed
 	// RPCs; read from the content's recorded status, never reconstructed here.
 	PublishedArtifact *pagebroker.PublishedArtifact
@@ -312,6 +319,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 			return RestoreResult{}, failStep(StepAdmitGroup, err)
 		}
 		groupDuration = time.Since(admitStart)
+		if err := recordCommit(ctx, req.Committed); err != nil {
+			return RestoreResult{}, failStep(StepRecordGroupStart, err)
+		}
 	}
 
 	var gpuContext *pagebroker.GpuContext

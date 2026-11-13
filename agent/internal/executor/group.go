@@ -83,3 +83,14 @@ func failGroup(ctx context.Context, log logr.Logger, g *group.Member) {
 		log.Error(err, "Failed to fail the pod group's attempt", "attempt", g.Attempt())
 	}
 }
+
+// recordCommit calls committed, the caller's record that the member started,
+// once the attempt has committed. This member has changed nothing yet, so a
+// record that cannot be written leaves it as Snapshot found it, and fails the
+// attempt for the members that already started.
+func recordCommit(ctx context.Context, committed func(context.Context) error) error {
+	if committed == nil {
+		return nil
+	}
+	return committed(ctx)
+}

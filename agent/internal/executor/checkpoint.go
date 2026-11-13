@@ -167,6 +167,13 @@ type CheckpointRequest struct {
 	// the group and leaves it once the capture has succeeded. A failed capture
 	// fails the attempt for every member.
 	Group *group.Member
+
+	// Committed, for a member of a pod group, is called once the attempt has
+	// committed, right after the admitted barrier and before the member's
+	// first irreversible step, so the caller can record that the member
+	// started. An error fails the attempt: the barrier has passed, so with
+	// session.ReasonMemberFailed. Nil records nothing.
+	Committed func(context.Context) error
 }
 
 type checkpointPhaseTimings struct {
@@ -282,6 +289,9 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 			return nil, failStep(StepAdmitGroup, err)
 		}
 		admitDuration = time.Since(admitStart)
+		if err := recordCommit(ctx, req.Committed); err != nil {
+			return nil, failStep(StepRecordGroupStart, err)
+		}
 	}
 	cudaJobFile := ""
 	if len(state.CUDAHostPIDs) > 0 && !usePageBrokerGPU {
