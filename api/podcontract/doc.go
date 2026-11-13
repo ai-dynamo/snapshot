@@ -12,8 +12,8 @@
 //     through BuildGroupTarget, and with no restore annotation. The gate keeps
 //     it unscheduled, so nothing has run in it.
 //  2. Claimed. The operator claims it for one PodGroupRestore in a single
-//     update conditional on its resourceVersion, built by ClaimGroupTarget:
-//     the update writes RestoreGroupUIDAnnotation and a single-pair
+//     patch conditional on its resourceVersion, built from ClaimGroupTarget:
+//     the patch writes RestoreGroupUIDAnnotation and a single-pair
 //     RestoreContainerMapAnnotation, and removes the gate. Only the operator
 //     removes the gate and writes the claim.
 //  3. Scheduled. The Pod takes a node, and the NRI plugin reads the claim from
