@@ -77,6 +77,24 @@ func TestContainerMappingsFromAnnotations(t *testing.T) {
 	}
 }
 
+func TestContainerMappingString(t *testing.T) {
+	for _, mapping := range []ContainerMapping{
+		{Source: "main", Destination: "server"},
+		{Source: "main", Destination: "main"},
+	} {
+		want := mapping.Source + "=" + mapping.Destination
+		if got := mapping.String(); got != want {
+			t.Fatalf("%#v.String() = %q, want %q", mapping, got, want)
+		}
+		parsed, err := ContainerMappingsFromAnnotations(map[string]string{
+			RestoreContainerMapAnnotation: mapping.String(),
+		}, "")
+		if err != nil || !reflect.DeepEqual(parsed, []ContainerMapping{mapping}) {
+			t.Fatalf("ContainerMappingsFromAnnotations(%q) = %#v, %v; want %#v", mapping.String(), parsed, err, mapping)
+		}
+	}
+}
+
 func TestValidateContainerMappings(t *testing.T) {
 	valid := []ContainerMapping{
 		{Source: "main", Destination: "engine-0"},

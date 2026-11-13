@@ -239,7 +239,7 @@ no annotation: do not set `nvidia.com/restore-from`,
 group target.
 
 Name the destination container in the `PodGroupRestore`, in the target's
-`containerMappings`. The operator claims the Pod in one update: it writes
+`containerMappings`. The operator claims the Pod in one patch: it writes
 `nvidia.com/restore-group-uid` and the mapping as
 `nvidia.com/restore-container-map`, and removes the gate.
 
