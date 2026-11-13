@@ -57,6 +57,10 @@ on:
   # passes, with the tag of the images it built from the mirrored commit.
   workflow_call:
     inputs:
+      validated_sha:
+        description: Commit that already passed make check in the caller. Empty validates here.
+        required: false
+        type: string
       snapshot_tag:
         description: Operator/agent/pagebroker image tag to install.
         required: true
@@ -76,6 +80,8 @@ permissions:
 jobs:
   check:
     name: Validate repository
+    # A caller may reuse its validation only for this exact checkout.
+    if: ${{ inputs.validated_sha != github.sha }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -93,6 +99,7 @@ jobs:
   e2e:
     name: ${{ matrix.case }}
     needs: check
+    if: ${{ !cancelled() && (needs.check.result == 'success' || (needs.check.result == 'skipped' && inputs.validated_sha == github.sha)) }}
     runs-on: prod-deploy-tester-v1
     # Above the sum of this job's own step timeout-minutes (123, dominated by
     # the 56-min test step) plus margin: a job-level timeout kills the whole

@@ -233,6 +233,28 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      # CPU tests enable operator hooks that the production image excludes.
+      # Warm that variant only from trusted main, keeping pull request builds
+      # read-only and leaving the published image and its digest unchanged.
+      # Cache warming is optional. A failure leaves CPU builds using their
+      # standard-cache fallback and does not invalidate published artifacts.
+      - name: Warm CPU operator cache
+        continue-on-error: true
+        if: >-
+          matrix.image == 'operator' && matrix.arch == 'amd64' &&
+          needs.version.outputs.release != 'true' &&
+          (github.event.workflow_run.head_branch || github.ref_name) == 'main'
+        uses: ./.github/actions/build-image
+        with:
+          image: operator
+          registry: ${{ env.REGISTRY }}
+          push: "false"
+          cache_variant: snapshot-e2e
+          cache_branch: main
+          cache_mode: write
+          cache_ref_prefix: ${{ env.CACHE_REF_PREFIX }}
+          build_args: --build-arg GO_BUILD_TAGS=snapshot_e2e
+
   # ── Multi-arch index (releases only) ────────────────────────────────────────
   publish-index:
     name: Publish ${{ matrix.image }} multi-arch index

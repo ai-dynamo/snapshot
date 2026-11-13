@@ -152,36 +152,35 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Read-only against the cache push-artifacts.yaml writes from main, so
-      # this reads the layers of the last merged build and writes nothing.
-      # Two runs of the same pull request therefore do not help each other;
-      # that is the price of a cache no pull request can corrupt.
-      - name: Build operator image
-        timeout-minutes: 15
-        uses: ./.github/actions/build-image
-        with:
-          image: operator
-          registry: ${{ env.IMAGE_REGISTRY }}
-          tags: ${{ env.IMAGE_TAG }}
-          build_args: --build-arg GO_BUILD_TAGS=snapshot_e2e
-          cache_mode: read
-          cache_branch: ${{ env.CACHE_BRANCH }}
-          cache_ref_prefix: ${{ env.CACHE_REF_PREFIX }}
-          cache_tag_suffix: ${{ env.CACHE_TAG_SUFFIX }}
-          phase: Build operator image
+      - name: Install kubectl
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/kubectl \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+          kubectl version --client
 
-      - name: Build agent image
-        timeout-minutes: 50
-        uses: ./.github/actions/build-image
+      - name: Install Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Install Python tooling
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          image: agent
-          registry: ${{ env.IMAGE_REGISTRY }}
-          tags: ${{ env.IMAGE_TAG }}
-          cache_mode: read
-          cache_branch: ${{ env.CACHE_BRANCH }}
-          cache_ref_prefix: ${{ env.CACHE_REF_PREFIX }}
-          cache_tag_suffix: ${{ env.CACHE_TAG_SUFFIX }}
-          phase: Build agent image
+          version: "0.10.11"
+          checksum: "5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583"
+          enable-cache: "false"
+          download-from-astral-mirror: "false"
+
+      # Build the three images while k3d starts, then wait for all four tasks.
+      - name: Build images and create k3d cluster
+        timeout-minutes: 60
+        env:
+          REGISTRY: ${{ env.IMAGE_REGISTRY }}
+          TAGS: ${{ env.IMAGE_TAG }}
+          PUSH: "true"
+          PLATFORM: linux/amd64
+          CACHE_MODE: read
+        run: exec bash hack/ci-prepare-cpu-e2e.sh
 
       # The restore path extracts the rootfs diff with the bundled tar, run
       # under the bundled loader so the placeholder's glibc never has to
@@ -200,19 +199,6 @@ jobs:
             BUNDLE_DEST="${RUNNER_TEMP}/agent-bundle" \
             DOCKER_BUILD_ARGS="${cache_flags}"
           hack/verify-bundle-glibc.sh "${RUNNER_TEMP}/agent-bundle"
-
-      - name: Build PageBroker image
-        timeout-minutes: 30
-        uses: ./.github/actions/build-image
-        with:
-          image: pagebroker
-          registry: ${{ env.IMAGE_REGISTRY }}
-          tags: ${{ env.IMAGE_TAG }}
-          cache_mode: read
-          cache_branch: ${{ env.CACHE_BRANCH }}
-          cache_ref_prefix: ${{ env.CACHE_REF_PREFIX }}
-          cache_tag_suffix: ${{ env.CACHE_TAG_SUFFIX }}
-          phase: Build PageBroker image
 
       # A pass has to be attributable to the images this job built, not to
       # whatever a registry happened to serve. The registry read below is this
@@ -252,29 +238,6 @@ jobs:
               echo "| \`${image}\` | \`${digest}\` |"
             done
           } >>"${GITHUB_STEP_SUMMARY}"
-
-      - name: Install kubectl
-        run: |
-          set -euo pipefail
-          curl -fsSL -o /tmp/kubectl \
-            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
-          sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
-          kubectl version --client
-
-      - name: Install Helm
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
-
-      - name: Install Python tooling
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-        with:
-          version: "0.10.11"
-          checksum: "5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583"
-          enable-cache: "false"
-          download-from-astral-mirror: "false"
-
-      - name: Create k3d cluster
-        timeout-minutes: 10
-        run: hack/k3d-cpu-e2e.sh cluster-up
 
       - name: Install Snapshot
         timeout-minutes: 10
