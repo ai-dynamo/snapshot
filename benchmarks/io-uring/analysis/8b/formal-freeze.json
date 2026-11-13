@@ -1,0 +1,116 @@
+{
+  "frozen_utc_ns": 1792799038498132000,
+  "paths": {
+    "vllm": {
+      "versions": {
+        "vllm": "0.27.1",
+        "torch": "2.13.0+cu130",
+        "uvloop": "0.22.1",
+        "uvicorn": "0.52.1",
+        "fastapi": "0.136.3",
+        "transformers": "5.15.0"
+      },
+      "image_id": "docker.io/vllm/vllm-openai@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee",
+      "code_sha256": {
+        "/benchmark/phase2-8b/code/serve.py": "2c4d56c45a2011f2e23a879856667940612b94420a0821c698c2fae8b58416d1",
+        "/benchmark/phase2-8b/code/sitecustomize.py": "379f8fc91c98ec9b3a7dc40d7440ce814bb8cc2c6da46eb829791a2a902de579"
+      },
+      "gpu_model": "NVIDIA H100 80GB HBM3",
+      "driver": "595.91.07"
+    },
+    "sglang": {
+      "versions": {
+        "sglang": "0.5.22",
+        "torch": "2.14.1+cu130",
+        "uvloop": "0.23.0",
+        "uvicorn": "0.54.0",
+        "fastapi": "0.143.2",
+        "transformers": "5.19.0"
+      },
+      "image_id": "docker.io/lmsysorg/sglang@sha256:e3a4f06001a29542fc4a8638536d9ffc5eb9c9942b08603c09b19a56eae4a1ae",
+      "code_sha256": {
+        "/benchmark/phase2-8b/code/serve.py": "2c4d56c45a2011f2e23a879856667940612b94420a0821c698c2fae8b58416d1",
+        "/benchmark/phase2-8b/code/sitecustomize.py": "379f8fc91c98ec9b3a7dc40d7440ce814bb8cc2c6da46eb829791a2a902de579"
+      },
+      "gpu_model": "NVIDIA H100 80GB HBM3",
+      "driver": "595.91.07"
+    },
+    "dynamo-vllm": {
+      "versions": {
+        "vllm": "0.28.0",
+        "torch": "2.13.0+cu130",
+        "uvloop": "0.22.1",
+        "uvicorn": "0.52.4",
+        "fastapi": "0.136.3",
+        "transformers": "5.14.1"
+      },
+      "image_id": "nvcr.io/nvidia/ai-dynamo/vllm-runtime@sha256:2b224a823d52a198ec0eeb0e3e4f5cf26cd8a7fc2e9812ee16204b6b1e974870",
+      "code_sha256": {
+        "/tmp/dynamo-hf-cache/c590-code/sitecustomize.py": "91548a90363bc93a8a87feb7de75036ed5486e55debc3558d6ec13bf7352a1b6"
+      },
+      "gpu_model": "NVIDIA H100 80GB HBM3",
+      "driver": "595.91.07"
+    }
+  },
+  "client": {
+    "deployment_id": 1801,
+    "pod_uid": "3341e891-6387-4e0c-a677-a3a581818cb1",
+    "node": "ip-10-100-154-108.ec2.internal",
+    "image_id": "docker.io/library/python@sha256:cb33f7f771ecec2ef1225cf39b159591a040391bd73e4c01f00fdfc4c47611d2",
+    "resources": {
+      "limits": {
+        "cpu": "8",
+        "memory": "16Gi",
+        "nvidia.com/gpu": "0"
+      },
+      "requests": {
+        "cpu": "6",
+        "memory": "12Gi",
+        "nvidia.com/gpu": "0"
+      }
+    },
+    "workers_max": 8,
+    "record_processors": 1
+  },
+  "plan_sha256": "d022c62f145416c0d1a84064587d653b593f6f24874d5c3f86c7a7642688f396",
+  "performance_files": {
+    "remote_cell.py": "2c8dd6c88ae72dfb4428ce97c5dab00bdaba4f99855be14f7c36c6fe5eecf154",
+    "run_cell.py": "8df65ed179d3509c66a687a1400760ebde46af91ca8ae7681bec3418a87c6569",
+    "telemetry.py": "2c7094fe77f3ccc8d8d685c0dd3d1502cdaba5e6564612ad761d1abddbd21f9b",
+    "serve.py": "2c4d56c45a2011f2e23a879856667940612b94420a0821c698c2fae8b58416d1",
+    "sitecustomize.py": "379f8fc91c98ec9b3a7dc40d7440ce814bb8cc2c6da46eb829791a2a902de579",
+    "cases.json": "31c760ebca790a2f8250f30867b1ae9cd8e84fa5e18979aafb47a3af378520f9",
+    "dependencies.txt": "3b07ab44b615618a8ccfa923b21f61775a3e7dfb91c1ec2b92cb250405ee3ba9",
+    "formal_runner.py": "fad2747963fd2a38081b2aef9f64f14b339f95d45994f8a00886edfa560649d9",
+    "activate.py": "65e4cc56e8181c617a271befe75b46618f9b99c218234d85bc235ac306a9533b",
+    "checkpoints.py": "0bbdcd73cda24e53d1a5000592542c6ed6df180325b7c2c31f230e9d72e9b451",
+    "collect.py": "980fc5c059c1e9a255faf8c457031750da78f57283fa888a672fbae439a42c3d",
+    "gates.py": "98f1a0c4fc4d37eb0983212cf218d361e201ebf1de3aec1f8f70011381748f14",
+    "control.py": "f92cbadcea30e505f31fa6685fac726ab04cf905dda36895bfbe09032dcfffc9",
+    "preview.py": "06d4bc135f66db52614b249c4607c8bb537505b22d5c2fa6ce86301e05ab63f8",
+    "cleanup.py": "a8f8f60628259dd36a2c5ce462ab8e93bb6a8f397824cf93e7cf10245041d2b0",
+    "operator_control.py": "4346a6c557f75541cca39225520332831dbb16869ca7d52a3f4b5ae66e85f313",
+    "report.py": "ee0fa4ac555263d4925354a43c68fa0ab35b30ab57a135107457576ce5c14fe6",
+    "plot_report.py": "c99c9e44f4c784e7496b071e6139e6cc1256dd95388275c351762d77132e1680",
+    "campaign.py": "a7afc59b435506921b168cd23c58bafbec81d9b783234470cb863f4951dc6dc8",
+    "deadline.json": "7ed987828dae92b28cdc6381c16576dbaf995e4a7e2250017c87e9e8a9a42de5",
+    "client-freeze.json": "a0807944cd32857c39240b4d9bca49f3d02077f17884e9b55ff2ee4872a0a8db",
+    "cluster_auth.py": "cb666aed38e951d2525d99cbc3972249a6018cef048be7defb93fe19f1dd0482",
+    "local_api.py": "afaa6a199f5085e08df10e017a13c009cb61b31ef7ce906ea7cdd6f6b6c9f873",
+    "auto_renew.py": "f00f271f156c414bca4e83094822a0134496b52066a4a967588eb50bb7bf422e",
+    "watchdog.py": "036c970e4d83f7124e8086fd137879a27ed28ff5a0e56066d8e24a956809940f",
+    "/private/tmp/c590-kubeconfig.json": "b7d48ab70bdefbf9e587b859f309bc8854edd76db7e3cce3ccf5befbc7bd944c",
+    "gpu-policy.json": "901da549e5b1a44b952b341a5817ab6a9b9af45c2222c3a37dfae23104773c24",
+    "space_guard.py": "d4264b5a2fcceafdaae5c99b03c1e37ddf06f6b70fb5ac330f36b602eb3bc856",
+    "tls_guard.py": "960124e1aaa9e1a5d90e1b06bce90493714bff692c15849f1dd6ef980bf8ec48",
+    "phase_runner.py": "b7ad8fef155a4522dbace57881a793a54d33d795ef36665f6329e4986f345b61",
+    "supervisor.py": "eabd64efa0525f7fbf7eadf50f413c6c8ffdc3e6621f9af11e11817bc5628e31"
+  },
+  "model": {
+    "name": "Qwen/Qwen3-8B",
+    "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+    "client_tokenizer": "Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca",
+    "tokenizer_identity": "All four published tokenizer files are identical at pinned revisions"
+  },
+  "pilot_cells": 108
+}

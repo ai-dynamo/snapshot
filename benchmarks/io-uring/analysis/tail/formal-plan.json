@@ -1,0 +1,279 @@
+{
+  "state": "frozen",
+  "maximum_campaign_hours": 8,
+  "measurement_cells": 40,
+  "primary_cells": 10,
+  "conditioning_cells": 30,
+  "one_serving_gpu_at_a_time": true,
+  "model": {
+    "name": "Qwen/Qwen3.8-27B-FP8",
+    "revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+    "client_tokenizer": "Qwen/Qwen3.8-27B-FP8@017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+    "tokenizer_identity": "Four hash-verified files staged in the HF snapshot cache; actual AIPerf offline loader must pass before GPU launch"
+  },
+  "scope": {
+    "dynamo-vllm": "Complete Dynamo endpoint; blocked GPU worker in both conditions; frontend unchanged"
+  },
+  "analysis": {
+    "primary": "Restored-blocked / blocked p99 request latency, C128, request starts 120\u2013300s into profiling",
+    "early_secondary": "Request starts 0\u201390s into the same profile",
+    "replicates": 10,
+    "practical_regression_margin_fraction": 0.03,
+    "method": "Paired log ratios with Student-t 95% interval, df9; independent launch/restore is the unit",
+    "secondary": [
+      "p95 latency",
+      "TTFT p99",
+      "decode p99",
+      "largest streaming gap p99",
+      "throughput",
+      "CPU throttling"
+    ],
+    "hardware": "Same verified H100 node/model/memory/driver; UUID recorded and fixed within each condition; same-UUID pair sensitivity analysis",
+    "caveats": [
+      "Cannot guarantee same physical GPU across conditions with the existing allocator",
+      "Earlier signal followed workload changes; this tests a fixed C1\u21928\u219232\u2192128 ramp",
+      "Secondary endpoints are exploratory; no pooled-request inference",
+      "Ten pairs may still leave the 3% margin inconclusive"
+    ]
+  },
+  "gates": [
+    "Exact model, serving code, dependencies, images and resource limits match the completed run",
+    "Fresh verified H100 inventory and at least 64 GiB checkpoint headroom",
+    "Scoped renewable operator rollback access established before enable",
+    "Complete error-free records, exact token lengths, sustained concurrency, client capacity gate",
+    "No extension beyond 8 hours; reserve 15 minutes for cleanup"
+  ],
+  "blocks": [
+    {
+      "repeat": 6,
+      "path": "dynamo-vllm",
+      "condition_order": [
+        "restored-blocked",
+        "blocked"
+      ],
+      "same_cells_for_each_condition": [
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 300,
+          "drain_seconds": 60
+        }
+      ]
+    },
+    {
+      "repeat": 7,
+      "path": "dynamo-vllm",
+      "condition_order": [
+        "blocked",
+        "restored-blocked"
+      ],
+      "same_cells_for_each_condition": [
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 300,
+          "drain_seconds": 60
+        }
+      ]
+    },
+    {
+      "repeat": 8,
+      "path": "dynamo-vllm",
+      "condition_order": [
+        "restored-blocked",
+        "blocked"
+      ],
+      "same_cells_for_each_condition": [
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 300,
+          "drain_seconds": 60
+        }
+      ]
+    },
+    {
+      "repeat": 9,
+      "path": "dynamo-vllm",
+      "condition_order": [
+        "blocked",
+        "restored-blocked"
+      ],
+      "same_cells_for_each_condition": [
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 300,
+          "drain_seconds": 60
+        }
+      ]
+    },
+    {
+      "repeat": 10,
+      "path": "dynamo-vllm",
+      "condition_order": [
+        "restored-blocked",
+        "blocked"
+      ],
+      "same_cells_for_each_condition": [
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 300,
+          "drain_seconds": 60
+        }
+      ]
+    }
+  ],
+  "continuation": "Five completed pairs remain immutable in io-uring-benchmark-tail-20261028"
+}

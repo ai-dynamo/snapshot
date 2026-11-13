@@ -1,0 +1,134 @@
+{
+  "frozen_utc_ns": 1793057802489413000,
+  "paths": {
+    "vllm": {
+      "versions": {
+        "vllm": "0.27.1",
+        "torch": "2.13.0+cu130",
+        "uvloop": "0.22.1",
+        "uvicorn": "0.52.1",
+        "fastapi": "0.136.3",
+        "transformers": "5.15.0"
+      },
+      "image_id": "docker.io/vllm/vllm-openai@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee",
+      "code_sha256": {
+        "/benchmark/phase3-27b-r2/code/serve.py": "d2a3ae1c9ab94ad02b60e3ce7633e829a7cdd6aabfb0834d1a8caa50562d1dad",
+        "/benchmark/phase3-27b-r2/code/sitecustomize.py": "004ddb04808471b8b83b8e41e2d6885d3c524dd18e94ff58db46dc4366285d6d",
+        "/benchmark/phase3-27b-r2/code/cache_prepare.py": "d2f7fe7f128329d76e019ce5a8ecef40e4b0b97b30ad4d416f8f06c2bd1601d9"
+      },
+      "gpu_model": "NVIDIA H100 80GB HBM3",
+      "driver": "595.91.07"
+    },
+    "sglang": {
+      "versions": {
+        "sglang": "0.5.22",
+        "torch": "2.14.1+cu130",
+        "uvloop": "0.23.0",
+        "uvicorn": "0.54.0",
+        "fastapi": "0.143.2",
+        "transformers": "5.19.0"
+      },
+      "image_id": "docker.io/lmsysorg/sglang@sha256:e3a4f06001a29542fc4a8638536d9ffc5eb9c9942b08603c09b19a56eae4a1ae",
+      "code_sha256": {
+        "/benchmark/phase3-27b-r2/code/serve.py": "d2a3ae1c9ab94ad02b60e3ce7633e829a7cdd6aabfb0834d1a8caa50562d1dad",
+        "/benchmark/phase3-27b-r2/code/sitecustomize.py": "004ddb04808471b8b83b8e41e2d6885d3c524dd18e94ff58db46dc4366285d6d",
+        "/benchmark/phase3-27b-r2/code/cache_prepare.py": "d2f7fe7f128329d76e019ce5a8ecef40e4b0b97b30ad4d416f8f06c2bd1601d9",
+        "/benchmark/phase3-27b-r2/code/sglang_serve.py": "faf7101440f11fe4e367867548f30cc63e8b6aa6a1e27099db69eed4910b2dfe"
+      },
+      "gpu_model": "NVIDIA H100 80GB HBM3",
+      "driver": "595.91.07"
+    },
+    "dynamo-vllm": {
+      "versions": {
+        "vllm": "0.28.0",
+        "torch": "2.13.0+cu130",
+        "uvloop": "0.22.1",
+        "uvicorn": "0.52.4",
+        "fastapi": "0.136.3",
+        "transformers": "5.14.1"
+      },
+      "image_id": "nvcr.io/nvidia/ai-dynamo/vllm-runtime@sha256:2b224a823d52a198ec0eeb0e3e4f5cf26cd8a7fc2e9812ee16204b6b1e974870",
+      "code_sha256": {
+        "/tmp/dynamo-hf-cache/c590-27b-code/sitecustomize.py": "004ddb04808471b8b83b8e41e2d6885d3c524dd18e94ff58db46dc4366285d6d",
+        "/tmp/dynamo-hf-cache/c590-27b-code/worker_factory.py": "5c5df4be740c4d6179452afb5d0c11de33e2a08ed3bb74a1d074d4081a60068d",
+        "/tmp/dynamo-hf-cache/c590-27b-code/warmup.py": "d1c1eb7f3f70151a1dbf58d117821018d8824615caa998a01060729b77751e53",
+        "/tmp/dynamo-hf-cache/c590-27b-code/warmup-requests.json": "34f598c313bc1c2a4f999148ee5c63529b269cfe440e44779fe4a7c6d4b1d4f3"
+      },
+      "gpu_model": "NVIDIA H100 80GB HBM3",
+      "driver": "595.91.07"
+    }
+  },
+  "client": {
+    "deployment_id": 1840,
+    "pod_uid": "a8c8975c-9be7-4bd3-b707-5e37c90b88e2",
+    "node": "ip-10-100-154-108.ec2.internal",
+    "image_id": "docker.io/library/python@sha256:cb33f7f771ecec2ef1225cf39b159591a040391bd73e4c01f00fdfc4c47611d2",
+    "resources": {
+      "limits": {
+        "cpu": "8",
+        "memory": "16Gi",
+        "nvidia.com/gpu": "0"
+      },
+      "requests": {
+        "cpu": "6",
+        "memory": "12Gi",
+        "nvidia.com/gpu": "0"
+      }
+    },
+    "workers_max": 8,
+    "record_processors": 1
+  },
+  "plan_sha256": "7c938705ec9ab85f95187c31d6ce9b6cd20c6a4e88facf62e69d4c3ac54a769e",
+  "performance_files": {
+    "sglang_serve.py": "faf7101440f11fe4e367867548f30cc63e8b6aa6a1e27099db69eed4910b2dfe",
+    "remote_cell.py": "159e35e1521d028eccd06f19cf06b4def6339c56d86ea4241828932d6d2a8e46",
+    "run_cell.py": "e1b43e6fcb8c8a29ce9a1a2a1ea06e384c1cb3b9620e62b82b26007ddd838c31",
+    "telemetry.py": "2c7094fe77f3ccc8d8d685c0dd3d1502cdaba5e6564612ad761d1abddbd21f9b",
+    "serve.py": "d2a3ae1c9ab94ad02b60e3ce7633e829a7cdd6aabfb0834d1a8caa50562d1dad",
+    "sitecustomize.py": "004ddb04808471b8b83b8e41e2d6885d3c524dd18e94ff58db46dc4366285d6d",
+    "cases.json": "8638daf36addbc67c21101462aed36e77255f08dcefdf4bc92a6ff01d86dba56",
+    "dependencies.txt": "3b07ab44b615618a8ccfa923b21f61775a3e7dfb91c1ec2b92cb250405ee3ba9",
+    "formal_runner.py": "98c1fde8a625a8744b0d56e18fc0ad731cadf788b3db1f321c9f526458daa2b9",
+    "activate.py": "f1fdd432492c22c0554902d3097dc24ae796b1a52939698eb182ca26406cfd6b",
+    "checkpoints.py": "0bbdcd73cda24e53d1a5000592542c6ed6df180325b7c2c31f230e9d72e9b451",
+    "collect.py": "672620686b8511a96731bb0c6333229079c99da78bd7802158d6c5ee936c9566",
+    "gates.py": "98f1a0c4fc4d37eb0983212cf218d361e201ebf1de3aec1f8f70011381748f14",
+    "control.py": "2b32f705fd3a84033f1c3435f22524e748c9222a15d93fd1d63c27cd15eb5cba",
+    "preview.py": "0feca0a6c6700f37acba9bc65052c6306f834bc2e513763520126ded673e693e",
+    "cleanup.py": "ff84d3e1c6abff23cc1e98bc9f758e4e43690adf69e5212572c68fa9c6b4daff",
+    "operator_control.py": "401184d303aab100d753df51c240aacbb1c9b24719775ab6cddcbba9b827f69e",
+    "report.py": "9b7c8b4ff708035a40ef9a24354f33db4262618255630b14f7a2dd2e2d361d07",
+    "plot_report.py": "4ca65ff2f37cf93bbc68b01c8067e8e5ff2782f8961d0df6a5485e632939a87d",
+    "campaign.py": "a7afc59b435506921b168cd23c58bafbec81d9b783234470cb863f4951dc6dc8",
+    "deadline.json": "3478ef67b635e2ac83337b011ac87884388fb9eb1eb8ffdfb86521fd48cbb411",
+    "client-freeze.json": "9b32db357e409d062eed5632b8d775ca1288abcbab49749f63384da6ccfbc1f5",
+    "cluster_auth.py": "cb666aed38e951d2525d99cbc3972249a6018cef048be7defb93fe19f1dd0482",
+    "local_api.py": "afaa6a199f5085e08df10e017a13c009cb61b31ef7ce906ea7cdd6f6b6c9f873",
+    "auto_renew.py": "f00f271f156c414bca4e83094822a0134496b52066a4a967588eb50bb7bf422e",
+    "watchdog.py": "c6b3fc6774968396241dbee4532ad95e9b0c009376cf2b34ae39ebe4bbe130ed",
+    "access/kubeconfig.json": "2f482470034eac6f16ac6400e651dc6eabc03b772a3f3737686ce3efe8712d22",
+    "gpu-policy.json": "b32aea1b1dd387121b6a779050ba008b1a9a9f301e45fdd76e7bd0dc34ec1ea8",
+    "space_guard.py": "d4264b5a2fcceafdaae5c99b03c1e37ddf06f6b70fb5ac330f36b602eb3bc856",
+    "tls_guard.py": "960124e1aaa9e1a5d90e1b06bce90493714bff692c15849f1dd6ef980bf8ec48",
+    "phase_runner.py": "6c51268300231d609ddb6e99f1c628a6ef5573aff5bf56d25837a230ea147530",
+    "supervisor.py": "fd487bf29a05bc891515423f79900645616a9ace19cff3cdc3f9c2d0750c8ba7",
+    "cache_prepare.py": "d2f7fe7f128329d76e019ce5a8ecef40e4b0b97b30ad4d416f8f06c2bd1601d9",
+    "dynamo-overlay/worker_factory.py": "5c5df4be740c4d6179452afb5d0c11de33e2a08ed3bb74a1d074d4081a60068d",
+    "dynamo-overlay/warmup.py": "d1c1eb7f3f70151a1dbf58d117821018d8824615caa998a01060729b77751e53",
+    "dynamo-overlay/warmup-requests.json": "34f598c313bc1c2a4f999148ee5c63529b269cfe440e44779fe4a7c6d4b1d4f3",
+    "client-request.json": "aff480272133269c0a13bcf8eb0f7c9783dfa1b0d3f72b3ea8c31389516918c7",
+    "model-metadata.json": "f0318d4d1cb080c4038dab6a333a20b29be8ccdd6a05dab6f425f3204f5d448c",
+    "dynamo-overlay/manifest.json": "e0419792c75d38dbb6affc9180e8d602ed3f92efbd10a71314188a8a41a4144d",
+    "capture_deadline.py": "b349b70c74da40ebb8f3ee8419b659ff47544c60fbbbdd448d54b2e78e277278",
+    "capture-deadline-approval.json": "8a2d3c309a77e15896a8eeb440e92bb77c38dc17ad18f3d3ce92dd8c1a9f848e",
+    "cluster_access.py": "9906d5fda29c46b2ee72993a53d7b15b1b1e6a27d055d59fd2ee924de34eff43",
+    "pilots.py": "544526c909172ab08fd52195d62f9a4f5d3b70729a26e3320eae34eae1e7629d"
+  },
+  "model": {
+    "name": "Qwen/Qwen3.8-27B-FP8",
+    "revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+    "client_tokenizer": "Qwen/Qwen3.8-27B-FP8@017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+    "tokenizer_identity": "Four hash-verified files staged in the HF snapshot cache; actual AIPerf offline loader must pass before GPU launch"
+  },
+  "pilot_cells": 108
+}

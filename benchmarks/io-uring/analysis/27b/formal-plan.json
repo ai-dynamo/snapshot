@@ -1,0 +1,1867 @@
+{
+  "state": "frozen",
+  "maximum_campaign_hours": 48,
+  "measurement_cells": 540,
+  "warmup_and_measurement_hours": 18,
+  "one_serving_gpu_at_a_time": true,
+  "gates": [
+    "all native ordinary and restored pilots pass",
+    "no client CPU throttling above1% of periods at each accepted concurrency",
+    "identical matched engine configuration and frozen client dependencies",
+    "exact pinned model and tokenizer revision",
+    "raw records complete with exact input/output lengths and zero errors",
+    "operator enable and rollback remain authorized and rollback credentials valid throughout",
+    "source and restored checkpoint identity evidence captured",
+    "fresh H100 inventory and same UUID throughout each cell",
+    "verify checkpoint-store free space before every capture; keep one experiment checkpoint at a time",
+    "validate all nine path/condition combinations before formal freeze",
+    "pilot 27B memory, restore and all three workloads through concurrency128",
+    "new 48-hour deadline begins only after explicit launch approval; never extend in flight"
+  ],
+  "concurrency_status": "fixed1,8,32,128; explicit workers_max8 and record_processors1; matched across conditions",
+  "analysis": {
+    "primary": "128 input /16 output tokens at concurrency128, separately for each serving path",
+    "throughput_regression_margin_fraction": 0.03,
+    "comparisons": [
+      "blocked / allowed",
+      "restored-blocked / blocked"
+    ],
+    "replicates": 5,
+    "unit": "independent launch or restore repeat, paired by block",
+    "method": "paired log throughput ratios with95% Student-t interval (df4) for5 pairs; list individual ratios; no pooled-request inference",
+    "caveats": [
+      "five repeats give limited CI precision",
+      "non-significance does not prove equivalence",
+      "native restore adds a seccomp layer; record it",
+      "no pooling across engines or models"
+    ]
+  },
+  "blocks": [
+    {
+      "repeat": 1,
+      "path": "sglang",
+      "condition_order": [
+        "allowed",
+        "blocked",
+        "restored-blocked"
+      ],
+      "same_cells_for_each_condition": [
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        }
+      ]
+    },
+    {
+      "repeat": 1,
+      "path": "dynamo-vllm",
+      "condition_order": [
+        "allowed",
+        "blocked",
+        "restored-blocked"
+      ],
+      "same_cells_for_each_condition": [
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        }
+      ]
+    },
+    {
+      "repeat": 1,
+      "path": "vllm",
+      "condition_order": [
+        "allowed",
+        "restored-blocked",
+        "blocked"
+      ],
+      "same_cells_for_each_condition": [
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        }
+      ]
+    },
+    {
+      "repeat": 2,
+      "path": "sglang",
+      "condition_order": [
+        "blocked",
+        "allowed",
+        "restored-blocked"
+      ],
+      "same_cells_for_each_condition": [
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        }
+      ]
+    },
+    {
+      "repeat": 2,
+      "path": "dynamo-vllm",
+      "condition_order": [
+        "restored-blocked",
+        "blocked",
+        "allowed"
+      ],
+      "same_cells_for_each_condition": [
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        }
+      ]
+    },
+    {
+      "repeat": 2,
+      "path": "vllm",
+      "condition_order": [
+        "allowed",
+        "blocked",
+        "restored-blocked"
+      ],
+      "same_cells_for_each_condition": [
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        }
+      ]
+    },
+    {
+      "repeat": 3,
+      "path": "sglang",
+      "condition_order": [
+        "blocked",
+        "allowed",
+        "restored-blocked"
+      ],
+      "same_cells_for_each_condition": [
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        }
+      ]
+    },
+    {
+      "repeat": 3,
+      "path": "dynamo-vllm",
+      "condition_order": [
+        "allowed",
+        "blocked",
+        "restored-blocked"
+      ],
+      "same_cells_for_each_condition": [
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        }
+      ]
+    },
+    {
+      "repeat": 3,
+      "path": "vllm",
+      "condition_order": [
+        "blocked",
+        "restored-blocked",
+        "allowed"
+      ],
+      "same_cells_for_each_condition": [
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        }
+      ]
+    },
+    {
+      "repeat": 4,
+      "path": "vllm",
+      "condition_order": [
+        "allowed",
+        "restored-blocked",
+        "blocked"
+      ],
+      "same_cells_for_each_condition": [
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        }
+      ]
+    },
+    {
+      "repeat": 4,
+      "path": "sglang",
+      "condition_order": [
+        "allowed",
+        "restored-blocked",
+        "blocked"
+      ],
+      "same_cells_for_each_condition": [
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        }
+      ]
+    },
+    {
+      "repeat": 4,
+      "path": "dynamo-vllm",
+      "condition_order": [
+        "allowed",
+        "restored-blocked",
+        "blocked"
+      ],
+      "same_cells_for_each_condition": [
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        }
+      ]
+    },
+    {
+      "repeat": 5,
+      "path": "vllm",
+      "condition_order": [
+        "blocked",
+        "restored-blocked",
+        "allowed"
+      ],
+      "same_cells_for_each_condition": [
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        }
+      ]
+    },
+    {
+      "repeat": 5,
+      "path": "dynamo-vllm",
+      "condition_order": [
+        "allowed",
+        "restored-blocked",
+        "blocked"
+      ],
+      "same_cells_for_each_condition": [
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        }
+      ]
+    },
+    {
+      "repeat": 5,
+      "path": "sglang",
+      "condition_order": [
+        "blocked",
+        "allowed",
+        "restored-blocked"
+      ],
+      "same_cells_for_each_condition": [
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 2048,
+          "osl": 128,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 512,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 1,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 8,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 32,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        },
+        {
+          "isl": 128,
+          "osl": 16,
+          "concurrency": 128,
+          "seed": 42,
+          "warmup_seconds": 30,
+          "measurement_seconds": 90,
+          "drain_seconds": 60
+        }
+      ]
+    }
+  ],
+  "scope": {
+    "vllm": "native HTTP server and engine processes; ingress and Istio proxy configuration matched",
+    "sglang": "native HTTP server and engine processes; ingress and Istio proxy configuration matched",
+    "dynamo-vllm": "GPU worker policy varied; frontend configuration, node, image, resources and allowed policy matched"
+  },
+  "client": {
+    "cpu_limit": 8,
+    "memory_gib": 16,
+    "node": "ip-10-100-154-108.ec2.internal",
+    "workers_max": 8,
+    "effective_workers": "min(concurrency,8)",
+    "aiperf": "0.13.0",
+    "record_processors": 1,
+    "remote_phase_directory": "/benchmark/phase3-27b-r2"
+  },
+  "model": {
+    "name": "Qwen/Qwen3.8-27B-FP8",
+    "revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+    "client_tokenizer": "Qwen/Qwen3.8-27B-FP8@017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+    "tokenizer_identity": "Four hash-verified files staged in the HF snapshot cache; actual AIPerf offline loader must pass before GPU launch"
+  },
+  "capacity_gate": {
+    "client_max_throttled_period_fraction": 0.01,
+    "required_errors": 0,
+    "exact_input_output_tokens": true,
+    "minimum_middle_window_inflight_fraction": 0.9
+  },
+  "limitations": [
+    "native sleep/memory saver enabled in all conditions",
+    "Dynamo frontend chart default has1CPU limit; endpoint configuration performance is measured",
+    "Dynamo frontend io_uring policy remains allowed",
+    "native restore adds another seccomp layer",
+    "maximum offered concurrency128; peak capacity beyond this is unmeasured",
+    "five pairs give limited interval precision",
+    "shared cluster background activity remains possible",
+    "checkpoint namespace object cleanup verified; cluster content cleanup delegated to native finalizers due scoped read permissions"
+  ],
+  "measurement_seconds": 90,
+  "warmup_seconds": 30,
+  "hardware_assignment_attempt_limit": 50,
+  "runtime_budget_note": "Pilot startup, export, validation and GPU assignment overhead require reserve.90s measurement retains540 cells and5 repeats within36h."
+}

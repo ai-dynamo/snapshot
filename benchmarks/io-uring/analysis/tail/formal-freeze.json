@@ -1,0 +1,106 @@
+{
+  "frozen_utc_ns": 1793234401805781000,
+  "client": {
+    "deployment_id": 1851,
+    "pod_uid": "fff089b5-b357-4a0b-bca7-9b1c0a4be0f8",
+    "node": "ip-10-100-154-108.ec2.internal",
+    "image_id": "docker.io/library/python@sha256:cb33f7f771ecec2ef1225cf39b159591a040391bd73e4c01f00fdfc4c47611d2",
+    "resources": {
+      "limits": {
+        "cpu": "8",
+        "memory": "16Gi",
+        "nvidia.com/gpu": "0"
+      },
+      "requests": {
+        "cpu": "6",
+        "memory": "12Gi",
+        "nvidia.com/gpu": "0"
+      }
+    },
+    "workers_max": 8,
+    "record_processors": 1
+  },
+  "paths": {
+    "dynamo-vllm": {
+      "versions": {
+        "vllm": "0.28.0",
+        "torch": "2.13.0+cu130",
+        "uvloop": "0.22.1",
+        "uvicorn": "0.52.4",
+        "fastapi": "0.136.3",
+        "transformers": "5.14.1"
+      },
+      "image_id": "nvcr.io/nvidia/ai-dynamo/vllm-runtime@sha256:2b224a823d52a198ec0eeb0e3e4f5cf26cd8a7fc2e9812ee16204b6b1e974870",
+      "code_sha256": {
+        "/tmp/dynamo-hf-cache/c590-27b-code/sitecustomize.py": "004ddb04808471b8b83b8e41e2d6885d3c524dd18e94ff58db46dc4366285d6d",
+        "/tmp/dynamo-hf-cache/c590-27b-code/worker_factory.py": "5c5df4be740c4d6179452afb5d0c11de33e2a08ed3bb74a1d074d4081a60068d",
+        "/tmp/dynamo-hf-cache/c590-27b-code/warmup.py": "d1c1eb7f3f70151a1dbf58d117821018d8824615caa998a01060729b77751e53",
+        "/tmp/dynamo-hf-cache/c590-27b-code/warmup-requests.json": "34f598c313bc1c2a4f999148ee5c63529b269cfe440e44779fe4a7c6d4b1d4f3"
+      },
+      "gpu_model": "NVIDIA H100 80GB HBM3",
+      "driver": "595.91.07"
+    }
+  },
+  "model": {
+    "name": "Qwen/Qwen3.8-27B-FP8",
+    "revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+    "client_tokenizer": "Qwen/Qwen3.8-27B-FP8@017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+    "tokenizer_identity": "Four hash-verified files staged in the HF snapshot cache; actual AIPerf offline loader must pass before GPU launch"
+  },
+  "plan_sha256": "b2eca631e568769a6510b33b65f3cc65878bd5fc34345de0536fb72de2bba4a1",
+  "performance_files": {
+    "sglang_serve.py": "faf7101440f11fe4e367867548f30cc63e8b6aa6a1e27099db69eed4910b2dfe",
+    "remote_cell.py": "0fc640e98c1f04dee75eb0ea7ce3516bca7b2bb3ef92113f409ecd852e15036a",
+    "run_cell.py": "d5c34e5307a886f2e60224df6fff9e665098f1ad272e564e055664ee59f929f6",
+    "telemetry.py": "2c7094fe77f3ccc8d8d685c0dd3d1502cdaba5e6564612ad761d1abddbd21f9b",
+    "serve.py": "d2a3ae1c9ab94ad02b60e3ce7633e829a7cdd6aabfb0834d1a8caa50562d1dad",
+    "sitecustomize.py": "004ddb04808471b8b83b8e41e2d6885d3c524dd18e94ff58db46dc4366285d6d",
+    "cases.json": "c31a16ff8cf56adf21cfbb1cfb376cda77a145af83a12e8791fbc4605d825d04",
+    "dependencies.txt": "3b07ab44b615618a8ccfa923b21f61775a3e7dfb91c1ec2b92cb250405ee3ba9",
+    "formal_runner.py": "98db8a6bf117f4961a25a160ee029b5780a7d50d9bb0cadd4eafecb6cba8bbec",
+    "activate.py": "d0e42cdbf1d2ec90b90603aa4ca8db26efc50510fc4116685506c9008bf0d790",
+    "checkpoints.py": "0bbdcd73cda24e53d1a5000592542c6ed6df180325b7c2c31f230e9d72e9b451",
+    "collect.py": "672620686b8511a96731bb0c6333229079c99da78bd7802158d6c5ee936c9566",
+    "gates.py": "98f1a0c4fc4d37eb0983212cf218d361e201ebf1de3aec1f8f70011381748f14",
+    "control.py": "2b32f705fd3a84033f1c3435f22524e748c9222a15d93fd1d63c27cd15eb5cba",
+    "preview.py": "0feca0a6c6700f37acba9bc65052c6306f834bc2e513763520126ded673e693e",
+    "cleanup.py": "ff84d3e1c6abff23cc1e98bc9f758e4e43690adf69e5212572c68fa9c6b4daff",
+    "operator_control.py": "304f2d09522bd42ce19849062ef59ec181c8dc0b61bb0dcea197f9b99a594169",
+    "report.py": "9b7c8b4ff708035a40ef9a24354f33db4262618255630b14f7a2dd2e2d361d07",
+    "plot_report.py": "4ca65ff2f37cf93bbc68b01c8067e8e5ff2782f8961d0df6a5485e632939a87d",
+    "campaign.py": "5b0d2f380256771b96fc94baf46a665dc0b402bb679f9f04eef034e066e77bb3",
+    "deadline.json": "a127133f375cfe1757e42168e9806f75eb1bd73953d00f36e4bcd566bbb7011c",
+    "client-freeze.json": "df65cffee08928f1122b3fbb7a836c94736088df114772d6a0c9a9f67b1779a3",
+    "cluster_auth.py": "cb666aed38e951d2525d99cbc3972249a6018cef048be7defb93fe19f1dd0482",
+    "local_api.py": "afaa6a199f5085e08df10e017a13c009cb61b31ef7ce906ea7cdd6f6b6c9f873",
+    "auto_renew.py": "f00f271f156c414bca4e83094822a0134496b52066a4a967588eb50bb7bf422e",
+    "watchdog.py": "c6b3fc6774968396241dbee4532ad95e9b0c009376cf2b34ae39ebe4bbe130ed",
+    "access/kubeconfig.json": "8b7a85ad9173290865e689da3b756052ac9dc6abad8b8796370b4fa93343f3c3",
+    "gpu-policy.json": "5d41a48038b3a7c70417e89b5ad9a74661f0b3d01643c1ac12db06670db1b9dc",
+    "space_guard.py": "d4264b5a2fcceafdaae5c99b03c1e37ddf06f6b70fb5ac330f36b602eb3bc856",
+    "tls_guard.py": "960124e1aaa9e1a5d90e1b06bce90493714bff692c15849f1dd6ef980bf8ec48",
+    "phase_runner.py": "cbdde28218d7cf4676a89743cdb6857416f7ac20c7e453f1ff3a72e315e995e4",
+    "supervisor.py": "fd487bf29a05bc891515423f79900645616a9ace19cff3cdc3f9c2d0750c8ba7",
+    "cache_prepare.py": "d2f7fe7f128329d76e019ce5a8ecef40e4b0b97b30ad4d416f8f06c2bd1601d9",
+    "dynamo-overlay/worker_factory.py": "5c5df4be740c4d6179452afb5d0c11de33e2a08ed3bb74a1d074d4081a60068d",
+    "dynamo-overlay/warmup.py": "d1c1eb7f3f70151a1dbf58d117821018d8824615caa998a01060729b77751e53",
+    "dynamo-overlay/warmup-requests.json": "34f598c313bc1c2a4f999148ee5c63529b269cfe440e44779fe4a7c6d4b1d4f3",
+    "client-request.json": "060af25682accc0dbd2d00e8aff3cffbd6a61f71877c30f316db766d54fbf05c",
+    "model-metadata.json": "f0318d4d1cb080c4038dab6a333a20b29be8ccdd6a05dab6f425f3204f5d448c",
+    "dynamo-overlay/manifest.json": "e0419792c75d38dbb6affc9180e8d602ed3f92efbd10a71314188a8a41a4144d",
+    "capture_deadline.py": "b349b70c74da40ebb8f3ee8419b659ff47544c60fbbbdd448d54b2e78e277278",
+    "capture-deadline-approval.json": "8a2d3c309a77e15896a8eeb440e92bb77c38dc17ad18f3d3ce92dd8c1a9f848e",
+    "cluster_access.py": "9906d5fda29c46b2ee72993a53d7b15b1b1e6a27d055d59fd2ee924de34eff43",
+    "pilots.py": "544526c909172ab08fd52195d62f9a4f5d3b70729a26e3320eae34eae1e7629d",
+    "baseline-reference.json": "a579dc18ebe1df60a5ce27271a70526c5c943e4bd42171b6b77b35326d4ea23b",
+    "tail_report.py": "cc7addb70356e697d9dcddfb53f287ad5d9e7918448709ac03e29a307da7f879",
+    "launch_tail.py": "5359ad7e2619b7419b26693e4780d83f58639138ff538dda08cca39bb05aa195",
+    "preflight_27b.py": "014202355a10affccab4af221b20d145289788872e587c36966f81e25489056d",
+    "continuation-source.json": "68561fe96b0c6d5896b0d3c810436ded18c25318450b32563674abe0bb7d77b0",
+    "historical-matching.json": "32aa7bde704654426708f5813edbe236df355cd97535b88572e9c5cfa77d896a",
+    "historical-component-resources.json": "53bb39905ee30de4732b7e5f8b9968c0438c94beaf5da2d33ba335509edda191",
+    "validate_startup_previews.py": "44f7cbdbed21730b5f4c4874c2dc5c57a4f12f5d4d90d579f4c908951df16726"
+  },
+  "fresh_pilot_cells": 0,
+  "validation": "First three conditioning cells validate each newly launched or restored server before C128"
+}

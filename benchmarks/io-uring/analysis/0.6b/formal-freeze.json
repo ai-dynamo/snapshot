@@ -1,0 +1,224 @@
+{
+  "frozen_utc_ns": 1792611527853744000,
+  "paths": {
+    "vllm": {
+      "versions": {
+        "vllm": "0.27.1",
+        "torch": "2.13.0+cu130",
+        "uvloop": "0.22.1",
+        "uvicorn": "0.52.1",
+        "fastapi": "0.136.3",
+        "transformers": "5.15.0"
+      },
+      "image_id": "docker.io/vllm/vllm-openai@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee",
+      "code_sha256": {
+        "/benchmark/code/serve.py": "602294e05b6b3b2da47d56f47d0267af9f0057310afc3a3bcb8fb72fb28fae86",
+        "/benchmark/code/sitecustomize.py": "379f8fc91c98ec9b3a7dc40d7440ce814bb8cc2c6da46eb829791a2a902de579"
+      },
+      "gpu_model": "NVIDIA H100 80GB HBM3",
+      "driver": "595.91.07"
+    },
+    "sglang": {
+      "versions": {
+        "sglang": "0.5.22",
+        "torch": "2.14.1+cu130",
+        "uvloop": "0.23.0",
+        "uvicorn": "0.54.0",
+        "fastapi": "0.143.2",
+        "transformers": "5.19.0"
+      },
+      "image_id": "docker.io/lmsysorg/sglang@sha256:e3a4f06001a29542fc4a8638536d9ffc5eb9c9942b08603c09b19a56eae4a1ae",
+      "code_sha256": {
+        "/benchmark/code/serve.py": "602294e05b6b3b2da47d56f47d0267af9f0057310afc3a3bcb8fb72fb28fae86",
+        "/benchmark/code/sitecustomize.py": "379f8fc91c98ec9b3a7dc40d7440ce814bb8cc2c6da46eb829791a2a902de579"
+      },
+      "gpu_model": "NVIDIA H100 80GB HBM3",
+      "driver": "595.91.07"
+    },
+    "dynamo-vllm": {
+      "versions": {
+        "vllm": "0.28.0",
+        "torch": "2.13.0+cu130",
+        "uvloop": "0.22.1",
+        "uvicorn": "0.52.4",
+        "fastapi": "0.136.3",
+        "transformers": "5.14.1"
+      },
+      "image_id": "nvcr.io/nvidia/ai-dynamo/vllm-runtime@sha256:2b224a823d52a198ec0eeb0e3e4f5cf26cd8a7fc2e9812ee16204b6b1e974870",
+      "code_sha256": {
+        "/tmp/dynamo-hf-cache/c590-code/sitecustomize.py": "91548a90363bc93a8a87feb7de75036ed5486e55debc3558d6ec13bf7352a1b6"
+      },
+      "gpu_model": "NVIDIA H100 80GB HBM3",
+      "driver": "595.91.07"
+    }
+  },
+  "client": {
+    "deployment_id": 1766,
+    "pod_uid": "c8c3ce6c-924b-4878-955b-ce1da3972cfd",
+    "node": "ip-10-100-154-108.ec2.internal",
+    "image_id": "docker.io/library/python@sha256:cb33f7f771ecec2ef1225cf39b159591a040391bd73e4c01f00fdfc4c47611d2",
+    "resources": {
+      "limits": {
+        "cpu": "8",
+        "memory": "16Gi",
+        "nvidia.com/gpu": "0"
+      },
+      "requests": {
+        "cpu": "6",
+        "memory": "12Gi",
+        "nvidia.com/gpu": "0"
+      }
+    },
+    "workers_max": 8,
+    "record_processors": 1
+  },
+  "plan_sha256": "dccb98cc54fb5a46899660769a274ec2c3d429545c672a0a6fa9de9b79169900",
+  "performance_files": {
+    "remote_cell.py": "42d37162819ac56efa118fd23260fdef86063cf91dab32fd496c46e7b38c92ce",
+    "run_cell.py": "e32c175aeeec0140e0c177970298b1edd65d5be806f0ee240fa138fd0b78a5e6",
+    "telemetry.py": "98d5460c56b8699d83330e07a17b8fa322c8faf3a1db04861ab5717bfc41014f",
+    "serve.py": "602294e05b6b3b2da47d56f47d0267af9f0057310afc3a3bcb8fb72fb28fae86",
+    "sitecustomize.py": "379f8fc91c98ec9b3a7dc40d7440ce814bb8cc2c6da46eb829791a2a902de579",
+    "cases.json": "694e6d8c55c653925b23376e38adc3258b8f9b8b7de9cb191f59b1b4294810c5",
+    "dependencies.txt": "3b07ab44b615618a8ccfa923b21f61775a3e7dfb91c1ec2b92cb250405ee3ba9",
+    "formal_runner.py": "baeebbe31ec9a278138717c42824ee5645e300d99e037a8fe1f8d0dee4258517",
+    "activate.py": "e6aeebf3f3329e7b102121766b9c35ee9b74e29a680c8eb4daf2f86bb01e3284",
+    "checkpoints.py": "0bbdcd73cda24e53d1a5000592542c6ed6df180325b7c2c31f230e9d72e9b451",
+    "collect.py": "b9badf42d7d113c0fef204dad4e20c35afbc1c8f871a674810cd30aa62744a19",
+    "gates.py": "98f1a0c4fc4d37eb0983212cf218d361e201ebf1de3aec1f8f70011381748f14",
+    "control.py": "ef41b937ef8037d46fe8c1d75198efdbbe6639e429fd70c529ba40b86f02cf5d",
+    "preview.py": "541f6bd4578ad83bae9f6a44f6119ae56cc4e0329a4889988fe162b67ec0e08d",
+    "cleanup.py": "245fe2a94a3ab534951c0b61f5cf554c8fe68bfe41b39257f874a80e588e2424",
+    "operator_control.py": "404ba405d27f1460b36de8ce493c7e86513a6881d2e240c13e90dfec36a765c3",
+    "report.py": "92eaed328a26a9b7681b5cfc1d3e6fe50110f994f4274cdadd50c943713fc2ff",
+    "plot_report.py": "e26e64837721438e7bbbd440470be038be21e29e25a725903429025a1cb5eef8",
+    "campaign.py": "370da0540c61ad4850bbb524a6e0acaffa6fea4e876669ff1e781be8df65d18b",
+    "deadline.json": "0efcd57e9f12a21dd484fcd604040a8f807dcbbae9d9ec3dd4e27cd37f887d3d",
+    "client-freeze.json": "09a5ade1bc8a1db907ac373027782ee6eac76797b072d94ff6c4df692f5726bb",
+    "cluster_auth.py": "cb666aed38e951d2525d99cbc3972249a6018cef048be7defb93fe19f1dd0482",
+    "local_api.py": "18ac1ab6c56ca51ad3da8c2a44a54a324b10aeff7007f7a379ae09238b47f323",
+    "auto_renew.py": "f00f271f156c414bca4e83094822a0134496b52066a4a967588eb50bb7bf422e",
+    "watchdog.py": "60425eced44450a5a1bc9d29693e186389195acfb0c94138a98927dca91b5623",
+    "/private/tmp/c590-kubeconfig.json": "b7d48ab70bdefbf9e587b859f309bc8854edd76db7e3cce3ccf5befbc7bd944c",
+    "gpu-policy.json": "a1889ac1c3dd3bb38f3d2e881b267d4e121d3ca276afc78fde542b5a0085f791"
+  },
+  "later_model": "Qwen/Qwen3-8B; not started",
+  "administrative_amendments": [
+    {
+      "kind": "deadline-only extension",
+      "approved": "User replied yes to reviewed 36-to-48-hour extension",
+      "original_freeze": "time-extension/original-formal-freeze.json",
+      "original_freeze_sha256": "ebb08edcfec19a7223f8dd02d07eaa87019d565de6f29eb4c0412a6221815398",
+      "old_deadline_utc": "2026-10-23T03:29:14.767964+00:00",
+      "new_deadline_utc": "2026-10-23T15:29:14.767964+00:00",
+      "measurement_protocol_changed": false
+    },
+    {
+      "kind": "explicitly approved recovery after deadline integrity failure",
+      "original_freeze": "recovery/attempt-1/formal-freeze.json",
+      "changed_files": [
+        "client-freeze.json",
+        "formal_runner.py"
+      ],
+      "measurement_protocol_changed": false,
+      "changes": "Guard honors only verified deadline amendment; replacement client identity pinned after matching image, node, resources, exact dependencies and serving source hashes.",
+      "tests": "recovery/guard-test-results.json",
+      "completed_cells_preserved": 38
+    },
+    {
+      "kind": "report execution interruption",
+      "changed_files": [
+        "report.py"
+      ],
+      "measurement_protocol_changed": false,
+      "numerical_results_changed": false,
+      "tests": "recovery/report-test-results.json"
+    },
+    {
+      "kind": "user-requested live transport-recovery validation and continuation",
+      "changed_files": [
+        "campaign.py",
+        "formal_runner.py",
+        "remote_cell.py",
+        "run_cell.py",
+        "telemetry.py",
+        "client-freeze.json"
+      ],
+      "measurement_parameters_changed": false,
+      "original_freeze": "hardening/live/previous-attempt/formal-freeze.json",
+      "original_controller_sources": "hardening/before",
+      "local_fault_tests": "hardening/verification.json",
+      "live_validation_required": "hardening/live/validation-status.json",
+      "retention": "on persistent transport failure retain evidence until reconnect or the original existing deadline; no deadline extension"
+    },
+    {
+      "kind": "live validation found multiline completion reader bug; serialize status on one line",
+      "changed_files": [
+        "remote_cell.py"
+      ],
+      "measurement_parameters_changed": false,
+      "regression_tests": "hardening/live/parser-regression-tests.json",
+      "prior_driver_source": "hardening/live/failed-validation-1/remote_cell.py",
+      "prior_validation_excluded": true
+    },
+    {
+      "kind": "disclose second interruption and verified live recovery",
+      "changed_files": [
+        "report.py"
+      ],
+      "numerical_results_changed": false,
+      "live_validation": "hardening/live/validation-status.json"
+    },
+    {
+      "kind": "local API transport recovery and status readback",
+      "changed_files": [
+        "control.py",
+        "local_api.py"
+      ],
+      "measurement_parameters_changed": false,
+      "receipt": "hardening/api-transport/fix-receipt.json"
+    },
+    {
+      "kind": "client replacement following local API transport failure cleanup",
+      "changed_files": [
+        "client-freeze.json"
+      ],
+      "measurement_parameters_changed": false,
+      "accepted_cells_preserved": 144,
+      "client_verification": "restart-144/client-verification.json"
+    },
+    {
+      "kind": "explicit user-approved H100 pool matching",
+      "receipt": "gpu-policy-relaxation/amendment-receipt.json",
+      "changed_files": [
+        "formal_runner.py",
+        "collect.py",
+        "gates.py",
+        "report.py",
+        "gpu-policy.json"
+      ],
+      "gpu_matching_changed": true,
+      "aiperf_arguments_changed": false,
+      "historical_cells_preserved": 144
+    }
+  ],
+  "hardware_policy": {
+    "id": "verified-h100-pool-v1",
+    "mode": "verified-h100-pool",
+    "node": "ip-10-100-154-108.ec2.internal",
+    "allowed_gpu_uuids": [
+      "GPU-a62c54ce-3074-92b9-ad56-72b549ca6cf4",
+      "GPU-1d93f352-617e-fe05-c2cb-ce84af38f697",
+      "GPU-72fdd6e6-ef18-2b7a-835c-47d9b2d1aece",
+      "GPU-8e5288f5-6a8d-bf53-5f54-1d297232e747",
+      "GPU-c432289e-521f-0ec5-ed12-6dade0767714",
+      "GPU-c35d03bd-a719-f261-8e5c-26918264263c",
+      "GPU-44cedd80-0731-65d5-0a4c-a9716d6e4a15",
+      "GPU-59c9fd01-1fca-1a75-1d0f-4aad3e783de5"
+    ],
+    "memory_mib": 81559,
+    "effective_after_accepted_cells": 144,
+    "verified_utc": "2026-10-22T17:50:37.270645+00:00",
+    "scope": "Same H100 80GB model, driver, full memory and MIG-disabled checks; UUID may vary between condition launches, never within a measurement; frontend-node constraint retained."
+  }
+}

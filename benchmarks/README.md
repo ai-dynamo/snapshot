@@ -10,6 +10,10 @@ See the [benchmark guide](../docs/development/benchmarks-guide.md) for setup and
 commands, and [Performance Benchmarks](../docs/overview/performance.md) for
 published results.
 
+The [io_uring serving benchmark report](io-uring/REPORT.md) measures syscall
+restrictions and checkpoint restore overhead. Its [analysis package](io-uring/README.md)
+contains the supporting data and reproduction instructions.
+
 ## Requirements
 
 - `uv`
