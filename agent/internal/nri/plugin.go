@@ -212,8 +212,14 @@ func dropsArgs(nriVersion string) bool {
 // other container alone. An error fails the container's creation, and kubelet
 // retries it: running the image's own command instead would start the
 // workload from scratch in a container the agent is about to restore into.
+//
+// A pod group's restore target carries its binding from creation, so its
+// destination comes from the sandbox's annotations alone (groupDestination).
+// A Pod restored on its own names its PodSnapshot, and the restorer resolves
+// its destinations.
 func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
-	if _, ok := pod.GetAnnotations()[podcontract.RestoreFromAnnotation]; !ok {
+	bindingDestination, bound, bindingErr := groupDestination(pod.GetAnnotations())
+	if _, ok := pod.GetAnnotations()[podcontract.RestoreFromAnnotation]; !ok && !bound {
 		return nil, nil, nil
 	}
 	if p.hostNamespace != "" && pod.GetNamespace() != p.hostNamespace {
@@ -222,17 +228,27 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 	namespace, name, uid := podIdentity(pod)
 	log := p.log.WithValues("pod", namespace+"/"+name, "container", ctr.GetName())
 
-	lookupCtx, cancel := context.WithTimeout(ctx, lookupTimeout)
-	defer cancel()
-	destinations, err := p.restorer.RestoreDestinations(lookupCtx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name:        name,
-		Namespace:   namespace,
-		UID:         ktypes.UID(uid),
-		Annotations: pod.GetAnnotations(),
-	}})
-	if err != nil {
-		log.Error(err, "Cannot resolve restore destinations")
-		return nil, nil, fmt.Errorf("snapshot: resolve restore destinations: %w", err)
+	var destinations []string
+	switch {
+	case bindingErr != nil:
+		log.Error(bindingErr, "Restore Pod has an invalid pod group binding")
+		return nil, nil, fmt.Errorf("snapshot: invalid pod group binding: %w", bindingErr)
+	case bound:
+		destinations = []string{bindingDestination}
+	default:
+		lookupCtx, cancel := context.WithTimeout(ctx, lookupTimeout)
+		defer cancel()
+		var err error
+		destinations, err = p.restorer.RestoreDestinations(lookupCtx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   namespace,
+			UID:         ktypes.UID(uid),
+			Annotations: pod.GetAnnotations(),
+		}})
+		if err != nil {
+			log.Error(err, "Cannot resolve restore destinations")
+			return nil, nil, fmt.Errorf("snapshot: resolve restore destinations: %w", err)
+		}
 	}
 	if !slices.Contains(destinations, ctr.GetName()) {
 		return nil, nil, nil

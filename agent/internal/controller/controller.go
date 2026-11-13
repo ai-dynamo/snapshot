@@ -184,6 +184,9 @@ type restoreOperation struct {
 	containerID       string
 	startedAt         time.Time
 	log               logr.Logger
+	// group is a group target's part in its attempt, nil for a Pod restored
+	// on its own.
+	group *groupRestoreRun
 }
 
 const (
@@ -401,6 +404,14 @@ func (w *NodeController) Run(ctx context.Context) error {
 	go sourceFactory.Start(w.stopCh)
 	syncFuncs = append(syncFuncs, sourceInformer.HasSynced)
 
+	if w.podGroups != nil {
+		synced, err := w.startPodGroupRestoreInformer()
+		if err != nil {
+			return err
+		}
+		syncFuncs = append(syncFuncs, synced)
+	}
+
 	// Close stopCh on cancellation so a stalled cache sync (below) is unblocked by ctx, not only on
 	// the happy path.
 	var stopOnce sync.Once
@@ -450,6 +461,7 @@ func (w *NodeController) forgetRestorePod(obj interface{}) {
 		return
 	}
 	w.handledRestores.Delete(string(pod.UID))
+	w.forgetGroupTarget(pod.UID)
 	prefix := string(pod.UID) + "/"
 	w.startedRestoreContainers.Range(func(key, _ any) bool {
 		if strings.HasPrefix(key.(string), prefix) {
@@ -491,7 +503,7 @@ func (w *NodeController) restorePodRequested(pod *corev1.Pod) bool {
 
 func (w *NodeController) restorePodRelevant(pod *corev1.Pod) bool {
 	return pod.Spec.NodeName == w.config.NodeName &&
-		(hasFinalizer(pod, restorePodFinalizer) || w.restorePodRequested(pod))
+		(hasFinalizer(pod, restorePodFinalizer) || w.restorePodRequested(pod) || w.groupTargetRelevant(pod))
 }
 
 // runRestoreQueue gives each pod its own goroutine. A CRIU run holds it for minutes and must not
@@ -534,6 +546,14 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
 	}
 	pod = pod.DeepCopy()
 	panicked = pod
+	if w.podGroups != nil {
+		// A group target serves the one attempt its binding names, and every
+		// report on it is fenced.
+		if claim, bound, err := podcontract.RestoreGroupClaimOf(pod.Annotations); bound {
+			requeue = w.processGroupRestorePod(ctx, pod, claim, err)
+			return
+		}
+	}
 	if w.skipRequestedAfterRefusal(pod) {
 		// The skip request is the way back for a pod the gates turned down, so
 		// it has to clear the in-process marker as well as the condition below.
@@ -1253,6 +1273,9 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (executor.Restor
 		PageBrokerRestoreMode:       w.config.PageBroker.RestoreMode,
 		PublishedArtifact:           op.artifact.PublishedArtifact,
 	}
+	if op.group != nil {
+		req.Group, req.Committed = op.group.member, op.group.committed
+	}
 	return w.restoreFn(ctx, w.runtime, op.log, req, w.injector)
 }
 
@@ -1291,7 +1314,7 @@ func (op *restoreOperation) completeRestore(ctx context.Context, restored execut
 	placeholderHostPID := restored.PlaceholderHostPID
 	// Any PID inside the container mount namespace reaches the control
 	// volume through /host/proc/<pid>/root.
-	contents := podcontract.FormatRestoreComplete(podcontract.RestoreComplete{PID: restored.RestoredPID})
+	contents := podcontract.FormatRestoreComplete(podcontract.RestoreComplete{PID: restored.RestoredPID, Attempt: op.groupAttempt()})
 	if err := w.writeControlSentinelFn(placeholderHostPID, podcontract.RestoreCompleteFile, contents); err != nil {
 		op.log.Error(err, "Failed to write restore-complete sentinel")
 		op.markRestoreFailed(placeholderHostPID)

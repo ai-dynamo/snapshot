@@ -106,6 +106,10 @@ func (w *NodeController) failRestoreAfterPanic(ctx context.Context, key client.O
 	// Marked handled first: a failed status write must not leave the key
 	// eligible for redelivery into the same panic.
 	w.markRestoreHandled(pod)
+	if w.groupTargetRelevant(pod) {
+		w.failGroupRestoreAfterPanic(ctx, pod, cause)
+		return
+	}
 	for attempt := range panicStatusRetries {
 		err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonFailed, cause.Error())
 		if err == nil {

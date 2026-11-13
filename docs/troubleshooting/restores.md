@@ -33,6 +33,41 @@ kubectl get pod <restore-pod> -n <ns> -o jsonpath='{.status.conditions[?(@.type=
 Add the volume to the restore Pod at the same `mountPath`. The volume's
 backing store can differ; only the path inside the container has to match.
 
+## A Group Restore Pod Stays at `GroupPending`
+
+The restore Pod's `PodGroupRestore` has not pinned it yet. The operator pins
+every target at once, after each target is scheduled and its destination
+container has an ID. Check the `PodGroupRestore`'s `Admitted` condition for
+the target it waits on:
+
+```bash
+kubectl get podgrouprestore <name> -n <ns> -o jsonpath='{.status.conditions}'
+```
+
+## A Group Restore Pod Fails Before It Restores
+
+A target of a `PodGroupRestore` can fail before the restore commits. The
+reason is in the Pod's `nvidia.com/GroupRestoreFailed` condition, or in the
+message of `nvidia.com/Restored` for a reason of the member's own:
+
+| Reason | Cause | What to do |
+| --- | --- | --- |
+| `PodIPChanged` | The Pod, its destination container, or its IP is not the one the operator pinned, for example after a container restart | Create new gated Pods and a new `PodGroupRestore` |
+| `GateBudgetTooShort` | The destination's startup probe gives up before the restore's deadline | Lower `deadlineSeconds`, or create the targets closer to the restore |
+| `CoordinatorUnreachable` | The node agent could not join the group's attempt. The agent's log shows what it waited for | Check that the agent Pod on the rank-0 member's node is Ready |
+
+A target that fails before the restore starts is left as Snapshot found it,
+and its peers fail with `Refused`. A claimed Pod serves one restore only, so
+create new targets to try again.
+
+## A Group Restore Pod Fails After the Agent Restarted
+
+The node agent restarted after it set `nvidia.com/RestoreStarted` and before
+it wrote `restore-complete`. The restore may have run partway, so the agent
+fails the member and never restores into the Pod again. The
+`nvidia.com/Restored` message says so. Create new targets and a new
+`PodGroupRestore`.
+
 ## Restore Fails at a Step
 
 ### resolving checkpoint artifact
