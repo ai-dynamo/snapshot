@@ -399,7 +399,7 @@ SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_FRAMEWORK_IMAGE=<registry>/vllm-snapsho
   uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
 ```
 
-To test an [eight-GPU recipe](../docs/guides/README.md#choose-your-recipe),
+To test an [eight-GPU recipe](../docs/using-snapshot/README.md#choose-your-recipe),
 set `SNAPSHOT_E2E_RECIPE` to its manifest filename without `.yaml`:
 
 ```bash
@@ -425,8 +425,8 @@ Model weights come from one of two places:
   so the NFS mount options reach the node. The model must already be in the cache.
 - **Guide download** (default without the variables): the guides' own plumbing
   runs unchanged. Every recipe's init container downloads into the guides'
-  [model cache](../docs/guides/README.md#model-cache), the `model-cache` PVC, which
-  the test creates from `docs/guides/model-cache-pvc.yaml` if missing (with
+  [model cache](../docs/using-snapshot/README.md#model-cache), the `model-cache` PVC, which
+  the test creates from `docs/using-snapshot/model-cache-pvc.yaml` if missing (with
   `SNAPSHOT_E2E_STORAGE_CLASS` when set) and leaves in place. This needs working
   DNS and egress from the pods. A partial or stale model cache (for example after
   a killed run) is reset by deleting that PVC; the next run recreates and refills
@@ -634,7 +634,7 @@ one-time GitHub Pages configuration.
 ## Framework Images
 
 The framework e2e workloads use the programs and manifests under
-`docs/guides/<framework>/` (`vllm`, `sglang`, `tensorrt-llm`). Each
+`docs/using-snapshot/<framework>/` (`vllm`, `sglang`, `tensorrt-llm`). Each
 framework runs the upstream image unmodified. The exact image reference is
 `spec.template.spec.containers[0].image` in that framework's own
 capture manifest, with `app.py` mounted from a ConfigMap (`kubectl create

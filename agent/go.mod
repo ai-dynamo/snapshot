@@ -1,6 +1,6 @@
 module github.com/ai-dynamo/snapshot/agent
 
-go 1.27.3
+go 1.27.4
 
 tool google.golang.org/protobuf/cmd/protoc-gen-go
 
@@ -75,7 +75,7 @@ require (
 	github.com/go-openapi/swag/yamlutils v0.27.1 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/klauspost/compress v1.20.0 // indirect
+	github.com/klauspost/compress v1.20.2 // indirect
 	github.com/knqyf263/go-plugin v0.9.0 // indirect
 	github.com/moby/locker v1.0.1 // indirect
 	github.com/moby/sys/signal v0.7.1 // indirect

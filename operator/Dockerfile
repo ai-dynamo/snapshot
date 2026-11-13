@@ -5,7 +5,7 @@
 # api/ and agent/ modules used by the operator.
 # Tracks the toolchain pinned in go.work, the three go.mod files, hack/tools.mk,
 # agent/Dockerfile, and the workflows. Move them together, never this one alone.
-FROM golang:1.27-alpine@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd AS builder
+FROM golang:1.27-alpine@sha256:eb61c3873c97416fff0116553fff65d67a3549f72e11d9758849a689cdd8b523 AS builder
 ARG GO_BUILD_TAGS
 WORKDIR /workspace
 COPY go.work go.work.sum ./
@@ -27,7 +27,7 @@ COPY operator/compliance/gen-attribution.sh /tmp/gen-attribution.sh
 COPY hack/compliance/go-licenses.sh /tmp/go-licenses.sh
 RUN sh /tmp/gen-attribution.sh /sources/go/vendor /legal/THIRD-PARTY.txt /tmp/go-licenses.sh
 
-FROM nvcr.io/nvidia/distroless/go:v4.1.4@sha256:965c2a14a594d7d467bbe9a6517d958cee22ed035333097bdc216da68fd55ba5
+FROM nvcr.io/nvidia/distroless/go:v4.1.8@sha256:676c150ccfb5987f58bbee9accfa506d5519d4acf4252f799d311476a0a7f1b5
 COPY --from=builder /workspace/operator/bin/manager /manager
 COPY --from=builder /workspace/operator/bin/crd-installer /crd-installer
 COPY --from=sources /sources /legal/source

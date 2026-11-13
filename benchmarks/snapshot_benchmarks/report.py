@@ -3,7 +3,7 @@
 
 """Renders a standalone text summary from a results directory.
 
-Deliberately does not write to docs/development/benchmarks.md or any other
+Deliberately does not write to docs/overview/performance.md or any other
 doc: these are raw, locally-generated numbers from whatever hardware the user
 ran on, and the published doc's tables stay a manually-reviewed, hand-edited
 artifact. See docs/development/benchmarks-guide.md for why.
@@ -274,7 +274,7 @@ def _render_legacy(results: list[dict]) -> str:
     lines.append("")
     lines.append(
         "Absolute numbers below are only comparable to "
-        "docs/development/benchmarks.md on equivalent hardware (same GPU model, "
+        "docs/overview/performance.md on equivalent hardware (same GPU model, "
         "driver major, and storage backend/class) -- see each run's "
         '"environment" block. See docs/development/benchmarks-guide.md for how '
         "to interpret a mismatch."

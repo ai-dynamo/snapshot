@@ -36,7 +36,7 @@ primitives, not orchestration.
 Repository agent skills live in `.agents/skills/` and are versioned with the
 checkout. Use the `snep` skill when drafting or revising a Snapshot Enhancement
 Proposal (SNEP); it guides the proposal section by section and follows the
-process in `docs/proposals/README.md`.
+process in `docs/design/README.md`.
 
 ## Repository layout
 
@@ -55,7 +55,7 @@ Three separate Go modules — `api`, `agent`, and `operator` — each with its o
 
 ## Build and test
 
-Run everything from the repository root. Go 1.27.3 — the version is pinned in
+Run everything from the repository root. Go 1.27.4 — the version is pinned in
 `hack/tools.mk`, `go.work`, all three `go.mod` files, `agent/Dockerfile`, and
 the workflows, and they must agree.
 
@@ -183,19 +183,20 @@ rg -l '1\.27\.1' go.work */go.mod hack/tools.mk agent/Dockerfile .github/workflo
 vim operator/Dockerfile   # FROM golang:1.28-alpine
 ```
 
-**Document a feature's version floor in the compatibility reference, not just
+**Document a feature's version floor on the Prerequisites page, not just
 in an error message.** Snapshot's general minimum driver and GPU Operator
 version lives in the README's
-[Prerequisites](README.md#prerequisites). A feature that needs more than that
+[Prerequisites](README.md#prerequisites) and in
+[Baseline Prerequisites](docs/get-started/prerequisites.md#baseline-prerequisites). A feature that needs more than that
 floor must add a row to
-[docs/reference/compatibility.md](docs/reference/compatibility.md) in the same
+[docs/get-started/prerequisites.md](docs/get-started/prerequisites.md) in the same
 change — see
 [CONTRIBUTING.md](CONTRIBUTING.md#documenting-a-feature-specific-version-floor).
 A version requirement that only exists as a runtime failure string is
 invisible to anyone deciding whether to adopt the feature.
 
 ```go
-// Good — floor is documented in docs/reference/compatibility.md and enforced here
+// Good — floor is documented in docs/get-started/prerequisites.md and enforced here
 if !driverSupports(minLaunchJobDriverVersion) {
     return fmt.Errorf("cuda-checkpoint --launch-job requires NVIDIA driver %s or newer", minLaunchJobDriverVersion)
 }
@@ -262,5 +263,5 @@ sees describes the capability, not the mechanism behind it.
 - [README.md](README.md) — what the system does and how it is used
 - [docs/development/build-from-source.md](docs/development/build-from-source.md) — full build instructions
 - [docs/reference](docs/reference) — API reference
-- [docs/operations](docs/operations) — install, storage, and operational guides
+- [docs/operate](docs/operate) — install, storage, and operational guides
 - [e2e/README.md](e2e/README.md) — running the end-to-end suite

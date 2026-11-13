@@ -145,7 +145,7 @@ func TestConfigureCheckpointRecordsRuntimeImageID(t *testing.T) {
 func TestGPUCheckpointCannotFallBackWhenExecutionIsMissing(t *testing.T) {
 	_, err := captureCheckpoint(context.Background(), nil, &types.CRIUSettings{}, &types.CheckpointManifest{CUDA: types.CUDAManifest{CustomStorage: true}},
 		&types.CheckpointContainerSnapshot{CUDAHostPIDs: []int{12}, CUDANSPIDs: []int{12}},
-		t.TempDir(), "", logr.Discard(), nil)
+		t.TempDir(), "", logr.Discard(), nil, 0, nil, nil)
 	require.ErrorContains(t, err, "missing PageBroker CustomStorage execution context")
 }
 
@@ -381,7 +381,7 @@ func TestCapturePreparesOnlyCoordinatorParticipants(t *testing.T) {
 			_, err := captureCheckpoint(ctx, nil, &types.CRIUSettings{},
 				&types.CheckpointManifest{CuInterpose: identity},
 				&types.CheckpointContainerSnapshot{PID: -1, CUDAHostPIDs: []int{1}, CUDANSPIDs: []int{1}},
-				t.TempDir(), "", logr.Discard(), nil)
+				t.TempDir(), "", logr.Discard(), nil, 0, nil, nil)
 			require.ErrorContains(t, err, tc.wantError)
 		})
 	}
@@ -521,7 +521,7 @@ func TestCheckpointBoundSendsArtifactTarget(t *testing.T) {
 // failure has to carry them: a probe cannot tell "not a CUDA process" from a
 // helper that failed, and an empty list would strand a suspended workload.
 func TestSuspendedSourceOf(t *testing.T) {
-	suspended, needsRecovery := SuspendedSourceOf(sourceNeedsRecovery(errors.New("capture failed"), []int{41, 42}, false, false))
+	suspended, needsRecovery := SuspendedSourceOf(sourceNeedsRecovery(errors.New("capture failed"), []int{41, 42}, false, false, 0))
 	assert.True(t, needsRecovery)
 	assert.Equal(t, []int{41, 42}, suspended.GPUPIDs)
 	assert.False(t, suspended.CuInterposePrepared)
@@ -529,12 +529,12 @@ func TestSuspendedSourceOf(t *testing.T) {
 	_, needsRecovery = SuspendedSourceOf(errors.New("prepare failed"))
 	assert.False(t, needsRecovery, "a failure before the source was touched needs no recovery")
 
-	cpuOnly, needsRecovery := SuspendedSourceOf(sourceNeedsRecovery(errors.New("capture failed"), nil, false, false))
+	cpuOnly, needsRecovery := SuspendedSourceOf(sourceNeedsRecovery(errors.New("capture failed"), nil, false, false, 0))
 	assert.True(t, needsRecovery)
 	assert.Empty(t, cpuOnly.GPUPIDs, "a CPU-only capture still needs recovery, with no GPUs to hand back")
 
 	// Multi-GPU preparation removes the tree's shared mappings, which nothing restores.
-	multiGPU, needsRecovery := SuspendedSourceOf(sourceNeedsRecovery(errors.New("capture failed"), []int{41}, true, false))
+	multiGPU, needsRecovery := SuspendedSourceOf(sourceNeedsRecovery(errors.New("capture failed"), []int{41}, true, false, 0))
 	assert.True(t, needsRecovery)
 	assert.True(t, multiGPU.CuInterposePrepared)
 }
@@ -614,6 +614,7 @@ func TestCheckpointCommitFailureReleasesOnlySettledFailures(t *testing.T) {
 			t.Cleanup(func() { captureCheckpointFunc = originalCapture })
 			captureCheckpointFunc = func(context.Context, *criurpc.CriuOpts, *types.CRIUSettings, *types.CheckpointManifest,
 				*types.CheckpointContainerSnapshot, string, string, logr.Logger, *pagebroker.CustomStorageExecution,
+				int, func(error) (bool, string), func(int, error),
 			) (*checkpointPhaseTimings, error) {
 				return &checkpointPhaseTimings{}, nil
 			}
@@ -698,7 +699,7 @@ func TestCheckpointKeepsStagingWhenTheCommitCannotDial(t *testing.T) {
 	originalCapture := captureCheckpointFunc
 	t.Cleanup(func() { captureCheckpointFunc = originalCapture })
 	captureCheckpointFunc = func(context.Context, *criurpc.CriuOpts, *types.CRIUSettings, *types.CheckpointManifest,
-		*types.CheckpointContainerSnapshot, string, string, logr.Logger, *pagebroker.CustomStorageExecution,
+		*types.CheckpointContainerSnapshot, string, string, logr.Logger, *pagebroker.CustomStorageExecution, int, func(error) (bool, string), func(int, error),
 	) (*checkpointPhaseTimings, error) {
 		// The dump completes just as the capture's context dies, so the commit
 		// that follows cannot dial.
@@ -782,4 +783,299 @@ func TestCheckpointTimingSummaryOmitsUnmeasuredCUDA(t *testing.T) {
 	assert.NotContains(t, summary, "cuda")
 	phases := summary["phases"].(map[string]string)
 	assert.Equal(t, (800 * time.Millisecond).String(), phases["cuda_checkpoint"])
+}
+
+// The suspend is already paid for, so a dump that fails against a tree CRIU can
+// still seize is repeated. The probe decides, not the shape of the failure.
+func TestCaptureCheckpointRepeatsTheDump(t *testing.T) {
+	dumpRetryInitialDelayOriginal := dumpRetryInitialDelay
+	t.Cleanup(func() { dumpRetryInitialDelay = dumpRetryInitialDelayOriginal })
+	dumpRetryInitialDelay = time.Millisecond
+
+	for _, tc := range []struct {
+		name        string
+		limit       int
+		failures    int
+		wantDumps   int
+		wantSuccess bool
+	}{
+		{name: "a transient failure succeeds on the repeat", limit: 2, failures: 1, wantDumps: 2, wantSuccess: true},
+		{name: "repeats stop at the limit", limit: 1, failures: 5, wantDumps: 2},
+		{name: "no repeats when none were asked for", limit: 0, failures: 1, wantDumps: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dumps := 0
+			originalDump := dumpCheckpointFunc
+			t.Cleanup(func() { dumpCheckpointFunc = originalDump })
+			dumpCheckpointFunc = func(context.Context, *criurpc.CriuOpts, *types.CRIUSettings, *types.CheckpointManifest,
+				*types.CheckpointContainerSnapshot, string, *checkpointPhaseTimings, logr.Logger,
+			) error {
+				dumps++
+				if dumps <= tc.failures {
+					return errors.New("no space left on device")
+				}
+				return nil
+			}
+			originalDumpable := dumpableFunc
+			t.Cleanup(func() { dumpableFunc = originalDumpable })
+			dumpableFunc = func(string, snapshotruntime.TreeSnapshot) (bool, string) { return true, "" }
+			originalSnapshot := snapshotTreeFunc
+			t.Cleanup(func() { snapshotTreeFunc = originalSnapshot })
+			snapshotTreeFunc = func(string, []int) (snapshotruntime.TreeSnapshot, error) {
+				return snapshotruntime.TreeSnapshot{1: 1}, nil
+			}
+
+			timings, err := captureCheckpoint(context.Background(), nil, &types.CRIUSettings{},
+				&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(), "",
+				logr.Discard(), nil, tc.limit, nil, nil)
+
+			assert.Equal(t, tc.wantDumps, dumps, "number of dumps")
+			assert.Equal(t, tc.wantDumps-1, timings.DumpRetries, "repeats counted, whatever the outcome")
+			if tc.wantSuccess {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+		})
+	}
+}
+
+// A tree CRIU can no longer seize must not be dumped again: the repeat would
+// fail the same way, and the probe is what says so.
+func TestCaptureCheckpointStopsWhenTheTreeIsNoLongerDumpable(t *testing.T) {
+	dumps := 0
+	originalDump := dumpCheckpointFunc
+	t.Cleanup(func() { dumpCheckpointFunc = originalDump })
+	dumpCheckpointFunc = func(context.Context, *criurpc.CriuOpts, *types.CRIUSettings, *types.CheckpointManifest,
+		*types.CheckpointContainerSnapshot, string, *checkpointPhaseTimings, logr.Logger,
+	) error {
+		dumps++
+		return errors.New("dump failed")
+	}
+	originalDumpable := dumpableFunc
+	t.Cleanup(func() { dumpableFunc = originalDumpable })
+	dumpableFunc = func(string, snapshotruntime.TreeSnapshot) (bool, string) {
+		return false, "task 43 of process 42 is still traced by 99"
+	}
+	originalSnapshot := snapshotTreeFunc
+	t.Cleanup(func() { snapshotTreeFunc = originalSnapshot })
+	snapshotTreeFunc = func(string, []int) (snapshotruntime.TreeSnapshot, error) {
+		return snapshotruntime.TreeSnapshot{1: 1}, nil
+	}
+
+	_, err := captureCheckpoint(context.Background(), nil, &types.CRIUSettings{},
+		&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(), "",
+		logr.Discard(), nil, 5, nil, nil)
+
+	require.Error(t, err)
+	assert.Equal(t, 1, dumps, "a tree CRIU cannot seize must not be dumped again")
+}
+
+// Without the tree recorded at suspend there is nothing for the probe to decide
+// on, so the dump runs once however many retries were asked for.
+func TestCaptureCheckpointDoesNotRepeatWithoutTheRecordedTree(t *testing.T) {
+	dumps := 0
+	originalDump := dumpCheckpointFunc
+	t.Cleanup(func() { dumpCheckpointFunc = originalDump })
+	dumpCheckpointFunc = func(context.Context, *criurpc.CriuOpts, *types.CRIUSettings, *types.CheckpointManifest,
+		*types.CheckpointContainerSnapshot, string, *checkpointPhaseTimings, logr.Logger,
+	) error {
+		dumps++
+		return errors.New("dump failed")
+	}
+	originalSnapshot := snapshotTreeFunc
+	t.Cleanup(func() { snapshotTreeFunc = originalSnapshot })
+	snapshotTreeFunc = func(string, []int) (snapshotruntime.TreeSnapshot, error) {
+		return nil, errors.New("read /proc/42/task: permission denied")
+	}
+
+	_, err := captureCheckpoint(context.Background(), nil, &types.CRIUSettings{},
+		&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(), "",
+		logr.Discard(), nil, 5, nil, nil)
+
+	require.Error(t, err)
+	assert.Equal(t, 1, dumps, "without the recorded tree there is nothing to repeat against")
+}
+
+// A capture whose context dies stops there, whether the cancellation arrives
+// mid-wait or alongside the timer — select picks at random when both are ready.
+func TestCaptureCheckpointStopsWhenTheContextIsDone(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		delay time.Duration
+	}{
+		{name: "cancelled while the repeat waits", delay: time.Hour},
+		{name: "cancelled as the wait ends", delay: time.Nanosecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dumpRetryInitialDelayOriginal := dumpRetryInitialDelay
+			t.Cleanup(func() { dumpRetryInitialDelay = dumpRetryInitialDelayOriginal })
+			dumpRetryInitialDelay = tc.delay
+
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+
+			dumps := 0
+			originalDump := dumpCheckpointFunc
+			t.Cleanup(func() { dumpCheckpointFunc = originalDump })
+			dumpCheckpointFunc = func(context.Context, *criurpc.CriuOpts, *types.CRIUSettings, *types.CheckpointManifest,
+				*types.CheckpointContainerSnapshot, string, *checkpointPhaseTimings, logr.Logger,
+			) error {
+				dumps++
+				cancel()
+				return errors.New("no space left on device")
+			}
+			originalDumpable := dumpableFunc
+			t.Cleanup(func() { dumpableFunc = originalDumpable })
+			dumpableFunc = func(string, snapshotruntime.TreeSnapshot) (bool, string) { return true, "" }
+			originalSnapshot := snapshotTreeFunc
+			t.Cleanup(func() { snapshotTreeFunc = originalSnapshot })
+			snapshotTreeFunc = func(string, []int) (snapshotruntime.TreeSnapshot, error) {
+				return snapshotruntime.TreeSnapshot{1: 1}, nil
+			}
+
+			_, err := captureCheckpoint(ctx, nil, &types.CRIUSettings{},
+				&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(), "",
+				logr.Discard(), nil, 5, nil, nil)
+
+			require.Error(t, err)
+			assert.Equal(t, 1, dumps, "a capture whose context is done must not dump again")
+		})
+	}
+}
+
+// Recording the tree walks /proc for every task while the workload is suspended,
+// which a capture that cannot repeat has no use for.
+func TestCaptureCheckpointSkipsTheTreeWhenNoRetriesRemain(t *testing.T) {
+	originalDump := dumpCheckpointFunc
+	t.Cleanup(func() { dumpCheckpointFunc = originalDump })
+	dumpCheckpointFunc = func(context.Context, *criurpc.CriuOpts, *types.CRIUSettings, *types.CheckpointManifest,
+		*types.CheckpointContainerSnapshot, string, *checkpointPhaseTimings, logr.Logger,
+	) error {
+		return errors.New("dump failed")
+	}
+	snapshots := 0
+	originalSnapshot := snapshotTreeFunc
+	t.Cleanup(func() { snapshotTreeFunc = originalSnapshot })
+	snapshotTreeFunc = func(string, []int) (snapshotruntime.TreeSnapshot, error) {
+		snapshots++
+		return snapshotruntime.TreeSnapshot{1: 1}, nil
+	}
+
+	_, err := captureCheckpoint(context.Background(), nil, &types.CRIUSettings{},
+		&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(), "",
+		logr.Discard(), nil, 0, nil, nil)
+
+	require.Error(t, err)
+	assert.Zero(t, snapshots, "a capture that cannot repeat must not walk the tree")
+}
+
+// The shift overflows int64 far enough out, and a zero or negative delay would
+// let repeats run back to back with no backoff.
+func TestDumpRetryDelayStaysWithinTheBackoff(t *testing.T) {
+	for _, attempt := range []int{0, 1, 4, 33, 64, 1000} {
+		delay := dumpRetryDelay(attempt)
+		assert.Positive(t, delay, "attempt %d", attempt)
+		assert.LessOrEqual(t, delay, dumpRetryDelayCeiling, "attempt %d", attempt)
+	}
+}
+
+// The dumpability probe answers whether another dump can run, not whether it
+// could end differently, so a dump nothing could make fit must be stopped
+// before the probe gets a say — and before it spends a retry.
+func TestCaptureCheckpointStopsWhenRepeatingCannotHelp(t *testing.T) {
+	dumps := 0
+	originalDump := dumpCheckpointFunc
+	t.Cleanup(func() { dumpCheckpointFunc = originalDump })
+	dumpCheckpointFunc = func(context.Context, *criurpc.CriuOpts, *types.CRIUSettings, *types.CheckpointManifest,
+		*types.CheckpointContainerSnapshot, string, *checkpointPhaseTimings, logr.Logger,
+	) error {
+		dumps++
+		return errors.New("no space left on device")
+	}
+	originalDumpable := dumpableFunc
+	t.Cleanup(func() { dumpableFunc = originalDumpable })
+	dumpableFunc = func(string, snapshotruntime.TreeSnapshot) (bool, string) { return true, "" }
+	originalSnapshot := snapshotTreeFunc
+	t.Cleanup(func() { snapshotTreeFunc = originalSnapshot })
+	snapshotTreeFunc = func(string, []int) (snapshotruntime.TreeSnapshot, error) {
+		return snapshotruntime.TreeSnapshot{1: 1}, nil
+	}
+
+	timings, err := captureCheckpoint(context.Background(), nil, &types.CRIUSettings{},
+		&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(), "",
+		logr.Discard(), nil, 5, func(error) (bool, string) { return false, "it can never fit" }, nil)
+
+	require.Error(t, err)
+	assert.Equal(t, 1, dumps, "a dump nothing could make fit must not be repeated")
+	assert.Zero(t, timings.DumpRetries, "the retries it would have spent are kept")
+}
+
+// The controller drives OnDumpRepeat by hand, so nothing else proves the
+// executor actually calls it, with the count and the dump error that prompted
+// the repeat — or that a capture cancelled in the backoff reports nothing,
+// since the retry it would have reported is one it never took.
+func TestCaptureCheckpointReportsEachRepeat(t *testing.T) {
+	dumpRetryInitialDelayOriginal := dumpRetryInitialDelay
+	t.Cleanup(func() { dumpRetryInitialDelay = dumpRetryInitialDelayOriginal })
+	dumpRetryInitialDelay = time.Millisecond
+
+	type report struct {
+		repeat int
+		err    string
+	}
+
+	for _, tc := range []struct {
+		name        string
+		cancelAfter int
+		wantReports []report
+	}{
+		{
+			name:        "every repeat reports its count and the dump that prompted it",
+			cancelAfter: -1,
+			wantReports: []report{{1, "dump 1 failed"}, {2, "dump 2 failed"}},
+		},
+		{
+			// Cancelled while the first repeat is backing off: the repeat never
+			// starts, so nothing is reported for it.
+			name:        "a capture cancelled in the backoff reports nothing",
+			cancelAfter: 1,
+			wantReports: nil,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+
+			dumps := 0
+			originalDump := dumpCheckpointFunc
+			t.Cleanup(func() { dumpCheckpointFunc = originalDump })
+			dumpCheckpointFunc = func(context.Context, *criurpc.CriuOpts, *types.CRIUSettings, *types.CheckpointManifest,
+				*types.CheckpointContainerSnapshot, string, *checkpointPhaseTimings, logr.Logger,
+			) error {
+				dumps++
+				if dumps == tc.cancelAfter {
+					cancel()
+				}
+				return fmt.Errorf("dump %d failed", dumps)
+			}
+			originalDumpable := dumpableFunc
+			t.Cleanup(func() { dumpableFunc = originalDumpable })
+			dumpableFunc = func(string, snapshotruntime.TreeSnapshot) (bool, string) { return true, "" }
+			originalSnapshot := snapshotTreeFunc
+			t.Cleanup(func() { snapshotTreeFunc = originalSnapshot })
+			snapshotTreeFunc = func(string, []int) (snapshotruntime.TreeSnapshot, error) {
+				return snapshotruntime.TreeSnapshot{1: 1}, nil
+			}
+
+			var got []report
+			_, err := captureCheckpoint(ctx, nil, &types.CRIUSettings{},
+				&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(), "",
+				logr.Discard(), nil, 2, nil,
+				func(repeat int, dumpErr error) { got = append(got, report{repeat, dumpErr.Error()}) })
+
+			require.Error(t, err)
+			assert.Equal(t, tc.wantReports, got)
+		})
+	}
 }
