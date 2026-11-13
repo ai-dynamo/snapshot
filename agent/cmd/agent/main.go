@@ -111,7 +111,7 @@ func main() {
 	agentLog.Info("Agent stopped")
 }
 
-// The sidecar allocates its GPU transfer rings before it creates the control socket.
+// The sidecar allocates its GPU transfer buffers before it creates the control socket.
 const pageBrokerStartupTimeout = 5 * time.Minute
 
 // waitForPageBroker retries while the sidecar is not yet listening.

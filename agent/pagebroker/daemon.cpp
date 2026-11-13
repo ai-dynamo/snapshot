@@ -737,12 +737,13 @@ ParseDaemonOptions(std::span<const std::string_view> arguments)
       options.enable_gpu = input == "on";
     } else if (option == "--max-concurrent-requests") {
       options.max_concurrent_requests = ParseSize(option, input, false);
-    } else if (option == "--custom-storage-buffer-count") {
-      options.gpu.buffer_count = ParseSize(option, input, false);
-    } else if (option == "--custom-storage-chunk-bytes") {
-      options.gpu.chunk_bytes = ParseSize(option, input, false);
-    } else if (option == "--custom-storage-max-pinned-bytes") {
-      options.gpu.max_pinned_bytes = ParseSize(option, input, true);
+    } else if (option == "--custom-storage-staging-bytes-per-gpu") {
+      const size_t bytes = ParseSize(option, input, false);
+      if (bytes % options.gpu.chunk_bytes) {
+        throw std::invalid_argument("invalid value for " + std::string(option) + ": " + std::string(input) +
+                                    " is not a multiple of " + std::to_string(options.gpu.chunk_bytes));
+      }
+      options.gpu.buffer_count = bytes / options.gpu.chunk_bytes;
     } else if (option == kStorageConfigOption) {
       options.storage_config = input;
     } else if (option == kModelStreamerConfigOption) {

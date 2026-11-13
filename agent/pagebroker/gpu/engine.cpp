@@ -16,7 +16,6 @@
 #include <cstdlib>
 #include <exception>
 #include <iterator>
-#include <limits>
 #include <map>
 #include <mutex>
 #include <numeric>
@@ -29,11 +28,11 @@
 #include "../errors.hpp"
 #include "file_descriptor.hpp"
 #include "storage_manifest.hpp"
-#include "transfer.hpp"
+#include "transfer/engine/posix/gpu_transfer.hpp"
 
 namespace snapshot::pagebroker::gpu {
 namespace {
-namespace transfer = snapshot::pagebroker::cuda;
+namespace transfer = snapshot::pagebroker::posix;
 constexpr auto kGpuWaitInterval = std::chrono::milliseconds{100};
 
 FileDescriptor
@@ -119,18 +118,14 @@ SetUpOrSkip(const std::string& gpu, Step step)
 }
 
 struct Device {
-  Device(CUdevice device, transfer::TransferOptions options)
-      : context(device), uuid(DeviceUUID(device)), buffers(options)
-  {
-  }
+  explicit Device(CUdevice device) : context(device), uuid(DeviceUUID(device)) {}
 
-  // Member order releases buffers before the retained context, including
+  // Member order releases staging before the retained context, including
   // partial engine setup and failed insertion into the device map.
   PrimaryContext context;
   std::string uuid;
   std::timed_mutex mutex;
-  transfer::TransferBuffers buffers;
-  size_t ring_bytes = 0;
+  std::unique_ptr<transfer::TransferPoolDevice> pooled;
 };
 
 class TargetClaim {
@@ -349,34 +344,47 @@ struct GpuEngine::GpuEngineState {
       return;
     }
     const transfer::TransferOptions settings{options.buffer_count, options.chunk_bytes, true};
-    transfer::TransferMemoryBytes(settings, count, options.max_pinned_bytes);
+    transfer::TransferMemoryBytes(settings, count);
     std::map<CUdevice, std::string> labels;
     for (int index = 0; index < count; ++index) {
       CUdevice id;
       CheckCuda(cuDeviceGet(&id, index), "get GPU device");
       labels[id] = DeviceLabel(index, id);
       SetUpOrSkip(labels[id], [&] {
-        auto device = std::make_unique<Device>(id, settings);
-        device->ring_bytes = transfer::TransferBuffers::AllocationBytes(device->context.handle, settings);
+        auto device = std::make_unique<Device>(id);
         devices.emplace(id, std::move(device));
       });
     }
-    // The pinned-memory limit is configuration, not a GPU fault, so it still
-    // stops PageBroker. The check above counts every GPU; this one adds CUDA's
-    // allocation rounding for the GPUs that were kept, before any ring is pinned.
-    size_t total_bytes = 0;
-    for (const auto& [id, device] : devices) {
-      (void)id;
-      const size_t bytes = device->ring_bytes;
-      Require(bytes <= std::numeric_limits<size_t>::max() - total_bytes, "total pinned allocation overflow");
-      total_bytes += bytes;
-      Require(!options.max_pinned_bytes || total_bytes <= options.max_pinned_bytes,
-              "total pinned allocation exceeds max-pinned-bytes");
-    }
     for (auto it = devices.begin(); it != devices.end();) {
       auto& device = *it->second;
-      const bool ready = SetUpOrSkip(labels[it->first], [&] { device.buffers.Initialize(device.context.handle); });
+      const bool ready = SetUpOrSkip(labels[it->first], [&] {
+        device.pooled = std::make_unique<transfer::TransferPoolDevice>(device.context.handle, settings);
+      });
       it = ready ? std::next(it) : devices.erase(it);
+    }
+    std::vector<transfer::TransferPoolDevice*> allocations;
+    for (const auto& [id, device] : devices) {
+      (void)id;
+      allocations.push_back(device->pooled.get());
+    }
+    // Keep all allocations alive until access checks finish. A failed target
+    // GPU is then removed before any lane starts using its resources.
+    std::vector<CUdevice> failed;
+    for (const auto& [id, device] : devices) {
+      if (!SetUpOrSkip(labels[id], [&] { device->pooled->AllowAccess(allocations); })) {
+        failed.push_back(id);
+      }
+    }
+    for (const auto id : failed) devices.erase(id);
+    std::vector<std::unique_ptr<transfer::TransferPoolDevice>> prepared;
+    for (auto& [id, device] : devices) {
+      (void)id;
+      prepared.push_back(std::move(device->pooled));
+    }
+    // Without the shared workers no GPU can transfer, so skip them all.
+    if (!prepared.empty() &&
+        !SetUpOrSkip("all GPUs", [&] { pool = std::make_unique<transfer::TransferPool>(std::move(prepared)); })) {
+      devices.clear();
     }
     available = !devices.empty();
   }
@@ -403,6 +411,7 @@ struct GpuEngine::GpuEngineState {
 
   driver::CheckpointAPI checkpoint;
   std::map<CUdevice, std::unique_ptr<Device>> devices;
+  std::unique_ptr<transfer::TransferPool> pool;
   bool available = false;
   std::mutex targets_mutex;
   std::set<int> active_targets;
@@ -480,7 +489,8 @@ class GpuEngine::Batch {
         if (ftruncate(file.get(), data.size)) {
           throw std::system_error(errno, std::generic_category(), "size GPU data file");
         }
-        transfer.device.buffers.Checkpoint(file.get(), data.devPtr, data.size, data.stream, cancellation_);
+        engine_.pool->Checkpoint(file.get(), transfer.device.context.handle, data.devPtr,
+                                 data.size, data.stream, cancellation_);
         result_.bytes += data.size;
       }
     }
@@ -496,7 +506,8 @@ class GpuEngine::Batch {
         if (file.get() < 0) {
           throw std::system_error(errno, std::generic_category(), "open GPU data file");
         }
-        transfer.device.buffers.Restore(file.get(), data.devPtr, data.size, data.stream, cancellation_);
+        engine_.pool->Restore(file.get(), transfer.device.context.handle, data.devPtr,
+                              data.size, data.stream, cancellation_);
         result_.bytes += data.size;
       }
     }
