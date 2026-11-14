@@ -964,3 +964,75 @@ func TestGroupRestoreRecoveryKeepsTheAttemptsDeadline(t *testing.T) {
 		})
 	}
 }
+
+// throttleSnapshotReads makes every read of the member's snapshot objects
+// fail as a throttled API server's do, and counts them.
+func throttleSnapshotReads(w *NodeController) *atomic.Int32 {
+	reads := &atomic.Int32{}
+	failReads(w, func(obj client.Object) error {
+		switch obj.(type) {
+		case *snapshotv1alpha1.PodGroupSnapshot, *snapshotv1alpha1.PodSnapshot:
+			reads.Add(1)
+			return apierrors.NewTooManyRequests("the API server is throttling", 1)
+		}
+		return nil
+	})
+	return reads
+}
+
+func TestGroupRestoreRecoveryFailsAnUnreleasedMemberWithoutReadingItsSnapshot(t *testing.T) {
+	rg := newRestoreGroup(t)
+	markStarted(rg.pods[0])
+	withPostRestore(rg, intstr.FromInt32(8000))
+	w, k, s := groupRestoreController(t, nil, rg, (&memberRestore{}).fn)
+	reads := throttleSnapshotReads(w)
+
+	assert.False(t, serveTarget(t, w, rg.pods[0]), "restore-complete decides; nothing waits for the API server")
+
+	restored := podCondition(t, w, "target-0", podcontract.RestoredCondition)
+	require.NotNil(t, restored)
+	assert.Equal(t, podcontract.RestoreReasonFailed, restored.Reason)
+	assert.Contains(t, restored.Message, "before its release")
+	assert.Zero(t, reads.Load(), "an unreleased member's snapshot is never read")
+	assert.Equal(t, []int{7}, k.list(), "the partly restored workload ends")
+	assert.Equal(t, string(restoreFailedSentinelContents), s.get("7/"+podcontract.RestoreFailedFile))
+}
+
+func TestGroupRestoreRecoveryStopsWaitingForItsSnapshotAtTheDeadline(t *testing.T) {
+	for name, tc := range map[string]struct {
+		created    time.Duration
+		requeue    bool
+		wantReason string
+		wantKills  []int
+	}{
+		"before the deadline": {created: -time.Minute, requeue: true, wantReason: podcontract.RestoreReasonInProgress},
+		"past the deadline": {
+			created: -20 * time.Minute, wantReason: podcontract.RestoreReasonFailed,
+			// As a post-restore action that failed: the workload ends.
+			wantKills: []int{7},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rg := newRestoreGroup(t)
+			rg.restore.CreationTimestamp = metav1.NewTime(time.Now().Add(tc.created)) // a 10-minute deadline
+			markStarted(rg.pods[0])
+			withPostRestore(rg, intstr.FromInt32(8000))
+			w, k, s := groupRestoreController(t, nil, rg, (&memberRestore{}).fn)
+			s.complete = true
+			calls := notifications(w)
+			reads := throttleSnapshotReads(w)
+
+			assert.Equal(t, tc.requeue, serveTarget(t, w, rg.pods[0]))
+
+			assert.Positive(t, reads.Load(), "a released member reads its snapshot for its post-restore action")
+			restored := podCondition(t, w, "target-0", podcontract.RestoredCondition)
+			require.NotNil(t, restored)
+			assert.Equal(t, tc.wantReason, restored.Reason)
+			assert.Zero(t, calls.Load())
+			assert.Equal(t, tc.wantKills, k.list())
+			if !tc.requeue {
+				assert.Contains(t, restored.Message, "deadline")
+			}
+		})
+	}
+}

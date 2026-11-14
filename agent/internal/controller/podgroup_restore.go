@@ -699,16 +699,21 @@ func (w *NodeController) restoreGroupMember(
 }
 
 // recoverStartedGroupRestore serves a target that had started when this agent
-// restarted. CRIU may already have run into it, so it never runs again:
+// restarted. CRIU may already have run into it, so it never runs again. What
+// is on the node decides first, and the API is read only for what a released
+// member has left:
 //
 //   - restore-complete proves a release only in the container the
 //     PodGroupRestore pinned. The control volume outlives the container, so a
 //     replaced container still has the file, although nothing restored runs
 //     in it; the member fails.
-//   - A member without restore-complete fails.
+//   - A member without restore-complete fails, without reading its snapshot.
 //   - A released member keeps running, and at most its post-restore action is
-//     left, which runs within the attempt's deadline. A released member whose
-//     action cannot be read fails as a failed action does.
+//     left. Its snapshot is read for that action alone, within the attempt's
+//     deadline: a read that fails is tried again until the deadline. A read
+//     still failing then, a snapshot that is gone, or an action that cannot
+//     be planned fails the member as a failed post-restore action does. A
+//     member with no action succeeds.
 func (w *NodeController) recoverStartedGroupRestore(ctx context.Context, log logr.Logger, pod *corev1.Pod, m *restoreMember) bool {
 	destination := m.claim.Mapping.Destination
 	containerID := restoreContainerIDFromStatus(pod, destination)
@@ -721,19 +726,6 @@ func (w *NodeController) recoverStartedGroupRestore(ctx context.Context, log log
 	}
 
 	plan := &restorePlan{artifact: &restoreArtifact{}, mappings: []podcontract.ContainerMapping{m.claim.Mapping}}
-	content, target, planErr := w.groupRestoreContent(ctx, pod, m)
-	var pending *restorePendingError
-	if errors.As(planErr, &pending) {
-		// A released member's post-restore action needs its content, so a
-		// read that failed is retried rather than skipping the action.
-		log.Info("Cannot read the interrupted member's snapshot yet; checking again", "reason", pending.message)
-		return true
-	}
-	if planErr == nil {
-		plan.artifact = &restoreArtifact{SnapshotName: target.SnapshotName, ContentUID: target.ContentUID, SourceContainerName: target.SourceContainerName}
-		plan.postRestore, plan.postRestorePeriod, planErr = planPostRestore(pod, plan.mappings,
-			postRestoreAction(content, target.SourceContainerName), w.hookExec, w.hookHTTP)
-	}
 	op := w.newRestoreOperation(pod, plan, destination, containerID, time.Now())
 	released := false
 	if containerID != "" {
@@ -751,13 +743,12 @@ func (w *NodeController) recoverStartedGroupRestore(ctx context.Context, log log
 		emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeWarning, reasonRestoreInterrupted, cause.Error())
 		return w.finishGroupRestore(ctx, log, pod, failedOutcome(m, pod, "", op.failRestore(ctx, cause))) != nil
 	}
-	if planErr != nil {
-		// Without the action's settings the agent can neither run it nor tell
-		// that there is none, so the member fails as a post-restore action that
-		// failed does, rather than report a success it cannot vouch for.
-		cause := postRestoreStepError(executor.StepCheckPostRestore,
-			fmt.Errorf("cannot read the released member's post-restore action: %w", planErr))
-		err := op.failPostRestore(ctx, cause)
+
+	if err := w.planRecoveredPostRestore(ctx, log, pod, m, op); err != nil {
+		if errors.As(err, new(*restorePendingError)) {
+			return true
+		}
+		err = op.failPostRestore(ctx, err)
 		if errors.Is(err, errRestoreInterrupted) {
 			return false
 		}
@@ -771,6 +762,36 @@ func (w *NodeController) recoverStartedGroupRestore(ctx context.Context, log log
 	}
 	return w.finishGroupRestore(ctx, log, pod, succeededOutcome(m, pod,
 		fmt.Sprintf("Restored member %s of PodGroupRestore %s into destination container %s", m.id, m.restore.Name, destination))) != nil
+}
+
+// planRecoveredPostRestore reads a released member's post-restore action into
+// op, from its snapshot. It returns a restorePendingError while a read fails
+// before the attempt's deadline, so the target tries again. Past the deadline,
+// for a snapshot that is gone or is another object, or for an action that
+// cannot be planned, it returns the post-restore step's failure: without the
+// action's settings the agent can neither run it nor tell that there is none.
+func (w *NodeController) planRecoveredPostRestore(ctx context.Context, log logr.Logger, pod *corev1.Pod, m *restoreMember, op *restoreOperation) error {
+	content, target, err := w.groupRestoreContent(ctx, pod, m)
+	var pending *restorePendingError
+	if errors.As(err, &pending) {
+		if w.nowFn().Before(m.deadline) {
+			log.Info("Cannot read the released member's snapshot yet; checking again", "reason", pending.message)
+			return err
+		}
+		return postRestoreStepError(executor.StepCheckPostRestore,
+			fmt.Errorf("the deadline of PodGroupRestore %s passed before the released member's post-restore action could be read: %s",
+				m.restore.Name, pending.message))
+	}
+	if err == nil {
+		op.artifact = &restoreArtifact{SnapshotName: target.SnapshotName, ContentUID: target.ContentUID, SourceContainerName: target.SourceContainerName}
+		op.postRestore, op.postRestorePeriod, err = planPostRestore(pod, []podcontract.ContainerMapping{m.claim.Mapping},
+			postRestoreAction(content, target.SourceContainerName), w.hookExec, w.hookHTTP)
+	}
+	if err != nil {
+		return postRestoreStepError(executor.StepCheckPostRestore,
+			fmt.Errorf("cannot read the released member's post-restore action: %w", err))
+	}
+	return nil
 }
 
 // recoverGroupPostRestore runs a released member's post-restore action after
