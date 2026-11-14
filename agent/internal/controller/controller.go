@@ -169,6 +169,8 @@ type restoreResult struct {
 	state       restoreResultState
 	// reason explains a failed or incompatible outcome.
 	reason string
+	// containerID is the destination container the pass found, if any.
+	containerID string
 }
 
 type restorePendingError struct {
@@ -894,6 +896,7 @@ func (w *NodeController) restorePodContainers(ctx context.Context, pod *corev1.P
 	}
 	workers.Wait()
 
+	w.publishRetryStatus(ctx, pod, plan, results)
 	return w.recordRestoreResults(ctx, pod, plan.artifact, results)
 }
 
@@ -1065,6 +1068,7 @@ func (w *NodeController) restoreDestinationOnce(
 	if containerID == "" {
 		return result
 	}
+	result.containerID = containerID
 
 	startedAt := time.Now()
 	log := w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "destination", destination)
@@ -1173,7 +1177,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		}
 		switch outcome {
 		case podcontract.RestoreFailedFile:
-			return errRestoreAlreadyFailed
+			return op.alreadyFailed()
 		case podcontract.RestoreCompleteFile:
 			return op.recoverPostRestore(ctx)
 		}

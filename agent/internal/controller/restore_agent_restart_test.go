@@ -145,6 +145,26 @@ func TestRunRestoreReportsAWrittenOutcomeAgain(t *testing.T) {
 	}
 }
 
+// A destination that failed before an agent restart reports the failure its
+// record kept, not only that it failed.
+func TestRunRestoreReportsTheFailureThatEndedAnEarlierPass(t *testing.T) {
+	h, run := newAttemptHarness(t, retryLimit("2"), nil)
+	h.recovering = true
+	record := h.interrupted("ctr-abc")
+	record.LastFailure = &podcontract.FailureSummary{Step: string(executor.StepRestoreCRIU), Cause: "criu exited with status 1"}
+	h.volume.put(t, "host-uid", "main", record)
+	h.volume.putSentinel("host-uid", "main", podcontract.RestoreFailedFile)
+
+	err := run()
+
+	require.ErrorIs(t, err, errRestoreAlreadyFailed)
+	assert.Equal(t, "the restore already failed in an earlier pass: while restoring with CRIU: criu exited with status 1", err.Error())
+	assert.Equal(t, executor.StepRestoreCRIU, executor.StepOf(err))
+	assert.Equal(t, 0, h.restores)
+	assert.Empty(t, h.calls)
+	assert.Empty(t, h.volume.writes, "the pass changed the attempt record")
+}
+
 // Only a sentinel of this destination, under the Pod's UID on the node, and
 // on a pass that finds the restore in progress counts as an outcome.
 func TestRunRestoreIgnoresOtherSentinels(t *testing.T) {

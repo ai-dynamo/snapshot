@@ -14,6 +14,7 @@ import (
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 const (
@@ -137,6 +138,7 @@ func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, recor
 	case retryInPlace:
 		backoff := restoreRetryBackoff(record.Attempt)
 		record.RetryAt = now.Add(backoff)
+		record.LastFailure = failureSummary(failure)
 		if saveErr := op.writeRestoreAttempts(op.nodeUID, record); saveErr != nil {
 			op.reportFailedAttempt(ctx, record, failure, "not retried: "+saveErr.Error())
 			return op.failRestore(ctx, errors.Join(err, saveErr))
@@ -145,10 +147,51 @@ func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, recor
 		return errRetryScheduled
 	case retriesExhausted:
 		op.reportFailedAttempt(ctx, record, failure, "no retries left")
-		return op.failRestore(ctx, op.retriesExhausted(ctx, record, left.attempts > 0, err))
+		err = op.failRestore(ctx, op.retriesExhausted(ctx, record, left.attempts > 0, err))
 	default:
 		op.reportFailedAttempt(ctx, record, failure, "not retried: "+whyNotRetried(failure, restoreCtx.Err()))
-		return op.failRestore(ctx, err)
+		err = op.failRestore(ctx, err)
+	}
+	op.recordLastFailure(record, failure)
+	return err
+}
+
+// recordLastFailure saves the failure that ended the restore for the retry
+// status. It follows restore-failed: a record saved first would make a crash
+// between the two look like an unfinished attempt, which a pass runs again.
+func (op *restoreOperation) recordLastFailure(record *restoreAttempts, f *executor.RestoreFailure) {
+	record.LastFailure = failureSummary(f)
+	if err := op.writeRestoreAttempts(op.nodeUID, record); err != nil {
+		op.log.Error(err, "Failed to save the failed attempt in the restore attempt record")
+	}
+}
+
+// alreadyFailed reports a destination whose restore-failed an earlier pass
+// wrote, with the failure that ended it when the record kept one.
+func (op *restoreOperation) alreadyFailed() error {
+	record, found, err := op.readRestoreAttempts(op.nodeUID)
+	if err != nil || !found || record.LastFailure == nil {
+		return errRestoreAlreadyFailed
+	}
+	last := &executor.RestoreFailure{Step: executor.Step(record.LastFailure.Step), Cause: errors.New(record.LastFailure.Cause)}
+	return fmt.Errorf("%w: %w", errRestoreAlreadyFailed, last)
+}
+
+// snapshotUnusableCodes are the final codes that name the snapshot. The others
+// name this node's access or configuration, or the request.
+var snapshotUnusableCodes = map[pagebroker.Failure_Code]bool{
+	pagebroker.Failure_ARTIFACT_NOT_FOUND:   true,
+	pagebroker.Failure_ARTIFACT_CORRUPT:     true,
+	pagebroker.Failure_UNSUPPORTED_ARTIFACT: true,
+}
+
+// failureSummary is a failed attempt as the retry status annotation reports
+// it. The cause comes from beneath the step, which the summary names apart.
+func failureSummary(f *executor.RestoreFailure) *podcontract.FailureSummary {
+	return &podcontract.FailureSummary{
+		Step:             string(f.Step),
+		Cause:            truncateUTF8(f.Cause.Error(), podcontract.FailureCauseMaxBytes),
+		SnapshotUnusable: snapshotUnusableCodes[failureCode(f.Cause)],
 	}
 }
 

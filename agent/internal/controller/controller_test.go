@@ -1987,6 +1987,7 @@ func TestRunRestoreFailureMarksUnresolvedContainerThroughHostPath(t *testing.T) 
 			assert.Equal(t, []string{
 				tc.want + "/main/" + podcontract.RestoreAttemptsFile,
 				tc.want + "/main/" + podcontract.RestoreFailedFile,
+				tc.want + "/main/" + podcontract.RestoreAttemptsFile,
 			}, written)
 		})
 	}
@@ -2024,6 +2025,7 @@ func TestRunRestoreFailureMarksAStoppedContainerThroughHostPath(t *testing.T) {
 		"write 4242 " + podcontract.RestoreFailedFile,
 		"write host-uid/main/" + podcontract.RestoreFailedFile,
 		"kill",
+		"write host-uid/main/" + podcontract.RestoreAttemptsFile,
 	}, calls)
 }
 

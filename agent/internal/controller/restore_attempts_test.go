@@ -359,7 +359,10 @@ func TestRunRestoreKeepsTheRecordUnderThePodsUIDWithoutTheNodes(t *testing.T) {
 
 	require.Error(t, run())
 
-	assert.Equal(t, []string{"restore-pod-uid/main/" + podcontract.RestoreAttemptsFile}, h.volume.writes)
+	assert.Equal(t, []string{
+		"restore-pod-uid/main/" + podcontract.RestoreAttemptsFile,
+		"restore-pod-uid/main/" + podcontract.RestoreAttemptsFile,
+	}, h.volume.writes)
 }
 
 func TestRecoveredPostRestoreKeepsTheRecordsDeadline(t *testing.T) {
