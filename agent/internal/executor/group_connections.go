@@ -45,15 +45,19 @@ type keptConnections struct {
 	socketsRestored func(context.Context) error
 	pid             int
 	connections     []criu.TCPConnection
-	// reported is set once nsrestore has reported its restored sockets.
-	reported bool
+	// stopped is set when serve failed because its context ended, as when
+	// wait stops it once nsrestore has exited. Such a failure is not why
+	// nsrestore failed.
+	stopped bool
 	// waited is how long CRIU waited for the other members to restore their
 	// sockets, once wait has returned.
 	waited time.Duration
 	// agent and nsrestore are the two ends of the peer sync socket. nsrestore
 	// inherits its end.
 	agent, nsrestore *os.File
-	served           chan error
+	// stop ends serve's context.
+	stop   context.CancelFunc
+	served chan error
 }
 
 // keepConnections holds the connections a restore from checkpointPath keeps for
@@ -99,8 +103,14 @@ func keepConnections(ctx context.Context, log logr.Logger, g *group.Member, mani
 		log.Info("Holding the connections kept for the group's other members",
 			"attempt", k.attempt, "connections", len(connections))
 	}
-	go func() { k.served <- k.serve(ctx) }()
+	k.start(ctx)
 	return k, nil
+}
+
+// start runs serve under a context that wait ends.
+func (k *keptConnections) start(ctx context.Context) {
+	ctx, k.stop = context.WithCancel(ctx)
+	go func() { k.served <- k.serve(ctx) }()
 }
 
 // peerSyncSocket creates the socket on which nsrestore reports its restored
@@ -130,15 +140,16 @@ func (k *keptConnections) inherit(cmd *exec.Cmd) {
 // member to have restored theirs, lifts the hold, turns keepalive back on, and
 // lets nsrestore continue. Any error closes the agent's end of the socket, so
 // nsrestore gets no answer and fails its CRIU restore before a task runs.
-func (k *keptConnections) serve(ctx context.Context) error {
+func (k *keptConnections) serve(ctx context.Context) (err error) {
 	// After a successful write, nsrestore already has its answer.
 	defer k.agent.Close()
+	// This runs before the close, so before nsrestore can fail because of err.
+	defer func() { k.stopped = err != nil && ctx.Err() != nil }()
 	stop := context.AfterFunc(ctx, func() { _ = k.agent.Close() })
 	defer stop()
 	if _, err := io.ReadFull(k.agent, make([]byte, 1)); err != nil {
 		return fmt.Errorf("nsrestore did not report its restored sockets: %w", err)
 	}
-	k.reported = true
 	start := time.Now()
 	if err := k.socketsRestored(ctx); err != nil {
 		return fmt.Errorf("wait for the other members to restore their sockets: %w", err)
@@ -158,18 +169,20 @@ func (k *keptConnections) serve(ctx context.Context) error {
 }
 
 // wait returns, once nsrestore has exited with nsrestoreErr, how the restore
-// went. Once nsrestore has reported its sockets, a failure to keep the
-// connections is why nsrestore failed, so it comes first. Before that,
-// nsrestore's own failure comes first. Both are kept.
+// went. A failure to keep the connections is why nsrestore failed, so it comes
+// first, unless serve failed only because its context ended. nsrestore's own
+// failure then comes first. Both are kept.
 func (k *keptConnections) wait(nsrestoreErr error) error {
-	// nsrestore has exited, so closing both ends ends a serve still reading.
+	// nsrestore has exited, so serve has nothing left to wait for. Its context
+	// ends before the close of nsrestore's end, so a read that the close ends
+	// counts as stopped too.
+	k.stop()
 	_ = k.nsrestore.Close()
-	_ = k.agent.Close()
 	keepErr := failStep(StepKeepPeerConnections, <-k.served)
 	if keepErr == nil {
 		return nsrestoreErr
 	}
-	if !k.reported && nsrestoreErr != nil {
+	if k.stopped && nsrestoreErr != nil {
 		return errors.Join(nsrestoreErr, keepErr)
 	}
 	return errors.Join(keepErr, nsrestoreErr)
