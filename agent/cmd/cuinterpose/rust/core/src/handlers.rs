@@ -334,7 +334,7 @@ pub fn cuMulticastCreate(out: *mut u64, properties: *const CUmulticastObjectProp
         return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
     let properties = unsafe { *properties };
-    // Exactly one exportable handle type: POSIX within a Pod, FABRIC across Pods.
+    // Exactly one exportable handle type, POSIX or FABRIC. Only FABRIC can span Pods.
     if properties.handleTypes != u64::from(POSIX.0)
         && properties.handleTypes != u64::from(fabric::FABRIC.0)
     {
