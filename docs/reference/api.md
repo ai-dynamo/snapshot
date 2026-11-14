@@ -61,7 +61,7 @@ when it binds a `PodSnapshot`; callers never create it.
 
 | Field                                           | Type                         | Description                                                                                                                                                                                                                                |
 |-------------------------------------------------|------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `conditions`                                    | []Condition                  | `Ready` (snapshot taken and usable for restore) and `Failed` (checkpoint failed terminally).                                                                                                                                               |
+| `conditions`                                    | []Condition                  | `Ready` (snapshot taken and usable for restore) and `Failed` (checkpoint failed terminally). For a member of a pod group, also `Started`: set once the group's checkpoint commits, before the node agent changes the source, and never removed. |
 | `source`                                        | CheckpointSource             | Where the snapshot was taken, written with `Ready`. Informational only: the restore compatibility gates compare the snapshot's manifest, not this block. Every field below is optional and absent when the value could not be read. |
 | `source.node.name`                              | string                       | Node the source pod ran on.                                                                                                                                                                                                                |
 | `source.node.architecture`                      | string                       | Node CPU architecture, as `GOARCH` spells it.                                                                                                                                                                                              |
@@ -175,9 +175,11 @@ The caller sets these annotations on the new pod to trigger a restore:
 Snapshot then reports restore progress with a pod status condition, written by
 the node agent and not set by the caller:
 
-| Pod condition         | Description                                                                                                                                                         |
-|-----------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `nvidia.com/Restored` | Added to the pod by the node agent once a restore is under way; becomes `True` when the restore completes. Observe it alongside pod readiness to confirm a restore. |
+| Pod condition                   | Description                                                                                                                                                         |
+|---------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `nvidia.com/Restored`           | Added to the pod by the node agent once a restore is under way; becomes `True` when the restore completes. Observe it alongside pod readiness to confirm a restore. |
+| `nvidia.com/RestoreStarted`     | Group restore targets only. `True` once the group's restore commits, before the node agent changes the pod. Never removed.                                         |
+| `nvidia.com/GroupRestoreFailed` | Group restore targets only. `True` when the member failed for a reason of the group, which is its reason. Set with `nvidia.com/Restored` `False`, `RestoreFailed`. |
 
 ## Labels
 

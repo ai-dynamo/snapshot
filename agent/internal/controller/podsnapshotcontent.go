@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
+	"github.com/ai-dynamo/snapshot/agent/internal/group"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
@@ -57,6 +58,11 @@ type CheckpointParams struct {
 	OnDumpRepeat func(repeat int, err error)
 	// StoreID binds this capture to a configured store; empty means legacy.
 	StoreID string
+	// Group, for a member of a pod group, is the member's part in the group's
+	// attempt, and Committed records that the member started once the
+	// attempt commits. Both are nil for a Pod checkpointed on its own.
+	Group     *group.Member
+	Committed func(context.Context) error
 }
 
 // singleTargetContainer returns the one capture-target container a source podRef names, from a
@@ -91,7 +97,20 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	if content == nil || content.Spec.Source.NodeName != w.config.NodeName ||
 		!content.DeletionTimestamp.IsZero() || isContentTerminal(content) {
 		w.checkpointGates.Delete(name)
+		w.forgetCaptureMember(name)
 		return nil
+	}
+	// A pod group member's capture runs once: what this agent already
+	// concluded is recorded again rather than checkpointed again.
+	if outcome := w.pendingCaptureOutcome(content); outcome != nil {
+		return w.recordCaptureOutcome(ctx, content, outcome)
+	}
+	member, err := w.captureMemberOf(ctx, content)
+	if err != nil {
+		if errors.As(err, new(*invalidMemberError)) {
+			return w.setSnapshotContentFailed(ctx, content, reasonInvalidPodGroupMember, err)
+		}
+		return err
 	}
 
 	// The immutable content UID and container own the artifact path. A recreated content object
@@ -139,6 +158,9 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	// atomic rename.
 	if recovered, err := w.recoverCommittedArtifact(ctx, content, contentUID, containerName, artifactPath); recovered || err != nil {
 		return err
+	}
+	if member != nil && contentStarted(content) {
+		return w.failInterruptedCapture(ctx, content, pod, containerName)
 	}
 
 	// Several work orders can name one pod, and everything below draws conclusions from live pod
@@ -206,6 +228,10 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	// capture the node cannot stage.
 	if err := w.checkStagingCapacity(ctx, containerPID); err != nil {
 		return w.setSnapshotContentFailed(ctx, content, reasonImageTooLarge, err)
+	}
+	if member != nil {
+		return w.runGroupCheckpoint(ctx, content, pod, member, containerName, containerID, containerPID,
+			cuInterposeRequested, contentUID, artifactPath)
 	}
 	return w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, cuInterposeRequested, contentUID, artifactPath)
 }
@@ -814,6 +840,8 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		DumpRetriesRemaining: params.DumpRetriesRemaining,
 		DumpWorthRepeating:   params.DumpWorthRepeating,
 		OnDumpRepeat:         params.OnDumpRepeat,
+		Group:                params.Group,
+		Committed:            params.Committed,
 	}
 	// Recovering the source belongs to runCheckpoint, which is the only place that
 	// knows whether another attempt follows.

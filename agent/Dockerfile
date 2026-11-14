@@ -67,10 +67,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 
 WORKDIR /workspace
 
-# The agent module depends on the api module via `replace => ../api`, so the api
-# module must sit at /api (a sibling of /workspace) for `go mod download` and the Go build to
-# resolve it. Provided via the `api` named build context.
+# The agent module depends on the api and coordinator modules via `replace => ../api` and
+# `replace => ../coordinator`, so both must sit next to /workspace, at /api and /coordinator, for
+# `go mod download` and the Go build to resolve them. Provided via the `api` and `coordinator`
+# named build contexts.
 COPY --from=api . /api/
+COPY --from=coordinator . /coordinator/
 
 COPY go.mod go.sum ./
 RUN go mod download

@@ -134,7 +134,7 @@ newer Kubernetes than the baseline; see
 
 | Value                                 | Default                             | Description                                                                                                                        |
 |---------------------------------------|-------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
-| `podGroups.enabled`                   | `false`                             | Install what pod groups need: the coordinator, its RBAC, and the operator's issuer of its TLS certificate.                         |
+| `podGroups.enabled`                   | `false`                             | Install what pod groups need: the coordinator, its RBAC, the operator's issuer of its TLS certificate, and the agent's part.       |
 | `coordinator.port`                    | `4224`                              | Port agents connect to over TLS, on the node's IP. 1024 to 65535.                                                                  |
 | `coordinator.healthPort`              | `4225`                              | Port of the coordinator's health endpoint, on the node's IP. 1024 to 65535. The agent pod is ready only once the coordinator is.   |
 | `coordinator.maxMemoryBytes`          | `1073741824`                        | Memory, in bytes, that every group's session shares. A group's writes fail once it is full.                                        |

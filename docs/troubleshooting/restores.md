@@ -33,6 +33,41 @@ kubectl get pod <restore-pod> -n <ns> -o jsonpath='{.status.conditions[?(@.type=
 Add the volume to the restore Pod at the same `mountPath`. The volume's
 backing store can differ; only the path inside the container has to match.
 
+## A Group Restore Pod Stays at `GroupPending`
+
+The restore Pod's `PodGroupRestore` has not pinned it yet. The operator pins
+every target at once, after each target is scheduled and its destination
+container has an ID. Check the `PodGroupRestore`'s `Admitted` condition for
+the target it waits on:
+
+```bash
+kubectl get podgrouprestore <name> -n <ns> -o jsonpath='{.status.conditions}'
+```
+
+## A Group Restore Pod Fails Before It Restores
+
+A target of a `PodGroupRestore` can fail before the restore commits. The
+reason is in the Pod's `nvidia.com/GroupRestoreFailed` condition, or in the
+message of `nvidia.com/Restored` for a reason of the member's own:
+
+| Reason | Cause | What to do |
+| --- | --- | --- |
+| `PodIPChanged` | The Pod, its destination container, or its IP is not the one the operator pinned, for example after a container restart | Create new gated Pods and a new `PodGroupRestore` |
+| `GateBudgetTooShort` | The destination's startup probe gives up before the restore's deadline | Lower `deadlineSeconds`, or create the targets closer to the restore |
+| `CoordinatorUnreachable` | The node agent could not join the group's attempt. The agent's log shows what it waited for | Check that the agent Pod on the rank-0 member's node is Ready |
+
+A target that fails before the restore starts is left as Snapshot found it,
+and its peers fail with `Refused`. A claimed Pod serves one restore only, so
+create new targets to try again.
+
+## A Group Restore Pod Fails After the Agent Restarted
+
+The node agent restarted after it set `nvidia.com/RestoreStarted` and before
+it wrote `restore-complete`. The restore may have run partway, so the agent
+fails the member and never restores into the Pod again. The
+`nvidia.com/Restored` message says so. Create new targets and a new
+`PodGroupRestore`.
+
 ## Restore Fails at a Step
 
 ### resolving checkpoint artifact
@@ -110,6 +145,39 @@ labels. Re-checkpoint with an agent that records them.
 ```bash
 kubectl describe pod <restore-pod> -n <ns>
 kubectl exec <restore-pod> -n <ns> -c <container> -- nvidia-smi -L
+```
+
+### admitting the pod group
+
+For a member of a pod group, the agent checks that the checkpoint is the
+member's own part of a group capture. It publishes the restore Pod's IP and the
+capture it restores, then waits for every other member's and for every member
+to accept. Nothing has been restored yet, so the attempt ends as `Refused`. A
+member that fails at any step fails the attempt for every other member. Each of
+them then fails at the step it was waiting in, with the reason the first member
+gave, such as `Refused` or `MemberFailed`.
+
+**Likely causes:**
+
+- The checkpoint was captured on its own, or by another member of the group
+- The members restore different captures
+- Another member refused first
+- The attempt's deadline passed before every member arrived
+
+### recording that the member started
+
+Once every member of a pod group has accepted, the attempt commits, and the
+agent sets the `nvidia.com/RestoreStarted` condition on the restore Pod before
+it restores anything. If it cannot, the member fails the attempt with
+`MemberFailed`. Other members that had already started fail with it.
+
+**Likely causes:**
+
+- The API server was unreachable or refused the status write
+- The restore Pod was deleted or replaced after the operator pinned it
+
+```bash
+kubectl get pod <restore-pod> -n <ns> -o jsonpath='{.status.conditions}'
 ```
 
 ### building GPU context
@@ -323,6 +391,22 @@ listening port, a peer, or GPU state.
 The agent log carries the process diagnostics and the `restore.log` lines
 recorded at the failure. The workload's own output is in the restore pod's
 container logs.
+
+### waiting for the pod group's other members
+
+Once its processes are restored, a member of a pod group waits at the `release`
+barrier until every other member arrives. The step fails when the attempt ends
+first, and the agent then terminates the restored processes.
+
+**Likely causes:**
+
+- Another member failed, and its agent's log carries the step
+- The attempt's deadline passed
+- The coordinator was lost (`CoordinatorLost`)
+
+```bash
+kubectl logs $agent -n <snapshot-ns> -c agent | grep -i 'pod group'
+```
 
 ### checking the post-restore action
 

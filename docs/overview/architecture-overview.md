@@ -329,6 +329,8 @@ survive. CuInterpose, the opt-in component that provides this, is described in
 | `agent/internal/controller` | The node-local control loop: capture and restore queues. |
 | `agent/internal/lifecyclehooks` | The file and HTTP actions of [lifecycle hooks](../design/lifecycle-hooks/README.md). |
 | `agent/internal/executor` | The checkpoint and restore workflows, including `nsrestore`. |
+| `agent/internal/group` | A pod group member's part in its attempt's coordination session: admission and barriers. |
+| `agent/internal/targetstatus` | The fenced condition writes on a pod group's restore Pods. |
 | `agent/internal/criu`, `agent/internal/cuda` | CRIU and CUDA primitives. |
 | `agent/internal/nri`, `agent/internal/restoreproxy` | Proxy injection and the proxy itself. |
 | `agent/internal/pagebroker` | The PageBroker control protocol client. |

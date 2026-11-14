@@ -250,3 +250,20 @@ Name the destination container in the `PodGroupRestore`, in the target's
 - On a node without the restore proxy, give the destination an inert command,
   as described in
   [Nodes Without the Restore Proxy](#nodes-without-the-restore-proxy).
+
+Once the Pod is claimed, the node agent does the following:
+
+- On a node with the restore proxy, it makes the proxy the destination's PID
+  1 when the container is created. A claimed Pod whose binding is invalid gets
+  no containers.
+- Until the operator pins the target, it reports `nvidia.com/Restored`
+  `False` with reason `GroupPending`. `podcontract.ClassifyRestoreOutcome`
+  reads that reason as not final.
+- It restores only into the Pod, the container, and the IP the operator
+  pinned. If any of them changed, the member fails with `PodIPChanged`.
+- It sets `nvidia.com/RestoreStarted` before it changes the Pod, and never
+  restores into a Pod that has it again.
+- It writes `restore-complete` with an `attempt` line that holds the
+  `PodGroupRestore`'s UID, after the `pid` line.
+- When the member fails for a reason of the group, it also sets
+  `nvidia.com/GroupRestoreFailed` with that reason.
