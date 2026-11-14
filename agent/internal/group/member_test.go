@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/ai-dynamo/snapshot/coordinator"
 	"github.com/ai-dynamo/snapshot/coordinator/coordinatortest"
 	"github.com/ai-dynamo/snapshot/coordinator/server"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
@@ -59,6 +61,25 @@ func TestAdmissionRefusesMembersRestoringDifferentCaptures(t *testing.T) {
 	require.NoError(t, g.Wait())
 	for _, err := range errs {
 		require.ErrorContains(t, err, "restores capture")
+	}
+}
+
+// A session of the coordinator cannot show how many waits a member has at
+// once, so this test counts them in a Store of its own.
+func TestAdmissionWaitsTwoAtATimeUntilTheSessionEnds(t *testing.T) {
+	deadline := time.Now().Add(time.Hour)
+	meta := session.Meta{Deadline: deadline}
+	for rank := range 8 {
+		meta.Members = append(meta.Members, session.Member{ID: fmt.Sprintf("member-%d", rank), Rank: rank})
+	}
+	store := &countingStore{}
+	m := &Member{session: metaSession{meta: meta}, agent: store, id: "member-0"}
+
+	require.NoError(t, m.Admit(within(t), Admission{PodIP: netip.MustParseAddr("10.1.0.1")}))
+	require.Len(t, store.waits, 8)
+	require.LessOrEqual(t, store.most, 2)
+	for _, wait := range store.waits {
+		require.GreaterOrEqual(t, wait, time.Until(deadline)+coordinator.DeadlineSlack)
 	}
 }
 
@@ -133,6 +154,40 @@ func each(t *testing.T, members []*Member, op func(context.Context, *Member) err
 		g.Go(func() error { return op(ctx, m) })
 	}
 	require.NoError(t, g.Wait())
+}
+
+// metaSession is a member's session of rank 0 that has only its Meta.
+type metaSession struct {
+	coordinator.Session
+	meta session.Meta
+}
+
+func (s metaSession) Meta() session.Meta { return s.meta }
+
+func (metaSession) Rank() int { return 0 }
+
+// countingStore answers every Get, after a moment, with an admission, and
+// records the wait each Get asked for and the most Gets it answered at once.
+type countingStore struct {
+	coordinator.Store
+	mu            sync.Mutex
+	waiting, most int
+	waits         []time.Duration
+}
+
+func (*countingStore) Insert(context.Context, string, []byte) error { return nil }
+
+func (s *countingStore) Get(_ context.Context, _ string, wait time.Duration) ([]byte, error) {
+	s.mu.Lock()
+	s.waiting++
+	s.most = max(s.most, s.waiting)
+	s.waits = append(s.waits, wait)
+	s.mu.Unlock()
+	time.Sleep(10 * time.Millisecond)
+	s.mu.Lock()
+	s.waiting--
+	s.mu.Unlock()
+	return []byte(`{"podIP":"10.1.0.2"}`), nil
 }
 
 func within(t *testing.T) context.Context {
