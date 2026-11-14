@@ -463,6 +463,25 @@ func TestDerivePodGroupSnapshotFailureReasons(t *testing.T) {
 			wantMessage: podGroupCancelledMessage,
 		},
 		{
+			name:        "deleted, and every member reported Cancelled",
+			members:     []podGroupMemberObservation{failedOnly("a", "Cancelled"), failedOnly("b", "Cancelled")},
+			deleting:    true,
+			wantReason:  snapshotv1alpha1.PodGroupReasonCancelled,
+			wantMessage: `member "a" (rank 0) failed with Cancelled: Cancelled message`,
+		},
+		{
+			name:         "past the deadline, and every member reported DeadlineExceeded",
+			members:      []podGroupMemberObservation{failedOnly("a", "DeadlineExceeded"), failedOnly("b", "DeadlineExceeded")},
+			pastDeadline: true,
+			wantReason:   snapshotv1alpha1.PodGroupReasonDeadlineExceeded,
+			wantMessage:  `member "a" (rank 0) failed with DeadlineExceeded: DeadlineExceeded message`,
+		},
+		{
+			name:       "every member reported, one CoordinatorLost, before the commit",
+			members:    []podGroupMemberObservation{failedOnly("a", "CoordinatorLost"), failedOnly("b", "Refused")},
+			wantReason: snapshotv1alpha1.PodGroupReasonCoordinatorLost,
+		},
+		{
 			name:         "deadline passed before Ready",
 			members:      []podGroupMemberObservation{pgCheckpointed("a"), started("b"), {}},
 			pastDeadline: true,
