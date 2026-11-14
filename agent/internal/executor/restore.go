@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -322,7 +323,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		// Every check above only read the artifact and the placeholder, so a
 		// refusal leaves the placeholder as Snapshot found it.
 		admitStart := time.Now()
-		if err := admitRestore(ctx, req.Group, req.TargetPodIP, manifest.PodGroup); err != nil {
+		if err := admitRestore(ctx, req.Group, req.TargetPodIP, manifest); err != nil {
 			return RestoreResult{}, failStep(StepAdmitGroup, err)
 		}
 		groupDuration = time.Since(admitStart)
@@ -786,6 +787,23 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 
 	cmd.Args = append(cmd.Args, args...)
+	if req.Group != nil {
+		relay, err := req.Group.OpenRelay(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if relay != nil {
+			// The relay runs inside nsrestore, which hands it the socket.
+			cmd.Args = append(cmd.Args, "--relay-session-fd", strconv.Itoa(firstExtraFileDescriptor+len(cmd.ExtraFiles)),
+				"--relay-args", strings.Join(relay.Args, " "))
+			cmd.ExtraFiles = append(cmd.ExtraFiles, relay.File)
+			defer func() {
+				if err := relay.Close(); err != nil {
+					log.Error(err, "The cuInterpose relay's session socket failed")
+				}
+			}()
+		}
+	}
 	if gpu != nil {
 		hostProc, err := os.Open(snapshotruntime.HostProcPath)
 		if err != nil {

@@ -18,6 +18,7 @@ require (
 	github.com/opencontainers/runtime-spec v1.3.0
 	github.com/prometheus/procfs v0.23.0
 	github.com/stretchr/testify v1.12.1
+	github.com/vmihailenco/msgpack/v5 v5.4.1
 	go.uber.org/zap v1.28.0
 	golang.org/x/mod v0.42.0
 	golang.org/x/sync v0.24.0
@@ -103,6 +104,7 @@ require (
 	github.com/prometheus/common v0.70.1 // indirect
 	github.com/sirupsen/logrus v1.10.2 // indirect
 	github.com/tetratelabs/wazero v1.11.0 // indirect
+	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	// Pinned ahead of Dynamo upstream (v1.43.0) to fix CVE-2026-41178; re-apply after each Dynamo sync.
