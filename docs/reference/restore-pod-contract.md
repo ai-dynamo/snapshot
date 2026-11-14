@@ -249,10 +249,13 @@ group target must carry exactly this probe, not the standalone one.
 
 Name the destination container in the `PodGroupRestore`, in the target's
 `containerMappings`. The operator claims no target until every target passes
-its checks, so no Pod takes a node while a peer is missing or refused. It then
-claims each Pod in one patch: it writes `nvidia.com/restore-group-uid` and the
-mapping as `nvidia.com/restore-container-map`, and removes the gate. Do not
-remove the gate yourself.
+its checks, so no Pod takes a node while a peer is missing or refused, unless a
+target changes during the claim. It then claims each Pod in one patch: it
+writes `nvidia.com/restore-group-uid` and the mapping as
+`nvidia.com/restore-container-map`, and removes the gate. Do not remove the
+gate yourself. The patches are separate, so a claim that landed stays when a
+later target changes: the next pass refuses the restore or waits, and the
+claimed Pod can take a node meanwhile.
 
 While the restore waits, its `Admitted` condition gives one of these reasons:
 
@@ -260,6 +263,7 @@ While the restore waits, its `Admitted` condition gives one of these reasons:
 | --- | --- |
 | `TargetPodPending` | A target Pod to exist, or a claimed Pod to get an IP address and a destination container ID |
 | `TargetPodUnscheduled` | A claimed Pod to be scheduled to a node, for example while the cluster lacks capacity |
+| `AgentNotReady` | The agent on each target's node to be Ready and to advertise the group protocol |
 
 The restore fails with `TargetInUse` when another `PodGroupRestore` claimed a
 target Pod, and with `Refused` when a target Pod cannot be claimed, for example
