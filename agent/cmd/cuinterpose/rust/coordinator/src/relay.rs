@@ -135,7 +135,8 @@ enum Reply {
 
 /// This Pod's side of each step.
 pub trait Pod {
-    /// Run \`command\` on every process of this Pod, which has rank \`rank\`.
+    /// Run `command` on every process of this Pod, which has rank `rank`. The relay names
+    /// the step in an error, so the Pod names only its processes.
     fn run(&mut self, command: &Command, rank: Rank) -> Result<Outcome>;
     /// The mode has ended for every Pod.
     fn finish(&mut self) -> Result<()>;
@@ -445,7 +446,9 @@ impl Relay<'_> {
                 )?;
                 self.execute(&topology, Command::RestoreMulticastDevices)?;
                 self.execute(&topology, Command::RestoreMulticastBindings)?;
-                let (restored, _) = self.records(Command::Inspect)?;
+                let (restored, _) = self
+                    .records(Command::Inspect)
+                    .context("inspect restored participants")?;
                 crate::group::verify_restored(&saved, &restored, &handles)?;
             }
         }

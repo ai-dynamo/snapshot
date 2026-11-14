@@ -197,13 +197,7 @@ fn command_all(
                 }
             }
         }
-        let step = operations.values().next().map(ToString::to_string);
-        ensure!(
-            failures.is_empty(),
-            "{}: {}",
-            step.unwrap_or_default(),
-            failures.join("\n")
-        );
+        ensure!(failures.is_empty(), "{}", failures.join("\n"));
         Ok(replies)
     })
 }
@@ -215,7 +209,7 @@ fn collect_records(peers: &[Peer], request: RecordRequest) -> Result<Manifest> {
             peer.records(request)
                 .with_context(|| {
                     format!(
-                        "{request:?}: participant {} ({})",
+                        "participant {} ({})",
                         peer.namespace_pid,
                         peer.endpoint.display()
                     )

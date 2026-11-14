@@ -544,7 +544,9 @@ fn record_request_error_or_wrong_reply_names_participant() {
         ),
     ];
     for (mode, kind, result, detail) in cases {
-        let error = format!("{kind:?}: {}: {detail}", harness.participant(2));
+        let participant = harness.participant(2);
+        // The coordinator names the request once, before the participant.
+        let error = format!("cuinterpose-coordinator: {kind:?}: {participant}: {detail}");
         harness.coordinator(mode, &[&error], |_| {
             reply(harness.request(1, kind.request(1)), 1, inspection(vec![]));
             reply(harness.request(2, kind.request(2)), 2, result);
@@ -562,7 +564,7 @@ fn missing_participant_socket_fails_with_connect_error() {
         harness.endpoint(2).display()
     );
     let error = format!(
-        "Inspect: {}: {request}: connect failed",
+        "cuinterpose-coordinator: Inspect: {}: {request}: connect failed",
         harness.participant(2)
     );
     harness.coordinator("--inspect", &[&error], |_| {
@@ -584,7 +586,8 @@ fn participant_refusal_in_any_phase_names_that_phase() {
             if mode == "--restore" {
                 harness.write_state(&[vec![], vec![]]);
             }
-            let error = format!("{operation}: {}: refused", harness.participant(1));
+            let participant = harness.participant(1);
+            let error = format!("cuinterpose-coordinator: {operation}: {participant}: refused");
             harness.coordinator(mode, &[&error], |_| {
                 harness.answer(kind, &[vec![], vec![]]);
                 for preceding in &operations[..index] {
@@ -834,6 +837,25 @@ fn restore_fails_when_restored_records_differ_from_checkpoint() {
             format!("restored topology does not match the checkpoint for participant 1: {detail}");
         harness.restore(&checkpoint, [0, 0], &[restored, vec![]], &[&error]);
     }
+}
+
+#[test]
+fn failed_inspection_after_restore_names_the_restored_participants() {
+    let harness = Harness::new();
+    let participants = [vec![], vec![]];
+    harness.write_state(&participants);
+    let participant = harness.participant(1);
+    let error = format!(
+        "cuinterpose-coordinator: inspect restored participants: Inspect: {participant}: lost"
+    );
+    harness.coordinator("--restore", &[&error], |_| {
+        harness.answer(RecordRequest::Inspect, &participants);
+        for operation in &RESTORE {
+            harness.phase(operation);
+        }
+        let connection = harness.request(1, RecordRequest::Inspect.request(1));
+        reply(connection, 1, Err("lost".to_owned()));
+    });
 }
 
 // Peer carriers (#550).
