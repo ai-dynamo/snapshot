@@ -430,6 +430,45 @@ func TestPodGroupRestoreReconciler_ClaimsTargetsTheCacheHasNotSeen(t *testing.T)
 	assertClaimed(t, r, "b", "restore-uid", before["b"])
 }
 
+// TestPodGroupRestoreReconciler_SendsNoClaimForARestoreTheCacheShowsStale: the
+// API server holds the restore already Failed, but the cache still shows it
+// before that, with every target ready to claim. No claim is sent, and the
+// reconcile looks again shortly.
+func TestPodGroupRestoreReconciler_SendsNoClaimForARestoreTheCacheShowsStale(t *testing.T) {
+	r, _ := makePodGroupRestoreReconciler(t, pgObjects(rgGatedCluster("a", "b"), []client.Object{rgRestore("a", "b")})...)
+	ctx := context.Background()
+	// The status already lists the members, so recording what the stale
+	// restore derives is a no-op that checks no resourceVersion.
+	listed := getRestore(t, r)
+	listed.Status.Members = []snapshotv1alpha1.PodGroupRestoreMemberStatus{
+		{ID: "a", Phase: snapshotv1alpha1.RestorePhasePending}, {ID: "b", Phase: snapshotv1alpha1.RestorePhasePending},
+	}
+	require.NoError(t, rgAPI(r).Status().Update(ctx, listed))
+	staleRestore := getRestore(t, r)
+	failed := getRestore(t, r)
+	failed.Status.Conditions = []metav1.Condition{{
+		Type: snapshotv1alpha1.PodGroupConditionFailed, Status: metav1.ConditionTrue, Reason: snapshotv1alpha1.PodGroupReasonTargetInUse,
+		Message: "refused", LastTransitionTime: metav1.Now(),
+	}}
+	require.NoError(t, rgAPI(r).Status().Update(ctx, failed))
+	cache := r.Client
+	r.Client = interceptor.NewClient(cache.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if restore, ok := obj.(*snapshotv1alpha1.PodGroupRestore); ok {
+				staleRestore.DeepCopyInto(restore)
+				return nil
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+
+	res := reconcileRestore(t, r)
+
+	assertGated(t, r, "a")
+	assertGated(t, r, "b")
+	assert.Equal(t, podGroupAdmissionRequeue, res.RequeueAfter)
+}
+
 // TestPodGroupRestoreReconciler_ResumesAfterACrashBetweenClaims finds target
 // a claimed and b still gated, as a crash between the two claims leaves them,
 // and claims b alone.

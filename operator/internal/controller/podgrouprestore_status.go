@@ -77,6 +77,9 @@ type podGroupRestoreObservation struct {
 	// claims holds the claims that admission prepared, which the reconcile
 	// sends after it records the status. The status does not read them.
 	claims []targetClaim
+	// stale is true when admission prepared claims, but the restore that the
+	// reconcile read is not the API server's current one, so no claim is sent.
+	stale bool
 	// deleting is true once the restore has a deletion timestamp.
 	deleting bool
 	// deadline is the restore's creation time plus spec.deadlineSeconds.

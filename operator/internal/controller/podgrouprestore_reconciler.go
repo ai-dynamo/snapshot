@@ -110,6 +110,9 @@ func (r *PodGroupRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err := r.claim(ctx, observed.claims); err != nil {
 		return ctrl.Result{}, err
 	}
+	if observed.stale {
+		return ctrl.Result{RequeueAfter: podGroupAdmissionRequeue}, nil
+	}
 	return ctrl.Result{RequeueAfter: podGroupRestoreRequeue(observed, &restore.Status, now)}, nil
 }
 
@@ -133,7 +136,11 @@ func (r *PodGroupRestoreReconciler) claim(ctx context.Context, claims []targetCl
 }
 
 // observe reads, through reader, the PodGroupSnapshot's ranks and each pinned
-// member's report, then runs admission while no member is pinned (admit).
+// member's report, then runs admission while no member is pinned (admit). It
+// keeps the claims that admission prepared only while the restore is current
+// in the API server (isCurrent): a restore that the cache shows stale, still
+// without a refusal that was just recorded, sends no claim, and the reconcile
+// looks again shortly.
 // Every member is pinned in the same status patch, so once any is, admission
 // never runs again, and a restore whose members wait for their pins is never
 // refused. Reconcile passes the cache first, and the API server when the
@@ -186,7 +193,31 @@ func (r *PodGroupRestoreReconciler) observe(
 		return podGroupRestoreObservation{}, err
 	}
 	observed.admission, observed.pins, observed.claims = admission.podGroupAdmission, admission.pins, admission.claims
+	if len(observed.claims) > 0 {
+		current, err := r.isCurrent(ctx, restore)
+		if err != nil {
+			return podGroupRestoreObservation{}, err
+		}
+		if !current {
+			observed.claims, observed.stale = nil, true
+		}
+	}
 	return observed, nil
+}
+
+// isCurrent reports whether restore, as the reconcile read it, is what the API
+// server holds: a claim starts from the restore's status, so it needs a
+// restore that the cache has not left behind. A restore the API server no
+// longer has is not current.
+func (r *PodGroupRestoreReconciler) isCurrent(ctx context.Context, restore *snapshotv1alpha1.PodGroupRestore) (bool, error) {
+	live := &snapshotv1alpha1.PodGroupRestore{}
+	switch err := r.NonCacheReadClient.Get(ctx, client.ObjectKeyFromObject(restore), live); {
+	case apierrors.IsNotFound(err):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("get PodGroupRestore %q: %w", restore.Name, err)
+	}
+	return live.ResourceVersion == restore.ResourceVersion, nil
 }
 
 // observeMember reads, through reader, a pinned member's Pod and, when it is
