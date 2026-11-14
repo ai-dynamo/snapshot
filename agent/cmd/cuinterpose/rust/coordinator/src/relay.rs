@@ -115,8 +115,8 @@ impl std::fmt::Display for Command {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
-    /// Inspect and BeginCheckpoint: the Pod's current records and, at restore, the
-    /// records that it saved at capture.
+    /// Inspect and BeginCheckpoint: the Pod's current records and, at the first Inspect
+    /// of a restore, the records that it saved at capture.
     Records {
         current: Manifest,
         saved: Option<Manifest>,

@@ -230,7 +230,7 @@ struct LocalPod<'a> {
     peers: &'a [Peer],
     /// Prepare: where the records frozen by BeginCheckpoint are published.
     state: Option<PathBuf>,
-    /// Restore: the records published at capture.
+    /// Restore: the records published at capture, until the first Inspect sends them.
     saved: Option<Manifest>,
     frozen: Option<Manifest>,
 }
@@ -260,7 +260,7 @@ impl relay::Pod for LocalPod<'_> {
             }
             return Ok(Outcome::Records {
                 current: records,
-                saved: self.saved.clone(),
+                saved: self.saved.take(),
             });
         }
         let operations = self
