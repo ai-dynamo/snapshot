@@ -6,9 +6,10 @@
 #[path = "../src/test_records.rs"]
 mod test_records;
 
+use cudarc::driver::sys::CUmemAllocationHandleType;
 use cuinterpose_protocol::{
-    self as protocol, AllocationOwner, AllocationReference, Manifest, NamespacePid, Operation,
-    Record, Reply, Request, Response,
+    self as protocol, AllocationOwner, AllocationReference, FABRIC_HANDLE_BYTES, FabricHandle,
+    FabricReplacement, Manifest, NamespacePid, Operation, Record, Reply, Request, Response,
 };
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::io::FdFlags;
@@ -24,16 +25,22 @@ use std::time::{Duration, Instant};
 use test_records::{A, A2, allocation, mapping, shared, with};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_cuinterpose-coordinator");
+/// The steps of each mode, without arguments: these participants hold no carrier
+/// allocations and no FABRIC handles unless a test says otherwise.
 const PREPARE: [Operation; 3] = [
     Operation::PrepareMulticast,
-    Operation::SaveAllocations,
+    Operation::SaveAllocations { owners: Vec::new() },
     Operation::PrepareUnicast,
 ];
 const RESTORE: [Operation; 6] = [
     Operation::LoadAllocations,
-    Operation::RestoreUnicast,
+    Operation::RestoreUnicast {
+        replacements: Vec::new(),
+    },
     Operation::RestoreMulticastCreators,
-    Operation::RestoreMulticastImporters,
+    Operation::RestoreMulticastImporters {
+        replacements: Vec::new(),
+    },
     Operation::RestoreMulticastDevices,
     Operation::RestoreMulticastBindings,
 ];
@@ -71,8 +78,37 @@ fn inspection(records: Vec<Record>) -> Result<Reply, String> {
     Ok(Reply::Inspection { records })
 }
 
-fn completed(operation: Operation, bytes: u64) -> Result<Reply, String> {
-    Ok(Reply::Completed { operation, bytes })
+/// A successful reply to `operation` that copied `bytes` and replaced no handles.
+fn completed(operation: &Operation, bytes: u64) -> Result<Reply, String> {
+    Ok(match operation {
+        Operation::SaveAllocations { .. } => Reply::Saved { bytes },
+        Operation::LoadAllocations => Reply::Loaded {
+            bytes,
+            replacements: Vec::new(),
+        },
+        Operation::RestoreMulticastCreators => Reply::MulticastRecreated {
+            replacements: Vec::new(),
+        },
+        _ => Reply::Completed,
+    })
+}
+
+/// `operation` as a participant receives it: with its own owners at SaveAllocations,
+/// and with every replacement so far at the steps that import FABRIC handles.
+fn addressed(
+    operation: &Operation,
+    owners: Vec<AllocationOwner>,
+    replacements: &[FabricReplacement],
+) -> Operation {
+    let replacements = replacements.to_vec();
+    match operation {
+        Operation::SaveAllocations { .. } => Operation::SaveAllocations { owners },
+        Operation::RestoreUnicast { .. } => Operation::RestoreUnicast { replacements },
+        Operation::RestoreMulticastImporters { .. } => {
+            Operation::RestoreMulticastImporters { replacements }
+        }
+        other => other.clone(),
+    }
 }
 
 fn owner(owner_pid: NamespacePid, allocation: AllocationReference) -> AllocationOwner {
@@ -271,20 +307,12 @@ impl Harness {
     fn execute(
         &self,
         pid: NamespacePid,
-        operation: Operation,
+        operation: &Operation,
         owners: Vec<AllocationOwner>,
     ) -> UnixStream {
-        let namespace_pid = pid;
-        let expected = if operation == Operation::SaveAllocations {
-            Request::SaveAllocations {
-                namespace_pid,
-                owners,
-            }
-        } else {
-            Request::Execute {
-                namespace_pid,
-                operation,
-            }
+        let expected = Request::Execute {
+            namespace_pid: pid,
+            operation: addressed(operation, owners, &[]),
         };
         self.request(pid, expected)
     }
@@ -297,12 +325,12 @@ impl Harness {
         }
     }
 
-    fn phase(&self, operation: Operation) {
+    fn phase(&self, operation: &Operation) {
         self.phase_with(operation, [0, 0], &Owners::default());
     }
 
     /// Complete one phase, holding participant 1's reply until participant 2 replies.
-    fn phase_with(&self, operation: Operation, carrier: [u64; 2], owners: &Owners) {
+    fn phase_with(&self, operation: &Operation, carrier: [u64; 2], owners: &Owners) {
         let [first, second] = owners.clone();
         // Accepting both requests before any reply detects serial dispatch.
         let held = self.execute(1, operation, first);
@@ -318,8 +346,8 @@ impl Harness {
     fn prepare(&self, participants: &[Vec<Record>; 2], owners: &Owners, saved: [u64; 2]) {
         self.coordinator("--prepare", &[], |_| {
             self.answer(RecordRequest::BeginCheckpoint, participants);
-            for operation in PREPARE {
-                let save = operation == Operation::SaveAllocations;
+            for operation in &PREPARE {
+                let save = matches!(operation, Operation::SaveAllocations { .. });
                 let carrier = if save { saved } else { [0, 0] };
                 self.phase_with(operation, carrier, owners);
             }
@@ -336,8 +364,8 @@ impl Harness {
     ) {
         self.coordinator("--restore", errors, |_| {
             self.answer(RecordRequest::Inspect, participants);
-            for operation in RESTORE {
-                let load = operation == Operation::LoadAllocations;
+            for operation in &RESTORE {
+                let load = matches!(operation, Operation::LoadAllocations);
                 let carrier = if load { loaded } else { [0, 0] };
                 self.phase_with(operation, carrier, &Owners::default());
             }
@@ -488,7 +516,7 @@ fn record_request_error_or_wrong_reply_names_participant() {
         (
             "--inspect",
             RecordRequest::Inspect,
-            completed(Operation::PrepareMulticast, 0),
+            completed(&Operation::PrepareMulticast, 0),
             "expected inspection reply, actual Completed",
         ),
     ];
@@ -529,14 +557,14 @@ fn participant_refusal_in_any_phase_names_that_phase() {
         ("--prepare", RecordRequest::BeginCheckpoint, &PREPARE[..]),
         ("--restore", RecordRequest::Inspect, &RESTORE[..]),
     ] {
-        for (index, &operation) in operations.iter().enumerate() {
+        for (index, operation) in operations.iter().enumerate() {
             if mode == "--restore" {
                 harness.write_state(&[vec![], vec![]]);
             }
-            let error = format!("{operation:?}: {}: refused", harness.participant(1));
+            let error = format!("{operation}: {}: refused", harness.participant(1));
             harness.coordinator(mode, &[&error], |_| {
                 harness.answer(kind, &[vec![], vec![]]);
-                for &preceding in &operations[..index] {
+                for preceding in &operations[..index] {
                     harness.phase(preceding);
                 }
                 let [refused, other] = [1, 2].map(|pid| harness.execute(pid, operation, vec![]));
@@ -558,7 +586,7 @@ fn phase_waits_for_every_participant_and_reports_each_failure_without_retry() {
     harness.coordinator("--prepare", &[&error, "receive failed"], |coordinator| {
         harness.answer(RecordRequest::BeginCheckpoint, &[vec![], vec![]]);
         let [refused, lost] =
-            [1, 2].map(|pid| harness.execute(pid, Operation::PrepareMulticast, vec![]));
+            [1, 2].map(|pid| harness.execute(pid, &Operation::PrepareMulticast, vec![]));
         reply(refused, 1, Err("refused".to_owned()));
         std::thread::sleep(Duration::from_millis(100));
         assert!(
@@ -580,10 +608,10 @@ fn silent_participant_fails_its_phase_at_the_carrier_timeout() {
     // EAGAIN is the read timeout. A closed connection fails differently.
     harness.coordinator("--prepare", &[&error, "(os error 11)"], |_| {
         harness.answer(RecordRequest::BeginCheckpoint, &[vec![], vec![]]);
-        harness.phase(Operation::PrepareMulticast);
-        let [held, other] =
-            [1, 2].map(|pid| harness.execute(pid, Operation::SaveAllocations, vec![]));
-        reply(other, 2, completed(Operation::SaveAllocations, 0));
+        let [multicast, save, _] = PREPARE;
+        harness.phase(&multicast);
+        let [held, other] = [1, 2].map(|pid| harness.execute(pid, &save, vec![]));
+        reply(other, 2, completed(&save, 0));
         // Keep the connection open until the coordinator exits.
         silent = Some(held);
     });
@@ -591,42 +619,46 @@ fn silent_participant_fails_its_phase_at_the_carrier_timeout() {
 }
 
 #[test]
-fn completion_reply_with_wrong_pid_operation_kind_or_byte_count_fails() {
+fn completion_reply_with_wrong_pid_step_or_byte_count_fails() {
     let harness = Harness::new();
     // Participant 1 alone holds a shared allocation, so it must save 4096 bytes.
     let participants = [vec![shared()], vec![]];
     let owners = [vec![owner(1, A)], vec![]];
+    let [multicast, save, _] = PREPARE;
+    let exchange = format!("PrepareMulticast: {}: ", harness.participant(1));
     let cases = [
         (
-            Operation::PrepareMulticast,
+            &multicast,
             3,
-            completed(Operation::PrepareMulticast, 0),
-            "namespace PID changed: expected 1, actual 3",
+            completed(&multicast, 0),
+            vec![
+                exchange.as_str(),
+                "namespace PID changed: expected 1, actual 3",
+            ],
         ),
         (
-            Operation::PrepareMulticast,
+            &multicast,
             1,
-            completed(Operation::LoadAllocations, 0),
-            "expected operation PrepareMulticast, actual LoadAllocations",
+            completed(&Operation::LoadAllocations, 0),
+            vec!["participant 1: unexpected reply to PrepareMulticast: Loaded"],
         ),
         (
-            Operation::PrepareMulticast,
+            &multicast,
             1,
             inspection(vec![]),
-            "expected PrepareMulticast completion with 0 bytes, actual Inspection",
+            vec!["participant 1: unexpected reply to PrepareMulticast: Inspection"],
         ),
         (
-            Operation::SaveAllocations,
+            &save,
             1,
-            completed(Operation::SaveAllocations, 0),
-            "expected_bytes 4096, bytes 0",
+            completed(&save, 0),
+            vec!["participant 1: SaveAllocations copied 0 carrier bytes, expected 4096"],
         ),
     ];
-    for (operation, namespace_pid, result, detail) in cases {
-        let phase = format!("{operation:?}: {}: ", harness.participant(1));
-        harness.coordinator("--prepare", &[&phase, detail], |_| {
+    for (operation, namespace_pid, result, errors) in cases {
+        harness.coordinator("--prepare", &errors, |_| {
             harness.answer(RecordRequest::BeginCheckpoint, &participants);
-            for &preceding in PREPARE.iter().take_while(|&&next| next != operation) {
+            for preceding in PREPARE.iter().take_while(|next| *next != operation) {
                 harness.phase(preceding);
             }
             let [first, second] = owners.clone();
@@ -645,14 +677,14 @@ fn state_write_failure_after_prepare_sends_no_further_requests() {
     let error = format!("publish checkpoint state {}", harness.state.display());
     harness.coordinator("--prepare", &[&error], |_| {
         harness.answer(RecordRequest::BeginCheckpoint, &[vec![], vec![]]);
-        for operation in PREPARE {
+        for operation in &PREPARE {
             harness.phase(operation);
         }
     });
 }
 
 #[test]
-fn carrier_size_overflow_fails_before_save_allocations() {
+fn carrier_size_overflow_fails_before_any_phase() {
     let harness = Harness::new();
     let records = [(3, u64::MAX), (4, 1)].map(|(id, size)| {
         let allocation = AllocationReference {
@@ -665,14 +697,13 @@ fn carrier_size_overflow_fails_before_save_allocations() {
             Allocation.size = size
         )
     });
-    let error = format!(
-        "SaveAllocations: {}: allocation size overflow",
-        harness.participant(2)
+    harness.coordinator(
+        "--prepare",
+        &["participant 2: carrier size overflow"],
+        |_| {
+            harness.answer(RecordRequest::BeginCheckpoint, &[vec![], records.to_vec()]);
+        },
     );
-    harness.coordinator("--prepare", &[&error], |_| {
-        harness.answer(RecordRequest::BeginCheckpoint, &[vec![], records.to_vec()]);
-        harness.phase(Operation::PrepareMulticast);
-    });
 }
 
 // Carrier ownership.
@@ -796,4 +827,74 @@ fn unexported_allocation_with_peer_access_is_saved_to_host_carrier() {
     let participants = [vec![accessed, mapping()], vec![]];
     harness.prepare(&participants, &[vec![owner(1, A)], vec![]], [4096, 0]);
     harness.restore(&participants, [4096, 0], &participants, &[]);
+}
+
+// FABRIC sharing within one Pod.
+
+#[test]
+fn fabric_importer_imports_the_handle_that_its_creator_exported_at_restore() {
+    let harness = Harness::new();
+    let fabric = CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_FABRIC.0;
+    let [old, new] = [1, 2].map(|byte| FabricHandle([byte; FABRIC_HANDLE_BYTES]));
+    // A fabric import names no creator, and its size is unknown to the importer.
+    let local = AllocationReference {
+        id: [9; 16],
+        creator_pid: 0,
+    };
+    let records = |handle| {
+        [
+            vec![
+                with!(shared(), Allocation.handle_types = fabric),
+                mapping(),
+                Record::FabricExport {
+                    allocation: A,
+                    handle,
+                },
+            ],
+            vec![
+                with!(
+                    shared(),
+                    Allocation.allocation = local,
+                    Allocation.handle_types = fabric,
+                    Allocation.size = 0
+                ),
+                with!(mapping(), Mapping.allocation = local),
+                Record::FabricImport {
+                    allocation: local,
+                    handle,
+                },
+            ],
+        ]
+    };
+    let owners = [
+        vec![owner(1, A)],
+        vec![AllocationOwner {
+            allocation: local,
+            owner_pid: 1,
+        }],
+    ];
+    harness.prepare(&records(old), &owners, [4096, 0]);
+    let replacement = FabricReplacement { old, new };
+    harness.coordinator("--restore", &[], |_| {
+        harness.answer(RecordRequest::Inspect, &records(old));
+        let [creator, importer] =
+            [1, 2].map(|pid| harness.execute(pid, &Operation::LoadAllocations, vec![]));
+        let loaded = Reply::Loaded {
+            bytes: 4096,
+            replacements: vec![replacement],
+        };
+        reply(creator, 1, Ok(loaded));
+        reply(importer, 2, completed(&Operation::LoadAllocations, 0));
+        for operation in &RESTORE[1..] {
+            let operation = addressed(operation, Vec::new(), &[replacement]);
+            for pid in [1, 2] {
+                let request = Request::Execute {
+                    namespace_pid: pid,
+                    operation: operation.clone(),
+                };
+                reply(harness.request(pid, request), pid, completed(&operation, 0));
+            }
+        }
+        harness.answer(RecordRequest::Inspect, &records(new));
+    });
 }

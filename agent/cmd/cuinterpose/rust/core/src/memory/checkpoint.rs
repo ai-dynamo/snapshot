@@ -3,13 +3,13 @@
 
 //! Validate, inspect, and update the local checkpoint state.
 
-use super::vmm::{Allocation, Mapping, access_metadata, location_metadata};
+use super::vmm::{Allocation, Mapping, access_metadata, context_device, location_metadata};
 use super::{Memblock, ProcessState, sharing};
+use crate::driver::Context;
 use crate::error::{Error, Result};
 use crate::runtime;
 use cudarc::driver::sys::CUresult::*;
-use cuinterpose_protocol::Operation;
-use cuinterpose_protocol::Reply;
+use cuinterpose_protocol::{FabricReplacement, Operation, Reply};
 use runtime::export_cache;
 use std::collections::BTreeMap;
 use std::ffi::c_void;
@@ -32,17 +32,17 @@ pub enum Phase {
 impl Phase {
     /// Validate local phase order before changing state and select the state to publish
     /// on success. Barriers between processes belong to the coordinator.
-    pub(crate) fn next(self, operation: Operation) -> Result<Self> {
+    pub(crate) fn next(self, operation: &Operation) -> Result<Self> {
         let (expected, next) = match operation {
             Operation::PrepareMulticast => (Self::Checkpointing, Self::MulticastPrepared),
-            Operation::SaveAllocations => (Self::MulticastPrepared, Self::AllocationsSaved),
+            Operation::SaveAllocations { .. } => (Self::MulticastPrepared, Self::AllocationsSaved),
             Operation::PrepareUnicast => (Self::AllocationsSaved, Self::UnicastPrepared),
             Operation::LoadAllocations => (Self::UnicastPrepared, Self::AllocationsLoaded),
-            Operation::RestoreUnicast => (Self::AllocationsLoaded, Self::UnicastRestored),
+            Operation::RestoreUnicast { .. } => (Self::AllocationsLoaded, Self::UnicastRestored),
             Operation::RestoreMulticastCreators => {
                 (Self::UnicastRestored, Self::MulticastCreatorsRestored)
             }
-            Operation::RestoreMulticastImporters => (
+            Operation::RestoreMulticastImporters { .. } => (
                 Self::MulticastCreatorsRestored,
                 Self::MulticastImportersRestored,
             ),
@@ -122,6 +122,7 @@ impl ProcessState {
             records.push(record);
         }
         super::multicast::describe(self, &mut records)?;
+        super::fabric::describe(self, &mut records);
         Ok(records)
     }
 
@@ -175,17 +176,18 @@ impl ProcessState {
         Ok(())
     }
 
-    /// Call after phase validation. A failure during state changes terminates the
-    /// process.
-    pub fn lifecycle(&mut self, operation: Operation) -> Result<u64> {
+    /// Call after phase validation, and for SaveAllocations after the owners are selected.
+    /// A failure during state changes terminates the process.
+    pub fn lifecycle(&mut self, operation: &Operation) -> Result<Reply> {
         use super::host_carrier::{AllocationContent, Arena};
         let next_phase = self.phase.next(operation)?;
-        let mut bytes = 0u64;
-        match operation {
+        let reply = match operation {
             Operation::PrepareMulticast => {
                 super::multicast::prepare(self)?;
+                Reply::Completed
             }
-            Operation::SaveAllocations => {
+            Operation::SaveAllocations { .. } => {
+                let mut bytes = 0u64;
                 let ids: Vec<_> = self
                     .memblocks
                     .values()
@@ -225,6 +227,7 @@ impl ProcessState {
                     allocations.push(AllocationContent::from(&*allocation));
                 }
                 self.arena = Arena::save(&allocations)?;
+                Reply::Saved { bytes }
             }
             Operation::PrepareUnicast => {
                 export_cache()?.clear()?;
@@ -249,6 +252,7 @@ impl ProcessState {
                         allocation.driver = None;
                     }
                 }
+                Reply::Completed
             }
             Operation::LoadAllocations => {
                 // A restored process may now run on a different GPU or driver.
@@ -264,7 +268,7 @@ impl ProcessState {
                     })
                     .map(AllocationContent::from)
                     .collect();
-                bytes = allocations.iter().try_fold(0u64, |sum, a| {
+                let bytes = allocations.iter().try_fold(0u64, |sum, a| {
                     sum.checked_add(a.size as u64)
                         .ok_or(CUDA_ERROR_OUT_OF_MEMORY)
                 })?;
@@ -280,9 +284,13 @@ impl ProcessState {
                         .ok_or(CUDA_ERROR_INVALID_HANDLE)?
                         .driver = allocation.driver;
                 }
-                self.remap(Participants::Owners)?;
+                let replacements = self.remap(Participants::Owners)?;
+                Reply::Loaded {
+                    bytes,
+                    replacements,
+                }
             }
-            Operation::RestoreUnicast => {
+            Operation::RestoreUnicast { replacements } => {
                 for allocation in self
                     .memblocks
                     .values_mut()
@@ -293,6 +301,17 @@ impl ProcessState {
                                 != Some(&self.namespace_pid)
                     })
                 {
+                    // FABRIC holders import the owner's new handle, wherever the owner runs.
+                    if let Some(old) = allocation.fabric {
+                        let new = super::fabric::replacement(replacements, old)?;
+                        allocation.driver = Some(Context::run(
+                            allocation.context,
+                            context_device(&allocation.properties),
+                            || crate::driver::import_fabric(&new),
+                        )?);
+                        allocation.fabric = Some(new);
+                        continue;
+                    }
                     let owner = self.checkpoint_owners[&allocation.reference.id];
                     let (raw, metadata) = sharing::request_export(allocation.reference, owner)
                         .map_err(Error::PeerExport)?;
@@ -303,17 +322,36 @@ impl ProcessState {
                     allocation.driver = Some(crate::driver::import_posix(raw.as_fd())?);
                 }
                 self.remap(Participants::Importers)?;
+                Reply::Completed
             }
-            Operation::RestoreMulticastCreators
-            | Operation::RestoreMulticastImporters
+            Operation::RestoreMulticastCreators => Reply::MulticastRecreated {
+                replacements: super::multicast::restore(self, operation)?,
+            },
+            Operation::RestoreMulticastImporters { .. }
             | Operation::RestoreMulticastDevices
-            | Operation::RestoreMulticastBindings => super::multicast::restore(self, operation)?,
+            | Operation::RestoreMulticastBindings => {
+                super::multicast::restore(self, operation)?;
+                Reply::Completed
+            }
+        };
+        // The process keeps the replacements that a step receives or returns for the
+        // application's later imports.
+        if let Operation::RestoreUnicast { replacements }
+        | Operation::RestoreMulticastImporters { replacements } = operation
+        {
+            self.record_fabric_replacements(replacements);
+        }
+        if let Reply::Loaded { replacements, .. } | Reply::MulticastRecreated { replacements } =
+            &reply
+        {
+            self.record_fabric_replacements(replacements);
         }
         self.phase = next_phase;
-        Ok(bytes)
+        Ok(reply)
     }
 
-    fn remap(&mut self, participants: Participants) -> Result<()> {
+    fn remap(&mut self, participants: Participants) -> Result<Vec<FabricReplacement>> {
+        let mut replacements = Vec::new();
         for allocation in self
             .memblocks
             .values_mut()
@@ -324,10 +362,14 @@ impl ProcessState {
             if allocation.uses_host_carrier()
                 && owned_here == (participants == Participants::Owners)
             {
-                restore_allocation(allocation, &self.mappings, participants)?;
+                replacements.extend(restore_allocation(
+                    allocation,
+                    &self.mappings,
+                    participants,
+                )?);
             }
         }
-        Ok(())
+        Ok(replacements)
     }
 }
 
@@ -337,11 +379,14 @@ enum Participants {
     Importers,
 }
 
+/// Map the recreated or imported backing at its checkpointed addresses. An owner also
+/// publishes the backing for its other holders, and returns the fabric handle that
+/// replaces the checkpointed one, if it had one.
 fn restore_allocation(
     allocation: &mut Allocation,
     mappings: &BTreeMap<u64, Mapping>,
     participants: Participants,
-) -> Result<()> {
+) -> Result<Option<FabricReplacement>> {
     let driver = allocation.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?;
     for mapping in mappings
         .values()
@@ -361,22 +406,32 @@ fn restore_allocation(
             }?;
         }
     }
+    let mut replacement = None;
     if participants == Participants::Owners {
-        let fd = crate::driver::export_posix(driver)?;
-        export_cache()?.insert(
-            allocation.reference,
-            fd,
-            sharing::ExportMetadata::Unicast {
-                size: allocation.size,
-                location: location_metadata(allocation.properties.location),
-            },
-        )?;
+        if allocation.properties.requestedHandleTypes == super::fabric::FABRIC {
+            // FABRIC holders, in any Pod, import the new handle through the coordinator.
+            if let Some(old) = allocation.fabric {
+                let new = crate::driver::export_fabric(driver)?;
+                allocation.fabric = Some(new);
+                replacement = Some(FabricReplacement { old, new });
+            }
+        } else {
+            let fd = crate::driver::export_posix(driver)?;
+            export_cache()?.insert(
+                allocation.reference,
+                fd,
+                sharing::ExportMetadata::Unicast {
+                    size: allocation.size,
+                    location: location_metadata(allocation.properties.location),
+                },
+            )?;
+        }
     }
     if allocation.refcounts.handle_entries == 0 {
         unsafe { crate::driver::cuMemRelease(driver) }?;
         allocation.driver = None;
     }
-    Ok(())
+    Ok(replacement)
 }
 
 pub(crate) fn inspect() -> std::result::Result<Reply, String> {
@@ -396,33 +451,20 @@ pub(crate) fn begin() -> std::result::Result<Reply, String> {
     Ok(Reply::Inspection { records })
 }
 
-pub(crate) fn execute(operation: Operation) -> std::result::Result<Reply, String> {
-    if operation == Operation::SaveAllocations {
-        return Err("SaveAllocations requires the checkpoint owner plan".into());
+pub(crate) fn execute(operation: &Operation) -> std::result::Result<Reply, String> {
+    let mut state = runtime::get().map_err(|_| "cuinterpose state is unavailable")?;
+    state
+        .phase
+        .next(operation)
+        .map_err(|error| format!("{operation}: {error}"))?;
+    // Check the owners before any state changes, so a refused owner plan leaves the
+    // process as it was.
+    if let Operation::SaveAllocations { owners } = operation {
+        state
+            .select_checkpoint_owners(owners)
+            .map_err(|error| format!("{operation}: invalid owner plan: {error}"))?;
     }
-    let mut state = runtime::get().map_err(|_| "cuinterpose state is unavailable")?;
-    state
-        .phase
-        .next(operation)
-        .map_err(|error| format!("{operation:?}: {error}"))?;
-    let bytes = runtime::must_complete(state.lifecycle(operation));
-    Ok(Reply::Completed { operation, bytes })
-}
-
-pub(crate) fn save_allocations(
-    owners: &[cuinterpose_protocol::AllocationOwner],
-) -> std::result::Result<Reply, String> {
-    let mut state = runtime::get().map_err(|_| "cuinterpose state is unavailable")?;
-    let operation = Operation::SaveAllocations;
-    state
-        .phase
-        .next(operation)
-        .map_err(|error| format!("{operation:?}: {error}"))?;
-    state
-        .select_checkpoint_owners(owners)
-        .map_err(|error| format!("{operation:?}: invalid owner plan: {error}"))?;
-    let bytes = runtime::must_complete(state.lifecycle(operation));
-    Ok(Reply::Completed { operation, bytes })
+    Ok(runtime::must_complete(state.lifecycle(operation)))
 }
 
 /// Keep the carrier until the successful LOAD reply has been sent.
@@ -464,6 +506,7 @@ mod tests {
                 peer_access_granted: false,
                 home_device: Some(0),
                 context: 0,
+                fabric: None,
             })
             .unwrap();
         reference
@@ -570,7 +613,7 @@ mod tests {
         let mut state = ProcessState::new(41);
         state.malloc_layouts.insert(0, (4096, 1));
         state.phase = Phase::UnicastPrepared;
-        state.lifecycle(Operation::LoadAllocations).unwrap();
+        state.lifecycle(&Operation::LoadAllocations).unwrap();
         assert!(state.malloc_layouts.is_empty());
     }
 }

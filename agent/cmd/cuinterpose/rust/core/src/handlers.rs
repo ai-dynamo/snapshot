@@ -8,14 +8,17 @@ use crate::error::{Error, Result};
 use crate::memory::multicast::{self, BindInput};
 use crate::memory::vmm::Allocation;
 use crate::memory::{self, Memblock, VirtualAllocationHandle};
-use crate::memory::{ipc, sharing, vmm};
+use crate::memory::{fabric, ipc, sharing, vmm};
 use crate::runtime;
 use cudarc::driver::sys::CUresult::*;
 use cudarc::driver::sys::*;
-use cuinterpose_protocol::BindingVersion;
+use cuinterpose_protocol::{BindingVersion, FABRIC_HANDLE_BYTES, FabricHandle};
 use runtime::active;
 use std::ffi::c_void;
 use std::os::fd::IntoRawFd;
+
+const POSIX: CUmemAllocationHandleType =
+    CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
 
 pub use crate::memory::context::{
     cuCtxDestroy, cuCtxDestroy_v2, cuDevicePrimaryCtxRelease, cuDevicePrimaryCtxRelease_v2,
@@ -61,6 +64,7 @@ pub fn cuMemCreate(
             peer_access_granted: false,
             home_device,
             context,
+            fabric: None,
         })),
         None => driver,
     };
@@ -218,10 +222,7 @@ pub fn cuMemExportToShareableHandle(
         unsafe { crate::driver::cuMemExportToShareableHandle(out, handle, kind, flags) }?;
         return Ok(());
     };
-    if out.is_null()
-        || kind != CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
-        || flags != 0
-    {
+    if out.is_null() || !matches!(kind, POSIX | fabric::FABRIC) || flags != 0 {
         return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
     let namespace_pid = state.namespace_pid;
@@ -233,10 +234,20 @@ pub fn cuMemExportToShareableHandle(
     if memblock.reference().creator_pid != namespace_pid {
         return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
-    if let Memblock::Unicast(allocation) = memblock
-        && allocation.properties.requestedHandleTypes.0 & kind.0 == 0
-    {
+    let requested = match memblock {
+        Memblock::Unicast(allocation) => u64::from(allocation.properties.requestedHandleTypes.0),
+        Memblock::Multicast(object) => object.properties.handleTypes,
+    };
+    if requested & u64::from(kind.0) == 0 {
         return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
+    }
+    if kind == fabric::FABRIC {
+        let exported = fabric::export(memblock)?;
+        unsafe {
+            out.cast::<[u8; FABRIC_HANDLE_BYTES]>()
+                .write_unaligned(exported.0)
+        };
+        return Ok(());
     }
     // The ticket identifies an allocation without retaining its backing, so it cannot
     // extend the allocation's lifetime as a CUDA export FD would.
@@ -259,7 +270,18 @@ pub fn cuMemImportFromShareableHandle(
     if out.is_null() {
         return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
-    if kind != CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR {
+    if kind == fabric::FABRIC {
+        if fd.is_null() {
+            return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
+        }
+        // For FABRIC the shareable handle argument points to the handle's bytes.
+        let handle =
+            FabricHandle(unsafe { fd.cast::<[u8; FABRIC_HANDLE_BYTES]>().read_unaligned() });
+        let (_state, imported) = fabric::import(active()?, handle)?;
+        unsafe { out.write(imported) };
+        return Ok(());
+    }
+    if kind != POSIX {
         return Err(CUDA_ERROR_NOT_SUPPORTED.into());
     }
     let Some(reference) =
@@ -292,6 +314,9 @@ pub fn cuMemGetAllocationPropertiesFromHandle(
     if let Some(allocation) = state
         .resolve_virtual_handle(handle)?
         .and_then(|id| state.memblocks.get(&id).and_then(Memblock::unicast))
+        // A fabric import, whose creator PID is 0, never creates its backing, so the
+        // driver's answer stands.
+        .filter(|allocation| allocation.reference.creator_pid != 0)
     {
         // Report the recorded handle types and location. They hide the internal POSIX
         // capability of private allocations and stay the same when reconstruction makes
@@ -309,8 +334,9 @@ pub fn cuMulticastCreate(out: *mut u64, properties: *const CUmulticastObjectProp
         return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
     let properties = unsafe { *properties };
-    if properties.handleTypes
-        != u64::from(CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0)
+    // Exactly one exportable handle type, POSIX or FABRIC. Only FABRIC can span Pods.
+    if properties.handleTypes != u64::from(POSIX.0)
+        && properties.handleTypes != u64::from(fabric::FABRIC.0)
     {
         return Err(CUDA_ERROR_NOT_SUPPORTED.into());
     }
@@ -448,6 +474,7 @@ pub fn cuMemAlloc_v2(out: *mut CUdeviceptr, size: usize) -> Result<()> {
         peer_access_granted: false,
         home_device: Some(device),
         context,
+        fabric: None,
     }));
     let opens = 0;
     let address = state.map_malloc(handle, size, extent, opens, context, device)?;

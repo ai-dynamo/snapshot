@@ -63,12 +63,12 @@ fn encoding_keeps_the_request_and_state_wire_format() {
     // Field and variant names are encoded, so renaming one makes existing state unreadable.
     let request = Request::Execute {
         namespace_pid: 1,
-        operation: Operation::SaveAllocations,
+        operation: Operation::LoadAllocations,
     };
     assert_eq!(
         encode(&request).unwrap(),
-        b"\x82\xa7version\x01\xa4body\x83\xa4kind\xa7execute\xadnamespace_pid\x01\
-          \xa9operation\xb0save_allocations"
+        b"\x82\xa7version\x02\xa4body\x83\xa4kind\xa7execute\xadnamespace_pid\x01\
+          \xa9operation\xb0load_allocations"
     );
     let state = Manifest::from([(
         1,
@@ -91,13 +91,70 @@ fn encoding_keeps_the_request_and_state_wire_format() {
     )]);
     assert_eq!(
         encode(&state).unwrap(),
-        b"\x82\xa7version\x01\xa4body\x81\x01\x91\x81\xaaallocation\x88\
+        b"\x82\xa7version\x02\xa4body\x81\x01\x91\x81\xaaallocation\x88\
           \xaaallocation\x82\xa2id\xc4\x10allocation-id-01\xabcreator_pid\x01\
           \xa6shared\xc3\xb3peer_access_granted\xc2\xa4size\xcd\x10\x00\
           \xafallocation_type\x01\xachandle_types\x01\
           \xa8location\x82\xadlocation_type\x01\xa2id\x00\
           \xbfvirtual_allocation_handle_count\x01"
     );
+}
+
+#[test]
+fn operations_and_replies_carry_only_their_own_fields() {
+    let replacement = FabricReplacement {
+        old: FabricHandle([1; FABRIC_HANDLE_BYTES]),
+        new: FabricHandle([2; FABRIC_HANDLE_BYTES]),
+    };
+    let restore = encode(&Request::Execute {
+        namespace_pid: 1,
+        operation: Operation::RestoreUnicast {
+            replacements: vec![replacement],
+        },
+    })
+    .unwrap();
+    // Each handle travels as one 64-byte bin value.
+    let old = [[0xc4, 64].as_slice(), &[1; FABRIC_HANDLE_BYTES]].concat();
+    assert!(restore.windows(old.len()).any(|window| window == old));
+    assert!(matches!(
+        decode::<Request>(&restore).unwrap(),
+        Request::Execute {
+            operation: Operation::RestoreUnicast { replacements },
+            ..
+        } if replacements == [replacement]
+    ));
+    // A reply without a result is only its name.
+    assert_eq!(
+        encode(&Reply::Completed).unwrap(),
+        b"\x82\xa7version\x02\xa4body\xa9completed"
+    );
+    let loaded = encode(&Reply::Loaded {
+        bytes: 4096,
+        replacements: vec![replacement],
+    })
+    .unwrap();
+    assert!(matches!(
+        decode::<Reply>(&loaded).unwrap(),
+        Reply::Loaded { bytes: 4096, replacements } if replacements == [replacement]
+    ));
+    // Messages name an operation without its arguments.
+    let save = Operation::SaveAllocations { owners: Vec::new() };
+    assert_eq!(save.to_string(), "SaveAllocations");
+}
+
+#[test]
+fn fabric_handles_print_only_a_digest() {
+    let first = format!("{:?}", FabricHandle([1; FABRIC_HANDLE_BYTES]));
+    let second = format!("{:?}", FabricHandle([2; FABRIC_HANDLE_BYTES]));
+    // Any process in the fabric domain can import memory through a handle's bytes.
+    assert_eq!(first.len(), "FabricHandle()".len() + 16, "{first}");
+    assert!(first.starts_with("FabricHandle("), "{first}");
+    assert_ne!(first, second);
+    let record = Record::FabricImport {
+        allocation: AllocationReference::default(),
+        handle: FabricHandle([1; FABRIC_HANDLE_BYTES]),
+    };
+    assert!(format!("{record:?}").contains(&first));
 }
 
 #[test]

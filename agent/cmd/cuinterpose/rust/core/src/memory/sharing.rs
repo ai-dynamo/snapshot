@@ -362,6 +362,7 @@ pub(crate) fn import_reference(
         // Imported backing already uses the host carrier.
         home_device: None,
         context,
+        fabric: None,
     }));
     Ok((state, handle))
 }

@@ -1039,7 +1039,7 @@ The memory-backed file referenced by a virtual shareable FD contains a fixed 24-
 
 | Bytes | Value |
 | --- | --- |
-| 4 | `CUI\x01` |
+| 4 | `CUI\x02` |
 | 4 | Creator namespace PID, little-endian |
 | 16 | Allocation ID |
 
@@ -1053,7 +1053,7 @@ The virtual memory-IPC handle occupies a 64-byte `CUipcMemHandle`:
 
 | Field | Bytes |
 | --- | --- |
-| ASCII `CUIPC001` | 8 |
+| ASCII `CUIPC002` | 8 |
 | Creator namespace PID | 4 |
 | Allocation ID | 16 |
 | Reserved zeros | 20 |

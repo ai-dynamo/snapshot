@@ -114,9 +114,12 @@ impl Arena {
             let mut driver = 0;
             // CUDA reports NONE on an imported handle. Reconstruction still needs
             // exportable backing so other holders can import this owner's new copy.
+            // FABRIC backing stays FABRIC, which holders in other Pods can import.
             let mut properties = allocation.properties;
-            properties.requestedHandleTypes =
-                cudarc::driver::sys::CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+            if properties.requestedHandleTypes != super::fabric::FABRIC {
+                properties.requestedHandleTypes =
+                    cudarc::driver::sys::CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+            }
             unsafe { crate::driver::cuMemCreate(&mut driver, allocation.size, &properties, 0) }?;
             allocation.driver = Some(driver);
         }
