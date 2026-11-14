@@ -136,6 +136,7 @@ type CheckpointRequest struct {
 	NodeName      string
 	PodName       string
 	PodNamespace  string
+	PodUID        string
 	PodIP         string
 	Clientset     kubernetes.Interface
 
@@ -299,12 +300,12 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		// Every step above only read the source or wrote to the capture's own
 		// staging, so a refusal leaves the source as Snapshot found it.
 		admitStart := time.Now()
-		if err := admitCapture(ctx, req.Group, req.PodIP); err != nil {
+		if err := admitCapture(ctx, req.Group, req.PodIP, req.PodUID, req.ContainerName); err != nil {
 			return nil, failStep(StepAdmitGroup, err)
 		}
 		admitDuration = time.Since(admitStart)
 		// The dump writes the manifest again, now with the group's section.
-		data.Group = groupManifest(req.Group)
+		data.PodGroup = groupManifest(req.Group)
 	}
 
 	captureTimings, err := captureCheckpointFunc(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu, req.DumpRetriesRemaining, req.DumpWorthRepeating, req.OnDumpRepeat, req.Group)

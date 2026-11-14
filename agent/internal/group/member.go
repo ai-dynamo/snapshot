@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/coordinator"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 )
@@ -46,6 +47,11 @@ const ReasonRefused = "Refused"
 type Admission struct {
 	// PodIP is the member's Pod IP now.
 	PodIP netip.Addr `json:"podIP"`
+	// PodUID and Containers are set at capture: the UID of the member's Pod
+	// and its captured containers, one today, which every member's artifact
+	// records for every member.
+	PodUID     string   `json:"podUID,omitempty"`
+	Containers []string `json:"containers,omitempty"`
 	// CaptureID is set at restore: the UID of the PodGroupSnapshot the
 	// member's artifact was captured in. Every member must restore the same
 	// capture.
@@ -86,6 +92,16 @@ func (m *Member) ID() string { return m.id }
 
 // Rank returns the member's rank, its position in the group.
 func (m *Member) Rank() int { return m.session.Rank() }
+
+// MemberIDs returns the ID of every member of the group, by rank.
+func (m *Member) MemberIDs() []string {
+	members := m.session.Meta().Members
+	ids := make([]string, len(members))
+	for rank, member := range members {
+		ids[rank] = member.ID
+	}
+	return ids
+}
 
 // Admit publishes own and returns once every member's admission is known. It
 // refuses an attempt whose members restore different captures.
@@ -139,16 +155,16 @@ func (m *Member) Admit(ctx context.Context, own Admission) error {
 func (m *Member) Admissions() []Admission { return m.admissions }
 
 // PeerIPs maps the IP each other member had at capture to its IP now, from
-// captured, the members' Pod IPs at capture by rank, which a restore reads from
-// its artifact, and the admissions.
-func (m *Member) PeerIPs(captured []netip.Addr) (map[netip.Addr]netip.Addr, error) {
+// captured, the member table a restore reads from its artifact, and the
+// admissions.
+func (m *Member) PeerIPs(captured []types.PodGroupManifestMember) (map[netip.Addr]netip.Addr, error) {
 	if len(captured) != len(m.admissions) {
 		return nil, fmt.Errorf("the capture had %d members, the restore has %d", len(captured), len(m.admissions))
 	}
 	peers := make(map[netip.Addr]netip.Addr, len(captured)-1)
 	for rank, a := range m.admissions {
 		if rank != m.Rank() {
-			peers[captured[rank]] = a.PodIP
+			peers[captured[rank].PodIP] = a.PodIP
 		}
 	}
 	return peers, nil
