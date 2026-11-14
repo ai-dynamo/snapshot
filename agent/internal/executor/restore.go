@@ -194,6 +194,12 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	}
 	if req.Group != nil {
 		defer func() {
+			// A panic fails the attempt too, or the other members would wait
+			// for this one until the deadline.
+			if r := recover(); r != nil {
+				failGroup(ctx, log, req.Group)
+				panic(r)
+			}
 			// A restore that only failed its cleanup has released its member.
 			if retErr != nil && !errors.As(retErr, new(*RestoreCleanupError)) {
 				failGroup(ctx, log, req.Group)
