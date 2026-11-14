@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"sync"
 	"time"
 
@@ -117,64 +118,55 @@ var codes = []struct {
 	{context.DeadlineExceeded, "CANCELLED"},
 }
 
+// relayAnswerTimeout bounds how long the agent keeps writing a relay's
+// pending answers once it stops serving the relay, so a relay that stopped
+// reading cannot hold the agent. A var so a test does not have to wait out the
+// real bound.
+var relayAnswerTimeout = 5 * time.Second
+
 // serveRelay answers the relay on conn, the agent's end of the relay's socket,
 // from the cuinterpose namespace of m's session. Requests run concurrently and
 // are answered as they complete, so a waiting get never holds up a later
 // request. A request whose id is already pending is answered INVALID.
 //
-// serveRelay returns when the relay closes its end, cancelling the requests it
-// has pending, and leaving the session as it is; when the session ends, once
-// it has answered every pending request with the session's end and closed
-// conn; or when ctx ends.
-func serveRelay(ctx context.Context, conn io.ReadWriteCloser, m *Member) error {
+// serveRelay stops once the relay closes its end, which cancels the requests
+// it has pending and leaves the session as it is, once the session ends, or
+// once ctx ends. It then stops reading, answers every pending request, with
+// the session's end if the session ended, and closes conn. The relay has
+// relayAnswerTimeout to take those answers.
+func serveRelay(ctx context.Context, conn net.Conn, m *Member) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	p := &relayProxy{conn: conn, member: m, store: m.session.CuInterpose(), pending: make(map[uint64]bool)}
-	requests := make(chan relayRequest)
-	failed := make(chan error, 1)
-	stopped := make(chan struct{})
-	go p.read(requests, failed, stopped)
-	// closeConn closes the agent's end once every answer is out, and waits for
-	// the reader.
-	closeConn := func() {
-		p.running.Wait()
-		close(stopped)
-		_ = conn.Close()
-		<-failed
-	}
+	var readErr error
+	reading := make(chan struct{})
+	go func() {
+		defer close(reading)
+		readErr = p.read(ctx)
+	}()
 
-	for {
-		select {
-		case req := <-requests:
-			p.start(ctx, req)
-		case err := <-failed:
-			// The relay is gone, or broke the protocol: nothing it asked for is
-			// wanted any more.
-			cancel()
-			p.running.Wait()
-			_ = conn.Close()
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
-			return err
-		case <-m.session.Done():
-			// Every pending request returns with the session's end now, and so
-			// does any request the reader holds already.
-			for drained := false; !drained; {
-				select {
-				case req := <-requests:
-					p.start(ctx, req)
-				default:
-					drained = true
-				}
-			}
-			closeConn()
-			return nil
-		case <-ctx.Done():
-			closeConn()
-			return ctx.Err()
+	var err error
+	select {
+	case <-reading:
+		// The relay is gone, or broke the protocol: nothing it asked for is
+		// wanted any more.
+		cancel()
+		if !errors.Is(readErr, io.EOF) {
+			err = readErr
 		}
+	case <-m.session.Done():
+		// Every pending request returns with the session's end now.
+	case <-ctx.Done():
+		err = ctx.Err()
 	}
+	now := time.Now()
+	_ = conn.SetReadDeadline(now)
+	_ = conn.SetWriteDeadline(now.Add(relayAnswerTimeout))
+	// The reader starts every request, so it returns before the wait for them.
+	<-reading
+	p.running.Wait()
+	_ = conn.Close()
+	return err
 }
 
 // relayProxy is the agent's end of one relay's socket.
@@ -193,20 +185,14 @@ type relayProxy struct {
 	running sync.WaitGroup
 }
 
-// read hands every request the relay sends to serveRelay, until reading fails.
-func (p *relayProxy) read(requests chan<- relayRequest, failed chan<- error, stopped <-chan struct{}) {
+// read starts every request the relay sends, until reading fails.
+func (p *relayProxy) read(ctx context.Context) error {
 	for {
 		var req relayRequest
 		if err := readRelayFrame(p.conn, &req); err != nil {
-			failed <- err
-			return
+			return err
 		}
-		select {
-		case requests <- req:
-		case <-stopped:
-			failed <- nil
-			return
-		}
+		p.start(ctx, req)
 	}
 }
 
