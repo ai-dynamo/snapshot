@@ -557,6 +557,12 @@ func validateRestoreManifest(req RestoreRequest, manifest *types.CheckpointManif
 			req.ArtifactContainerName,
 		)
 	}
+	// The member's connections to the other members, and the memory it shares
+	// with them, restore only with the group.
+	if manifest.PodGroup != nil && req.Group == nil {
+		return fmt.Errorf("the checkpoint is member %s of pod group capture %s, and restores only with its group",
+			manifest.PodGroup.MemberID, manifest.PodGroup.CaptureUID)
+	}
 	return nil
 }
 

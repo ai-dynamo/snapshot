@@ -236,6 +236,23 @@ func TestGroupRestoreFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
 	}
 }
 
+func TestRestoreRefusesAPodGroupMembersArtifactOnItsOwn(t *testing.T) {
+	base := writeGroupArtifact(t, capturedAs("member-0", "member-0", "member-1"))
+	mounter := stoppingMounter{stop: func() error {
+		t.Error("a refused restore mounted into its placeholder")
+		return errors.New("refused")
+	}}
+	req := RestoreRequest{
+		BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+		TargetPodIP: "10.0.0.1", WithoutProxy: true, SkipCompatCheck: true,
+	}
+	_, err := Restore(groupTestContext(t), &restoreFakeRuntime{}, testr.New(t), req, mounter)
+
+	assert.Equal(t, StepValidateManifest, StepOf(err), "%v", err)
+	require.ErrorContains(t, err,
+		"the checkpoint is member member-0 of pod group capture capture-1, and restores only with its group")
+}
+
 func TestGroupCheckpointThatPanicsFailsTheAttempt(t *testing.T) {
 	member, peer := joinMembers(t)
 	peerEnded := runPeer(t, peer, group.Admission{PodIP: netip.MustParseAddr("10.0.0.2")}, group.NetFreeze)
