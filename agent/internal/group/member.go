@@ -98,12 +98,19 @@ func (m *Member) Admit(ctx context.Context, own Admission) error {
 		return fmt.Errorf("publish the admission: %w", err)
 	}
 	meta := m.session.Meta()
+	// The session ends at the latest DeadlineSlack past its deadline, so a wait
+	// that long returns with how the session ended, rather than racing the
+	// coordinator's DeadlineExceeded.
+	wait := max(time.Until(meta.Deadline)+coordinator.DeadlineSlack, time.Second)
 	admissions := make([]Admission, len(meta.Members))
 	g, gctx := errgroup.WithContext(ctx)
+	// With the watch of the session's end and a wait of the member's relay, two
+	// waits at once stay within the four watches that a member's share of the
+	// bucket's consumers allows, as session.MaxConsumersPerMember sizes it.
+	g.SetLimit(2)
 	for rank := range admissions {
 		g.Go(func() error {
-			// The session ends at its deadline, which ends this wait too.
-			value, err := m.agent.Get(gctx, admitKey(rank), max(time.Until(meta.Deadline), time.Second))
+			value, err := m.agent.Get(gctx, admitKey(rank), wait)
 			if err != nil {
 				return fmt.Errorf("read the admission of rank %d: %w", rank, err)
 			}
