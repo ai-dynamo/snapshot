@@ -69,6 +69,19 @@ func TestPodGroupAttemptPassesRestoreReasons(t *testing.T) {
 	}
 }
 
+func TestPodGroupAttemptCancelsOnlyMembersWithoutWork(t *testing.T) {
+	// A restore-shaped view: a member whose Pod is pinned has work.
+	pinned := podGroupMemberView{id: "a", rank: 0, hasWork: true}
+	unpinned := podGroupMemberView{id: "b", rank: 1}
+	attempt := newPodGroupAttempt(&podGroupSnapshotKind, 600, podGroupAdmission{}, true, false,
+		[]podGroupMemberView{pinned, unpinned})
+
+	assert.Nil(t, attempt.memberCause(&pinned))
+	cause := attempt.memberCause(&unpinned)
+	require.NotNil(t, cause)
+	assert.Equal(t, snapshotv1alpha1.PodGroupReasonCancelled, cause.reason)
+}
+
 func TestPodGroupAttemptAdmittedTakesTheFailure(t *testing.T) {
 	members := []podGroupMemberView{failedView("a", 0, false, "Own"), failedView("b", 1, false, "Own")}
 
