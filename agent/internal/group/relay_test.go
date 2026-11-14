@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -32,8 +33,8 @@ func TestRelaysRunARoundThroughTheSession(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, relay)
 	leader, follower := openRelay(t, members[0]), openRelay(t, members[2])
-	assert.Equal(t, []string{"--rank", "2", "--relay-ranks", "0,2", "--round-timeout-seconds", "600"},
-		follower.args[:6])
+	deadline := strconv.FormatInt(members[2].session.Meta().Deadline.Unix(), 10)
+	assert.Equal(t, []string{"--rank", "2", "--relay-ranks", "0,2", "--deadline", deadline}, follower.args)
 
 	write(t, follower.conn, map[string]any{"op": "get", "id": 1, "key": "inspect.1.cmd", "wait_ms": 60_000})
 	assert.Equal(t, answer{"id": uint64(1), "ok": true}, call(t, leader.conn,
