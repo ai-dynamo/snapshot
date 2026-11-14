@@ -20,6 +20,7 @@ use cudarc::driver::sys::{
     CUmemLocationType, CUmulticastObjectProp,
 };
 use cuinterpose_protocol::{AllocationReference, FabricHandle, FabricReplacement, Record};
+use std::collections::BTreeMap;
 use std::sync::MutexGuard;
 
 pub(crate) const FABRIC: CUmemAllocationHandleType =
@@ -84,13 +85,15 @@ pub(crate) fn export(memblock: &mut Memblock) -> Result<FabricHandle> {
     Ok(handle)
 }
 
-/// Import a fabric handle. A handle that this process already exported or imported
-/// returns another virtual handle for its memblock. Any other handle is imported from the
-/// driver and recorded under `importer_reference`.
+/// Import a fabric handle. A handle that a restore replaced stands for its newest
+/// replacement. A handle that this process already exported or imported returns another
+/// virtual handle for its memblock. Any other handle is imported from the driver and
+/// recorded under `importer_reference`.
 pub(crate) fn import(
     mut state: MutexGuard<'static, ProcessState>,
     handle: FabricHandle,
 ) -> Result<(MutexGuard<'static, ProcessState>, u64)> {
+    let handle = state.current_fabric_handle(handle);
     if let Some(virtual_handle) = state.import_known_fabric(handle, None)? {
         return Ok((state, virtual_handle));
     }
@@ -190,6 +193,29 @@ impl ProcessState {
             .handle_entries += 1;
         Ok(Some(virtual_handle))
     }
+
+    /// Keep the replacements that a restore step received or returned. A handle that a
+    /// later restore replaces again maps from every earlier handle to the newest one.
+    pub(crate) fn record_fabric_replacements(&mut self, replacements: &[FabricReplacement]) {
+        let replacements: BTreeMap<_, _> = replacements
+            .iter()
+            .map(|replacement| (replacement.old, replacement.new))
+            .collect();
+        for new in self.fabric_replacements.values_mut() {
+            if let Some(newer) = replacements.get(new) {
+                *new = *newer;
+            }
+        }
+        self.fabric_replacements.extend(replacements);
+    }
+
+    /// The newest replacement of `handle`, or `handle` itself if no restore replaced it.
+    fn current_fabric_handle(&self, handle: FabricHandle) -> FabricHandle {
+        self.fabric_replacements
+            .get(&handle)
+            .copied()
+            .unwrap_or(handle)
+    }
 }
 
 /// Name the handle of every memblock that this process exported or imported, which is
@@ -223,6 +249,7 @@ pub(crate) fn replacement(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{LazyLock, Mutex};
 
     fn handle(byte: u8) -> FabricHandle {
         let mut bytes = [byte; 64];
@@ -348,6 +375,50 @@ mod tests {
         let memblock = &state.memblocks[&reference.id];
         assert_eq!(memblock.driver_handle().unwrap(), 0x2000);
         assert_eq!(memblock.refcounts().handle_entries, 1);
+    }
+
+    fn replaced(old: u8, new: u8) -> FabricReplacement {
+        FabricReplacement {
+            old: handle(old),
+            new: handle(new),
+        }
+    }
+
+    #[test]
+    fn replaced_handles_stand_for_their_newest_replacement() {
+        let mut state = ProcessState::new(41);
+        // One restore replaces 1 with 2 and 5 with 6, and a later step passes 1 with 2
+        // again. The next restore replaces 2 with 3.
+        state.record_fabric_replacements(&[replaced(1, 2), replaced(5, 6)]);
+        state.record_fabric_replacements(&[replaced(1, 2)]);
+        state.record_fabric_replacements(&[replaced(2, 3)]);
+        for (old, current) in [(1, 3), (2, 3), (3, 3), (5, 6), (6, 6), (7, 7)] {
+            assert_eq!(
+                state.current_fabric_handle(handle(old)),
+                handle(current),
+                "{old}"
+            );
+        }
+    }
+
+    #[test]
+    fn imports_of_a_replaced_handle_return_the_memblock_of_its_replacement() {
+        // `import` takes the guard of a static registry.
+        static STATE: LazyLock<Mutex<ProcessState>> =
+            LazyLock::new(|| Mutex::new(ProcessState::new(41)));
+        let mut state = STATE.lock().unwrap();
+        let reference = importer_reference(&handle(3));
+        state
+            .adopt_unicast(allocation(reference, Some(handle(3))))
+            .unwrap();
+        state.record_fabric_replacements(&[replaced(1, 2)]);
+        state.record_fabric_replacements(&[replaced(2, 3)]);
+        // Tests have no driver, so the import succeeds only through the known handle 3.
+        let (state, imported) = import(state, handle(1)).unwrap();
+        assert_eq!(
+            state.resolve_virtual_handle(imported).unwrap(),
+            Some(reference.id)
+        );
     }
 
     #[test]

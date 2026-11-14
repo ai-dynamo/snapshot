@@ -16,7 +16,7 @@ use crate::error::{Error, Result};
 use crate::runtime;
 use checkpoint::Phase;
 use cudarc::driver::sys::CUresult::*;
-use cuinterpose_protocol::{AllocationId, AllocationReference, NamespacePid};
+use cuinterpose_protocol::{AllocationId, AllocationReference, FabricHandle, NamespacePid};
 use runtime::export_cache;
 use std::collections::BTreeMap;
 use vmm::{Allocation, Mapping};
@@ -166,6 +166,9 @@ pub struct ProcessState {
     // Set once per checkpoint after every registry is frozen. Importers can outlive
     // the creator's local references, so the carrier owner is separate from identity.
     pub checkpoint_owners: BTreeMap<AllocationId, NamespacePid>,
+    // Every FABRIC handle that a restore replaced, mapped to its newest replacement. An
+    // application can keep a handle's bytes across restores and import them later.
+    fabric_replacements: BTreeMap<FabricHandle, FabricHandle>,
     pub arena: Option<host_carrier::Arena>,
     pub unlocked_driver_calls: usize,
     next_virtual_allocation_handle: u64,
@@ -187,6 +190,7 @@ impl ProcessState {
             next_virtual_allocation_handle: 1,
             phase: Phase::Active,
             checkpoint_owners: BTreeMap::new(),
+            fabric_replacements: BTreeMap::new(),
             arena: None,
             unlocked_driver_calls: 0,
         }

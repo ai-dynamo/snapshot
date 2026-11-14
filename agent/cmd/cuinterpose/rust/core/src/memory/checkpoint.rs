@@ -334,6 +334,18 @@ impl ProcessState {
                 Reply::Completed
             }
         };
+        // The process keeps the replacements that a step receives or returns for the
+        // application's later imports.
+        if let Operation::RestoreUnicast { replacements }
+        | Operation::RestoreMulticastImporters { replacements } = operation
+        {
+            self.record_fabric_replacements(replacements);
+        }
+        if let Reply::Loaded { replacements, .. } | Reply::MulticastRecreated { replacements } =
+            &reply
+        {
+            self.record_fabric_replacements(replacements);
+        }
         self.phase = next_phase;
         Ok(reply)
     }
