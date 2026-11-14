@@ -10,8 +10,8 @@ use cuinterpose_protocol::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Sharing uses exactly one exportable handle type: POSIX within a Pod or FABRIC across
-/// Pods.
+/// Sharing uses exactly one exportable handle type, POSIX or FABRIC. Only FABRIC sharing
+/// can span Pods.
 const EXPORTS: [u64; 2] = [
     CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0 as u64,
     CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_FABRIC.0 as u64,
