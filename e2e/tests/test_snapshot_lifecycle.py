@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -890,9 +891,237 @@ def test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot(
         assert "RestoreIncompatible" not in restore_event_reasons(
             config.namespace, run.restore_pod
         )
+        # With no retries the restore fails as it always has, and still says
+        # where.
+        assert_retry_status(
+            k8s.read_pod(config.namespace, run.restore_pod),
+            attempt=1,
+            retry_limit=0,
+        )
+        assert "RestoreAttemptFailed" not in restore_event_reasons(
+            config.namespace, run.restore_pod
+        )
     except Exception:
         snap.debug_dump(config, run)
         raise
+
+
+# The agent reads the manifest before it changes the container, so an
+# attempt that cannot read it fails with the container untouched.
+MANIFEST = "manifest.yaml"
+# The first retry starts 30 seconds after the failure, so the test repairs the
+# manifest before it. The limit leaves room for a slow repair.
+REPAIRED_RETRY_LIMIT = 3
+
+
+@pytest.mark.snapshot_success
+@pytest.mark.gpu
+def test_restore_retries_in_place_once_the_checkpoint_is_repaired(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    restore_retries_once_the_checkpoint_is_repaired(config, run, gpu=True)
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_success
+def test_cpu_restore_retries_in_place_once_the_checkpoint_is_repaired(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    restore_retries_once_the_checkpoint_is_repaired(config, run, gpu=False)
+
+
+def restore_retries_once_the_checkpoint_is_repaired(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+    *,
+    gpu: bool,
+) -> None:
+    """A failure that left the container untouched, retried in it.
+
+    Each attempt that reads the damaged manifest fails before nsrestore runs,
+    and the first after the repair restores the source in the same container.
+    """
+    try:
+        _, source_node, checkpoint_observations = create_valid_checkpoint(config, run, gpu=gpu)
+        _, content = snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
+        content_uid = content["metadata"]["uid"]
+        snap.corrupt_checkpoint_image(config, source_node, content_uid, MANIFEST)
+
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        k8s.create_pod(
+            retrying_restore_pod(
+                config,
+                run,
+                gpu=gpu,
+                source_node=source_node,
+                retry_limit=REPAIRED_RETRY_LIMIT,
+            )
+        )
+        snap.wait_for_pod_event(config.namespace, run.restore_pod, "RestoreAttemptFailed")
+        snap.repair_checkpoint_image(config, source_node, content_uid, MANIFEST)
+
+        restored_pod = snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "True", "RestoreSucceeded"
+        )
+        snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
+        snap.assert_restored_state(
+            config.namespace,
+            run.restore_pod,
+            source_token=run.source_token,
+            restore_token=run.restore_token,
+            checkpoint_observations=checkpoint_observations,
+            gpu=gpu,
+        )
+
+        failed = restore_event_messages(config.namespace, run.restore_pod, "RestoreAttemptFailed")
+        assert 1 <= len(failed) <= REPAIRED_RETRY_LIMIT, failed
+        for attempt, message in enumerate(failed, start=1):
+            assert re.fullmatch(
+                f"Attempt {attempt} of {REPAIRED_RETRY_LIMIT + 1} for destination {snap.CONTAINER} "
+                r"failed: while reading checkpoint manifest: .+; retrying in place in \S+",
+                message,
+                re.DOTALL,
+            ), failed
+        restarts = k8s.read_pod(config.namespace, run.restore_pod).status.container_statuses[0]
+        assert restarts.restart_count == 0
+        assert_retry_status(
+            restored_pod,
+            attempt=len(failed) + 1,
+            retry_limit=REPAIRED_RETRY_LIMIT,
+            step="reading checkpoint manifest",
+        )
+        reasons = restore_event_reasons(config.namespace, run.restore_pod)
+        assert {"RestoreRequested", "RestoreSucceeded"} <= reasons
+        assert not reasons & {"RestoreRetriesExhausted", "RestoreFailed"}
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_failure
+def test_restore_from_an_unreadable_manifest_ends_once_its_retries_run_out(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    try:
+        _, source_node, _ = create_valid_checkpoint(config, run, gpu=False)
+        _, content = snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
+        snap.corrupt_checkpoint_image(config, source_node, content["metadata"]["uid"], MANIFEST)
+
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        k8s.create_pod(
+            retrying_restore_pod(config, run, gpu=False, source_node=source_node, retry_limit=1)
+        )
+        restored_pod = snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "False", "RestoreFailed"
+        )
+        assert "restore used all 2 attempts" in snap.pod_condition(
+            restored_pod, snap.RESTORED_CONDITION
+        ).message
+
+        assert_restore_events(
+            config.namespace,
+            run.restore_pod,
+            {"RestoreAttemptFailed", "RestoreRetriesExhausted", "RestoreFailed"},
+        )
+        failed = restore_event_messages(config.namespace, run.restore_pod, "RestoreAttemptFailed")
+        assert len(failed) == 2, failed
+        assert failed[0].startswith(f"Attempt 1 of 2 for destination {snap.CONTAINER} failed: ")
+        assert failed[0].endswith("; retrying in place in 30s")
+        assert failed[1].startswith(f"Attempt 2 of 2 for destination {snap.CONTAINER} failed: ")
+        assert failed[1].endswith("; no retries left")
+        assert_retry_status(restored_pod, attempt=2, retry_limit=1, step="reading checkpoint manifest")
+
+        # Running out of retries is still a failure of the pod, not of the
+        # capture.
+        pod_snapshot, content = snap.wait_for_snapshot_ready(
+            config.namespace, run.snapshot_name, timeout=60
+        )
+        assert snap.condition(pod_snapshot, "Ready")["status"] == "True"
+        assert snap.condition(content, "Ready")["status"] == "True"
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_failure
+def test_restore_from_a_damaged_checkpoint_ends_on_the_attempt_that_changed_the_container(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    """CRIU reads the damaged inventory after the rootfs diff, so the attempt
+    changed the container, and a retry limit does not retry it."""
+    try:
+        _, source_node, _ = create_valid_checkpoint(config, run, gpu=False)
+        _, content = snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
+        snap.corrupt_checkpoint_image(config, source_node, content["metadata"]["uid"])
+
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        k8s.create_pod(
+            retrying_restore_pod(config, run, gpu=False, source_node=source_node, retry_limit=2)
+        )
+        restored_pod = snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "False", "RestoreFailed"
+        )
+
+        assert_restore_events(
+            config.namespace,
+            run.restore_pod,
+            {"RestoreAttemptFailed", "RestoreFailed"},
+        )
+        failed = restore_event_messages(config.namespace, run.restore_pod, "RestoreAttemptFailed")
+        assert len(failed) == 1, failed
+        assert failed[0].startswith(f"Attempt 1 of 3 for destination {snap.CONTAINER} failed: ")
+        assert failed[0].endswith("; not retried: another attempt needs a new container")
+        assert "RestoreRetriesExhausted" not in restore_event_reasons(
+            config.namespace, run.restore_pod
+        )
+        assert_retry_status(restored_pod, attempt=1, retry_limit=2)
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+def retrying_restore_pod(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+    *,
+    gpu: bool,
+    source_node: str,
+    retry_limit: int,
+) -> dict[str, Any]:
+    pod = snap.restore_pod(config=config, run=run, gpu=gpu, source_node=source_node)
+    pod["metadata"]["annotations"][snap.RESTORE_RETRY_LIMIT_ANNOTATION] = str(retry_limit)
+    return pod
+
+
+def assert_retry_status(
+    pod: client.V1Pod,
+    *,
+    attempt: int,
+    retry_limit: int,
+    step: str = "restoring with CRIU",
+) -> None:
+    """The damaged file is the restore's only failure, and nothing reports the
+    snapshot unusable, since only PageBroker can."""
+    status = snap.restore_retry_status(pod)
+    assert set(status) == {snap.CONTAINER}, status
+    entry = status[snap.CONTAINER]
+    assert entry["attempt"] == attempt, status
+    assert entry["retryLimit"] == retry_limit, status
+    assert entry["lastFailure"]["step"] == step, status
+    assert entry["lastFailure"]["cause"], status
+    assert "snapshotUnusable" not in entry["lastFailure"], status
 
 
 # A checkpoint captured with more memory than the target offers is the cheapest
@@ -1535,6 +1764,18 @@ def restore_event_reasons(namespace: str, pod_name: str) -> set[str]:
         for event in events
         if event.involved_object and event.involved_object.name == pod_name
     }
+
+
+def restore_event_messages(namespace: str, pod_name: str, reason: str) -> list[str]:
+    events = [
+        event
+        for event in k8s.list_events(namespace)
+        if event.involved_object
+        and event.involved_object.name == pod_name
+        and event.reason == reason
+    ]
+    events.sort(key=lambda event: event.metadata.creation_timestamp)
+    return [event.message for event in events]
 
 
 def restore_event_count(namespace: str, pod_name: str, reason: str) -> int:
