@@ -322,7 +322,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		// Every check above only read the artifact and the placeholder, so a
 		// refusal leaves the placeholder as Snapshot found it.
 		admitStart := time.Now()
-		if err := admitRestore(ctx, req.Group, req.TargetPodIP, manifest.PodGroup); err != nil {
+		if err := admitRestore(ctx, req.Group, req.TargetPodIP, manifest.PodGroup, func() error {
+			return checkKeptConnections(req.Group, manifest, req.TargetPodIP, snap.PlaceholderPID)
+		}); err != nil {
 			return RestoreResult{}, failStep(StepAdmitGroup, err)
 		}
 		groupDuration = time.Since(admitStart)

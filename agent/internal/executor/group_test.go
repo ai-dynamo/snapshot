@@ -201,6 +201,24 @@ func TestGroupRestoreFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
 			wantReason:  group.ReasonRefused,
 		},
 		{
+			name:        "the restore moves both members to one IP",
+			captured:    capturedAs("member-0", "member-0", "member-1"),
+			targetPodIP: "10.0.0.2",
+			wantStep:    StepAdmitGroup,
+			wantReason:  group.ReasonRefused,
+		},
+		{
+			name: "a member's Pod IP at capture is not IPv4",
+			captured: func() *types.PodGroupManifest {
+				captured := capturedAs("member-0", "member-0", "member-1")
+				captured.Members[1].PodIP = netip.MustParseAddr("fd00::2")
+				return captured
+			}(),
+			targetPodIP: "10.0.0.1",
+			wantStep:    StepAdmitGroup,
+			wantReason:  group.ReasonRefused,
+		},
+		{
 			name:          "the first step after the commit fails",
 			captured:      capturedAs("member-0", "member-0", "member-1"),
 			targetPodIP:   "10.0.0.1",
@@ -400,7 +418,7 @@ func stubCapture(t *testing.T, capture func(*types.CheckpointManifest) (*checkpo
 
 // writeGroupArtifact writes the artifact of content "content" and container
 // "main" under a new base path, which it returns, as a member of the group
-// capture captured.
+// capture captured, with the Pod IP that captured lists for that member.
 func writeGroupArtifact(t *testing.T, captured *types.PodGroupManifest) string {
 	t.Helper()
 	base := t.TempDir()
@@ -410,6 +428,7 @@ func writeGroupArtifact(t *testing.T, captured *types.PodGroupManifest) string {
 	manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
 		types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
 	manifest.PodGroup = captured
+	manifest.K8s.PodIP = captured.Members[captured.Rank()].PodIP.String()
 	require.NoError(t, types.WriteManifest(directory, manifest))
 	return base
 }

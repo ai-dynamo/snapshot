@@ -143,6 +143,20 @@ func Lift(hostPID int, attempt string) error {
 	return nil
 }
 
+// Check returns an error when no hold can be installed in the network
+// namespace of the process hostPID: when the kernel has no nf_tables, or the
+// agent may not use it there. It only lists the namespace's tables.
+func Check(hostPID int) error {
+	err := inNetworkNamespace(hostPID, func(conn *nftables.Conn) error {
+		_, err := conn.ListTablesOfFamily(nftables.TableFamilyIPv4)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("check that the Pod's network namespace can hold connections: %w", err)
+	}
+	return nil
+}
+
 // removeTable queues the removal of attempt's table, whether or not it is
 // there: adding a table that exists changes nothing, and the kernel refuses to
 // delete one that does not.
