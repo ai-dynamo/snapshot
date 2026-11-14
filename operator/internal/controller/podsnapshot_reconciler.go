@@ -317,7 +317,11 @@ func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap 
 			return sr.failPodSnapshot(ctx, snap, "StalePodReference", err)
 		}
 		if errors.Is(err, errPodSnapshotSourcePodEnded) {
-			return sr.failPodSnapshot(ctx, snap, podSnapshotReasonSourcePodGone, err)
+			reason := podSnapshotReasonSourcePodGone
+			if pod.Status.Phase == corev1.PodSucceeded {
+				reason = snapshotv1alpha1.ReasonSourceCompletedWithoutCapture
+			}
+			return sr.failPodSnapshot(ctx, snap, reason, err)
 		}
 		return ctrl.Result{}, fmt.Errorf("validate source pod: %w", err)
 	}
