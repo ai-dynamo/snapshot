@@ -85,6 +85,22 @@ func TestFailEndsTheAttemptForEveryMember(t *testing.T) {
 	}
 }
 
+func TestFailAfterAnAdmittedWaitThatEndedEarlyCountsAsCommitted(t *testing.T) {
+	members := joinAll(t, 2)
+	// Member 0 arrives, then stops waiting before member 1 arrives.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.ErrorIs(t, members[0].Barrier(ctx, Admitted), context.DeadlineExceeded)
+
+	// The arrival stays recorded, so member 1 passes the barrier and starts.
+	require.NoError(t, members[1].Barrier(within(t), Admitted))
+	waiting := make(chan error, 1)
+	go func() { waiting <- members[1].Barrier(within(t), Release) }()
+
+	require.NoError(t, members[0].Fail(within(t)))
+	require.ErrorIs(t, <-waiting, &session.AbortError{Reason: session.ReasonMemberFailed})
+}
+
 // joinAll starts a coordinator with the session of one attempt of n members,
 // and joins each of them.
 func joinAll(t *testing.T, n int) []*Member {

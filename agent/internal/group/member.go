@@ -62,7 +62,10 @@ type Member struct {
 	id      string
 	// admissions holds every member's admission, by rank, once Admit returns.
 	admissions []Admission
-	// committed is set once the Admitted barrier has released.
+	// committed is set once the member calls the Admitted barrier, after which
+	// the attempt may have committed: an arrival that was recorded stays
+	// recorded even when the call fails, and the other members may then pass
+	// the barrier.
 	committed atomic.Bool
 }
 
@@ -146,18 +149,19 @@ func (m *Member) PeerIPs(captured []netip.Addr) (map[netip.Addr]netip.Addr, erro
 
 // Barrier returns once every member has arrived at the barrier name.
 func (m *Member) Barrier(ctx context.Context, name string) error {
-	if err := m.session.Barrier(ctx, name); err != nil {
-		return fmt.Errorf("barrier %s: %w", name, err)
-	}
 	if name == Admitted {
 		m.committed.Store(true)
+	}
+	if err := m.session.Barrier(ctx, name); err != nil {
+		return fmt.Errorf("barrier %s: %w", name, err)
 	}
 	return nil
 }
 
 // Fail ends the attempt for every member, unless it has ended already, and
-// closes the connection. The reason is ReasonRefused until the attempt has
-// committed, and session.ReasonMemberFailed after.
+// closes the connection. The reason is ReasonRefused until the member calls
+// the Admitted barrier, and session.ReasonMemberFailed after, since the
+// attempt may then have committed.
 func (m *Member) Fail(ctx context.Context) error {
 	reason := ReasonRefused
 	if m.committed.Load() {
