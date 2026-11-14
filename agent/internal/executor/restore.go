@@ -179,7 +179,8 @@ func fetchArtifactMetadata(ctx context.Context, broker pagebroker.Client, artifa
 // The DaemonSet side inspects the placeholder and launches nsrestore,
 // which handles rootfs application, CRIU restore, and CUDA restore inside the namespace.
 //
-// A RestoreCleanupError still carries the result: the restore itself succeeded.
+// A failed attempt returns a *RestoreFailure. A RestoreCleanupError still
+// carries the result: the restore itself succeeded.
 func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest, mounts RestoreMounter) (restored RestoreResult, retErr error) {
 	ctx = logr.NewContext(ctx, log)
 	if mounts == nil {
@@ -198,8 +199,14 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	var cleanupErr error
 	var activeMounts []restoreMount
 	restoreComplete := false
+	// A mount left behind stays in the container, and an abort that failed
+	// may leave the transaction open: another attempt must not run beside it.
+	mountLeft, abortFailed := false, false
 	cleanup := func() {
-		cleanupErr = errors.Join(cleanupErr, cleanupRestoreMounts(ctx, activeMounts, restoreComplete))
+		if err := cleanupRestoreMounts(ctx, activeMounts, restoreComplete); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+			mountLeft = true
+		}
 		activeMounts = nil
 	}
 	defer func() {
@@ -207,35 +214,41 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 			defer gpu.Close()
 		}
 		if usePageBrokerGPU && transactionID != "" && !committed && preparationAttempted {
-			var err error
+			var abortErr, stopErr error
 			if gpu != nil && !gpuRestoreComplete {
-				err = abortRestoreTransaction(ctx, gpu, terminateFailedRestore)
+				abortErr, stopErr = abortRestoreTransaction(ctx, gpu, terminateFailedRestore)
 			} else {
-				err = abortPageBrokerTransaction(broker, transactionID)
+				abortErr = abortPageBrokerTransaction(broker, transactionID)
 			}
-			if err != nil {
+			if abortErr != nil {
 				if retErr != nil {
-					retErr = errors.Join(retErr, fmt.Errorf("abort PageBroker restore: %w", err))
+					abortFailed = true
+					cleanupErr = errors.Join(cleanupErr, fmt.Errorf("abort PageBroker restore: %w", abortErr))
 				} else {
-					cleanupErr = errors.Join(cleanupErr, fmt.Errorf("release PageBroker restore: %w", err))
+					cleanupErr = errors.Join(cleanupErr, fmt.Errorf("release PageBroker restore: %w", abortErr))
 				}
+			}
+			if stopErr != nil {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("terminate failed restore after GPU drain: %w", stopErr))
 			}
 		}
 		cleanup()
 		if !usePageBrokerGPU && transactionID != "" && !committed && preparationAttempted {
 			if err := abortPageBrokerTransaction(broker, transactionID); err != nil {
+				abortFailed = abortFailed || retErr != nil
 				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("abort PageBroker restore %q: %w", transactionID, err))
 			}
 		}
-		if cleanupErr == nil {
+		if cleanupErr != nil {
+			log.Error(cleanupErr, "restore cleanup failed")
+		}
+		if retErr != nil {
+			retErr = newRestoreFailure(retErr, cleanupErr, abortFailed, mountLeft)
 			return
 		}
-		log.Error(cleanupErr, "restore cleanup failed")
-		if retErr == nil {
+		if cleanupErr != nil {
 			retErr = NewRestoreCleanupError(cleanupErr)
-			return
 		}
-		retErr = errors.Join(retErr, cleanupErr)
 	}()
 
 	restoreStart := time.Now()
@@ -267,19 +280,19 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		}
 	}
 	if err := validateRestoreManifest(req, manifest); err != nil {
-		return RestoreResult{}, failStep(StepValidateManifest, err)
+		return RestoreResult{}, failStep(StepValidateManifest, final(err))
 	}
 	if manifest.CuInterpose != nil {
 		// These libraries belong to the checkpointed process. The agent supplies their
 		// files, but an upgraded bundle may differ from the bytes loaded at capture.
 		if err := cuda.VerifyCuInterposeLibraryIdentity(nsmount.CuInterposeBundlePath, manifest.CuInterpose); err != nil {
-			return RestoreResult{}, failStep(StepVerifyCuInterpose, err)
+			return RestoreResult{}, failStep(StepVerifyCuInterpose, final(err))
 		}
 	}
 
 	usePageBrokerGPU = manifest.CUDA.CustomStorage
 	if err := validateCustomStorageRestore(req, manifest); err != nil {
-		return RestoreResult{}, failStep(StepValidateManifest, err)
+		return RestoreResult{}, failStep(StepValidateManifest, final(err))
 	}
 
 	snap, gpuDeviceMapDuration, err := inspectRestore(ctx, rt, log, req, manifest)
@@ -342,12 +355,10 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 
 	result, err := execNSRestoreFunc(ctx, log, req, snap, bundleMount, containerCheckpointPath, gpu)
 	if err != nil {
-		if usePageBrokerGPU {
-			// Abort may stop the placeholder before the controller can write its
-			// failure marker. Preserve the one-restore-per-pod contract first.
-			if markerErr := snapshotruntime.WriteControlSentinel(snap.PlaceholderPID, podcontract.RestoreFailedFile, []byte("restore failed\n")); markerErr != nil {
-				log.Error(markerErr, "Failed to write restore-failed sentinel")
-			}
+		if usePageBrokerGPU && containerChanged(err) {
+			// Processes nsrestore left behind stop once the abort drained the GPU
+			// work PageBroker gave them. An untouched container holds nothing of
+			// PageBroker's, so it is kept for another attempt.
 			terminateFailedRestore = func(stopCtx context.Context) error {
 				return rt.TerminateContainer(stopCtx, req.ContainerID)
 			}
@@ -385,7 +396,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		cleanupErr = errors.Join(cleanupErr, result.CleanupError)
 	}
 	if err := validateRestoredProcessFunc(snap.TargetRoot, result.RestoredPID, log); err != nil {
-		return RestoreResult{}, failStep(StepValidateRestored, err)
+		return RestoreResult{}, &changedContainerError{err: failStep(StepValidateRestored, err)}
 	}
 
 	// Restored processes still need these paths for lazy core loading and
@@ -561,8 +572,8 @@ func checkRestoreProxy(pid int) error {
 		return fmt.Errorf("read the command of the container's PID 1: %w", err)
 	}
 	if cmdline != podcontract.RestoreProxyPath {
-		return fmt.Errorf("the container's PID 1 is %q, not %s: the agent's NRI plugin did not set up this container; check that NRI is enabled in the container runtime",
-			cmdline, podcontract.RestoreProxyPath)
+		return final(fmt.Errorf("the container's PID 1 is %q, not %s: the agent's NRI plugin did not set up this container; check that NRI is enabled in the container runtime",
+			cmdline, podcontract.RestoreProxyPath))
 	}
 	return nil
 }
@@ -806,14 +817,12 @@ func addCustomStorageFiles(ctx context.Context, cmd *exec.Cmd, execution *pagebr
 
 // abortRestoreTransaction keeps failed targets alive until the broker confirms
 // that all imported CUDA mappings and storage transfers have been drained.
-func abortRestoreTransaction(ctx context.Context, gpu *pagebroker.CustomStorageExecution, terminate func(context.Context) error) error {
-	abortErr := gpu.Abort(ctx)
+func abortRestoreTransaction(ctx context.Context, gpu *pagebroker.CustomStorageExecution, terminate func(context.Context) error) (abortErr, stopErr error) {
+	abortErr = gpu.Abort(ctx)
 	if terminate != nil {
 		stopCtx, stop := context.WithTimeout(context.Background(), failedRestoreTerminationTimeout)
 		defer stop()
-		if err := terminate(stopCtx); err != nil {
-			return errors.Join(abortErr, fmt.Errorf("terminate failed restore after GPU drain: %w", err))
-		}
+		stopErr = terminate(stopCtx)
 	}
-	return abortErr
+	return abortErr, stopErr
 }
