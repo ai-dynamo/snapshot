@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -121,6 +122,50 @@ func TestRelayThatGoesAwayLeavesTheSession(t *testing.T) {
 
 	require.NoError(t, r.close())
 	assert.NoError(t, members[0].session.Err(), "the session outlives its relay")
+}
+
+func TestRelayThatStopsReadingDoesNotHoldTheAgent(t *testing.T) {
+	original := relayAnswerTimeout
+	t.Cleanup(func() { relayAnswerTimeout = original })
+	relayAnswerTimeout = 100 * time.Millisecond
+
+	for _, tc := range []struct {
+		name string
+		end  func(t *testing.T, peer *Member, conn net.Conn)
+	}{
+		{"the session ends", func(t *testing.T, peer *Member, _ net.Conn) {
+			require.NoError(t, peer.Fail(within(t)))
+		}},
+		{"the relay breaks the protocol", func(t *testing.T, _ *Member, conn net.Conn) {
+			_, err := conn.Write(binary.LittleEndian.AppendUint32(nil, maxRelayBody+1))
+			require.NoError(t, err)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			members := joinAll(t, 2)
+			r := openRelay(t, members[0])
+			// The relay starts to read an answer far larger than its socket's
+			// buffer, and then reads no more.
+			require.NoError(t, members[1].session.CuInterpose().Insert(within(t), "records", make([]byte, 8<<20)))
+			write(t, r.conn, map[string]any{"op": "get", "id": 1, "key": "records"})
+			var header [4]byte
+			_, err := io.ReadFull(r.conn, header[:])
+			require.NoError(t, err)
+
+			tc.end(t, members[1], r.conn)
+
+			served := make(chan struct{})
+			go func() {
+				_ = r.close()
+				close(served)
+			}()
+			select {
+			case <-served:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the agent still writes to a relay that stopped reading")
+			}
+		})
+	}
 }
 
 func TestRelayFrameWithAnUnknownFieldEndsTheService(t *testing.T) {
