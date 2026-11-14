@@ -165,6 +165,42 @@ func TestGroupRestoreFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
 	}
 }
 
+func TestGroupCheckpointThatPanicsFailsTheAttempt(t *testing.T) {
+	member, peer := joinMembers(t)
+	peerEnded := runPeer(t, peer, group.Admission{PodIP: netip.MustParseAddr("10.0.0.2")}, group.NetFreeze)
+	socket := serveCheckpointStaging(t, t.TempDir())
+	stubCapture(t, func(*types.CheckpointManifest) (*checkpointPhaseTimings, error) {
+		panic("the dump panicked")
+	})
+	cfg := &types.AgentConfig{
+		Storage:    types.StorageSpec{BasePath: t.TempDir()},
+		PageBroker: types.PageBrokerSpec{ControlSocketPath: socket},
+	}
+	req := CheckpointRequest{ContentUID: "content-uid", ContainerName: "main", PodIP: "10.0.0.1", Group: member}
+
+	require.PanicsWithValue(t, "the dump panicked", func() {
+		_, _ = checkpoint(groupTestContext(t), nil, testr.New(t), req, cfg, inspectNothing(t))
+	})
+	require.ErrorIs(t, (<-peerEnded).err, &session.AbortError{Reason: session.ReasonMemberFailed})
+}
+
+func TestGroupRestoreThatPanicsFailsTheAttempt(t *testing.T) {
+	member, peer := joinMembers(t)
+	peerEnded := runPeer(t, peer,
+		group.Admission{PodIP: netip.MustParseAddr("10.0.0.2"), CaptureID: "capture-1"}, group.Release)
+	base := writeGroupArtifact(t, &types.GroupManifest{CaptureID: "capture-1", Member: "member-0", Rank: 0})
+	mounter := stoppingMounter{stop: func() error { panic("the bundle mount panicked") }}
+	req := RestoreRequest{
+		BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+		TargetPodIP: "10.0.0.1", WithoutProxy: true, SkipCompatCheck: true, Group: member,
+	}
+
+	require.PanicsWithValue(t, "the bundle mount panicked", func() {
+		_, _ = Restore(groupTestContext(t), &restoreFakeRuntime{}, testr.New(t), req, mounter)
+	})
+	require.ErrorIs(t, (<-peerEnded).err, &session.AbortError{Reason: session.ReasonMemberFailed})
+}
+
 // joinMembers starts a coordinator with the session of one attempt of two
 // members, member-0 and member-1, and joins both.
 func joinMembers(t *testing.T) (*group.Member, *group.Member) {

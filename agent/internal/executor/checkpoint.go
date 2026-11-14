@@ -194,6 +194,12 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	log.Info("=== Starting checkpoint operation ===")
 	if req.Group != nil {
 		defer func() {
+			// A panic fails the attempt too, or the other members would wait
+			// for this one until the deadline.
+			if r := recover(); r != nil {
+				failGroup(ctx, log, req.Group)
+				panic(r)
+			}
 			if retErr != nil {
 				failGroup(ctx, log, req.Group)
 			}
