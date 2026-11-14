@@ -203,14 +203,19 @@ func TestDerivePodGroupSnapshotMemberTable(t *testing.T) {
 			}(),
 		},
 		{
-			name:     "deletion before any member started cancels the member",
+			name:     "deletion before any member started cancels a member with no work",
+			member:   podGroupMemberObservation{nodeName: "node-a"},
+			deleting: true,
+			want: snapshotv1alpha1.PodGroupSnapshotMemberStatus{
+				NodeName: "node-a", Phase: snapshotv1alpha1.CheckpointPhaseFailed,
+				Reason: snapshotv1alpha1.PodGroupReasonCancelled, Message: podGroupCancelledMemberMessage,
+			},
+		},
+		{
+			name:     "deletion before any member started leaves a member with work",
 			member:   podGroupMemberObservation{podSnapshot: pgSnap("a"), nodeName: "node-a"},
 			deleting: true,
-			want: func() snapshotv1alpha1.PodGroupSnapshotMemberStatus {
-				m := pgPinned("a", 0, snapshotv1alpha1.CheckpointPhaseFailed)
-				m.Reason, m.Message = snapshotv1alpha1.PodGroupReasonCancelled, podGroupCancelledMemberMessage
-				return m
-			}(),
+			want:     pgPinned("a", 0, snapshotv1alpha1.CheckpointPhaseAdmitted),
 		},
 		{
 			name:     "deletion after the member started leaves it Checkpointing",
@@ -872,7 +877,7 @@ func TestPodGroupSnapshotReleasable(t *testing.T) {
 		{"running", nil, []snapshotv1alpha1.CheckpointPhase{"Checkpointing", "Admitted"}, false},
 		{"cancelled", []metav1.Condition{failed}, []snapshotv1alpha1.CheckpointPhase{"Failed", "Failed"}, true},
 		{"failed while a member still dumps", []metav1.Condition{failed}, []snapshotv1alpha1.CheckpointPhase{"Failed", "Checkpointing"}, false},
-		{"failed with a member never started", []metav1.Condition{failed}, []snapshotv1alpha1.CheckpointPhase{"Failed", "Admitted"}, true},
+		{"failed while a member has not reported", []metav1.Condition{failed}, []snapshotv1alpha1.CheckpointPhase{"Failed", "Admitted"}, false},
 		{"ready", []metav1.Condition{ready}, []snapshotv1alpha1.CheckpointPhase{"Checkpointed", "Checkpointed"}, true},
 		{"ready withdrawn", []metav1.Condition{withdrawn}, []snapshotv1alpha1.CheckpointPhase{"Checkpointed", "Checkpointed"}, true},
 	} {

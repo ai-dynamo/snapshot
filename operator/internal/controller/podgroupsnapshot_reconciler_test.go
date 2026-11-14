@@ -811,8 +811,11 @@ func TestPodGroupSnapshotReconciler_Deletion(t *testing.T) {
 		return apierrors.IsNotFound(err)
 	}
 
-	t.Run("cancelled before any member starts", func(t *testing.T) {
-		r := setup(t)
+	t.Run("a member with no work is cancelled at once", func(t *testing.T) {
+		// No agent runs, so admission waits and no PodSnapshot exists.
+		r, recorder := makePodGroupReconciler(t, pgGroup("a", "b"), pgSourcePod("a", "node-1"), pgSourcePod("b", "node-1"))
+		reconcileGroup(t, r)
+		require.Empty(t, listMemberPodSnapshots(t, r))
 		var recorded *metav1.Condition
 		r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
 			SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
@@ -822,7 +825,6 @@ func TestPodGroupSnapshotReconciler_Deletion(t *testing.T) {
 			},
 		})
 		deleteGroup(t, r)
-		recorder := r.Recorder.(*record.FakeRecorder)
 		drainEvents(recorder)
 
 		reconcileGroup(t, r)
@@ -831,6 +833,48 @@ func TestPodGroupSnapshotReconciler_Deletion(t *testing.T) {
 		assert.Equal(t, snapshotv1alpha1.PodGroupReasonCancelled, recorded.Reason)
 		assert.True(t, gone(t, r))
 		assert.Equal(t, []string{"Warning Cancelled " + podGroupCancelledMessage}, drainEvents(recorder))
+	})
+
+	t.Run("held until the members with work report", func(t *testing.T) {
+		r := setup(t)
+		deleteGroup(t, r)
+
+		reconcileGroup(t, r)
+
+		assert.False(t, gone(t, r))
+		got := getGroup(t, r)
+		for _, m := range got.Status.Members {
+			assert.Equal(t, snapshotv1alpha1.CheckpointPhaseAdmitted, m.Phase, m.ID)
+		}
+		assert.Len(t, listMemberPodSnapshots(t, r), 2, "no PodSnapshot is removed")
+
+		t.Run("one report is not enough", func(t *testing.T) {
+			cancelled := pgCondition(snapshotv1alpha1.PodSnapshotConditionFailed, "Cancelled")
+			pgReport(t, r, "a", nil, []metav1.Condition{cancelled})
+			reconcileGroup(t, r)
+			assert.False(t, gone(t, r))
+		})
+
+		t.Run("released once every member reports", func(t *testing.T) {
+			cancelled := pgCondition(snapshotv1alpha1.PodSnapshotConditionFailed, "Cancelled")
+			pgReport(t, r, "b", nil, []metav1.Condition{cancelled})
+			reconcileGroup(t, r)
+			assert.True(t, gone(t, r))
+		})
+	})
+
+	t.Run("the deadline ends the wait", func(t *testing.T) {
+		r := setup(t)
+		deleteGroup(t, r)
+		reconcileGroup(t, r)
+		require.False(t, gone(t, r))
+
+		got := getGroup(t, r)
+		got.CreationTimestamp = metav1.NewTime(got.CreationTimestamp.Add(-time.Hour))
+		require.NoError(t, r.Update(context.Background(), got))
+		reconcileGroup(t, r)
+
+		assert.True(t, gone(t, r))
 	})
 
 	t.Run("held while a started member runs", func(t *testing.T) {
@@ -1089,12 +1133,10 @@ func TestPodGroupSnapshotReconciler_ConfirmsADeletion(t *testing.T) {
 			drainEvents(recorder))
 	})
 
-	t.Run("a group no member started is cancelled and released", func(t *testing.T) {
+	t.Run("a group whose members have no work is cancelled and released", func(t *testing.T) {
 		group := deleting()
-		members := func() []client.Object {
-			return pgObjects([]client.Object{group}, pgMemberObjects(group, 0, nil, nil), pgMemberObjects(group, 1, nil, nil))
-		}
-		r, recorder := makeLaggingPodGroupReconciler(t, members(), members())
+		group.Status.Members = nil
+		r, recorder := makeLaggingPodGroupReconciler(t, []client.Object{group}, pgObjects([]client.Object{group}))
 
 		reconcileGroup(t, r)
 
