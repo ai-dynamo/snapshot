@@ -36,6 +36,14 @@ type RestoreOptions struct {
 	CgroupRoot             string
 	LSMProfile             string
 	TargetPodIP            string
+	// PeerIPs maps the IP each other member of the Pod's group had at capture to
+	// its IP now. The restore keeps the connections to them. Empty for a Pod
+	// restored on its own.
+	PeerIPs criu.IPMap
+	// PeerSync, for a group member, is the socket on which the restore tells the
+	// agent that CRIU has restored every process and socket, and waits, before
+	// any of them runs, until the agent lets it continue.
+	PeerSync *os.File
 	// BundleDir is the path where the agent's binary bundle is mounted inside this namespace.
 	BundleDir string
 }
@@ -72,6 +80,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		"cgroup_root", opts.CgroupRoot,
 		"lsm_profile", opts.LSMProfile,
 		"target_pod_ip_present", opts.TargetPodIP != "",
+		"peers", len(opts.PeerIPs),
 	)
 	m, err := types.ReadManifest(opts.CheckpointPath)
 	if err != nil {
@@ -105,7 +114,16 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		}
 	}
 
-	if err := criu.ConfigureInetRemap(m, opts.TargetPodIP, log); err != nil {
+	// Keeping a peer's connections strips their keepalive, which only the
+	// agent turns back on, once every member has restored its sockets.
+	if len(opts.PeerIPs) > 0 && opts.PeerSync == nil {
+		return nil, failStep(StepPrepareCRIURestore, errors.New("peer IPs need the peer sync socket"))
+	}
+	ipMap, err := criu.RestoreIPMap(m, opts.TargetPodIP, opts.PeerIPs)
+	if err != nil {
+		return nil, failStep(StepPrepareCRIURestore, err)
+	}
+	if err := criu.ConfigureInetRemap(m, ipMap, log); err != nil {
 		return nil, failStep(StepPrepareCRIURestore, err)
 	}
 	criuOpts, err := criu.BuildRestoreOpts(m, opts.CgroupRoot, opts.LSMProfile, log)
@@ -247,7 +265,7 @@ func executeRestore(
 			log.Error(err, "failed to unmount securityfs")
 		}
 	}()
-	criuPID, cleanup, prepare, restore, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.BundleDir, unmountSecurityFS, log)
+	criuPID, cleanup, prepare, restore, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.BundleDir, opts.PeerIPs, unmountSecurityFS, opts.postRestore(), log)
 	if err != nil {
 		return nil, 0, nil, failStep(StepRestoreCRIU, err)
 	}
@@ -425,4 +443,13 @@ func within(timeout time.Duration, fn func() error) error {
 	case <-time.After(timeout):
 		return fmt.Errorf("no answer in %s", timeout)
 	}
+}
+
+// postRestore returns what runs at CRIU's post-restore: for a group member, the
+// wait for the agent, and nothing for a Pod restored on its own.
+func (o RestoreOptions) postRestore() func() error {
+	if o.PeerSync == nil {
+		return nil
+	}
+	return awaitPeers(o.PeerSync)
 }
