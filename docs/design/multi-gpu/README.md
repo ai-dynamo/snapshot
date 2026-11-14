@@ -349,7 +349,8 @@ The shim reads the object kind from the driver's private handle layout and refus
 
 During restore, each creator exports a new handle for its recreated backing or multicast object and returns the old and new handles to the coordinator.
 Each importer then imports the new handle that replaces the one it recorded, wherever the creator runs.
-The shim does not translate other handles, so an application must not import a handle that it kept from before the checkpoint.
+Each process keeps every replacement that it receives or exports, and maps a handle replaced in several restores to its newest replacement.
+An import translates its handle through that table first, so a handle that the application kept from before the checkpoint imports the restored memory.
 
 #### Creator and checkpoint holder
 
@@ -774,10 +775,12 @@ The modes run these steps, with `<mode>` set to `inspect`, `prepare`, or `restor
 After the last step, the leader inserts `DONE` as the next command, and every coordinator exits.
 At prepare, each coordinator writes its own Pod's `cuinterpose.state` when the mode ends.
 
-The deadline bounds the first round, because at restore each coordinator starts only after its own Pod's CRIU and CUDA restores.
-`--round-timeout-seconds` bounds every later round.
-A coordinator that fails ends the attempt for every member through the session, with reason `Refused` when the leader refuses the topology and `MemberFailed` otherwise.
-Every other coordinator then exits with an error, and each agent handles the failure as for a single Pod.
+The attempt's deadline bounds every round.
+At restore each coordinator starts only after its own Pod's CRIU and CUDA restores, and the per-process timeouts of a step already bound each coordinator's own work, so the leader waits for replies until the deadline.
+A leader that reaches the deadline with replies missing exits without failing the session, which then ends with `DeadlineExceeded`.
+A coordinator that fails ends the attempt for every member through the session.
+The reason follows the commit point: `Refused` in `--inspect`, which runs before the attempt commits, and `MemberFailed` in `--prepare` and `--restore`, which run after it.
+Every other coordinator then exits with an error, without failing the session again, and each agent handles the failure as for a single Pod.
 
 A Pod alone runs the same steps as the leader of a group of one, without a session.
 The agent side, which creates the socket and serves the session for each coordinator, comes with the agent's group support.
@@ -859,8 +862,7 @@ The agent invokes the coordinator with an explicit participant list:
 cuinterpose-coordinator (--inspect | --prepare | --restore)
     --socket-dir DIR --process PID [--process PID ...]
     [--checkpoint-dir DIR]
-    [--session-fd FD --rank RANK --relay-ranks RANK,...
-     --round-timeout-seconds SECONDS --deadline UNIX_SECONDS]
+    [--session-fd FD --rank RANK --relay-ranks RANK,... --deadline UNIX_SECONDS]
 ```
 
 | Argument | Contract |
@@ -874,8 +876,7 @@ cuinterpose-coordinator (--inspect | --prepare | --restore)
 | `--session-fd FD` | The agent's socket for the [group's session](#groups-of-pods). Without it, the Pod runs alone. With it, every argument below is required. |
 | `--rank RANK` | This Pod's rank in the group. |
 | `--relay-ranks RANK,...` | Every rank that runs a coordinator. It must contain `--rank`. The lowest leads the group. |
-| `--round-timeout-seconds SECONDS` | Bounds the leader's wait for the replies of each round after the first. |
-| `--deadline UNIX_SECONDS` | The attempt's deadline. It bounds the first round and every wait of the other coordinators. |
+| `--deadline UNIX_SECONDS` | The attempt's deadline. It bounds every round and every wait of the other coordinators. |
 
 Select exactly one operation.
 The [capture](#capture) and [restore](#restore) sequences define when the agent invokes each operation relative to the CUDA Driver and CRIU.
