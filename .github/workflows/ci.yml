@@ -121,6 +121,7 @@ jobs:
             e2e/tests/test_benchmark_outcomes.py \
             e2e/tests/test_benchmark_history.py \
             e2e/tests/test_benchmark_preview.py \
+            e2e/tests/test_ci_build_image.py \
             e2e/tests/test_framework_manifests.py \
             e2e/tests/test_inference.py \
             e2e/tests/test_k8s.py \

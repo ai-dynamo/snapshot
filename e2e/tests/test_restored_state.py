@@ -15,20 +15,22 @@ from snapshot_e2e import lifecycle
 
 
 @pytest.mark.parametrize(
-    "failure",
+    ("failure", "progress_after"),
     [
-        None,
-        "pid-1-not-proxy",
-        "restored-pid-not-workload",
-        "file-token",
-        "cpu-token",
-        "gpu-token",
-        "too-few-observations",
-        "no-progress",
+        (None, 1),
+        (None, 5),
+        (None, 12),
+        ("pid-1-not-proxy", 1),
+        ("restored-pid-not-workload", 1),
+        ("file-token", 1),
+        ("cpu-token", 1),
+        ("gpu-token", 1),
+        ("too-few-observations", 1),
+        ("no-progress", 1),
     ],
 )
 def test_restored_state_requires_every_remote_assertion_to_pass(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str | None
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str | None, progress_after: int
 ) -> None:
     files = {}
     for name in ("RESTORE_DONE", "FILE_TOKEN", "OBSERVATIONS"):
@@ -53,6 +55,7 @@ def test_restored_state_requires_every_remote_assertion_to_pass(
     files["OBSERVATIONS"].write_text(observation)
 
     expect_failure = failure is not None
+    sleeps = tmp_path / "sleeps"
 
     def exec_command(namespace: str, pod: str, command: str, *, container: str | None = None) -> str:
         assert (namespace, pod, container) == ("test-ns", "restored-pod", "main")
@@ -64,7 +67,17 @@ def test_restored_state_requires_every_remote_assertion_to_pass(
             else f"printf '%s' {shlex.quote(observation)} >> {shlex.quote(str(files['OBSERVATIONS']))}"
         )
         result = subprocess.run(
-            ["bash", "-c", f"sleep() {{ {progress}; }}\n{command}"],
+            [
+                "bash",
+                "-c",
+                f"""sleep() {{
+                  printf '%s\\n' "$1" >> {shlex.quote(str(sleeps))}
+                  if test "$(wc -l < {shlex.quote(str(sleeps))})" -ge {progress_after}; then
+                    {progress}
+                  fi
+                }}
+                {command}""",
+            ],
             capture_output=True,
             text=True,
             timeout=5,
@@ -93,6 +106,9 @@ def test_restored_state_requires_every_remote_assertion_to_pass(
     else:
         output = lifecycle.assert_restored_state("test-ns", "restored-pod", **kwargs)
         assert "source_token=source-state restore_token=restore-state" in output
+        assert sleeps.read_text().splitlines() == ["1"] * progress_after
+    if failure == "no-progress":
+        assert sleeps.read_text().splitlines() == ["1"] * 12
 
 
 @pytest.mark.parametrize(
