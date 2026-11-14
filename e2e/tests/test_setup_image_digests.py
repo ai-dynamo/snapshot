@@ -3,7 +3,10 @@
 
 """Cluster-free checks that an install runs the images a candidate recorded."""
 
+import hashlib
+import io
 import json
+import urllib.error
 
 import pytest
 from kubernetes import client
@@ -154,3 +157,123 @@ def test_readiness_fails_when_a_stale_image_runs(monkeypatch):
     with pytest.raises(setup.SetupError, match="snapshot-agent-a/agent runs agent"):
         setup.setup_snapshot_readiness(args, setup.setup_context(args))
     assert selectors == [f"{setup.SNAPSHOT_LABEL},app.kubernetes.io/instance=snapshot"]
+
+
+MANIFEST = "application/vnd.oci.image.manifest.v1+json"
+INDEX = "application/vnd.oci.image.index.v1+json"
+
+
+@pytest.fixture
+def registry(monkeypatch):
+    blobs = {}
+    calls = []
+
+    def register(body):
+        raw = json.dumps(body).encode()
+        digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+        blobs[digest] = raw
+        return digest
+
+    def fetch(request, timeout):
+        url = request if isinstance(request, str) else request.full_url
+        calls.append(url)
+        if "/token?" in url:
+            return io.BytesIO(b'{"token":"test-token"}')
+        digest = url.rsplit("/", 1)[-1]
+        return io.BytesIO(blobs[digest])
+
+    monkeypatch.setattr(setup.urllib.request, "urlopen", fetch)
+    monkeypatch.setattr(setup.k8s, "read_node", lambda name: client.V1Node(
+        metadata=client.V1ObjectMeta(labels={"kubernetes.io/os": "linux", "kubernetes.io/arch": "amd64"})
+    ))
+    return register, blobs, calls
+
+
+def descriptor(digest, arch="amd64", **extra):
+    return {"mediaType": MANIFEST, "digest": digest,
+            "platform": {"os": "linux", "architecture": arch}, **extra}
+
+
+def verify_pagebroker(monkeypatch, recorded, actual):
+    pods = running(pagebroker=actual)
+    for item in pods:
+        item.spec = client.V1PodSpec(containers=[], node_name="worker")
+    monkeypatch.setattr(client.CoreV1Api, "list_namespaced_pod", lambda *args, **kwargs: client.V1PodList(items=pods))
+    setup.verify_running_images(namespace="test", release="snapshot", expected={**EXPECTED, "pagebroker": recorded})
+
+
+def test_different_provenance_indexes_with_the_same_platform_image_pass(monkeypatch, registry):
+    register, _, calls = registry
+    image = register({"mediaType": MANIFEST, "layers": [{"digest": AGENT}]})
+    # Even an attestation claiming the node's platform is not executable content.
+    attestation = descriptor(OPERATOR, annotations={"vnd.docker.reference.type": "attestation-manifest"})
+    old = register({"mediaType": INDEX, "manifests": [descriptor(image), attestation]})
+    new = register({"mediaType": INDEX, "manifests": [descriptor(image), {**attestation, "digest": PAGEBROKER}, descriptor(AGENT, "arm64")]})
+    verify_pagebroker(monkeypatch, new, old)
+    assert len([url for url in calls if "/token?" in url]) == 1
+    assert len([url for url in calls if url.endswith(image)]) == 1
+    assert not any(url.endswith(OPERATOR) or url.endswith(AGENT) for url in calls)
+
+
+def test_different_runnable_content_still_fails(monkeypatch, registry):
+    register, _, _ = registry
+    first = register({"mediaType": MANIFEST, "layers": [{"digest": OPERATOR}]})
+    second = register({"mediaType": MANIFEST, "layers": [{"digest": AGENT}]})
+    old = register({"mediaType": INDEX, "manifests": [descriptor(first)]})
+    new = register({"mediaType": INDEX, "manifests": [descriptor(second)]})
+    with pytest.raises(setup.SetupError, match="runs pagebroker"):
+        verify_pagebroker(monkeypatch, new, old)
+
+
+@pytest.mark.parametrize("entries", [[], [descriptor(AGENT, "arm64")], [descriptor(AGENT), descriptor(PAGEBROKER)], "invalid"])
+def test_missing_ambiguous_or_malformed_platforms_fail(monkeypatch, registry, entries):
+    register, _, _ = registry
+    index = register({"mediaType": INDEX, "manifests": entries})
+    with pytest.raises(setup.SetupError, match="could not verify platform image"):
+        verify_pagebroker(monkeypatch, OPERATOR, index)
+
+
+def test_registry_errors_fail_closed(monkeypatch, registry):
+    def unavailable(*args, **kwargs):
+        raise urllib.error.URLError("registry unavailable")
+    monkeypatch.setattr(setup.urllib.request, "urlopen", unavailable)
+    with pytest.raises(setup.SetupError, match="registry unavailable"):
+        verify_pagebroker(monkeypatch, PAGEBROKER, AGENT)
+
+
+def test_manifest_bytes_must_match_the_requested_digest(monkeypatch, registry):
+    register, blobs, _ = registry
+    image = register({"mediaType": MANIFEST})
+    blobs[image] = b'{}'
+    with pytest.raises(setup.SetupError, match="bytes do not match"):
+        verify_pagebroker(monkeypatch, PAGEBROKER, image)
+
+
+def test_matching_digests_do_not_contact_the_registry(monkeypatch, registry):
+    _, _, calls = registry
+    verify_pagebroker(monkeypatch, PAGEBROKER, PAGEBROKER)
+    assert calls == []
+
+
+def test_malformed_runtime_digest_fails_before_registry_access(monkeypatch, registry):
+    _, _, calls = registry
+    with pytest.raises(setup.SetupError, match="invalid manifest digest"):
+        verify_pagebroker(monkeypatch, PAGEBROKER, "sha256:invalid")
+    assert calls == []
+
+
+def test_missing_node_platform_fails_before_registry_access(monkeypatch, registry):
+    _, _, calls = registry
+    monkeypatch.setattr(setup.k8s, "read_node", lambda name: client.V1Node())
+    with pytest.raises(setup.SetupError, match="no OS/architecture labels"):
+        verify_pagebroker(monkeypatch, PAGEBROKER, AGENT)
+    assert calls == []
+
+
+def test_missing_pod_assignment_is_a_setup_error(monkeypatch, registry):
+    _, _, calls = registry
+    pods = running(pagebroker=AGENT)
+    monkeypatch.setattr(client.CoreV1Api, "list_namespaced_pod", lambda *args, **kwargs: client.V1PodList(items=pods))
+    with pytest.raises(setup.SetupError, match="has no assigned node"):
+        setup.verify_running_images(namespace="test", release="snapshot", expected=EXPECTED)
+    assert calls == []
