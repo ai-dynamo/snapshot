@@ -49,6 +49,10 @@ func (r *ContainerdRuntime) ResolveContainerPodUID(ctx context.Context, containe
 	return resolveContainerPodUID(ctx, r.cri, containerID)
 }
 
+func (r *ContainerdRuntime) ContainerRunning(ctx context.Context, containerID string) (bool, error) {
+	return containerRunning(ctx, r.cri, containerID)
+}
+
 func (r *ContainerdRuntime) TerminateContainer(ctx context.Context, containerID string) error {
 	id, err := containerIDForRuntime(containerID, "containerd://")
 	if err != nil {

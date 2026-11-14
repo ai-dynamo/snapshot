@@ -117,6 +117,10 @@ type NodeController struct {
 	// waits on a sibling neither restores nor notifies it again.
 	finishedRestoreDestinations sync.Map
 
+	// runningAttempts holds, per container ID, the context.CancelCauseFunc of
+	// a restore attempt running in that container.
+	runningAttempts sync.Map
+
 	// contentIndexer is the PodSnapshotContent informer's indexer, indexed by source pod
 	// (podRefIndex). The source-pod informer uses it to map a pod event back to its work order.
 	contentIndexer cache.Indexer
@@ -485,9 +489,13 @@ func (w *NodeController) RestoreContainerStarted(pod ktypes.NamespacedName, uid 
 // RestoreContainerStopped forgets a reported destination container that has
 // stopped, unless a later container already replaced the report. A restore
 // into it would fail the Pod's restore instead of waiting for the container
-// kubelet starts next.
+// kubelet starts next. An attempt running in the container ends.
 func (w *NodeController) RestoreContainerStopped(uid ktypes.UID, container, containerID string) {
 	w.startedRestoreContainers.CompareAndDelete(restoreContainerKey(uid, container), containerID)
+	if cancel, ok := w.runningAttempts.Load(containerID); ok {
+		w.log.Info("Ending the restore attempt, since its container stopped", "container", container, "container_id", containerID)
+		cancel.(context.CancelCauseFunc)(errContainerStopped)
+	}
 }
 
 func restoreContainerKey(uid ktypes.UID, container string) string {
@@ -1184,7 +1192,9 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		defer cancel()
 	}
 
-	restored, err := op.executeRestore(restoreCtx)
+	attemptCtx, endAttempt := op.watchContainer(restoreCtx, record)
+	restored, err := op.executeRestore(attemptCtx)
+	stopped := endAttempt()
 	if err != nil {
 		var incompatible *compat.IncompatibleError
 		if errors.As(err, &incompatible) {
@@ -1196,6 +1206,9 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 
 		var cleanupErr *executor.RestoreCleanupError
 		if !errors.As(err, &cleanupErr) {
+			if stopped {
+				err = stoppedDuringAttempt(err)
+			}
 			return op.attemptFailed(ctx, restoreCtx, record, err)
 		}
 		logWithStep(op.log, err).Error(cleanupErr, "Restore completed with cleanup errors")

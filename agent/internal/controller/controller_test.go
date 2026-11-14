@@ -55,6 +55,30 @@ type fakeRuntime struct {
 	resolveContainerPID  int
 	// podUID is the Pod's UID on the node, as the runtime reports it.
 	podUID string
+	// exited holds the IDs of containers that no longer run; every other
+	// container runs.
+	exited       map[string]bool
+	runningErr   error
+	runningCalls int
+}
+
+func (r *fakeRuntime) ContainerRunning(_ context.Context, id string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.runningCalls++
+	if r.runningErr != nil {
+		return false, r.runningErr
+	}
+	return !r.exited[id], nil
+}
+
+func (r *fakeRuntime) exit(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.exited == nil {
+		r.exited = map[string]bool{}
+	}
+	r.exited[id] = true
 }
 
 var _ snapshotruntime.Runtime = (*fakeRuntime)(nil)
