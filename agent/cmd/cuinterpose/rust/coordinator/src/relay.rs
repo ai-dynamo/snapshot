@@ -271,9 +271,20 @@ impl Relay<'_> {
                 Err(error) => Reply::Error(format!("{error:#}")),
             };
             let key = self.reply_key(round, self.group.rank);
-            self.session()
-                .insert(&key, &rmp_serde::to_vec_named(&reply)?)?;
-            result.with_context(|| format!("round {round} ({command})"))?;
+            let inserted = self
+                .session()
+                .insert(&key, &rmp_serde::to_vec_named(&reply)?);
+            if let Err(error) = result {
+                let context = match inserted {
+                    Ok(()) => format!("round {round} ({command})"),
+                    // The step's error stays the cause when its reply failed too.
+                    Err(failure) => {
+                        format!("round {round} ({command}), whose error reply failed ({failure:#})")
+                    }
+                };
+                return Err(error.context(context));
+            }
+            inserted?;
             self.round += 1;
         }
     }
@@ -849,6 +860,28 @@ mod tests {
         // Nothing runs after the failed round.
         let unicast = |pod: &Scripted| pod.calls.lock().unwrap().contains(&Command::PrepareUnicast);
         assert!(!results.iter().any(|(_, pod)| unicast(pod)));
+    }
+
+    #[test]
+    fn follower_step_error_outlasts_a_session_that_ended_first() {
+        let agent = FakeAgent::default();
+        let mut pods = pods();
+        // Rank 2 fails the session while rank 1's step still runs, and then rank 1's step
+        // fails too.
+        pods[1].slow = Some(("PrepareMulticast", Duration::from_millis(500)));
+        for pod in &mut pods[1..] {
+            pod.failing = Some("PrepareMulticast");
+        }
+        let results = group(&agent, Mode::Prepare, pods, LONG);
+        let follower = results[1].0.as_ref().unwrap_err();
+        assert!(!session::ended(follower), "{follower:#}");
+        let follower = format!("{follower:#}");
+        assert!(
+            follower.contains("whose error reply failed (")
+                && follower.contains("ABORTED (MemberFailed)")
+                && follower.ends_with("participant 7: refused"),
+            "{follower}"
+        );
     }
 
     #[test]
