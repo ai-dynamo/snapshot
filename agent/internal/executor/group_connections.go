@@ -128,9 +128,11 @@ func (k *keptConnections) inherit(cmd *exec.Cmd) {
 
 // serve waits for nsrestore to report its restored sockets, then for every
 // member to have restored theirs, lifts the hold, turns keepalive back on, and
-// lets nsrestore continue. Any error leaves nsrestore without an answer, which
-// fails its CRIU restore before a task runs.
+// lets nsrestore continue. Any error closes the agent's end of the socket, so
+// nsrestore gets no answer and fails its CRIU restore before a task runs.
 func (k *keptConnections) serve(ctx context.Context) error {
+	// After a successful write, nsrestore already has its answer.
+	defer k.agent.Close()
 	stop := context.AfterFunc(ctx, func() { _ = k.agent.Close() })
 	defer stop()
 	if _, err := io.ReadFull(k.agent, make([]byte, 1)); err != nil {
