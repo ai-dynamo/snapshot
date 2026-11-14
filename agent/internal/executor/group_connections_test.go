@@ -82,28 +82,20 @@ func TestKeptConnectionsLetTheRestoreContinueOnceEveryMemberRestored(t *testing.
 }
 
 func TestKeptConnectionsAbortTheRestoreWhenTheBarrierFails(t *testing.T) {
-	called := make(chan struct{})
 	k := startKept(t, context.Background(), func(context.Context) error {
-		close(called)
 		return errors.New("session failed")
 	})
-	restore := nsrestoreSide(k)
-	select {
-	case <-called:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the barrier never ran")
-	}
 
-	// nsrestore gets no answer and fails. Once it exits, the agent closes both
-	// ends and reports the barrier's error as the reason.
+	// nsrestore gets no answer and fails on its own, since the agent waits for
+	// it only once it has exited.
+	if err := await(t, nsrestoreSide(k)); err == nil {
+		t.Fatal("nsrestore's post-restore hook succeeded, want it to abort the restore")
+	}
 	nsrestoreErr := failStep(StepRestoreCRIU, errors.New("post-restore hook failed"))
 	err := k.wait(nsrestoreErr)
 	if StepOf(err) != StepKeepPeerConnections || !strings.Contains(err.Error(), "session failed") ||
 		!errors.Is(err, nsrestoreErr) {
 		t.Fatalf("wait = %v, want the barrier's error first, then nsrestore's", err)
-	}
-	if err := await(t, restore); err == nil {
-		t.Fatal("nsrestore's post-restore hook succeeded, want it to abort the restore")
 	}
 }
 
