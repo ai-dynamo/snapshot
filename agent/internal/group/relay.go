@@ -10,14 +10,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
-
-// relayRoundTimeout bounds each of the leader's gathers after the first one,
-// which waits until the attempt's deadline for every relay to start.
-const relayRoundTimeout = 10 * time.Minute
 
 // Relay is one run of this member's cuInterpose coordinator as its Pod's relay
 // in the group. The agent serves one end of a socket pair from the member's
@@ -26,7 +21,7 @@ type Relay struct {
 	// File is the coordinator's end, which it inherits as --session-fd.
 	File *os.File
 	// Args place the coordinator in the group: its rank, the ranks that run a
-	// relay, the round timeout, and the attempt's deadline.
+	// relay, and the attempt's deadline.
 	Args   []string
 	cancel context.CancelFunc
 	served chan error
@@ -80,7 +75,6 @@ func (m *Member) relayArgs() []string {
 	return []string{
 		"--rank", strconv.Itoa(m.Rank()),
 		"--relay-ranks", strings.Join(ranks, ","),
-		"--round-timeout-seconds", strconv.Itoa(int(relayRoundTimeout.Seconds())),
 		"--deadline", strconv.FormatInt(m.session.Meta().Deadline.Unix(), 10),
 	}
 }
