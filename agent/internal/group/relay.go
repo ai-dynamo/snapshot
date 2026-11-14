@@ -52,7 +52,7 @@ func (m *Member) OpenRelay(ctx context.Context) (*Relay, error) {
 		cancel: cancel,
 		served: make(chan error, 1),
 	}
-	go func() { r.served <- serveRelay(ctx, conn, m.session) }()
+	go func() { r.served <- serveRelay(ctx, conn, m) }()
 	return r, nil
 }
 

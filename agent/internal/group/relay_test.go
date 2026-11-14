@@ -77,24 +77,39 @@ func TestRelayAnswersInAnyOrderAndRefusesAnIDAlreadyPending(t *testing.T) {
 		"the first get with id 1 is still the one answered, with its empty value")
 }
 
-func TestRelayFailEndsTheAttempt(t *testing.T) {
-	members := joinAll(t, 2)
-	r := openRelay(t, members[0])
-	write(t, r.conn, map[string]any{"op": "get", "id": 7, "key": "inspect.1.cmd", "wait_ms": 60_000})
+func TestRelayFailEndsTheAttemptAsTheMemberWould(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		committed   bool
+		relayReason string
+		want        string
+	}{
+		{"before the admitted barrier", false, session.ReasonMemberFailed, ReasonRefused},
+		{"after the admitted barrier", true, ReasonRefused, session.ReasonMemberFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			members := joinAll(t, 2)
+			if tc.committed {
+				each(t, members, func(ctx context.Context, m *Member) error { return m.Barrier(ctx, Admitted) })
+			}
+			r := openRelay(t, members[0])
+			write(t, r.conn, map[string]any{"op": "get", "id": 7, "key": "inspect.1.cmd", "wait_ms": 60_000})
 
-	write(t, r.conn, map[string]any{"op": "fail", "id": 8, "reason": "Refused"})
+			write(t, r.conn, map[string]any{"op": "fail", "id": 8, "reason": tc.relayReason})
 
-	got := []answer{read(t, r.conn), read(t, r.conn)}
-	assert.ElementsMatch(t, []answer{
-		{"id": uint64(7), "ok": false, "code": "ABORTED", "reason": "Refused"},
-		{"id": uint64(8), "ok": true},
-	}, got)
-	var header [4]byte
-	_, err := io.ReadFull(r.conn, header[:])
-	assert.ErrorIs(t, err, io.EOF, "the agent closes its end after the last answer")
-	require.NoError(t, r.close())
-	<-members[1].session.Done()
-	assert.ErrorIs(t, members[1].session.Err(), &session.AbortError{Reason: "Refused"})
+			got := []answer{read(t, r.conn), read(t, r.conn)}
+			assert.ElementsMatch(t, []answer{
+				{"id": uint64(7), "ok": false, "code": "ABORTED", "reason": tc.want},
+				{"id": uint64(8), "ok": true},
+			}, got)
+			var header [4]byte
+			_, err := io.ReadFull(r.conn, header[:])
+			assert.ErrorIs(t, err, io.EOF, "the agent closes its end after the last answer")
+			require.NoError(t, r.close())
+			<-members[1].session.Done()
+			assert.ErrorIs(t, members[1].session.Err(), &session.AbortError{Reason: tc.want})
+		})
+	}
 }
 
 func TestRelayThatGoesAwayLeavesTheSession(t *testing.T) {
