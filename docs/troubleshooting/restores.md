@@ -70,12 +70,13 @@ Re-take the checkpoint with the agent version that will restore it.
 The artifact's content UID and container name must match what the restore
 annotation asked for, and a GPU checkpoint taken through PageBroker
 CustomStorage can only be restored on a node whose agent has CustomStorage
-available.
+available. A checkpoint of a pod group's member restores only with its group.
 
 **Likely causes:**
 
 - The restore mapping names a container that was not the one checkpointed
 - The restore pod landed on a node without CustomStorage support
+- The checkpoint was captured as a member of a pod group, and the restore pod restores it on its own
 
 Check the container mapping on the restore pod against the `PodSnapshot`, and
 the node's agent configuration.
