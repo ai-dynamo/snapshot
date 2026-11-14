@@ -118,8 +118,9 @@ type RestorePhase string
 const (
 	// RestorePhasePending means the member has not yet passed admission.
 	RestorePhasePending RestorePhase = "Pending"
-	// RestorePhaseAdmitted means the member passed admission and its bindings
-	// are pinned. The restore commits once every member has.
+	// RestorePhaseAdmitted means the member passed admission, and its target is
+	// claimed and pinned. The restore commits only at the agents' admitted
+	// barrier.
 	RestorePhaseAdmitted RestorePhase = "Admitted"
 	// RestorePhaseRestoring means the member's processes are being restored.
 	RestorePhaseRestoring RestorePhase = "Restoring"

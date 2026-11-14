@@ -13,8 +13,9 @@ const PodGroupMaxDeadlineSeconds = 86400
 // PodGroupSnapshot and PodGroupRestore condition types. Only the operator sets
 // them, via meta.SetStatusCondition.
 const (
-	// PodGroupConditionAdmitted is True once every member has passed admission,
-	// which commits the attempt.
+	// PodGroupConditionAdmitted is True once every member has passed admission.
+	// It does not commit the attempt: the agents commit it at their admitted
+	// barrier, and can refuse it until then.
 	PodGroupConditionAdmitted = "Admitted"
 	// PodGroupConditionReleased is True once a PodGroupRestore's attempt has
 	// reached release, from which point its released members run whatever
