@@ -110,8 +110,9 @@ const (
 )
 
 // PodGroupSnapshotMemberStatus is the observed state of one member. Its
-// bindings and startedAt are write-once, and its phase stops changing once
-// final.
+// nodeName, bindings and startedAt are write-once, and its phase stops
+// changing once final.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.nodeName) || (has(self.nodeName) && self.nodeName == oldSelf.nodeName)",message="nodeName is write-once"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.podSnapshot) || (has(self.podSnapshot) && self.podSnapshot == oldSelf.podSnapshot)",message="podSnapshot is write-once"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.content) || (has(self.content) && self.content == oldSelf.content)",message="content is write-once"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.startedAt) || (has(self.startedAt) && self.startedAt == oldSelf.startedAt)",message="startedAt is write-once"

@@ -506,8 +506,8 @@ spec:
                 items:
                   description: |-
                     PodGroupSnapshotMemberStatus is the observed state of one member. Its
-                    bindings and startedAt are write-once, and its phase stops changing once
-                    final.
+                    nodeName, bindings and startedAt are write-once, and its phase stops
+                    changing once final.
                   properties:
                     content:
                       description: Content is the member's PodSnapshotContent, which
@@ -598,6 +598,9 @@ spec:
                   - rank
                   type: object
                   x-kubernetes-validations:
+                  - message: nodeName is write-once
+                    rule: '!has(oldSelf.nodeName) || (has(self.nodeName) && self.nodeName
+                      == oldSelf.nodeName)'
                   - message: podSnapshot is write-once
                     rule: '!has(oldSelf.podSnapshot) || (has(self.podSnapshot) &&
                       self.podSnapshot == oldSelf.podSnapshot)'

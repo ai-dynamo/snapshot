@@ -198,6 +198,9 @@ func TestPodGroupSnapshotAdmission(t *testing.T) {
 			(*ms)[0].NodeName = strings.Repeat("x", 254)
 		}, "status.members[0].nodeName: Too long"},
 	}
+	cases = append(cases, writeOnceCases("nodeName",
+		func(m *member, v int) { m.NodeName = fmt.Sprintf("node-%d", v) },
+		func(m *member) { m.NodeName = "" })...)
 	cases = append(cases, writeOnceCases("podSnapshot",
 		func(m *member, v int) { m.PodSnapshot = objectIdentity("pod-snapshot", v) },
 		func(m *member) { m.PodSnapshot = nil })...)
