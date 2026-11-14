@@ -145,14 +145,15 @@ func (r *PodGroupRestoreReconciler) claim(ctx context.Context, restore *snapshot
 const podGroupRestoreClaimFailedReason = "ClaimFailed"
 
 // observe reads, through reader, the PodGroupSnapshot's ranks and each pinned
-// member's report, then runs admission while no member is pinned (admit). It
-// keeps the claims that admission prepared only while the restore is current
-// in the API server (isCurrent): a restore that the cache shows stale, still
-// without a refusal that was just recorded, sends no claim, and the reconcile
-// looks again shortly. Every member is pinned in the same status patch, so once any is, admission
-// never runs again, and a restore whose members wait for their pins is never
+// member's report, then runs admission while no member is pinned (admit). Every
+// member is pinned in the same status patch, so once any is, admission never
+// runs again, and a restore whose members wait for their pins is never
 // refused. Reconcile passes the cache first, and the API server when the
 // result would make an irreversible decision.
+//
+// It drops the claims admission prepared unless the restore is current in the
+// API server (isCurrent). A stale restore sends no claim, and the reconcile
+// looks again shortly.
 func (r *PodGroupRestoreReconciler) observe(
 	ctx context.Context,
 	reader client.Reader,

@@ -239,7 +239,9 @@ func derivePodGroupRestoreMemberStatus(m *snapshotv1alpha1.PodGroupRestoreMember
 		m.Phase, m.Reason, m.Message = snapshotv1alpha1.RestorePhaseFailed, cause.Reason, cause.Message
 		if !isMemberReason(cause.Reason) {
 			m.Reason = restored.Reason
-			m.Message = fmt.Sprintf("agent reason %q: %s", cause.Reason, cause.Message)
+			if cause.Reason != "" {
+				m.Message = fmt.Sprintf("agent reason %q: %s", cause.Reason, cause.Message)
+			}
 		}
 		m.Message = capMessage(m.Message, maxMemberMessageLength)
 	case observed.podDeleted && m.Pod != nil:

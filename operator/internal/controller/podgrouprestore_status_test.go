@@ -203,6 +203,16 @@ func TestDerivePodGroupRestoreMemberTable(t *testing.T) {
 			}(),
 		},
 		{
+			name:     "an empty GroupRestoreFailed reason is no reason: Restored's reason, and the group's message",
+			previous: restoring,
+			observed: prObserved(prPod("a", prStarted, prRestoreError, prGroupFailed(""))),
+			want: func() snapshotv1alpha1.PodGroupRestoreMemberStatus {
+				m := prFailed(prPinned("a", snapshotv1alpha1.RestorePhaseRestoring), podcontract.RestoreReasonFailed)
+				m.Message = " message"
+				return m
+			}(),
+		},
+		{
 			name:     "a GroupRestoreFailed reason longer than the CRD allows becomes Restored's reason",
 			previous: restoring,
 			observed: prObserved(prPod("a", prStarted, prRestoreError, prGroupFailed(strings.Repeat("a", maxMemberReasonLength+1)))),
@@ -860,9 +870,10 @@ func TestMemberReasonPatternMatchesTheCRD(t *testing.T) {
 	var crd apiextensionsv1.CustomResourceDefinition
 	found := false
 	for _, manifest := range crds.All() {
-		require.NoError(t, yaml.Unmarshal([]byte(manifest), &crd))
-		if crd.Spec.Names.Kind == "PodGroupRestore" {
-			found = true
+		var candidate apiextensionsv1.CustomResourceDefinition
+		require.NoError(t, yaml.Unmarshal([]byte(manifest), &candidate))
+		if candidate.Spec.Names.Kind == "PodGroupRestore" {
+			crd, found = candidate, true
 			break
 		}
 	}
@@ -870,9 +881,9 @@ func TestMemberReasonPatternMatchesTheCRD(t *testing.T) {
 	status := crd.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["status"]
 	reason := status.Properties["members"].Items.Schema.Properties["reason"]
 
-	assert.Equal(t, reason.Pattern, memberReasonPattern.String())
+	assert.Equal(t, memberReasonPattern.String(), reason.Pattern)
 	require.NotNil(t, reason.MaxLength)
-	assert.EqualValues(t, *reason.MaxLength, maxMemberReasonLength)
+	assert.EqualValues(t, maxMemberReasonLength, *reason.MaxLength)
 }
 
 func TestIsMemberReason(t *testing.T) {
