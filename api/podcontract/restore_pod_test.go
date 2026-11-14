@@ -399,6 +399,71 @@ func TestValidateRejectsMinimumContractDrift(t *testing.T) {
 	}
 }
 
+func TestBuildKeepsRetryLimitAnnotation(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing *string
+		want     *string
+		wantErr  bool
+	}{
+		{name: "unset leaves the agent default"},
+		{name: "zero", existing: ptr("0"), want: ptr("0")},
+		{name: "positive", existing: ptr("2"), want: ptr("2")},
+		{name: "negative", existing: ptr("-1"), wantErr: true},
+		{name: "not a number", existing: ptr("many"), wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			pod := restorePodFixture()
+			if test.existing != nil {
+				pod.Annotations[RestoreRetryLimitAnnotation] = *test.existing
+			}
+			before := pod.DeepCopy()
+
+			shaped, err := Build(pod, restoreRequest(), Options{})
+			if !reflect.DeepEqual(pod, before) {
+				t.Fatal("Build() mutated its input")
+			}
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("Build() unexpectedly succeeded")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Build() failed: %v", err)
+			}
+			got, found := shaped.Annotations[RestoreRetryLimitAnnotation]
+			if test.want == nil {
+				if found {
+					t.Fatalf("%s = %q, want absent", RestoreRetryLimitAnnotation, got)
+				}
+				return
+			}
+			if !found || got != *test.want {
+				t.Fatalf("%s = %q (found %v), want %q", RestoreRetryLimitAnnotation, got, found, *test.want)
+			}
+			if err := Validate(shaped, restoreRequest()); err != nil {
+				t.Fatalf("Validate() rejected the built Pod: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsInvalidRetryLimit(t *testing.T) {
+	valid, err := Build(restorePodFixture(), restoreRequest(), Options{})
+	if err != nil {
+		t.Fatalf("Build() failed: %v", err)
+	}
+	for _, value := range []string{"", "-2", "one", "2x"} {
+		pod := valid.DeepCopy()
+		pod.Annotations[RestoreRetryLimitAnnotation] = value
+		if err := Validate(pod, restoreRequest()); err == nil {
+			t.Errorf("Validate() accepted %s=%q", RestoreRetryLimitAnnotation, value)
+		}
+	}
+}
+
 func TestBuildAllowsUnmanagedSeccomp(t *testing.T) {
 	pod := restorePodFixture()
 	shaped, err := Build(pod, restoreRequest(), Options{})

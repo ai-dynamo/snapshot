@@ -148,6 +148,49 @@ func TestSkipCompatCheckFromAnnotations(t *testing.T) {
 	}
 }
 
+func TestRestoreRetryLimitFromAnnotations(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     *string
+		wantLimit int
+		wantFound bool
+		wantErr   bool
+	}{
+		{name: "absent"},
+		{name: "zero", value: ptr("0"), wantFound: true},
+		{name: "positive", value: ptr("5"), wantLimit: 5, wantFound: true},
+		{name: "surrounding space", value: ptr(" 3 "), wantLimit: 3, wantFound: true},
+		{name: "empty", value: ptr(""), wantFound: true, wantErr: true},
+		{name: "negative", value: ptr("-1"), wantFound: true, wantErr: true},
+		{name: "not a number", value: ptr("two"), wantFound: true, wantErr: true},
+		{name: "fraction", value: ptr("1.5"), wantFound: true, wantErr: true},
+		{name: "overflow", value: ptr("99999999999999999999"), wantFound: true, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			annotations := map[string]string{}
+			if test.value != nil {
+				annotations[RestoreRetryLimitAnnotation] = *test.value
+			}
+			limit, found, err := RestoreRetryLimitFromAnnotations(annotations)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("RestoreRetryLimitFromAnnotations() error = %v, wantErr %v", err, test.wantErr)
+			}
+			if limit != test.wantLimit || found != test.wantFound {
+				t.Fatalf("RestoreRetryLimitFromAnnotations() = %d, %v, want %d, %v", limit, found, test.wantLimit, test.wantFound)
+			}
+		})
+	}
+
+	if _, found, err := RestoreRetryLimitFromAnnotations(nil); found || err != nil {
+		t.Fatalf("nil annotations = found %v, error %v", found, err)
+	}
+}
+
+func ptr[T any](value T) *T {
+	return &value
+}
+
 func TestRestoreCompleteRoundTrip(t *testing.T) {
 	data := FormatRestoreComplete(RestoreComplete{PID: 4242})
 	if string(data) != "pid=4242\n" {

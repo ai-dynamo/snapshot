@@ -201,6 +201,9 @@ func validateRestoreAnnotations(annotations map[string]string, request Request) 
 	if !sameContainerMappings(annotatedMappings, request.Mappings) {
 		return fmt.Errorf("%s does not match the requested restore mappings", RestoreContainerMapAnnotation)
 	}
+	if _, _, err := RestoreRetryLimitFromAnnotations(annotations); err != nil {
+		return err
+	}
 	return nil
 }
 
