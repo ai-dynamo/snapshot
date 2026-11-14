@@ -44,7 +44,7 @@ struct Arguments {
     processes: Vec<NamespacePid>,
     /// The agent's end of the attempt's session, inherited from the agent. Without it, the
     /// Pod runs alone.
-    #[arg(long, requires_all = ["rank", "relay_ranks", "round_timeout_seconds", "deadline"])]
+    #[arg(long, requires_all = ["rank", "relay_ranks", "deadline"])]
     session_fd: Option<i32>,
     /// This Pod's rank in the group.
     #[arg(long, requires = "session_fd")]
@@ -52,9 +52,6 @@ struct Arguments {
     /// Every rank that runs a relay. The lowest leads the group.
     #[arg(long, requires = "session_fd", value_delimiter = ',')]
     relay_ranks: Vec<group::Rank>,
-    /// Bounds the leader's wait for the replies of each round after the first.
-    #[arg(long, requires = "session_fd", value_parser = clap::value_parser!(u64).range(1..))]
-    round_timeout_seconds: Option<u64>,
     /// The attempt's deadline in seconds since the Unix epoch.
     #[arg(long, requires = "session_fd")]
     deadline: Option<u64>,
@@ -70,7 +67,6 @@ impl Arguments {
         let mut group = relay::Group {
             rank: self.rank.context(required)?,
             relays: self.relay_ranks.clone(),
-            round_timeout: Duration::from_secs(self.round_timeout_seconds.context(required)?),
             deadline: SystemTime::UNIX_EPOCH
                 + Duration::from_secs(self.deadline.context(required)?),
         };

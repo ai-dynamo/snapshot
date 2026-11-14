@@ -15,7 +15,7 @@ use cuinterpose_protocol::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -146,19 +146,16 @@ pub struct Group {
     pub rank: Rank,
     /// Every rank that runs a relay. The lowest leads the group and gathers from the rest.
     pub relays: Vec<Rank>,
-    /// Bounds each gather after the first.
-    pub round_timeout: Duration,
-    /// The attempt's deadline.
+    /// The attempt's deadline, which bounds every wait for another relay.
     pub deadline: SystemTime,
 }
 
 impl Group {
-    /// A Pod alone. It waits for no other relay, so it needs no timeouts.
+    /// A Pod alone. It waits for no other relay, so it needs no deadline.
     fn alone() -> Self {
         Self {
             rank: 0,
             relays: vec![0],
-            round_timeout: Duration::ZERO,
             deadline: SystemTime::UNIX_EPOCH,
         }
     }
@@ -286,7 +283,6 @@ impl Relay<'_> {
     fn round(&mut self, command: &Command) -> Result<BTreeMap<Rank, Outcome>> {
         let round = self.round;
         self.round += 1;
-        let started = Instant::now();
         let key = self.command_key(round);
         if let Some(session) = &mut self.session {
             session.insert(&key, &rmp_serde::to_vec_named(command)?)?;
@@ -296,13 +292,6 @@ impl Relay<'_> {
             .run(command, self.group.rank)
             .with_context(|| format!("{command}"))?;
         let mut outcomes = BTreeMap::from([(self.group.rank, own)]);
-        // At restore each relay starts after its own CRIU and CUDA restore, so only the
-        // deadline bounds the first round.
-        let wait = if round == 1 {
-            self.group.until_deadline()
-        } else {
-            self.group.round_timeout.saturating_sub(started.elapsed())
-        };
         let others: Vec<Rank> = self
             .group
             .relays
@@ -317,17 +306,24 @@ impl Relay<'_> {
         let Some(session) = &mut self.session else {
             return Ok(outcomes);
         };
-        let values = session.get_all(&keys, wait)?;
+        // Each relay bounds its step by its processes' own timeouts and replies with an
+        // error when they expire, and a relay or agent that dies ends the session. At
+        // restore each relay also starts only after its own CRIU and CUDA restore. So the
+        // leader waits for every reply until the deadline.
+        let values = session.get_all(&keys, self.group.until_deadline())?;
         let missing: Vec<Rank> = others
             .iter()
             .zip(&values)
             .filter(|(_, value)| value.is_none())
             .map(|(rank, _)| *rank)
             .collect();
-        ensure!(
-            missing.is_empty(),
-            "ranks {missing:?} did not reply to round {round} ({command}) in time"
-        );
+        if !missing.is_empty() {
+            // At the deadline the coordinator fails the session, so its reason stands.
+            return Err(session::Ended(format!(
+                "ranks {missing:?} did not reply to round {round} ({command}) before the deadline"
+            ))
+            .into());
+        }
         for (rank, value) in others.into_iter().zip(values) {
             let reply: Reply = rmp_serde::from_slice(&value.unwrap_or_default())
                 .with_context(|| format!("decode the reply of rank {rank} to round {round}"))?;
@@ -471,6 +467,7 @@ mod tests {
     };
     use std::os::unix::net::UnixStream;
     use std::sync::{Arc, Mutex};
+    use std::time::Instant;
 
     const FABRIC: u32 = CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_FABRIC.0;
     /// Every Pod's process has the same PID in its own namespace.
@@ -674,7 +671,6 @@ mod tests {
         mode: Mode,
         pods: Vec<Scripted>,
         deadline: Duration,
-        round_timeout: Duration,
     ) -> Vec<(Result<()>, Scripted)> {
         let relays: Vec<Rank> = vec![0, 1, 2];
         let threads: Vec<_> = pods
@@ -684,7 +680,6 @@ mod tests {
                 let group = Group {
                     rank: pod.rank,
                     relays: relays.clone(),
-                    round_timeout,
                     deadline: SystemTime::now() + deadline,
                 };
                 std::thread::spawn(move || (run(Some((session, group)), mode, &mut pod), pod))
@@ -706,7 +701,7 @@ mod tests {
     fn three_pods_capture_and_restore_through_the_session() {
         let agent = FakeAgent::default();
         for mode in [Mode::Inspect, Mode::Prepare] {
-            for (result, pod) in group(&agent, mode, pods(), LONG, LONG) {
+            for (result, pod) in group(&agent, mode, pods(), LONG) {
                 result.unwrap();
                 assert!(pod.finished);
             }
@@ -716,7 +711,7 @@ mod tests {
             pod.saved = Some(pod.records.clone());
         }
         let calls: Vec<_> = restore.iter().map(|pod| Arc::clone(&pod.calls)).collect();
-        for (result, pod) in group(&agent, Mode::Restore, restore, LONG, LONG) {
+        for (result, pod) in group(&agent, Mode::Restore, restore, LONG) {
             result.unwrap();
             assert!(pod.finished && pod.restored);
         }
@@ -775,7 +770,7 @@ mod tests {
         let agent = FakeAgent::default();
         let pods = pods();
         let calls: Vec<_> = pods.iter().map(|pod| Arc::clone(&pod.calls)).collect();
-        for (result, _) in group(&agent, Mode::Prepare, pods, LONG, LONG) {
+        for (result, _) in group(&agent, Mode::Prepare, pods, LONG) {
             result.unwrap();
         }
         let owners = |rank: usize| {
@@ -806,7 +801,7 @@ mod tests {
         let agent = FakeAgent::default();
         let mut pods = pods();
         pods[1].carrier = Some(0);
-        let results = group(&agent, Mode::Prepare, pods, LONG, LONG);
+        let results = group(&agent, Mode::Prepare, pods, LONG);
         let leader = format!("{:#}", results[0].0.as_ref().unwrap_err());
         assert!(
             leader.contains(
@@ -825,7 +820,7 @@ mod tests {
             let mut pods = pods();
             // Rank 2 imports a handle that nobody exported.
             pods[2].records = records(2, 9, 2);
-            let results = group(&agent, mode, pods, LONG, LONG);
+            let results = group(&agent, mode, pods, LONG);
             for (result, _) in &results {
                 assert!(result.is_err());
             }
@@ -845,7 +840,7 @@ mod tests {
         let agent = FakeAgent::default();
         let mut pods = pods();
         pods[1].failing = Some("SaveAllocations");
-        let results = group(&agent, Mode::Prepare, pods, LONG, LONG);
+        let results = group(&agent, Mode::Prepare, pods, LONG);
         assert!(results.iter().all(|(result, _)| result.is_err()));
         let follower = format!("{:#}", results[1].0.as_ref().unwrap_err());
         assert!(follower.contains("participant 7: refused"), "{follower}");
@@ -857,24 +852,26 @@ mod tests {
     }
 
     #[test]
-    fn silent_rank_fails_the_session_when_its_round_times_out() {
+    fn silent_rank_leaves_the_failure_to_the_deadline() {
         let agent = FakeAgent::default();
         let mut pods = pods();
         pods[2].slow = Some(("PrepareMulticast", Duration::from_secs(2)));
-        let results = group(
-            &agent,
-            Mode::Prepare,
-            pods,
-            LONG,
-            Duration::from_millis(200),
-        );
-        assert!(results.iter().all(|(result, _)| result.is_err()));
+        let started = Instant::now();
+        let results = group(&agent, Mode::Prepare, pods, Duration::from_secs(1));
+        assert!(started.elapsed() >= Duration::from_millis(900));
+        for (result, _) in &results {
+            let error = result.as_ref().unwrap_err();
+            assert!(session::ended(error), "{error:#}");
+        }
         let leader = format!("{:#}", results[0].0.as_ref().unwrap_err());
         assert!(
-            leader.contains("ranks [2] did not reply to round 2 (PrepareMulticast) in time"),
+            leader.contains(
+                "ranks [2] did not reply to round 2 (PrepareMulticast) before the deadline"
+            ),
             "{leader}"
         );
-        assert_eq!(agent.fails(), [(0, "MemberFailed".to_owned())]);
+        // The coordinator fails the session at the deadline with its own reason.
+        assert!(agent.fails().is_empty());
     }
 
     #[test]
@@ -884,13 +881,7 @@ mod tests {
         let mut pods = pods();
         pods.pop();
         let started = Instant::now();
-        let results = group(
-            &agent,
-            Mode::Inspect,
-            pods,
-            Duration::from_secs(1),
-            Duration::from_millis(1),
-        );
+        let results = group(&agent, Mode::Inspect, pods, Duration::from_secs(1));
         assert!(started.elapsed() >= Duration::from_millis(900));
         let leader = format!("{:#}", results[0].0.as_ref().unwrap_err());
         assert!(
@@ -907,7 +898,6 @@ mod tests {
         let group = Group {
             rank: 1,
             relays: vec![0, 1],
-            round_timeout: LONG,
             deadline: SystemTime::now() + LONG,
         };
         let error = run(Some((Session::new(relay), group)), Mode::Inspect, &mut pod).unwrap_err();
@@ -920,7 +910,6 @@ mod tests {
         let group = |rank, relays: &[Rank]| Group {
             rank,
             relays: relays.to_vec(),
-            round_timeout: LONG,
             deadline: SystemTime::now(),
         };
         let mut checked = group(1, &[2, 1, 2]);

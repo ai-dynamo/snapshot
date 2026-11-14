@@ -281,10 +281,6 @@ impl Harness {
             command
                 .args(["--session-fd", &SESSION_FD.to_string()])
                 .args(["--rank", "0", "--relay-ranks", "0"])
-                .args([
-                    "--round-timeout-seconds",
-                    &HANG_TIMEOUT.as_secs().to_string(),
-                ])
                 .args(["--deadline", &deadline.as_secs().to_string()]);
         }
         // The coordinator runs in the workload's root, where TMPDIR may be missing or on
@@ -983,8 +979,6 @@ fn session_arguments_are_all_or_nothing() {
         "1",
         "--relay-ranks",
         "0,1",
-        "--round-timeout-seconds",
-        "60",
         "--deadline",
         "1",
     ];
