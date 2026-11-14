@@ -81,7 +81,7 @@ func (r *PodGroupSnapshotReconciler) admit(ctx context.Context, reader client.Re
 			return podGroupAdmission{}, fmt.Errorf("get source Pod %q of member %q: %w", ref.Name, member.ID, err)
 		}
 		switch err := validateSourcePod(ref, pod); {
-		case errors.Is(err, errPodSnapshotStalePodRef):
+		case errors.Is(err, errPodSnapshotStalePodRef), errors.Is(err, errPodSnapshotSourcePodEnded):
 			return podGroupRefusal(fmt.Sprintf("member %q: %v", member.ID, err)), nil
 		case errors.Is(err, errPodSnapshotPodUnscheduled):
 			unscheduled = append(unscheduled, fmt.Sprintf("member %q: source Pod %q is not scheduled to a node yet", member.ID, ref.Name))

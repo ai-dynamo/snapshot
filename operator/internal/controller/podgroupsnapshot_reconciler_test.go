@@ -253,6 +253,37 @@ func TestPodGroupSnapshotReconciler_CreatesMembersWithTheirOwnSettings(t *testin
 	assert.Empty(t, drainEvents(recorder), "nothing has turned True yet")
 }
 
+func TestPodGroupSnapshotReconciler_RefusesAnEndedSourcePod(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(pod *corev1.Pod)
+		want   string
+	}{
+		{"succeeded", func(pod *corev1.Pod) { pod.Status.Phase = corev1.PodSucceeded }, `pod "pod-b" is Succeeded`},
+		{"failed", func(pod *corev1.Pod) { pod.Status.Phase = corev1.PodFailed }, `pod "pod-b" is Failed`},
+		{"being deleted", func(pod *corev1.Pod) {
+			pod.DeletionTimestamp = ptr.To(metav1.Now())
+			pod.Finalizers = []string{"test/hold"}
+		}, `pod "pod-b" is being deleted`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := pgSourcePod("b", "node-1")
+			tc.mutate(pod)
+			// The agent is ready: only the source Pod keeps the group from passing.
+			r, _ := makePodGroupReconciler(t, append(pgReadyCluster("a"), pgGroup("a", "b"), pod)...)
+
+			res := reconcileGroup(t, r)
+
+			assert.Zero(t, res.RequeueAfter)
+			assert.Empty(t, listMemberPodSnapshots(t, r), "nothing is created")
+			failed := groupCondition(t, getGroup(t, r), snapshotv1alpha1.PodGroupConditionFailed)
+			require.NotNil(t, failed)
+			assert.Equal(t, snapshotv1alpha1.PodGroupReasonRefused, failed.Reason)
+			assert.Equal(t, `member "b": `+errPodSnapshotSourcePodEnded.Error()+": "+tc.want, failed.Message)
+		})
+	}
+}
+
 func TestPodGroupSnapshotReconciler_RefusesBeforeCreatingAnything(t *testing.T) {
 	otherSnap := func() *snapshotv1alpha1.PodSnapshot {
 		return &snapshotv1alpha1.PodSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "group-b", Namespace: pgNamespace, UID: "other"}}
