@@ -4,10 +4,13 @@
 package runtime
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // fakeContainer lays out procRoot/<pid>/root/snapshot-control, as the agent
@@ -343,5 +346,152 @@ func TestWriteFileInDirRejectsPaths(t *testing.T) {
 		if err := writeString(dir, name, "x", 0o644); err == nil {
 			t.Errorf("WriteFileInDir(%q) succeeded, want error", name)
 		}
+	}
+}
+
+// The Pod can write anything into its control volume, so reading a file there
+// must not follow a link, block on a FIFO, or read without bound.
+func TestReadPodControlFile(t *testing.T) {
+	const maxBytes = 8
+	tests := []struct {
+		name         string
+		setup        func(t *testing.T, dir string)
+		noVolume     bool
+		want         string
+		wantNotExist bool
+		wantErr      bool
+	}{
+		{name: "a regular file", setup: func(t *testing.T, dir string) { writeFile(t, dir, "12345678") }, want: "12345678"},
+		{name: "an empty file", setup: func(t *testing.T, dir string) { writeFile(t, dir, "") }, want: ""},
+		{name: "no file yet", wantNotExist: true},
+		{name: "no volume yet", noVolume: true, wantNotExist: true},
+		{name: "a file over the limit", setup: func(t *testing.T, dir string) { writeFile(t, dir, "123456789") }, wantErr: true},
+		{name: "a link to a file elsewhere", setup: func(t *testing.T, dir string) {
+			target := filepath.Join(t.TempDir(), "target")
+			if err := os.WriteFile(target, []byte("outside"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(dir, "record")); err != nil {
+				t.Fatal(err)
+			}
+		}, wantErr: true},
+		{name: "a FIFO", setup: func(t *testing.T, dir string) {
+			if err := unix.Mkfifo(filepath.Join(dir, "record"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, wantErr: true},
+		{name: "a directory", setup: func(t *testing.T, dir string) {
+			if err := os.Mkdir(filepath.Join(dir, "record"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			podsDir := t.TempDir()
+			if !tt.noVolume {
+				var volume string
+				podsDir, volume = podsDirWithControlVolume(t)
+				dir := filepath.Join(volume, "main")
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if tt.setup != nil {
+					tt.setup(t, dir)
+				}
+			}
+
+			data, err := readPodControlFile(podsDir, "uid", "main", "record", maxBytes)
+
+			if errors.Is(err, os.ErrNotExist) != tt.wantNotExist {
+				t.Fatalf("readPodControlFile() error = %v, want os.ErrNotExist %v", err, tt.wantNotExist)
+			}
+			if (err != nil) != (tt.wantErr || tt.wantNotExist) {
+				t.Fatalf("readPodControlFile() = %q, %v; want error %v", data, err, tt.wantErr)
+			}
+			if err == nil && string(data) != tt.want {
+				t.Fatalf("readPodControlFile() = %q, want %q", data, tt.want)
+			}
+		})
+	}
+}
+
+func TestReadPodControlFileRejectsPaths(t *testing.T) {
+	podsDir, _ := podsDirWithControlVolume(t)
+	for _, name := range []string{"", "..", "a/b", "../x"} {
+		if _, err := readPodControlFile(podsDir, "uid", "main", name, 8); err == nil || errors.Is(err, os.ErrNotExist) {
+			t.Errorf("readPodControlFile(%q) = %v, want a refusal", name, err)
+		}
+	}
+}
+
+func TestRemovePodControlFile(t *testing.T) {
+	tests := []struct {
+		name     string
+		setup    func(t *testing.T, dir string)
+		noVolume bool
+		wantErr  bool
+	}{
+		{name: "a regular file", setup: func(t *testing.T, dir string) { writeFile(t, dir, "{}") }},
+		{name: "no file", setup: func(*testing.T, string) {}},
+		{name: "no volume", noVolume: true},
+		{name: "a link removes the link only", setup: func(t *testing.T, dir string) {
+			target := filepath.Join(t.TempDir(), "target")
+			if err := os.WriteFile(target, []byte("outside"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if _, err := os.Stat(target); err != nil {
+					t.Errorf("the link's target is gone: %v", err)
+				}
+			})
+			if err := os.Symlink(target, filepath.Join(dir, "record")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "a directory", setup: func(t *testing.T, dir string) {
+			if err := os.Mkdir(filepath.Join(dir, "record"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			podsDir := t.TempDir()
+			dir := ""
+			if !tt.noVolume {
+				var volume string
+				podsDir, volume = podsDirWithControlVolume(t)
+				dir = filepath.Join(volume, "main")
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				tt.setup(t, dir)
+			}
+
+			err := removePodControlFile(podsDir, "uid", "main", "record")
+
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("removePodControlFile() error = %v, want error %v", err, tt.wantErr)
+			}
+			if dir == "" || tt.wantErr {
+				return
+			}
+			if _, err := os.Lstat(filepath.Join(dir, "record")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("record still exists: %v", err)
+			}
+		})
+	}
+	for _, name := range []string{"", "..", "a/b", "../x"} {
+		if err := removePodControlFile(t.TempDir(), "uid", "main", name); err == nil {
+			t.Errorf("removePodControlFile(%q) succeeded, want a refusal", name)
+		}
+	}
+}
+
+func writeFile(t *testing.T, dir, contents string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "record"), []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -228,7 +228,9 @@ func TestParseRestoreComplete(t *testing.T) {
 }
 
 func TestIsReservedControlFile(t *testing.T) {
-	for _, name := range []string{RestoreCompleteFile, RestoreFailedFile, RestoreProxyBinaryName, CUDAJobFileName} {
+	for _, name := range []string{
+		RestoreCompleteFile, RestoreFailedFile, RestoreAttemptsFile, RestoreProxyBinaryName, CUDAJobFileName,
+	} {
 		if !IsReservedControlFile(name) {
 			t.Errorf("IsReservedControlFile(%q) = false, want true", name)
 		}
