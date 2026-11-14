@@ -107,27 +107,6 @@ func TestRelayThatGoesAwayLeavesTheSession(t *testing.T) {
 	assert.NoError(t, members[0].session.Err(), "the session outlives its relay")
 }
 
-func TestRelayKeepsItsKeysWithinItsBudget(t *testing.T) {
-	members := joinAll(t, 2)
-	r := openRelay(t, members[0])
-	largest := make([]byte, members[0].session.Meta().MaxValue)
-
-	assert.Equal(t, answer{"id": uint64(1), "ok": true}, call(t, r.conn,
-		map[string]any{"op": "insert", "id": 1, "key": "round.1.cmd", "value": largest}))
-	assert.Equal(t, answer{"id": uint64(2), "ok": false, "code": "TOO_MANY"}, call(t, r.conn,
-		map[string]any{"op": "insert", "id": 2, "key": "round.2.cmd", "value": []byte("x")}))
-	// Sending a key again costs nothing more.
-	assert.Equal(t, answer{"id": uint64(3), "ok": true}, call(t, r.conn,
-		map[string]any{"op": "insert", "id": 3, "key": "round.1.cmd", "value": largest}))
-
-	assert.Equal(t, answer{"id": uint64(4), "ok": true}, call(t, r.conn,
-		map[string]any{"op": "delete", "id": 4, "key": "round.1.cmd"}))
-	assert.Equal(t, answer{"id": uint64(5), "ok": true}, call(t, r.conn,
-		map[string]any{"op": "insert", "id": 5, "key": "round.2.cmd", "value": []byte("x")}))
-	_, err := members[1].session.CuInterpose().Get(within(t), "round.2.cmd", 0)
-	require.NoError(t, err)
-}
-
 // testRelay is the relay's end of a relay socket, as a connection.
 type testRelay struct {
 	conn  net.Conn

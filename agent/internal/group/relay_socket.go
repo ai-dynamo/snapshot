@@ -35,10 +35,7 @@ import (
 //
 // A get's wait starts once the coordinator has answered that the key is
 // absent, so while the agent cannot reach the coordinator, the answer can come
-// later than wait_ms, though never after the session's end. An insert past the
-// relay's budget is answered TOO_MANY: a relay keeps at most the session's
-// largest value in keys at once, counting each key it inserted until it
-// deletes it.
+// later than wait_ms, though never after the session's end.
 
 // maxRelayBody is the largest frame body either end accepts: a value of the
 // session's largest, with its key and the rest of the message.
@@ -128,8 +125,7 @@ var codes = []struct {
 func serveRelay(ctx context.Context, conn io.ReadWriteCloser, s coordinator.Session) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	p := &relayProxy{conn: conn, session: s, store: s.CuInterpose(),
-		pending: make(map[uint64]bool), budget: s.Meta().MaxValue, held: make(map[string]int)}
+	p := &relayProxy{conn: conn, session: s, store: s.CuInterpose(), pending: make(map[uint64]bool)}
 	requests := make(chan relayRequest)
 	failed := make(chan error, 1)
 	stopped := make(chan struct{})
@@ -191,17 +187,6 @@ type relayProxy struct {
 	pending map[uint64]bool
 
 	running sync.WaitGroup
-
-	// writes serializes the relay's inserts and deletes, so its budget counts
-	// each key in the order the session applies them, and guards the fields
-	// below.
-	writes sync.Mutex
-	// budget bounds what the relay keeps in the session: the coordinator's
-	// memory is shared by every session, and a workload that drives its relay
-	// could otherwise fill it. held is the size of each value the relay
-	// inserted and has not deleted, and used their sum.
-	budget, used int
-	held         map[string]int
 }
 
 // read hands every request the relay sends to serveRelay, until reading fails.
@@ -249,11 +234,11 @@ func (p *relayProxy) forward(ctx context.Context, req relayRequest) relayAnswer 
 	)
 	switch req.Op {
 	case opInsert:
-		err = p.insertKey(ctx, req.Key, req.Value)
+		err = p.store.Insert(ctx, req.Key, req.Value)
 	case opGet:
 		value, err = p.store.Get(ctx, req.Key, waitOf(req.WaitMS))
 	case opDelete:
-		err = p.deleteKey(ctx, req.Key)
+		err = p.store.Delete(ctx, req.Key)
 	case opFail:
 		err = p.session.Fail(ctx, req.Reason)
 	default:
@@ -263,38 +248,6 @@ func (p *relayProxy) forward(ctx context.Context, req relayRequest) relayAnswer 
 		return failure(req.ID, err)
 	}
 	return relayAnswer{ID: req.ID, OK: true, Value: value, hasValue: req.Op == opGet}
-}
-
-// insertKey inserts value under key within the relay's budget. A value counts
-// from before it is sent until the relay deletes its key, even if the insert
-// fails, since a write that fails may have been applied, and a key the relay
-// inserts again counts at its largest value.
-func (p *relayProxy) insertKey(ctx context.Context, key string, value []byte) error {
-	p.writes.Lock()
-	defer p.writes.Unlock()
-	if extra := len(value) - p.held[key]; extra > 0 {
-		if p.used+extra > p.budget {
-			return fmt.Errorf("the relay keeps %d bytes in the session, and %d more would pass its budget of %d: %w",
-				p.used, extra, p.budget, session.ErrTooMany)
-		}
-		p.held[key] = len(value)
-		p.used += extra
-	}
-	return p.store.Insert(ctx, key, value)
-}
-
-// deleteKey deletes key, which returns its value to the relay's budget. A key
-// that another relay deletes, as the leader deletes each round's replies,
-// still counts against the relay that inserted it.
-func (p *relayProxy) deleteKey(ctx context.Context, key string) error {
-	p.writes.Lock()
-	defer p.writes.Unlock()
-	if err := p.store.Delete(ctx, key); err != nil {
-		return err
-	}
-	p.used -= p.held[key]
-	delete(p.held, key)
-	return nil
 }
 
 // answer writes one answer. The relay may be gone, which serveRelay learns
