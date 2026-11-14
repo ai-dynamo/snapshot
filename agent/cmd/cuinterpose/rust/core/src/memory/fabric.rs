@@ -91,7 +91,7 @@ pub(crate) fn import(
     mut state: MutexGuard<'static, ProcessState>,
     handle: FabricHandle,
 ) -> Result<(MutexGuard<'static, ProcessState>, u64)> {
-    if let Some(virtual_handle) = state.import_known_fabric(handle)? {
+    if let Some(virtual_handle) = state.import_known_fabric(handle, None)? {
         return Ok((state, virtual_handle));
     }
     let multicast = is_multicast(&handle)?;
@@ -105,9 +105,7 @@ pub(crate) fn import(
     // Imports can wait for the fabric manager, so the registry is released around them.
     let (mut state, imported) = runtime::call_unlocked(state, || driver::import_fabric(&handle))?;
     let imported = runtime::must_complete(VirtualAllocationHandle::from_driver(imported));
-    if let Some(virtual_handle) = state.import_known_fabric(handle)? {
-        // Another thread imported the same handle while this one waited.
-        unsafe { driver::cuMemRelease(imported) }?;
+    if let Some(virtual_handle) = state.import_known_fabric(handle, Some(imported))? {
         return Ok((state, virtual_handle));
     }
     let reference = importer_reference(&handle);
@@ -154,19 +152,36 @@ pub(crate) fn import(
 }
 
 impl ProcessState {
-    /// Mint another virtual handle for the memblock that `handle` already names.
-    fn import_known_fabric(&mut self, handle: FabricHandle) -> Result<Option<u64>> {
+    /// Mint another virtual handle for the memblock that `handle` already names. A mapping
+    /// keeps a unicast memblock after the application or a restore releases its driver
+    /// handle. Such a memblock takes `imported`, a new import of `handle`, and counts as
+    /// unknown without one. A memblock that holds a driver handle releases `imported`.
+    fn import_known_fabric(
+        &mut self,
+        handle: FabricHandle,
+        imported: Option<u64>,
+    ) -> Result<Option<u64>> {
         if self.phase != Phase::Active {
             return Err(CUDA_ERROR_NOT_READY.into());
         }
-        let Some(id) = self
+        let Some((&id, memblock)) = self
             .memblocks
-            .iter()
+            .iter_mut()
             .find(|(_, memblock)| memblock.fabric() == Some(handle))
-            .map(|(id, _)| *id)
         else {
             return Ok(None);
         };
+        if let Memblock::Unicast(allocation) = memblock
+            && allocation.driver.is_none()
+        {
+            if imported.is_none() {
+                return Ok(None);
+            }
+            allocation.driver = imported;
+        } else if let Some(imported) = imported {
+            // Another thread imported the same handle while this one waited.
+            unsafe { driver::cuMemRelease(imported) }?;
+        }
         let virtual_handle = self.mint_virtual_allocation_handle(id)?;
         self.memblocks
             .get_mut(&id)
@@ -219,7 +234,7 @@ mod tests {
         Allocation {
             reference,
             refcounts: Default::default(),
-            driver: None,
+            driver: Some(0x1000),
             size: 4096,
             properties: CUmemAllocationProp {
                 type_: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED,
@@ -295,8 +310,8 @@ mod tests {
         state
             .adopt_unicast(allocation(reference, Some(handle(2))))
             .unwrap();
-        assert_eq!(state.import_known_fabric(handle(3)).unwrap(), None);
-        let again = state.import_known_fabric(handle(2)).unwrap().unwrap();
+        assert_eq!(state.import_known_fabric(handle(3), None).unwrap(), None);
+        let again = state.import_known_fabric(handle(2), None).unwrap().unwrap();
         assert_eq!(
             state.resolve_virtual_handle(again).unwrap(),
             Some(reference.id)
@@ -304,9 +319,35 @@ mod tests {
         assert_eq!(state.memblocks[&reference.id].refcounts().handle_entries, 2);
         state.phase = Phase::Checkpointing;
         assert!(matches!(
-            state.import_known_fabric(handle(2)),
+            state.import_known_fabric(handle(2), None),
             Err(Error::Cuda(CUDA_ERROR_NOT_READY))
         ));
+    }
+
+    #[test]
+    fn known_handles_without_a_driver_handle_take_a_new_import() {
+        // An application that imports, maps, and releases a handle leaves a mapped
+        // memblock without a driver handle. Restore leaves the same state.
+        let mut state = ProcessState::new(41);
+        let reference = importer_reference(&handle(2));
+        let mut mapped = allocation(reference, Some(handle(2)));
+        mapped.driver = None;
+        mapped.refcounts.mappings = 1;
+        state
+            .memblocks
+            .insert(reference.id, Memblock::Unicast(mapped));
+        assert_eq!(state.import_known_fabric(handle(2), None).unwrap(), None);
+        let again = state
+            .import_known_fabric(handle(2), Some(0x2000))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state.resolve_virtual_handle(again).unwrap(),
+            Some(reference.id)
+        );
+        let memblock = &state.memblocks[&reference.id];
+        assert_eq!(memblock.driver_handle().unwrap(), 0x2000);
+        assert_eq!(memblock.refcounts().handle_entries, 1);
     }
 
     #[test]
