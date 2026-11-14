@@ -23,7 +23,9 @@ type PodGroupSnapshotSpec struct {
 	// Members are the Pods to checkpoint together, 1 to 256 of them. A
 	// member's position in the list is its rank, which every restore of the
 	// group reuses, so the list is ordered: like the rest of the spec, the
-	// order cannot change.
+	// order cannot change. With 256 members whose templates hold very long
+	// values, the object and its status can exceed the API server's object size
+	// limit of about 1.5 MiB.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=256
@@ -95,8 +97,8 @@ type CheckpointPhase string
 const (
 	// CheckpointPhasePending means the member has not yet passed admission.
 	CheckpointPhasePending CheckpointPhase = "Pending"
-	// CheckpointPhaseAdmitted means the member passed admission. The checkpoint
-	// commits once every member has.
+	// CheckpointPhaseAdmitted means the member passed admission and has its
+	// PodSnapshot. The checkpoint commits only at the agents' admitted barrier.
 	CheckpointPhaseAdmitted CheckpointPhase = "Admitted"
 	// CheckpointPhaseCheckpointing means the member is being checkpointed.
 	CheckpointPhaseCheckpointing CheckpointPhase = "Checkpointing"
@@ -108,8 +110,9 @@ const (
 )
 
 // PodGroupSnapshotMemberStatus is the observed state of one member. Its
-// bindings and startedAt are write-once, and its phase stops changing once
-// final.
+// nodeName, bindings and startedAt are write-once, and its phase stops
+// changing once final.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.nodeName) || (has(self.nodeName) && self.nodeName == oldSelf.nodeName)",message="nodeName is write-once"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.podSnapshot) || (has(self.podSnapshot) && self.podSnapshot == oldSelf.podSnapshot)",message="podSnapshot is write-once"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.content) || (has(self.content) && self.content == oldSelf.content)",message="content is write-once"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.startedAt) || (has(self.startedAt) && self.startedAt == oldSelf.startedAt)",message="startedAt is write-once"
