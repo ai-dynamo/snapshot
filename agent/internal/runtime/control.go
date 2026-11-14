@@ -246,20 +246,23 @@ func removePodControlFile(podsDir, podUID, containerName, name string) error {
 	return nil
 }
 
-// ControlSentinelExists reports whether a sentinel exists in the workload
-// container's snapshot-control volume. It returns an error when the container's
-// control mount cannot be inspected, so callers do not mistake an inaccessible
-// volume for a missing sentinel. Only a regular file counts; anything else
-// under the name is an error.
-func ControlSentinelExists(hostPID int, name string) (bool, error) {
-	return controlSentinelExists(HostProcPath, hostPID, name)
+// PodControlSentinelExists reports whether a sentinel exists in
+// OpenPodControlDir, which needs no process in the container. A volume that
+// kubelet has not set up holds none. Only a regular file counts; anything
+// else under the name is an error, so callers do not mistake it for a
+// missing sentinel.
+func PodControlSentinelExists(podUID, containerName, name string) (bool, error) {
+	return podControlSentinelExists(KubeletPodsDir, podUID, containerName, name)
 }
 
-func controlSentinelExists(procRoot string, hostPID int, name string) (bool, error) {
+func podControlSentinelExists(podsDir, podUID, containerName, name string) (bool, error) {
 	if name == "" || name != filepath.Base(name) || name == ".." {
 		return false, fmt.Errorf("invalid control sentinel name %q", name)
 	}
-	dir, err := openContainerControlDir(procRoot, hostPID)
+	dir, err := openPodControlDir(podsDir, podUID, containerName)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("control sentinel %q: %w", name, err)
 	}

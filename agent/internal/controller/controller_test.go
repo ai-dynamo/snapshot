@@ -166,7 +166,7 @@ func TestNewDefaultControllerSetsDefaultOperations(t *testing.T) {
 		testr.New(t),
 	)
 	t.Cleanup(w.restoreQueue.ShutDown)
-	if w.checkpointFn == nil || w.restoreFn == nil || w.writeControlSentinelFn == nil || w.writePodControlSentinelFn == nil || w.readPodControlFileFn == nil || w.removePodControlFileFn == nil || w.controlSentinelExistsFn == nil || w.sendSignalFn == nil || w.restoreQueue == nil {
+	if w.checkpointFn == nil || w.restoreFn == nil || w.writeControlSentinelFn == nil || w.writePodControlSentinelFn == nil || w.readPodControlFileFn == nil || w.removePodControlFileFn == nil || w.podControlSentinelExistsFn == nil || w.sendSignalFn == nil || w.restoreQueue == nil {
 		t.Fatal("default controller operations must be initialized")
 	}
 	if w.compareFn == nil {
@@ -201,22 +201,22 @@ func makeTestController(t *testing.T, pod *corev1.Pod, apiObjects ...runtime.Obj
 			NodeName: testNodeName,
 			Storage:  types.StorageSpec{Type: "pvc", BasePath: t.TempDir()},
 		},
-		clientset:                 fake.NewClientset(coreObjects...),
-		client:                    clientBuilder.Build(),
-		runtime:                   &fakeRuntime{},
-		injector:                  noopInjector{},
-		restoreFn:                 executor.Restore,
-		writeControlSentinelFn:    func(int, string, []byte) error { return nil },
-		writePodControlSentinelFn: func(string, string, string, []byte) error { return nil },
-		readPodControlFileFn:      func(string, string, string, int64) ([]byte, error) { return nil, os.ErrNotExist },
-		removePodControlFileFn:    func(string, string, string) error { return nil },
-		controlSentinelExistsFn:   func(int, string) (bool, error) { return false, nil },
-		sendSignalFn:              func(logr.Logger, int, syscall.Signal, string) error { return nil },
-		restoreQueue:              workqueue.NewTypedDelayingQueue[client.ObjectKey](),
-		compareFn:                 compat.Compare,
-		log:                       testr.New(t),
-		captureQueue:              newTestCaptureQueue(t),
-		stopCh:                    make(chan struct{}),
+		clientset:                  fake.NewClientset(coreObjects...),
+		client:                     clientBuilder.Build(),
+		runtime:                    &fakeRuntime{},
+		injector:                   noopInjector{},
+		restoreFn:                  executor.Restore,
+		writeControlSentinelFn:     func(int, string, []byte) error { return nil },
+		writePodControlSentinelFn:  func(string, string, string, []byte) error { return nil },
+		readPodControlFileFn:       func(string, string, string, int64) ([]byte, error) { return nil, os.ErrNotExist },
+		removePodControlFileFn:     func(string, string, string) error { return nil },
+		podControlSentinelExistsFn: func(string, string, string) (bool, error) { return false, nil },
+		sendSignalFn:               func(logr.Logger, int, syscall.Signal, string) error { return nil },
+		restoreQueue:               workqueue.NewTypedDelayingQueue[client.ObjectKey](),
+		compareFn:                  compat.Compare,
+		log:                        testr.New(t),
+		captureQueue:               newTestCaptureQueue(t),
+		stopCh:                     make(chan struct{}),
 	}
 	// Set the clock and requeue as newDefaultController does.
 	w.nowFn = time.Now
@@ -1554,10 +1554,10 @@ func TestRestoreStatusRetryUsesCompletionSentinelWithoutReplayingRestore(t *test
 		sentinelWritten = true
 		return nil
 	}
-	w.controlSentinelExistsFn = func(pid int, name string) (bool, error) {
-		assert.Equal(t, 4242, pid)
-		assert.Equal(t, podcontract.RestoreCompleteFile, name)
-		return sentinelWritten, nil
+	w.podControlSentinelExistsFn = func(podUID, container, name string) (bool, error) {
+		assert.Equal(t, string(pod.UID), podUID)
+		assert.Equal(t, "main", container)
+		return name == podcontract.RestoreCompleteFile && sentinelWritten, nil
 	}
 	statusPatches := 0
 	w.clientset.(*fake.Clientset).PrependReactor("patch", "pods", func(action clientgotesting.Action) (bool, runtime.Object, error) {
@@ -2080,10 +2080,8 @@ func TestRunRestoreFinalizesExistingCompletionSentinelWithoutReplay(t *testing.T
 	})
 	w := makeTestController(t, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
-	w.controlSentinelExistsFn = func(pid int, name string) (bool, error) {
-		assert.Equal(t, 4242, pid)
-		assert.Equal(t, podcontract.RestoreCompleteFile, name)
-		return true, nil
+	w.podControlSentinelExistsFn = func(_, _, name string) (bool, error) {
+		return name == podcontract.RestoreCompleteFile, nil
 	}
 	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
 		t.Fatal("restore executor must not be replayed after the completion sentinel exists")

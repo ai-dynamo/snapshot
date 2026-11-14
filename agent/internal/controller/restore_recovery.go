@@ -33,6 +33,10 @@ var errRetryScheduled = errors.New("the restore waits for its next attempt")
 // stopped.
 var errContainerStopped = errors.New("the container stopped during the attempt")
 
+// errRestoreAlreadyFailed is a destination whose restore-failed an earlier
+// pass wrote.
+var errRestoreAlreadyFailed = errors.New("the restore already failed in an earlier pass")
+
 type recovery int
 
 const (
@@ -113,8 +117,14 @@ func restoreFailureOf(err error) *executor.RestoreFailure {
 
 // attemptFailed chooses what follows a failed attempt. A retry in the same
 // container is saved in the record for a later pass to start; anything else
-// ends the restore, including a failure that changed the container.
+// ends the restore, including a failure that changed the container. An agent
+// that is stopping chooses nothing: it may stop halfway through, and the next
+// agent finds the attempt unfinished instead.
 func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, record *restoreAttempts, err error) error {
+	if ctx.Err() != nil {
+		op.log.Info("Agent stopping; leaving the restore attempt to the next agent", "error", err.Error())
+		return errRestoreInterrupted
+	}
 	failure := restoreFailureOf(err)
 	if !failure.ContainerChanged && record.Limit > 0 && op.containerStopped(ctx) {
 		failure = restoreFailureOf(stoppedDuringAttempt(failure))
