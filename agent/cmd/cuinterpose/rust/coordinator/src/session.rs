@@ -156,7 +156,7 @@ impl Session {
         let id = self.next_id;
         self.next_id += 1;
         match protocol::send_session(&self.socket, &request(id)) {
-            Err(protocol::Error::Io(error)) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+            Err(error) if closed(&error) => {
                 Err(Ended("the agent closed the session socket".into()).into())
             }
             result => result
@@ -167,9 +167,11 @@ impl Session {
 
     fn receive(&mut self) -> Result<Response> {
         loop {
-            let response = protocol::receive_session::<Response>(&self.socket)
-                .context("receive a session answer from the agent")?
-                .ok_or_else(|| Ended("the agent closed the session socket".into()))?;
+            let response = match protocol::receive_session::<Response>(&self.socket) {
+                Err(error) if closed(&error) => None,
+                result => result.context("receive a session answer from the agent")?,
+            }
+            .ok_or_else(|| Ended("the agent closed the session socket".into()))?;
             if !self.abandoned.remove(&response.id) {
                 return Ok(response);
             }
@@ -188,11 +190,21 @@ impl Session {
     }
 }
 
+/// Whether the agent closed its end of the socket, which a clean end of the stream also
+/// shows.
+fn closed(error: &protocol::Error) -> bool {
+    matches!(error, protocol::Error::Io(error) if matches!(
+        error.kind(),
+        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+    ))
+}
+
 fn refusal(subject: &str, code: Option<&str>, reason: Option<String>) -> anyhow::Error {
     let code = code.unwrap_or("no code");
     let reason = reason.filter(|reason| !reason.is_empty());
     match code {
-        "ABORTED" | "CLOSED" => {
+        // The session failed or closed, or the agent stopped serving it.
+        "ABORTED" | "CLOSED" | "CANCELLED" => {
             let detail = match reason {
                 Some(reason) => format!("{code} ({reason})"),
                 None => code.to_owned(),
@@ -206,4 +218,32 @@ fn refusal(subject: &str, code: Option<&str>, reason: Option<String>) -> anyhow:
 /// Whether `error` comes from a session that already ended.
 pub fn ended(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| cause.is::<Ended>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn answers_of_a_session_that_ended_are_told_from_refusals() {
+        for code in ["ABORTED", "CLOSED", "CANCELLED"] {
+            assert!(ended(&refusal("key", Some(code), None)), "{code}");
+        }
+        for code in [Some("TOO_LARGE"), None] {
+            assert!(!ended(&refusal("key", code, None)), "{code:?}");
+        }
+    }
+
+    #[test]
+    fn reset_socket_ends_the_session() {
+        let (relay, agent) = UnixStream::pair().unwrap();
+        let mut session = Session::new(relay);
+        let id = session
+            .send(|id| Request::Delete { id, key: "key" })
+            .unwrap();
+        // Closing a socket with unread data resets the connection.
+        drop(agent);
+        let error = session.answer(id, "key").map(drop).unwrap_err();
+        assert!(ended(&error), "{error:#}");
+    }
 }
