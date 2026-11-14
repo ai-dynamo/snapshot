@@ -288,6 +288,30 @@ func TestPodGroupRestoreClaimsAndPins(t *testing.T) {
 	assert.Equal(t, snapshotv1alpha1.RestorePhaseFailed, m.Phase)
 	assert.Equal(t, snapshotv1alpha1.PodGroupReasonPodIPChanged, m.Reason, "the reason comes from its GroupRestoreFailed")
 	assert.NotNil(t, m.StartedAt)
+
+	t.Run("a reason the CRD refuses neither wedges the status nor holds the restore", func(t *testing.T) {
+		writeReport(t, cl, pod("b"),
+			corev1.PodCondition{Type: podcontract.RestoreStartedCondition, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now()},
+			corev1.PodCondition{Type: podcontract.RestoredCondition, Status: corev1.ConditionFalse, Reason: podcontract.RestoreReasonFailed},
+			corev1.PodCondition{Type: podcontract.GroupRestoreFailedCondition, Status: corev1.ConditionTrue,
+				Reason: "Pod IP changed", Message: "the Pod's IP changed"})
+
+		got := reconcile()
+
+		m := got.Status.Members[1]
+		assert.Equal(t, snapshotv1alpha1.RestorePhaseFailed, m.Phase)
+		assert.Equal(t, podcontract.RestoreReasonFailed, m.Reason)
+		assert.Equal(t, `agent reason "Pod IP changed": the Pod's IP changed`, m.Message)
+		failed := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed)
+		require.NotNil(t, failed)
+		assert.Equal(t, metav1.ConditionTrue, failed.Status)
+
+		require.NoError(t, cl.Delete(ctx, restore))
+		_, err := r.Reconcile(ctx, request)
+		require.NoError(t, err)
+		err = cl.Get(ctx, client.ObjectKeyFromObject(restore), &snapshotv1alpha1.PodGroupRestore{})
+		assert.True(t, apierrors.IsNotFound(err), "the restore is released, got %v", err)
+	})
 }
 
 // writeReport writes a report on pod as the contract requires: the conditions

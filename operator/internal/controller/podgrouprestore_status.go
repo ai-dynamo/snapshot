@@ -6,6 +6,7 @@ package controller
 import (
 	"cmp"
 	"fmt"
+	"regexp"
 	"slices"
 	"time"
 
@@ -16,6 +17,18 @@ import (
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
+
+// maxMemberReasonLength is the CRD's limit on a member's reason.
+const maxMemberReasonLength = 1024
+
+// memberReasonPattern is the CRD's pattern for a member's reason. The CRD
+// refuses a status that breaks it, so the operator copies no reason that does.
+var memberReasonPattern = regexp.MustCompile(`^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$`)
+
+// isMemberReason reports whether the CRD accepts reason as a member's reason.
+func isMemberReason(reason string) bool {
+	return len(reason) <= maxMemberReasonLength && memberReasonPattern.MatchString(reason)
+}
 
 // podGroupRestoreMemberObservation is what one reconcile saw of one pinned
 // target.
@@ -114,7 +127,9 @@ var podGroupRestoreKind = podGroupKind{
 //	Failed     its report's nvidia.com/Restored is False with RestoreFailed or
 //	           RestoreIncompatible: the reason and message of the report's
 //	           nvidia.com/GroupRestoreFailed when it is True, otherwise
-//	           Restored's, the message cut to maxMemberMessageLength bytes
+//	           Restored's, the message cut to maxMemberMessageLength bytes;
+//	           a reason the CRD would refuse (see isMemberReason) becomes
+//	           Restored's, and the message then quotes it
 //	Failed     its pinned Pod is gone or replaced, as the API server
 //	           confirmed: TargetPodDeleted
 //	Failed     the restore was refused or passed its deadline, or it was
@@ -218,8 +233,12 @@ func derivePodGroupRestoreMemberStatus(m *snapshotv1alpha1.PodGroupRestoreMember
 		if group := report.groupFailed; group != nil && group.Status == corev1.ConditionTrue {
 			cause = group
 		}
-		m.Phase, m.Reason = snapshotv1alpha1.RestorePhaseFailed, cause.Reason
-		m.Message = capMessage(cause.Message, maxMemberMessageLength)
+		m.Phase, m.Reason, m.Message = snapshotv1alpha1.RestorePhaseFailed, cause.Reason, cause.Message
+		if !isMemberReason(cause.Reason) {
+			m.Reason = restored.Reason
+			m.Message = fmt.Sprintf("agent reason %q: %s", cause.Reason, cause.Message)
+		}
+		m.Message = capMessage(m.Message, maxMemberMessageLength)
 	case observed.podDeleted && m.Pod != nil:
 		m.Phase, m.Reason = snapshotv1alpha1.RestorePhaseFailed, snapshotv1alpha1.PodGroupReasonTargetPodDeleted
 		m.Message = fmt.Sprintf("Pod %q was deleted or replaced before the member was released", m.Pod.Name)

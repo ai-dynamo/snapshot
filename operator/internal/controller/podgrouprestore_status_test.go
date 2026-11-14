@@ -11,13 +11,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/yaml"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/api/v1alpha1/crds"
 )
 
 // prSpec is a PodGroupRestore spec whose targets a, b, ... name the restore
@@ -188,6 +191,27 @@ func TestDerivePodGroupRestoreMemberTable(t *testing.T) {
 			previous: restoring,
 			observed: prObserved(prPod("a", prStarted, prRestoreError, prGroupFailed(snapshotv1alpha1.PodGroupReasonPodIPChanged))),
 			want:     prFailed(prPinned("a", snapshotv1alpha1.RestorePhaseRestoring), snapshotv1alpha1.PodGroupReasonPodIPChanged),
+		},
+		{
+			name:     "a GroupRestoreFailed reason the CRD refuses becomes Restored's reason, quoted in the message",
+			previous: restoring,
+			observed: prObserved(prPod("a", prStarted, prRestoreError, prGroupFailed("Pod IP changed"))),
+			want: func() snapshotv1alpha1.PodGroupRestoreMemberStatus {
+				m := prFailed(prPinned("a", snapshotv1alpha1.RestorePhaseRestoring), podcontract.RestoreReasonFailed)
+				m.Message = `agent reason "Pod IP changed": Pod IP changed message`
+				return m
+			}(),
+		},
+		{
+			name:     "a GroupRestoreFailed reason longer than the CRD allows becomes Restored's reason",
+			previous: restoring,
+			observed: prObserved(prPod("a", prStarted, prRestoreError, prGroupFailed(strings.Repeat("a", maxMemberReasonLength+1)))),
+			want: func() snapshotv1alpha1.PodGroupRestoreMemberStatus {
+				m := prFailed(prPinned("a", snapshotv1alpha1.RestorePhaseRestoring), podcontract.RestoreReasonFailed)
+				m.Message = capMessage(`agent reason "`+strings.Repeat("a", maxMemberReasonLength+1)+`": `+
+					strings.Repeat("a", maxMemberReasonLength+1)+" message", maxMemberMessageLength)
+				return m
+			}(),
 		},
 		{
 			name:     "GroupRestoreFailed while Restored is in progress fails nothing",
@@ -830,4 +854,59 @@ func TestPodGroupRestoreChangeIsIrreversible(t *testing.T) {
 			assert.Equal(t, tc.want, podGroupRestoreChangeIsIrreversible(tc.persisted, tc.derived, tc.deleting))
 		})
 	}
+}
+
+func TestMemberReasonPatternMatchesTheCRD(t *testing.T) {
+	var crd apiextensionsv1.CustomResourceDefinition
+	found := false
+	for _, manifest := range crds.All() {
+		require.NoError(t, yaml.Unmarshal([]byte(manifest), &crd))
+		if crd.Spec.Names.Kind == "PodGroupRestore" {
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "the PodGroupRestore CRD is embedded")
+	status := crd.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["status"]
+	reason := status.Properties["members"].Items.Schema.Properties["reason"]
+
+	assert.Equal(t, reason.Pattern, memberReasonPattern.String())
+	require.NotNil(t, reason.MaxLength)
+	assert.EqualValues(t, *reason.MaxLength, maxMemberReasonLength)
+}
+
+func TestIsMemberReason(t *testing.T) {
+	for reason, want := range map[string]bool{
+		"PodIPChanged":            true,
+		"RestoreFailed":           true,
+		"a,b:c_d":                 true,
+		"":                        false,
+		"Pod IP changed":          false,
+		"Pod-IP":                  false,
+		"Pod.IP":                  false,
+		"1Pod":                    false,
+		"Pod:":                    false,
+		strings.Repeat("a", 1024): true,
+		strings.Repeat("a", 1025): false,
+	} {
+		assert.Equal(t, want, isMemberReason(reason), "%q", reason)
+	}
+}
+
+func TestDerivePodGroupRestoreStatusWithAReasonTheCRDRefuses(t *testing.T) {
+	spec := prSpec("a", "b")
+	previous := prStatus(prPinned("a", snapshotv1alpha1.RestorePhaseRestoring), prPinned("b", snapshotv1alpha1.RestorePhaseRestoring))
+	observed := prObserved(
+		prPod("a", prStarted, prRestoreError, prGroupFailed("Pod IP changed")),
+		prPod("b", prStarted))
+
+	got := prDerive(spec, observed, previous)
+
+	failed := prCondition(got, snapshotv1alpha1.PodGroupConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, metav1.ConditionTrue, failed.Status)
+	for _, m := range got.Members {
+		assert.True(t, m.Reason == "" || isMemberReason(m.Reason), "member %s reason %q", m.ID, m.Reason)
+	}
+	assert.Equal(t, podcontract.RestoreReasonFailed, got.Members[0].Reason)
 }
