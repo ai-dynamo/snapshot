@@ -117,10 +117,10 @@ var podGroupRestoreKind = podGroupKind{
 //	           Restored's, the message cut to maxMemberMessageLength bytes
 //	Failed     its pinned Pod is gone or replaced, as the API server
 //	           confirmed: TargetPodDeleted
-//	Failed     the restore was refused, passed its deadline, or was deleted
-//	           before any member started, and the member is not Released:
-//	           that cause's reason, with a fixed message pointing to the
-//	           restore's Failed condition
+//	Failed     the restore was refused or passed its deadline, or it was
+//	           deleted before any member started and the member is not pinned,
+//	           and the member is not Released: that cause's reason, with a
+//	           fixed message pointing to the restore's Failed condition
 //	Released   its report's nvidia.com/Restored is True
 //	Restoring  it has startedAt
 //	Admitted   it is pinned
@@ -168,13 +168,16 @@ func derivePodGroupRestoreStatus(
 		next.Members[i] = status
 	}
 
+	views := podGroupRestoreMemberViews(next.Members, observed.ranks)
 	attempt := newPodGroupAttempt(&podGroupRestoreKind, spec.DeadlineSeconds, observed.admission,
-		observed.deleting, !now.Before(observed.deadline), podGroupRestoreMemberViews(next.Members, observed.ranks))
-	if cause := attempt.memberCause(); cause != nil {
-		for i := range next.Members {
-			if m := &next.Members[i]; !isRestorePhaseFinal(m.Phase) {
-				m.Phase, m.Reason, m.Message = snapshotv1alpha1.RestorePhaseFailed, cause.reason, cause.message
-			}
+		observed.deleting, !now.Before(observed.deadline), views)
+	for i := range next.Members {
+		m := &next.Members[i]
+		if isRestorePhaseFinal(m.Phase) {
+			continue
+		}
+		if cause := attempt.memberCause(&podGroupMemberView{hasWork: m.Pod != nil}); cause != nil {
+			m.Phase, m.Reason, m.Message = snapshotv1alpha1.RestorePhaseFailed, cause.reason, cause.message
 		}
 	}
 
@@ -299,12 +302,12 @@ func isRestorePhaseFinal(phase snapshotv1alpha1.RestorePhase) bool {
 }
 
 // podGroupRestoreFinished reports whether a PodGroupRestore's attempt has
-// finished: it is Ready or Failed, and no member is still Restoring. Agents
-// read an unfinished restore for its pins until their member ends, so it holds
-// its own in-use finalizer, and its PodGroupSnapshot's, and its target Pods stay
-// in use. A restore deleted before any member started has finished with
-// Cancelled; its deadline bounds every other wait, since it fails every member
-// still Restoring.
+// finished: it is Ready or Failed, and every member is Released or Failed.
+// Agents read an unfinished restore for its pins until their member ends, so it
+// holds its own in-use finalizer, and its PodGroupSnapshot's, and its target
+// Pods stay in use. A restore deleted before any member started cancels only
+// the members that are not pinned; its deadline bounds every other wait, since
+// it fails every member that is not final.
 func podGroupRestoreFinished(status *snapshotv1alpha1.PodGroupRestoreStatus) bool {
 	ended := meta.IsStatusConditionTrue(status.Conditions, snapshotv1alpha1.PodGroupConditionReady) ||
 		meta.IsStatusConditionTrue(status.Conditions, snapshotv1alpha1.PodGroupConditionFailed)
@@ -312,7 +315,7 @@ func podGroupRestoreFinished(status *snapshotv1alpha1.PodGroupRestoreStatus) boo
 		return false
 	}
 	for _, m := range status.Members {
-		if m.Phase == snapshotv1alpha1.RestorePhaseRestoring {
+		if !isRestorePhaseFinal(m.Phase) {
 			return false
 		}
 	}

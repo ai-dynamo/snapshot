@@ -1318,7 +1318,7 @@ func TestPodGroupRestoreReconciler_Deletion(t *testing.T) {
 		require.NoError(t, r.Delete(context.Background(), getRestore(t, r)))
 	}
 
-	t.Run("cancelled before any member starts", func(t *testing.T) {
+	t.Run("cancelled before any member starts, held while its members are pinned", func(t *testing.T) {
 		r := setup(t)
 		var recorded *metav1.Condition
 		r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
@@ -1334,8 +1334,13 @@ func TestPodGroupRestoreReconciler_Deletion(t *testing.T) {
 
 		require.NotNil(t, recorded, "Cancelled is recorded before the finalizer goes")
 		assert.Equal(t, snapshotv1alpha1.PodGroupReasonCancelled, recorded.Reason)
-		assert.True(t, restoreGone(t, r))
+		assert.False(t, restoreGone(t, r), "a pinned member reports its own end")
 		assert.Equal(t, []string{"Warning Cancelled " + podGroupRestoreCancelledMessage}, drainEvents(recorder))
+
+		rgReport(t, r, "a", prRestoreError)
+		rgReport(t, r, "b", prRestoreError)
+		reconcileRestore(t, r)
+		assert.True(t, restoreGone(t, r))
 	})
 
 	t.Run("a restore deleted before its claim claims nothing", func(t *testing.T) {

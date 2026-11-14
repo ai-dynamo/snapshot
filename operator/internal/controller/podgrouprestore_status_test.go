@@ -200,7 +200,7 @@ func TestDerivePodGroupRestoreMemberTable(t *testing.T) {
 		{
 			name:     "GroupRestoreFailed without Restored fails nothing",
 			previous: admitted,
-			observed: prObserved(prPod("a", prGroupFailed(snapshotv1alpha1.PodGroupReasonGateBudgetTooShort))),
+			observed: prObserved(prPod("a", prGroupFailed("AgentSpecific"))),
 			want:     prPinned("a", snapshotv1alpha1.RestorePhaseAdmitted),
 		},
 		{
@@ -271,16 +271,21 @@ func TestDerivePodGroupRestoreMemberTable(t *testing.T) {
 			want:         prFailed(prPinned("a", snapshotv1alpha1.RestorePhaseRestoring), podcontract.RestoreReasonFailed),
 		},
 		{
-			name:     "deletion before any member started cancels the member",
+			name:     "deletion before any member started cancels a member that is not pinned",
+			previous: nil,
+			observed: prObserved(),
+			deleting: true,
+			want: snapshotv1alpha1.PodGroupRestoreMemberStatus{
+				ID: "a", Phase: snapshotv1alpha1.RestorePhaseFailed,
+				Reason: snapshotv1alpha1.PodGroupReasonCancelled, Message: podGroupRestoreCancelledMemberMessage,
+			},
+		},
+		{
+			name:     "deletion before any member started leaves a pinned member to its agent",
 			previous: admitted,
 			observed: prObserved(prPod("a")),
 			deleting: true,
-			want: func() snapshotv1alpha1.PodGroupRestoreMemberStatus {
-				m := prPinned("a", snapshotv1alpha1.RestorePhaseAdmitted)
-				m.Phase, m.Reason = snapshotv1alpha1.RestorePhaseFailed, snapshotv1alpha1.PodGroupReasonCancelled
-				m.Message = podGroupRestoreCancelledMemberMessage
-				return m
-			}(),
+			want:     prPinned("a", snapshotv1alpha1.RestorePhaseAdmitted),
 		},
 		{
 			name:     "deletion after the member started leaves it Restoring",
@@ -549,8 +554,8 @@ func TestDerivePodGroupRestoreFailureReasons(t *testing.T) {
 			wantReason: snapshotv1alpha1.PodGroupReasonPodIPChanged,
 		},
 		{
-			name:       "row 2: GateBudgetTooShort after the commit is MemberFailed",
-			members:    []podGroupRestoreMemberObservation{started("a"), reported("b", snapshotv1alpha1.PodGroupReasonGateBudgetTooShort)},
+			name:       "row 2: an agent-specific reason after the commit is MemberFailed",
+			members:    []podGroupRestoreMemberObservation{started("a"), reported("b", "AgentSpecific")},
 			previous:   pinned("a", "b"),
 			wantReason: snapshotv1alpha1.PodGroupReasonMemberFailed,
 		},
@@ -563,13 +568,13 @@ func TestDerivePodGroupRestoreFailureReasons(t *testing.T) {
 			wantReason: snapshotv1alpha1.PodGroupReasonMemberFailed,
 		},
 		{
-			name: "row 3: GateBudgetTooShort before the commit",
+			name: "row 3: an agent-specific reason before the commit is Refused",
 			members: []podGroupRestoreMemberObservation{
-				reported("a", snapshotv1alpha1.PodGroupReasonGateBudgetTooShort), reported("b", snapshotv1alpha1.PodGroupReasonRefused),
+				reported("a", "AgentSpecific"), reported("b", snapshotv1alpha1.PodGroupReasonRefused),
 			},
 			previous:    pinned("a", "b"),
-			wantReason:  snapshotv1alpha1.PodGroupReasonGateBudgetTooShort,
-			wantMessage: `member "a" (rank 0) failed with GateBudgetTooShort: GateBudgetTooShort message`,
+			wantReason:  snapshotv1alpha1.PodGroupReasonRefused,
+			wantMessage: `member "a" (rank 0) failed with AgentSpecific: AgentSpecific message`,
 		},
 		{
 			name: "row 3: PodIPChanged before the commit",
@@ -764,7 +769,7 @@ func TestPodGroupRestoreFinished(t *testing.T) {
 		{"released, not ready", []metav1.Condition{released}, []snapshotv1alpha1.RestorePhase{"Released", "Restoring"}, false},
 		{"ready", []metav1.Condition{released, ready}, []snapshotv1alpha1.RestorePhase{"Released", "Released"}, true},
 		{"failed while a member restores", []metav1.Condition{failed}, []snapshotv1alpha1.RestorePhase{"Failed", "Restoring"}, false},
-		{"failed with a member never started", []metav1.Condition{failed}, []snapshotv1alpha1.RestorePhase{"Failed", "Admitted"}, true},
+		{"failed while a member is pinned and unfinished", []metav1.Condition{failed}, []snapshotv1alpha1.RestorePhase{"Failed", "Admitted"}, false},
 		{"cancelled", []metav1.Condition{failed}, []snapshotv1alpha1.RestorePhase{"Failed", "Failed"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
