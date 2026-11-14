@@ -100,9 +100,10 @@ pub(crate) fn import(
     let multicast = is_multicast(&handle)?;
     let context = driver::context()?;
     // An importer cannot observe the creator's properties. It records the device it
-    // imports on, and the coordinator takes the rest from the creator's records.
+    // imports on, or device 0 without a current context, as a native import needs none.
+    // The coordinator takes the location and the rest from the creator's records.
     let mut device = 0;
-    if !multicast {
+    if !multicast && context != 0 {
         unsafe { driver::cuCtxGetDevice(&mut device) }?;
     }
     // Imports can wait for the fabric manager, so the registry is released around them.
