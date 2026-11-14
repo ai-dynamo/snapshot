@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/vmihailenco/msgpack/v5"
 
+	"github.com/ai-dynamo/snapshot/coordinator"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 )
 
@@ -124,6 +126,80 @@ func TestRelayThatGoesAwayLeavesTheSession(t *testing.T) {
 	assert.NoError(t, members[0].session.Err(), "the session outlives its relay")
 }
 
+func TestRelayWaitsForRoomInFlight(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		inserts int
+		value   []byte
+		want    int32
+	}{
+		// A get for the other member, and the requests besides.
+		{"by requests", 10, []byte("x"), 1 + relayRequestsBesideGets},
+		{"by bytes", 3, make([]byte, maxRelayBody-1024), 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := session.Meta{
+				Deadline: time.Now().Add(time.Hour),
+				Members:  []session.Member{{ID: "member-0"}, {ID: "member-1", Rank: 1}},
+			}
+			store := &holdingStore{release: make(chan struct{})}
+			r := openRelay(t, &Member{session: holdingSession{metaSession{meta: meta}, store}, id: "member-0"})
+			var frames []byte
+			for id := range tc.inserts {
+				frames = append(frames, frame(t, map[string]any{"op": "insert", "id": id, "key": strconv.Itoa(id), "value": tc.value})...)
+			}
+			written := make(chan error, 1)
+			go func() {
+				_, err := r.conn.Write(frames)
+				written <- err
+			}()
+
+			require.Eventually(t, func() bool { return store.started.Load() == tc.want }, 10*time.Second, time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
+			assert.Equal(t, tc.want, store.started.Load(), "the agent reads no request past the relay's room")
+
+			close(store.release)
+			for range tc.inserts {
+				assert.Equal(t, true, read(t, r.conn)["ok"])
+			}
+			require.NoError(t, <-written)
+		})
+	}
+}
+
+func TestRelayLeaderWaitingForEveryOtherRelayStillWrites(t *testing.T) {
+	members := joinAll(t, 4)
+	leader := openRelay(t, members[0])
+	// A request that waits for room fails the test rather than hang it.
+	require.NoError(t, leader.conn.SetDeadline(time.Now().Add(10*time.Second)))
+
+	// The leader waits for every other relay's reply at once.
+	for rank := 1; rank < 4; rank++ {
+		write(t, leader.conn, map[string]any{
+			"op": "get", "id": rank, "key": "round.reply." + strconv.Itoa(rank), "wait_ms": 60_000,
+		})
+	}
+	// Its writes still have room, the largest value among them, and so has an
+	// insert that ends one of its waits.
+	largest := make([]byte, members[0].session.Meta().MaxValue)
+	assert.Equal(t, answer{"id": uint64(4), "ok": true}, call(t, leader.conn,
+		map[string]any{"op": "insert", "id": 4, "key": "round.cmd", "value": largest}))
+	write(t, leader.conn, map[string]any{"op": "insert", "id": 5, "key": "round.reply.1", "value": []byte("1")})
+	assert.ElementsMatch(t, []answer{
+		{"id": uint64(1), "ok": true, "value": []byte("1")},
+		{"id": uint64(5), "ok": true},
+	}, []answer{read(t, leader.conn), read(t, leader.conn)})
+
+	// The other relays' replies end the other waits.
+	for rank := 2; rank < 4; rank++ {
+		require.NoError(t, members[rank].session.CuInterpose().Insert(within(t), "round.reply."+strconv.Itoa(rank), []byte("r")))
+	}
+	assert.ElementsMatch(t, []answer{
+		{"id": uint64(2), "ok": true, "value": []byte("r")},
+		{"id": uint64(3), "ok": true, "value": []byte("r")},
+	}, []answer{read(t, leader.conn), read(t, leader.conn)})
+}
+
 func TestRelayThatStopsReadingDoesNotHoldTheAgent(t *testing.T) {
 	original := relayAnswerTimeout
 	t.Cleanup(func() { relayAnswerTimeout = original })
@@ -220,10 +296,16 @@ type answer map[string]any
 
 func write(t *testing.T, conn net.Conn, request map[string]any) {
 	t.Helper()
+	_, err := conn.Write(frame(t, request))
+	require.NoError(t, err)
+}
+
+// frame encodes request as one frame.
+func frame(t *testing.T, request map[string]any) []byte {
+	t.Helper()
 	body, err := msgpack.Marshal(request)
 	require.NoError(t, err)
-	_, err = conn.Write(append(binary.LittleEndian.AppendUint32(nil, uint32(len(body))), body...))
-	require.NoError(t, err)
+	return append(binary.LittleEndian.AppendUint32(nil, uint32(len(body))), body...)
 }
 
 func read(t *testing.T, conn net.Conn) answer {
@@ -245,4 +327,32 @@ func call(t *testing.T, conn net.Conn, request map[string]any) answer {
 	t.Helper()
 	write(t, conn, request)
 	return read(t, conn)
+}
+
+// holdingSession is a member's session of rank 0, which never ends, whose
+// relay store is store.
+type holdingSession struct {
+	metaSession
+	store *holdingStore
+}
+
+func (s holdingSession) CuInterpose() coordinator.Store { return s.store }
+
+func (holdingSession) Done() <-chan struct{} { return nil }
+
+// holdingStore holds every insert until release is closed, and counts the
+// inserts it has started.
+type holdingStore struct {
+	coordinator.Store
+	release chan struct{}
+	started atomic.Int32
+}
+
+func (s *holdingStore) Insert(ctx context.Context, _ string, _ []byte) error {
+	s.started.Add(1)
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+	}
+	return nil
 }

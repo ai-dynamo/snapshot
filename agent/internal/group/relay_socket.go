@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/vmihailenco/msgpack/v5"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/ai-dynamo/snapshot/coordinator"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
@@ -44,6 +45,19 @@ import (
 // maxRelayBody is the largest frame body either end accepts: a value of the
 // session's largest, with its key and the rest of the message.
 const maxRelayBody = 33 << 20
+
+// The agent reads a relay's next request only while the relay has room for it
+// in flight, so a relay that sends faster than the session answers waits,
+// rather than the agent holding all it sends. The room is a get for each other
+// member, as a round's leader waits for every other relay's reply at once,
+// relayRequestsBesideGets more requests, and maxRelayBytes of frames, two of
+// the largest. A waiting get holds only its own small frame, so the gets of a
+// relay that keeps to the protocol never keep out an insert that would end
+// their wait. An insert by another relay comes through that relay's own room.
+const (
+	relayRequestsBesideGets = 4
+	maxRelayBytes           = 2 * maxRelayBody
+)
 
 // The operations a relay asks for.
 const (
@@ -137,7 +151,14 @@ var relayAnswerTimeout = 5 * time.Second
 func serveRelay(ctx context.Context, conn net.Conn, m *Member) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	p := &relayProxy{conn: conn, member: m, store: m.session.CuInterpose(), pending: make(map[uint64]bool)}
+	p := &relayProxy{
+		conn:     conn,
+		member:   m,
+		store:    m.session.CuInterpose(),
+		pending:  make(map[uint64]bool),
+		requests: semaphore.NewWeighted(int64(len(m.session.Meta().Members) - 1 + relayRequestsBesideGets)),
+		bytes:    semaphore.NewWeighted(maxRelayBytes),
+	}
 	var readErr error
 	reading := make(chan struct{})
 	go func() {
@@ -183,26 +204,60 @@ type relayProxy struct {
 	pending map[uint64]bool
 
 	running sync.WaitGroup
+
+	// requests and bytes are the relay's room in flight. A request takes its
+	// room before the agent reads its body, and gives it back once its answer
+	// is written. A get's answer, at most the session's largest value, counts
+	// only as one of the requests.
+	requests, bytes *semaphore.Weighted
 }
 
-// read starts every request the relay sends, until reading fails.
+// read starts every request the relay sends, each once the relay has room for
+// it in flight, until reading fails.
 func (p *relayProxy) read(ctx context.Context) error {
 	for {
-		var req relayRequest
-		if err := readRelayFrame(p.conn, &req); err != nil {
+		size, err := readRelayHeader(p.conn)
+		if err != nil {
 			return err
 		}
-		p.start(ctx, req)
+		if err := p.hold(ctx, size); err != nil {
+			return err
+		}
+		var req relayRequest
+		if err := readRelayBody(p.conn, size, &req); err != nil {
+			return err
+		}
+		p.start(ctx, req, size)
 	}
 }
 
-// start forwards one request in a goroutine of its own.
-func (p *relayProxy) start(ctx context.Context, req relayRequest) {
+// hold waits until the relay has room in flight for a request of size bytes,
+// and takes it.
+func (p *relayProxy) hold(ctx context.Context, size int64) error {
+	if err := p.requests.Acquire(ctx, 1); err != nil {
+		return err
+	}
+	if err := p.bytes.Acquire(ctx, size); err != nil {
+		p.requests.Release(1)
+		return err
+	}
+	return nil
+}
+
+// release gives back the room of a request of size bytes.
+func (p *relayProxy) release(size int64) {
+	p.bytes.Release(size)
+	p.requests.Release(1)
+}
+
+// start forwards one request of size bytes in a goroutine of its own.
+func (p *relayProxy) start(ctx context.Context, req relayRequest, size int64) {
 	p.mu.Lock()
 	duplicate := p.pending[req.ID]
 	p.pending[req.ID] = true
 	p.mu.Unlock()
 	p.running.Go(func() {
+		defer p.release(size)
 		if duplicate {
 			p.answer(relayAnswer{ID: req.ID, Code: codeInvalid})
 			return
@@ -272,17 +327,23 @@ func waitOf(ms uint64) time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
-// readRelayFrame reads one frame into v, and refuses a field v does not have.
-// A clean end of the stream before a frame is io.EOF.
-func readRelayFrame(r io.Reader, v any) error {
+// readRelayHeader reads a frame's header, and returns the size of its body. A
+// clean end of the stream before a frame is io.EOF.
+func readRelayHeader(r io.Reader) (int64, error) {
 	var header [4]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
-		return err
+		return 0, err
 	}
 	size := binary.LittleEndian.Uint32(header[:])
 	if size > maxRelayBody {
-		return fmt.Errorf("a frame of %d bytes is over the limit of %d", size, maxRelayBody)
+		return 0, fmt.Errorf("a frame of %d bytes is over the limit of %d", size, maxRelayBody)
 	}
+	return int64(size), nil
+}
+
+// readRelayBody reads a frame's body of size bytes into v, and refuses a field
+// v does not have.
+func readRelayBody(r io.Reader, size int64, v any) error {
 	body := make([]byte, size)
 	if _, err := io.ReadFull(r, body); err != nil {
 		if err == io.EOF {
