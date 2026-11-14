@@ -189,22 +189,11 @@ impl Group {
     }
 }
 
-/// The leader refused the group's topology.
-#[derive(Debug)]
-struct Refused;
-
-impl std::fmt::Display for Refused {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("the leader refused the group topology")
-    }
-}
-
-impl std::error::Error for Refused {}
-
 /// Run `mode` for this Pod, in its group when `member` names one and alone otherwise. A
 /// Pod alone leads a group of one, without a session. In a group, any failure ends the
-/// attempt for every member, as `Refused` when the leader refuses the topology and
-/// `MemberFailed` otherwise.
+/// attempt for every member. Inspect runs during admission, before the attempt commits,
+/// so its failures end the attempt as `Refused`. Prepare and restore run after the
+/// commit, so theirs end it as `MemberFailed`.
 pub fn run(member: Option<(Session, Group)>, mode: Mode, pod: &mut dyn Pod) -> Result<()> {
     let (session, group) = match member {
         Some((session, group)) => (Some(session), group),
@@ -226,10 +215,9 @@ pub fn run(member: Option<(Session, Group)>, mode: Mode, pod: &mut dyn Pod) -> R
         && let Some(session) = &mut relay.session
         && !session::ended(error)
     {
-        let reason = if error.downcast_ref::<Refused>().is_some() {
-            "Refused"
-        } else {
-            "MemberFailed"
+        let reason = match mode {
+            Mode::Inspect => "Refused",
+            Mode::Prepare | Mode::Restore => "MemberFailed",
         };
         // A session that ended meanwhile, when another member failed it
         // first, needs no failing.
@@ -398,11 +386,10 @@ impl Relay<'_> {
     }
 
     fn lead(&mut self) -> Result<()> {
-        let refused = |error: anyhow::Error| error.context(Refused);
         match self.mode {
             Mode::Inspect => {
                 let (pods, _) = self.records(Command::Inspect)?;
-                Topology::validate(&pods).map_err(refused)?;
+                Topology::validate(&pods)?;
             }
             Mode::Prepare => {
                 // Inspect does not freeze registries, so the topology is validated again
@@ -410,7 +397,7 @@ impl Relay<'_> {
                 // here preparation is fail-stop: callers must abandon the checkpoint and
                 // every source process.
                 let (pods, _) = self.records(Command::BeginCheckpoint)?;
-                let topology = Topology::validate(&pods).map_err(refused)?;
+                let topology = Topology::validate(&pods)?;
                 self.execute(&topology, Command::PrepareMulticast)?;
                 let owners = pods
                     .iter()
@@ -435,8 +422,8 @@ impl Relay<'_> {
                         .filter(|rank| !saved.contains_key(rank))
                         .collect::<Vec<_>>()
                 );
-                Topology::validate(&current).map_err(refused)?;
-                let topology = Topology::validate(&saved).map_err(refused)?;
+                Topology::validate(&current)?;
+                let topology = Topology::validate(&saved)?;
                 // Importers need the FABRIC handles that creators export in the step
                 // before, in any Pod.
                 let mut handles = HandleTable::default();
@@ -831,20 +818,26 @@ mod tests {
     }
 
     #[test]
-    fn leader_refusal_fails_the_session_as_refused() {
-        let agent = FakeAgent::default();
-        let mut pods = pods();
-        // Rank 2 imports a handle that nobody exported.
-        pods[2].records = records(2, 9, 2);
-        let results = group(&agent, Mode::Inspect, pods, LONG, LONG);
-        for (result, _) in &results {
-            assert!(result.is_err());
+    fn leader_refusal_fails_the_session_as_refused_only_before_the_commit() {
+        // Inspect runs during admission, and Prepare validates again after the commit.
+        for (mode, reason) in [(Mode::Inspect, "Refused"), (Mode::Prepare, "MemberFailed")] {
+            let agent = FakeAgent::default();
+            let mut pods = pods();
+            // Rank 2 imports a handle that nobody exported.
+            pods[2].records = records(2, 9, 2);
+            let results = group(&agent, mode, pods, LONG, LONG);
+            for (result, _) in &results {
+                assert!(result.is_err());
+            }
+            let leader = format!("{:#}", results[0].0.as_ref().unwrap_err());
+            assert!(leader.contains("has no exporter in the group"), "{leader}");
+            let follower = format!("{:#}", results[1].0.as_ref().unwrap_err());
+            assert!(
+                follower.contains(&format!("ABORTED ({reason})")),
+                "{follower}"
+            );
+            assert_eq!(agent.fails(), [(0, reason.to_owned())], "{mode:?}");
         }
-        let leader = format!("{:#}", results[0].0.as_ref().unwrap_err());
-        assert!(leader.contains("has no exporter in the group"), "{leader}");
-        let follower = format!("{:#}", results[1].0.as_ref().unwrap_err());
-        assert!(follower.contains("ABORTED (Refused)"), "{follower}");
-        assert_eq!(agent.fails(), [(0, "Refused".to_owned())]);
     }
 
     #[test]

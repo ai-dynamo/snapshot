@@ -948,19 +948,27 @@ fn relay_alone_in_its_group_runs_every_mode_through_the_session() {
 }
 
 #[test]
-fn relay_refusal_fails_the_session_before_any_phase() {
+fn relay_failure_is_refused_only_before_the_attempt_commits() {
     let mut harness = Harness::new();
-    harness.agent = Some(fake_agent::FakeAgent::default());
     let error = "participant 1: invalid mapping or mapping out of bounds";
     let participants = [
         vec![allocation(), with!(mapping(), Mapping.size = 8192)],
         vec![],
     ];
-    harness.coordinator("--prepare", &[error], |_| {
-        harness.answer(RecordRequest::BeginCheckpoint, &participants);
-    });
-    let agent = harness.agent.as_ref().unwrap();
-    assert_eq!(agent.fails(), [(0, "Refused".to_owned())]);
+    // Inspect runs during admission. Prepare and restore run after the commit.
+    for (mode, kind, reason) in [
+        ("--inspect", RecordRequest::Inspect, "Refused"),
+        ("--prepare", RecordRequest::BeginCheckpoint, "MemberFailed"),
+        ("--restore", RecordRequest::Inspect, "MemberFailed"),
+    ] {
+        if mode == "--restore" {
+            harness.write_state(&participants);
+        }
+        harness.agent = Some(fake_agent::FakeAgent::default());
+        harness.coordinator(mode, &[error], |_| harness.answer(kind, &participants));
+        let agent = harness.agent.as_ref().unwrap();
+        assert_eq!(agent.fails(), [(0, reason.to_owned())], "{mode}");
+    }
 }
 
 #[test]
