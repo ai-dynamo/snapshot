@@ -54,7 +54,7 @@ func groupManifest(g *group.Member) *types.PodGroupManifest {
 // it restores, reads every other member's, and passes the admitted barrier,
 // after which the attempt commits.
 func admitRestore(ctx context.Context, g *group.Member, targetPodIP string, captured *types.PodGroupManifest) error {
-	if err := checkGroupArtifact(captured, g.ID(), g.Rank()); err != nil {
+	if err := checkGroupArtifact(captured, g.ID(), g.Rank(), len(g.MemberIDs())); err != nil {
 		return err
 	}
 	ip, err := netip.ParseAddr(targetPodIP)
@@ -68,14 +68,17 @@ func admitRestore(ctx context.Context, g *group.Member, targetPodIP string, capt
 }
 
 // checkGroupArtifact refuses an artifact that is not member's part, at rank,
-// of a group capture, in the version of its manifest this agent restores.
-func checkGroupArtifact(captured *types.PodGroupManifest, member string, rank int) error {
+// of a group capture whose number of members is members, in the version of
+// its manifest this agent restores.
+func checkGroupArtifact(captured *types.PodGroupManifest, member string, rank, members int) error {
 	switch {
 	case captured == nil:
 		return errors.New("the artifact was not captured as a member of a pod group")
 	case captured.Version != types.PodGroupManifestVersion:
 		return fmt.Errorf("the artifact's pod group section has version %d, and this agent restores version %d",
 			captured.Version, types.PodGroupManifestVersion)
+	case len(captured.Members) != members:
+		return fmt.Errorf("the capture had %d members, the restore has %d", len(captured.Members), members)
 	case captured.MemberID != member || captured.Rank() != rank:
 		return fmt.Errorf("the artifact is member %s at rank %d of its capture, not member %s at rank %d",
 			captured.MemberID, captured.Rank(), member, rank)

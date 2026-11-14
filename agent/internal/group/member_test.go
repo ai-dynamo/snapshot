@@ -69,6 +69,15 @@ func TestAdmissionRefusesMembersRestoringDifferentCaptures(t *testing.T) {
 	}
 }
 
+func TestAdmissionRefusesAPodIPThatIsNotIPv4(t *testing.T) {
+	members := joinAll(t, 1)
+	err := members[0].Admit(within(t), Admission{PodIP: netip.MustParseAddr("fd00::1")})
+	require.ErrorContains(t, err, "the Pod's IP fd00::1 is not an IPv4 address")
+
+	_, err = members[0].agent.Get(within(t), admitKey(0), 0)
+	require.ErrorIs(t, err, session.ErrNotFound, "a refused admission is not published")
+}
+
 // A session of the coordinator cannot show how many waits a member has at
 // once, so this test counts them in a Store of its own.
 func TestAdmissionWaitsTwoAtATimeUntilTheSessionEnds(t *testing.T) {

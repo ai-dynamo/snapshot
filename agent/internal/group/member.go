@@ -104,8 +104,12 @@ func (m *Member) MemberIDs() []string {
 }
 
 // Admit publishes own and returns once every member's admission is known. It
-// refuses an attempt whose members restore different captures.
+// refuses a Pod IP that is not IPv4, since a restore maps IPv4 addresses only,
+// and an attempt whose members restore different captures.
 func (m *Member) Admit(ctx context.Context, own Admission) error {
+	if !own.PodIP.Is4() {
+		return fmt.Errorf("the Pod's IP %s is not an IPv4 address, which a pod group needs", own.PodIP)
+	}
 	value, err := json.Marshal(own)
 	if err != nil {
 		return err

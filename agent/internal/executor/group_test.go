@@ -55,9 +55,14 @@ func TestGroupRestoreRefusesAnotherMembersArtifact(t *testing.T) {
 			captured: otherVersion,
 			want:     "the artifact's pod group section has version 2, and this agent restores version 1",
 		},
+		{
+			name:     "an artifact of a capture with more members",
+			captured: capturedAs("worker", "leader", "worker", "spare"),
+			want:     "the capture had 3 members, the restore has 2",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkGroupArtifact(tc.captured, "worker", 1)
+			err := checkGroupArtifact(tc.captured, "worker", 1, 2)
 			if tc.want == "" {
 				require.NoError(t, err)
 				return
@@ -102,7 +107,8 @@ func TestGroupCheckpointRecordsEveryMember(t *testing.T) {
 
 func TestGroupCheckpointFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
 	for _, tc := range []struct {
-		name string
+		name  string
+		podIP string
 		// noStaging leaves PageBroker's staging directory missing, so writing
 		// the manifest, the last step before admission, fails.
 		noStaging     bool
@@ -113,12 +119,20 @@ func TestGroupCheckpointFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
 	}{
 		{
 			name:       "a step before admission fails",
+			podIP:      "10.0.0.1",
 			noStaging:  true,
 			wantStep:   StepConfigureCheckpoint,
 			wantReason: group.ReasonRefused,
 		},
 		{
+			name:       "the Pod's IP is not IPv4",
+			podIP:      "fd00::1",
+			wantStep:   StepAdmitGroup,
+			wantReason: group.ReasonRefused,
+		},
+		{
 			name:          "the dump fails",
+			podIP:         "10.0.0.1",
 			wantStep:      StepDumpCRIU,
 			wantDumped:    true,
 			wantCommitted: true,
@@ -143,7 +157,7 @@ func TestGroupCheckpointFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
 				Storage:    types.StorageSpec{BasePath: t.TempDir()},
 				PageBroker: types.PageBrokerSpec{ControlSocketPath: socket},
 			}
-			req := CheckpointRequest{ContentUID: "content-uid", ContainerName: "main", PodIP: "10.0.0.1", Group: member}
+			req := CheckpointRequest{ContentUID: "content-uid", ContainerName: "main", PodIP: tc.podIP, Group: member}
 			_, err := checkpoint(groupTestContext(t), nil, testr.New(t), req, cfg, inspectNothing(t))
 
 			assert.Equal(t, tc.wantStep, StepOf(err), "%v", err)
@@ -159,20 +173,37 @@ func TestGroupRestoreFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		captured      *types.PodGroupManifest
+		targetPodIP   string
 		wantStep      Step
 		wantMounted   bool
 		wantCommitted bool
 		wantReason    string
 	}{
 		{
-			name:       "a check before admission fails",
-			captured:   capturedAs("member-1", "member-0", "member-1"),
-			wantStep:   StepAdmitGroup,
-			wantReason: group.ReasonRefused,
+			name:        "the artifact is another member's",
+			captured:    capturedAs("member-1", "member-0", "member-1"),
+			targetPodIP: "10.0.0.1",
+			wantStep:    StepAdmitGroup,
+			wantReason:  group.ReasonRefused,
+		},
+		{
+			name:        "the artifact lists another number of members",
+			captured:    capturedAs("member-0", "member-0", "member-1", "member-2"),
+			targetPodIP: "10.0.0.1",
+			wantStep:    StepAdmitGroup,
+			wantReason:  group.ReasonRefused,
+		},
+		{
+			name:        "the restore Pod's IP is not IPv4",
+			captured:    capturedAs("member-0", "member-0", "member-1"),
+			targetPodIP: "fd00::1",
+			wantStep:    StepAdmitGroup,
+			wantReason:  group.ReasonRefused,
 		},
 		{
 			name:          "the first step after the commit fails",
 			captured:      capturedAs("member-0", "member-0", "member-1"),
+			targetPodIP:   "10.0.0.1",
 			wantStep:      StepMountBundle,
 			wantMounted:   true,
 			wantCommitted: true,
@@ -192,7 +223,7 @@ func TestGroupRestoreFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
 			}}
 			req := RestoreRequest{
 				BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
-				TargetPodIP: "10.0.0.1", WithoutProxy: true, SkipCompatCheck: true, Group: member,
+				TargetPodIP: tc.targetPodIP, WithoutProxy: true, SkipCompatCheck: true, Group: member,
 			}
 			_, err := Restore(groupTestContext(t), &restoreFakeRuntime{}, testr.New(t), req, mounter)
 
