@@ -15,8 +15,7 @@ import (
 // one and name distinct Pods, and that each target Pod exists, is a group
 // target that no PodGroupRestore has claimed, and has the destination that its
 // mapping names. Only then does it claim each target Pod for this
-// PodGroupRestore. The node agents then check that each target's startup
-// probe allows for what remains of the deadline.
+// PodGroupRestore.
 type PodGroupRestoreSpec struct {
 	// SnapshotRef names the PodGroupSnapshot to restore, in this namespace.
 	// Its UID is required, so a recreated PodGroupSnapshot with the same name
