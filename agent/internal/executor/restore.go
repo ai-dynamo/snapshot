@@ -301,18 +301,6 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err != nil {
 		return RestoreResult{}, failStep(StepInspectPlaceholder, err)
 	}
-	// groupDuration is the time spent in the pod group's admission and
-	// barriers, mostly waiting for the other members.
-	var groupDuration time.Duration
-	if req.Group != nil {
-		// Every check above only read the placeholder, so a refusal leaves it
-		// as Snapshot found it.
-		admitStart := time.Now()
-		if err := admitRestore(ctx, req.Group, req.TargetPodIP, manifest.Group); err != nil {
-			return RestoreResult{}, failStep(StepAdmitGroup, err)
-		}
-		groupDuration = time.Since(admitStart)
-	}
 
 	var gpuContext *pagebroker.GpuContext
 	if usePageBrokerGPU {
@@ -320,6 +308,18 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		if err != nil {
 			return RestoreResult{}, failStep(StepBuildGPUContext, err)
 		}
+	}
+	// groupDuration is the time spent in the pod group's admission and
+	// barriers, mostly waiting for the other members.
+	var groupDuration time.Duration
+	if req.Group != nil {
+		// Every check above only read the artifact and the placeholder, so a
+		// refusal leaves the placeholder as Snapshot found it.
+		admitStart := time.Now()
+		if err := admitRestore(ctx, req.Group, req.TargetPodIP, manifest.Group); err != nil {
+			return RestoreResult{}, failStep(StepAdmitGroup, err)
+		}
+		groupDuration = time.Since(admitStart)
 	}
 
 	bundleMount, err := mounts.MountBundle(ctx, snap.PlaceholderPID)
