@@ -28,11 +28,13 @@ import (
 // requests: insert {op, id, key, value}, get {op, id, key, wait_ms}, where a
 // zero wait_ms does not wait, delete {op, id, key}, and fail {op, id, reason}.
 // Values are bin. Keys are the relay's own: the agent places them in the
-// session's cuinterpose namespace, so a relay reaches nothing else. The agent
-// answers each request once, in any order, with {id, ok}, a value on a
-// successful get, and on a failure a code, such as NOT_YET, with the session's
-// reason for ABORTED. When the session ends, the agent answers every pending
-// request with ABORTED or CLOSED and closes its end.
+// session's cuinterpose namespace, so a relay reaches nothing else. A fail ends
+// the attempt as the member's own failure would, whatever its reason says:
+// Refused until the member calls the admitted barrier, and MemberFailed after.
+// The agent answers each request once, in any order, with {id, ok}, a value on
+// a successful get, and on a failure a code, such as NOT_YET, with the
+// session's reason for ABORTED. When the session ends, the agent answers every
+// pending request with ABORTED or CLOSED and closes its end.
 //
 // A get's wait starts once the coordinator has answered that the key is
 // absent, so while the agent cannot reach the coordinator, the answer can come
@@ -116,18 +118,18 @@ var codes = []struct {
 }
 
 // serveRelay answers the relay on conn, the agent's end of the relay's socket,
-// from the cuinterpose namespace of s. Requests run concurrently and are
-// answered as they complete, so a waiting get never holds up a later request.
-// A request whose id is already pending is answered INVALID.
+// from the cuinterpose namespace of m's session. Requests run concurrently and
+// are answered as they complete, so a waiting get never holds up a later
+// request. A request whose id is already pending is answered INVALID.
 //
 // serveRelay returns when the relay closes its end, cancelling the requests it
-// has pending, and leaving the session as it is; when s ends, once it has
-// answered every pending request with the session's end and closed conn; or
-// when ctx ends.
-func serveRelay(ctx context.Context, conn io.ReadWriteCloser, s coordinator.Session) error {
+// has pending, and leaving the session as it is; when the session ends, once
+// it has answered every pending request with the session's end and closed
+// conn; or when ctx ends.
+func serveRelay(ctx context.Context, conn io.ReadWriteCloser, m *Member) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	p := &relayProxy{conn: conn, session: s, store: s.CuInterpose(), pending: make(map[uint64]bool)}
+	p := &relayProxy{conn: conn, member: m, store: m.session.CuInterpose(), pending: make(map[uint64]bool)}
 	requests := make(chan relayRequest)
 	failed := make(chan error, 1)
 	stopped := make(chan struct{})
@@ -155,7 +157,7 @@ func serveRelay(ctx context.Context, conn io.ReadWriteCloser, s coordinator.Sess
 				return nil
 			}
 			return err
-		case <-s.Done():
+		case <-m.session.Done():
 			// Every pending request returns with the session's end now, and so
 			// does any request the reader holds already.
 			for drained := false; !drained; {
@@ -177,9 +179,9 @@ func serveRelay(ctx context.Context, conn io.ReadWriteCloser, s coordinator.Sess
 
 // relayProxy is the agent's end of one relay's socket.
 type relayProxy struct {
-	conn    io.ReadWriteCloser
-	session coordinator.Session
-	store   coordinator.Store
+	conn   io.ReadWriteCloser
+	member *Member
+	store  coordinator.Store
 
 	// writeMu serializes answers, so frames never interleave.
 	writeMu sync.Mutex
@@ -242,7 +244,7 @@ func (p *relayProxy) forward(ctx context.Context, req relayRequest) relayAnswer 
 	case opDelete:
 		err = p.store.Delete(ctx, req.Key)
 	case opFail:
-		err = p.session.Fail(ctx, req.Reason)
+		err = p.member.Fail(ctx)
 	default:
 		return relayAnswer{ID: req.ID, Code: codeInvalid}
 	}
