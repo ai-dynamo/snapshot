@@ -13,8 +13,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
-	"k8s.io/apimachinery/pkg/types"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/coordinator"
 	"github.com/ai-dynamo/snapshot/coordinator/coordinatortest"
 	"github.com/ai-dynamo/snapshot/coordinator/server"
@@ -23,25 +24,29 @@ import (
 
 func TestAdmissionGathersEveryMember(t *testing.T) {
 	members := joinAll(t, 3)
-	captured := []netip.Addr{
-		netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("10.0.0.2"), netip.MustParseAddr("10.0.0.3"),
+	captured := []types.PodGroupManifestMember{
+		{ID: "member-0", PodIP: netip.MustParseAddr("10.0.0.1")},
+		{ID: "member-1", PodIP: netip.MustParseAddr("10.0.0.2")},
+		{ID: "member-2", PodIP: netip.MustParseAddr("10.0.0.3")},
 	}
-	now := []netip.Addr{
-		netip.MustParseAddr("10.1.0.1"), netip.MustParseAddr("10.1.0.2"), netip.MustParseAddr("10.1.0.3"),
+	admissions := make([]Admission, 3)
+	for rank := range admissions {
+		admissions[rank] = Admission{
+			PodIP: netip.MustParseAddr(fmt.Sprintf("10.1.0.%d", rank+1)), PodUID: fmt.Sprintf("pod-%d", rank),
+			Containers: []string{"main"}, CaptureID: "capture-1",
+		}
 	}
-	each(t, members, func(ctx context.Context, m *Member) error {
-		return m.Admit(ctx, Admission{PodIP: now[m.Rank()], CaptureID: "capture-1"})
-	})
+	each(t, members, func(ctx context.Context, m *Member) error { return m.Admit(ctx, admissions[m.Rank()]) })
 
 	for _, m := range members {
-		require.Len(t, m.Admissions(), 3)
-		for rank, a := range m.Admissions() {
-			require.Equal(t, now[rank], a.PodIP)
-		}
+		require.Equal(t, admissions, m.Admissions())
+		require.Equal(t, []string{"member-0", "member-1", "member-2"}, m.MemberIDs())
 	}
 	peers, err := members[1].PeerIPs(captured)
 	require.NoError(t, err)
-	require.Equal(t, map[netip.Addr]netip.Addr{captured[0]: now[0], captured[2]: now[2]}, peers)
+	require.Equal(t, map[netip.Addr]netip.Addr{
+		captured[0].PodIP: admissions[0].PodIP, captured[2].PodIP: admissions[2].PodIP,
+	}, peers)
 	_, err = members[1].PeerIPs(captured[:2])
 	require.ErrorContains(t, err, "the capture had 2 members, the restore has 3")
 
@@ -127,7 +132,7 @@ func TestFailAfterAnAdmittedWaitThatEndedEarlyCountsAsCommitted(t *testing.T) {
 func joinAll(t *testing.T, n int) []*Member {
 	t.Helper()
 	srv := coordinatortest.Start(t)
-	spec := server.Spec{UID: types.UID("attempt-1"), Deadline: time.Now().Add(time.Hour)}
+	spec := server.Spec{UID: k8stypes.UID("attempt-1"), Deadline: time.Now().Add(time.Hour)}
 	// Listed out of rank order: a member takes its rank from the session.
 	for rank := n - 1; rank >= 0; rank-- {
 		spec.Members = append(spec.Members, session.Member{ID: fmt.Sprintf("member-%d", rank), Rank: rank})

@@ -20,34 +20,40 @@ import (
 // restore failed, which may have to wait for the coordinator.
 const groupFailTimeout = 30 * time.Second
 
-// admitCapture runs a capture's admission: the member publishes its Pod IP,
-// reads every other member's, and passes the admitted barrier, after which the
-// attempt commits.
-func admitCapture(ctx context.Context, g *group.Member, podIP string) error {
+// admitCapture runs a capture's admission: the member publishes its Pod IP, its
+// Pod's UID and its captured container, reads every other member's, and passes
+// the admitted barrier, after which the attempt commits.
+func admitCapture(ctx context.Context, g *group.Member, podIP, podUID, container string) error {
 	ip, err := netip.ParseAddr(podIP)
 	if err != nil {
 		return fmt.Errorf("the Pod's IP: %w", err)
 	}
-	if err := g.Admit(ctx, group.Admission{PodIP: ip}); err != nil {
+	if err := g.Admit(ctx, group.Admission{PodIP: ip, PodUID: podUID, Containers: []string{container}}); err != nil {
 		return err
 	}
 	return g.Barrier(ctx, group.Admitted)
 }
 
 // groupManifest records g's part in the capture, once it has been admitted.
-func groupManifest(g *group.Member) *types.GroupManifest {
-	podIPs := make([]netip.Addr, len(g.Admissions()))
+func groupManifest(g *group.Member) *types.PodGroupManifest {
+	ids := g.MemberIDs()
+	members := make([]types.PodGroupManifestMember, len(ids))
 	for rank, a := range g.Admissions() {
-		podIPs[rank] = a.PodIP
+		members[rank] = types.PodGroupManifestMember{ID: ids[rank], PodUID: a.PodUID, Containers: a.Containers, PodIP: a.PodIP}
 	}
-	return &types.GroupManifest{CaptureID: g.Attempt(), Member: g.ID(), Rank: g.Rank(), PodIPs: podIPs}
+	return &types.PodGroupManifest{
+		Version:    types.PodGroupManifestVersion,
+		CaptureUID: g.Attempt(),
+		MemberID:   g.ID(),
+		Members:    members,
+	}
 }
 
 // admitRestore runs a restore's admission: the member checks that its artifact
 // is its own part of a group capture, publishes its new Pod IP and the capture
 // it restores, reads every other member's, and passes the admitted barrier,
 // after which the attempt commits.
-func admitRestore(ctx context.Context, g *group.Member, targetPodIP string, captured *types.GroupManifest) error {
+func admitRestore(ctx context.Context, g *group.Member, targetPodIP string, captured *types.PodGroupManifest) error {
 	if err := checkGroupArtifact(captured, g.ID(), g.Rank()); err != nil {
 		return err
 	}
@@ -55,21 +61,24 @@ func admitRestore(ctx context.Context, g *group.Member, targetPodIP string, capt
 	if err != nil {
 		return fmt.Errorf("the restore Pod's IP: %w", err)
 	}
-	if err := g.Admit(ctx, group.Admission{PodIP: ip, CaptureID: captured.CaptureID}); err != nil {
+	if err := g.Admit(ctx, group.Admission{PodIP: ip, CaptureID: captured.CaptureUID}); err != nil {
 		return err
 	}
 	return g.Barrier(ctx, group.Admitted)
 }
 
 // checkGroupArtifact refuses an artifact that is not member's part, at rank,
-// of a group capture.
-func checkGroupArtifact(captured *types.GroupManifest, member string, rank int) error {
+// of a group capture, in the version of its manifest this agent restores.
+func checkGroupArtifact(captured *types.PodGroupManifest, member string, rank int) error {
 	switch {
 	case captured == nil:
 		return errors.New("the artifact was not captured as a member of a pod group")
-	case captured.Member != member || captured.Rank != rank:
+	case captured.Version != types.PodGroupManifestVersion:
+		return fmt.Errorf("the artifact's pod group section has version %d, and this agent restores version %d",
+			captured.Version, types.PodGroupManifestVersion)
+	case captured.MemberID != member || captured.Rank() != rank:
 		return fmt.Errorf("the artifact is member %s at rank %d of its capture, not member %s at rank %d",
-			captured.Member, captured.Rank, member, rank)
+			captured.MemberID, captured.Rank(), member, rank)
 	}
 	return nil
 }

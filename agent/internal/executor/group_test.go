@@ -31,22 +31,29 @@ import (
 )
 
 func TestGroupRestoreRefusesAnotherMembersArtifact(t *testing.T) {
+	otherVersion := capturedAs("worker", "leader", "worker")
+	otherVersion.Version = types.PodGroupManifestVersion + 1
 	for _, tc := range []struct {
 		name     string
-		captured *types.GroupManifest
+		captured *types.PodGroupManifest
 		want     string
 	}{
-		{name: "the member's own artifact", captured: &types.GroupManifest{Member: "worker", Rank: 1}},
+		{name: "the member's own artifact", captured: capturedAs("worker", "leader", "worker")},
 		{name: "an artifact captured on its own", want: "not captured as a member of a pod group"},
 		{
 			name:     "another member's artifact",
-			captured: &types.GroupManifest{Member: "leader", Rank: 0},
+			captured: capturedAs("leader", "leader", "worker"),
 			want:     "the artifact is member leader at rank 0 of its capture, not member worker at rank 1",
 		},
 		{
 			name:     "the member's artifact at another rank",
-			captured: &types.GroupManifest{Member: "worker", Rank: 0},
+			captured: capturedAs("worker", "worker", "leader"),
 			want:     "the artifact is member worker at rank 0 of its capture, not member worker at rank 1",
+		},
+		{
+			name:     "an artifact this agent cannot read",
+			captured: otherVersion,
+			want:     "the artifact's pod group section has version 2, and this agent restores version 1",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -58,6 +65,39 @@ func TestGroupRestoreRefusesAnotherMembersArtifact(t *testing.T) {
 			require.ErrorContains(t, err, tc.want)
 		})
 	}
+}
+
+func TestGroupCheckpointRecordsEveryMember(t *testing.T) {
+	member, peer := joinMembers(t)
+	peerEnded := runPeer(t, peer, group.Admission{
+		PodIP: netip.MustParseAddr("10.0.0.2"), PodUID: "pod-1", Containers: []string{"worker"},
+	}, group.NetFreeze)
+	socket := serveCheckpointStaging(t, t.TempDir())
+	var recorded *types.PodGroupManifest
+	stubCapture(t, func(data *types.CheckpointManifest) (*checkpointPhaseTimings, error) {
+		recorded = data.PodGroup
+		return nil, failStep(StepDumpCRIU, errors.New("stop after the manifest is recorded"))
+	})
+	cfg := &types.AgentConfig{
+		Storage:    types.StorageSpec{BasePath: t.TempDir()},
+		PageBroker: types.PageBrokerSpec{ControlSocketPath: socket},
+	}
+	req := CheckpointRequest{
+		ContentUID: "content-uid", ContainerName: "main", PodUID: "pod-0", PodIP: "10.0.0.1", Group: member,
+	}
+	_, err := checkpoint(groupTestContext(t), nil, testr.New(t), req, cfg, inspectNothing(t))
+
+	require.Equal(t, StepDumpCRIU, StepOf(err), "%v", err)
+	<-peerEnded
+	require.Equal(t, &types.PodGroupManifest{
+		Version:    types.PodGroupManifestVersion,
+		CaptureUID: "attempt-1",
+		MemberID:   "member-0",
+		Members: []types.PodGroupManifestMember{
+			{ID: "member-0", PodUID: "pod-0", Containers: []string{"main"}, PodIP: netip.MustParseAddr("10.0.0.1")},
+			{ID: "member-1", PodUID: "pod-1", Containers: []string{"worker"}, PodIP: netip.MustParseAddr("10.0.0.2")},
+		},
+	}, recorded)
 }
 
 func TestGroupCheckpointFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
@@ -118,7 +158,7 @@ func TestGroupCheckpointFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
 func TestGroupRestoreFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
-		captured      *types.GroupManifest
+		captured      *types.PodGroupManifest
 		wantStep      Step
 		wantMounted   bool
 		wantCommitted bool
@@ -126,13 +166,13 @@ func TestGroupRestoreFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
 	}{
 		{
 			name:       "a check before admission fails",
-			captured:   &types.GroupManifest{CaptureID: "capture-1", Member: "member-1", Rank: 1},
+			captured:   capturedAs("member-1", "member-0", "member-1"),
 			wantStep:   StepAdmitGroup,
 			wantReason: group.ReasonRefused,
 		},
 		{
 			name:          "the first step after the commit fails",
-			captured:      &types.GroupManifest{CaptureID: "capture-1", Member: "member-0", Rank: 0},
+			captured:      capturedAs("member-0", "member-0", "member-1"),
 			wantStep:      StepMountBundle,
 			wantMounted:   true,
 			wantCommitted: true,
@@ -188,7 +228,7 @@ func TestGroupRestoreThatPanicsFailsTheAttempt(t *testing.T) {
 	member, peer := joinMembers(t)
 	peerEnded := runPeer(t, peer,
 		group.Admission{PodIP: netip.MustParseAddr("10.0.0.2"), CaptureID: "capture-1"}, group.Release)
-	base := writeGroupArtifact(t, &types.GroupManifest{CaptureID: "capture-1", Member: "member-0", Rank: 0})
+	base := writeGroupArtifact(t, capturedAs("member-0", "member-0", "member-1"))
 	mounter := stoppingMounter{stop: func() error { panic("the bundle mount panicked") }}
 	req := RestoreRequest{
 		BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
@@ -313,7 +353,7 @@ func stubCapture(t *testing.T, capture func(*types.CheckpointManifest) (*checkpo
 // writeGroupArtifact writes the artifact of content "content" and container
 // "main" under a new base path, which it returns, as a member of the group
 // capture captured.
-func writeGroupArtifact(t *testing.T, captured *types.GroupManifest) string {
+func writeGroupArtifact(t *testing.T, captured *types.PodGroupManifest) string {
 	t.Helper()
 	base := t.TempDir()
 	directory, err := nsmount.ResolveArtifactPath(base, "content", "main")
@@ -321,7 +361,7 @@ func writeGroupArtifact(t *testing.T, captured *types.GroupManifest) string {
 	require.NoError(t, os.MkdirAll(directory, 0o700))
 	manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
 		types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
-	manifest.Group = captured
+	manifest.PodGroup = captured
 	require.NoError(t, types.WriteManifest(directory, manifest))
 	return base
 }
@@ -350,4 +390,16 @@ func groupTestContext(t *testing.T) context.Context {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 	return ctx
+}
+
+// capturedAs returns the pod group section of member's artifact of the capture
+// "capture-1", whose members have ids, by rank.
+func capturedAs(member string, ids ...string) *types.PodGroupManifest {
+	captured := &types.PodGroupManifest{Version: types.PodGroupManifestVersion, CaptureUID: "capture-1", MemberID: member}
+	for rank, id := range ids {
+		captured.Members = append(captured.Members, types.PodGroupManifestMember{
+			ID: id, PodUID: "pod-" + id, Containers: []string{"main"}, PodIP: netip.AddrFrom4([4]byte{10, 0, 0, byte(rank + 1)}),
+		})
+	}
+	return captured
 }
