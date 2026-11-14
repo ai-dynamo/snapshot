@@ -4,6 +4,7 @@
 package group
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -50,7 +51,8 @@ const (
 )
 
 // relayRequest is one message from the relay. Fields an operation does not
-// use are absent, which decodes as their zero value.
+// use are absent, which decodes as their zero value, and a frame with any other
+// field ends the service.
 type relayRequest struct {
 	Op     string `msgpack:"op"`
 	ID     uint64 `msgpack:"id"`
@@ -282,8 +284,8 @@ func waitOf(ms uint64) time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
-// readRelayFrame reads one frame into v. A clean end of the stream before a
-// frame is io.EOF.
+// readRelayFrame reads one frame into v, and refuses a field v does not have.
+// A clean end of the stream before a frame is io.EOF.
 func readRelayFrame(r io.Reader, v any) error {
 	var header [4]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
@@ -300,7 +302,11 @@ func readRelayFrame(r io.Reader, v any) error {
 		}
 		return err
 	}
-	if err := msgpack.Unmarshal(body, v); err != nil {
+	// Skipping a field recurses once for each level its value nests, without a
+	// limit, so a deep one would overflow the stack, which ends the agent.
+	dec := msgpack.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields(true)
+	if err := dec.Decode(v); err != nil {
 		return fmt.Errorf("decode a frame: %w", err)
 	}
 	return nil

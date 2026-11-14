@@ -4,6 +4,7 @@
 package group
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"io"
@@ -104,6 +105,24 @@ func TestRelayThatGoesAwayLeavesTheSession(t *testing.T) {
 	require.NoError(t, r.conn.Close())
 
 	require.NoError(t, r.close())
+	assert.NoError(t, members[0].session.Err(), "the session outlives its relay")
+}
+
+func TestRelayFrameWithAnUnknownFieldEndsTheService(t *testing.T) {
+	members := joinAll(t, 2)
+	r := openRelay(t, members[0])
+	// A map whose one field is unknown, and nests arrays as deep as a frame
+	// allows: skipping it would recurse once for each level, past the stack's
+	// limit, which would end the agent.
+	body := append([]byte{0x81, 0xa1, 'x'}, bytes.Repeat([]byte{0x91}, maxRelayBody-4)...)
+	body = append(body, 0xc0)
+	_, err := r.conn.Write(append(binary.LittleEndian.AppendUint32(nil, uint32(len(body))), body...))
+	require.NoError(t, err)
+
+	var header [4]byte
+	_, err = io.ReadFull(r.conn, header[:])
+	assert.ErrorIs(t, err, io.EOF, "the agent closes its end")
+	require.ErrorContains(t, r.close(), `unknown field "x"`)
 	assert.NoError(t, members[0].session.Err(), "the session outlives its relay")
 }
 
