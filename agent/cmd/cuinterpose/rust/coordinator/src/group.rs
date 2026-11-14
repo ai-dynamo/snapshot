@@ -43,6 +43,7 @@ fn local_pid(group_pid: NamespacePid) -> NamespacePid {
 }
 
 /// A Pod alone, as a group of one.
+#[cfg(test)]
 pub fn alone(manifest: Manifest) -> Pods {
     Pods::from([(0, manifest)])
 }

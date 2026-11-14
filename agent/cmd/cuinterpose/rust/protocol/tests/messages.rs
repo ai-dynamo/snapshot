@@ -295,3 +295,62 @@ fn connect_times_out_when_listener_backlog_is_full() {
     // host delays the wakeup by far less.
     assert!(started.elapsed() < Duration::from_secs(60));
 }
+
+#[test]
+fn session_frames_carry_a_bare_map_with_a_full_size_value() {
+    #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct Insert {
+        op: String,
+        id: u64,
+        key: String,
+        #[serde(with = "serde_bytes")]
+        value: Vec<u8>,
+    }
+    let (sender, receiver) = UnixStream::pair().unwrap();
+    let small = Insert {
+        op: "insert".into(),
+        id: 1,
+        key: "prepare.1.cmd".into(),
+        value: vec![7; 3],
+    };
+    send_session(&sender, &small).unwrap();
+    let mut prefix = [0; 4];
+    (&receiver).read_exact(&mut prefix).unwrap();
+    let mut body = vec![0; u32::from_le_bytes(prefix) as usize];
+    (&receiver).read_exact(&mut body).unwrap();
+    // No version envelope: the body starts with the map of the request's fields.
+    assert_eq!(&body[..4], b"\x84\xa2op");
+    assert_eq!(&body[body.len() - 5..], b"\xc4\x03\x07\x07\x07");
+    let large = Insert {
+        value: vec![1; MAX_MESSAGE_BYTES],
+        ..small
+    };
+    let writer = std::thread::spawn(move || {
+        send_session(&sender, &large).unwrap();
+        large
+    });
+    let received: Insert = receive_session(&receiver).unwrap().unwrap();
+    assert_eq!(received, writer.join().unwrap());
+    // A clean end of stream between messages is not an error.
+    assert!(receive_session::<Insert>(&receiver).unwrap().is_none());
+}
+
+#[test]
+fn session_receive_rejects_oversized_or_truncated_frames() {
+    let (mut sender, receiver) = UnixStream::pair().unwrap();
+    sender
+        .write_all(&((SESSION_MAX_MESSAGE_BYTES + 1) as u32).to_le_bytes())
+        .unwrap();
+    drop(sender);
+    assert_eq!(
+        invalid(receive_session::<u64>(&receiver)),
+        "session message exceeds size limit"
+    );
+    let (mut sender, receiver) = UnixStream::pair().unwrap();
+    sender.write_all(&[1, 0]).unwrap();
+    drop(sender);
+    assert_eq!(
+        invalid(receive_session::<u64>(&receiver)),
+        "session message truncated"
+    );
+}
