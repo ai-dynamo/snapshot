@@ -156,15 +156,17 @@ func (r *PodGroupSnapshotReconciler) observe(
 	}
 
 	if observed.deleting {
-		// The API server cannot select PodGroupRestores by
-		// spec.snapshotRef.uid, which the CRD does not declare as a selectable
-		// field, so the restores are listed and filtered here, in both passes.
+		// The API server cannot select PodGroupRestores by spec.snapshotRef,
+		// which the CRD does not declare as a selectable field, so the
+		// restores are listed and filtered here, in both passes. A restore
+		// holds the group only when its reference matches by name, which is
+		// how its events wake the group, and by UID.
 		restores := &snapshotv1alpha1.PodGroupRestoreList{}
 		if err := reader.List(ctx, restores, client.InNamespace(group.Namespace)); err != nil {
 			return podGroupSnapshotObservation{}, fmt.Errorf("list the PodGroupRestores of PodGroupSnapshot %q: %w", group.Name, err)
 		}
 		for i := range restores.Items {
-			if restores.Items[i].Spec.SnapshotRef.UID == group.UID {
+			if ref := restores.Items[i].Spec.SnapshotRef; ref.Name == group.Name && ref.UID == group.UID {
 				observed.restores = append(observed.restores, restores.Items[i])
 			}
 		}

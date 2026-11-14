@@ -107,7 +107,7 @@ func (r *PodGroupRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if deleting && podGroupRestoreFinished(&restore.Status) {
 		return ctrl.Result{}, removePodGroupFinalizer(ctx, r.Client, restore)
 	}
-	if err := r.claim(ctx, observed.claims); err != nil {
+	if err := r.claim(ctx, restore, observed.claims); err != nil {
 		return ctrl.Result{}, err
 	}
 	if observed.stale {
@@ -122,26 +122,34 @@ func (r *PodGroupRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 // this API version does not know stay on the Pod as they are. It stops at the
 // first error. A conflict proves nothing, since the kubelet and other
 // controllers also write the Pod: the reconcile ends, and the next one reads
-// the Pods again and applies the claim table. A claim that landed stays, so a
-// restart between two claims finds the first Pod claimed and the second still
-// gated.
-func (r *PodGroupRestoreReconciler) claim(ctx context.Context, claims []targetClaim) error {
+// the Pods again and applies the claim table. Any other error, such as a
+// webhook's refusal or a missing permission, reaches the restore as a warning
+// event, and the reconcile retries. A claim that landed stays, so a restart
+// between two claims finds the first Pod claimed and the second still gated.
+func (r *PodGroupRestoreReconciler) claim(ctx context.Context, restore *snapshotv1alpha1.PodGroupRestore, claims []targetClaim) error {
 	for _, c := range claims {
 		patch := client.MergeFromWithOptions(c.original, client.MergeFromWithOptimisticLock{})
 		if err := r.Patch(ctx, c.claimed, patch); err != nil {
-			return fmt.Errorf("claim Pod %q: %w", c.claimed.Name, err)
+			err = fmt.Errorf("claim Pod %q: %w", c.claimed.Name, err)
+			if !apierrors.IsConflict(err) {
+				r.Recorder.Event(restore, corev1.EventTypeWarning, podGroupRestoreClaimFailedReason, err.Error())
+			}
+			return err
 		}
 	}
 	return nil
 }
+
+// podGroupRestoreClaimFailedReason is the reason of the event for a claim that
+// the API server refused for a cause other than a conflict.
+const podGroupRestoreClaimFailedReason = "ClaimFailed"
 
 // observe reads, through reader, the PodGroupSnapshot's ranks and each pinned
 // member's report, then runs admission while no member is pinned (admit). It
 // keeps the claims that admission prepared only while the restore is current
 // in the API server (isCurrent): a restore that the cache shows stale, still
 // without a refusal that was just recorded, sends no claim, and the reconcile
-// looks again shortly.
-// Every member is pinned in the same status patch, so once any is, admission
+// looks again shortly. Every member is pinned in the same status patch, so once any is, admission
 // never runs again, and a restore whose members wait for their pins is never
 // refused. Reconcile passes the cache first, and the API server when the
 // result would make an irreversible decision.

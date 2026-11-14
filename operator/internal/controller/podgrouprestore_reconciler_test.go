@@ -375,7 +375,7 @@ func TestPodGroupRestoreReconciler_ClaimsNothingUntilEveryTargetPasses(t *testin
 // read, so it conflicts; the next reconcile reads b again and claims it,
 // keeping the scheduler's condition.
 func TestPodGroupRestoreReconciler_ClaimsAgainAfterAConflict(t *testing.T) {
-	r, _ := makePodGroupRestoreReconciler(t, append(rgGatedCluster("a", "b"), rgRestore("a", "b"))...)
+	r, recorder := makePodGroupRestoreReconciler(t, append(rgGatedCluster("a", "b"), rgRestore("a", "b"))...)
 	before := rgPod(t, r, "a")
 	gatedCondition := corev1.PodCondition{Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: "SchedulingGated"}
 	written := false
@@ -398,11 +398,38 @@ func TestPodGroupRestoreReconciler_ClaimsAgainAfterAConflict(t *testing.T) {
 	assertGated(t, r, "b")
 	assert.Nil(t, rgCondition(getRestore(t, r).Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed),
 		"a conflict alone proves nothing")
+	assert.Empty(t, drainEvents(recorder), "a conflict is not worth an event")
 
 	beforeB := rgPod(t, r, "b")
 	reconcileRestore(t, r)
 	assertClaimed(t, r, "b", "restore-uid", beforeB)
 	assert.Contains(t, rgPod(t, r, "b").Status.Conditions, gatedCondition)
+}
+
+// TestPodGroupRestoreReconciler_SurfacesAClaimTheAPIServerRefuses: a webhook
+// or a missing permission refuses the claim of target a. The reconcile
+// returns the error, so it retries, and the restore carries a warning event
+// with the error.
+func TestPodGroupRestoreReconciler_SurfacesAClaimTheAPIServerRefuses(t *testing.T) {
+	r, recorder := makePodGroupRestoreReconciler(t, append(rgGatedCluster("a", "b"), rgRestore("a", "b"))...)
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if pod, ok := obj.(*corev1.Pod); ok && pod.Name == "restore-a" {
+				return apierrors.NewForbidden(corev1.Resource("pods"), "restore-a", errors.New("denied by policy"))
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: pgNamespace, Name: "restore"}})
+
+	require.True(t, apierrors.IsForbidden(err), "the reconcile retries: %v", err)
+	assertGated(t, r, "a")
+	assertGated(t, r, "b")
+	events := drainEvents(recorder)
+	require.Len(t, events, 1)
+	assert.Contains(t, events[0], "Warning ClaimFailed claim Pod \"restore-a\"")
+	assert.Contains(t, events[0], "denied by policy")
 }
 
 // TestPodGroupRestoreReconciler_ClaimsTargetsTheCacheHasNotSeen: both target
@@ -1328,6 +1355,10 @@ func TestPodGroupRestoreReconciler_DeletedTargetPodFailsItsMember(t *testing.T) 
 	})
 
 	t.Run("a replacement Pod of the same name, which hides a start: MemberFailed, not Refused", func(t *testing.T) {
+		r, _ := makePodGroupRestoreReconciler(t, append(rgReadyCluster("a", "b"), rgRestore("a", "b"))...)
+		reconcileRestore(t, r)
+		require.NoError(t, r.Delete(ctx, rgTargetPod("a", "")))
+		reconcileRestore(t, r)
 		require.NoError(t, r.Delete(ctx, rgTargetPod("b", "")))
 		replacement := rgTargetPod("b", "node-1")
 		replacement.UID = "replacement-uid"

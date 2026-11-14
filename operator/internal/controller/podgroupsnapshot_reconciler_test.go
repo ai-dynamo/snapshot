@@ -1029,6 +1029,10 @@ func TestPodGroupSnapshotReconciler_HeldByUnfinishedRestores(t *testing.T) {
 	running := restoreOf("running", "group-uid")
 	restoreOf("finished", "group-uid", failed)
 	restoreOf("of-an-earlier-group", "earlier-group-uid")
+	other := rgRestore("a")
+	other.Name, other.UID, other.ResourceVersion = "of-another-name", "of-another-name-uid", ""
+	other.Spec.SnapshotRef.Name = "other-group"
+	require.NoError(t, r.Create(ctx, other))
 	require.NoError(t, r.Delete(ctx, getGroup(t, r)))
 	gone := func() bool {
 		err := r.Get(ctx, types.NamespacedName{Namespace: pgNamespace, Name: "group"}, &snapshotv1alpha1.PodGroupSnapshot{})
@@ -1044,7 +1048,7 @@ func TestPodGroupSnapshotReconciler_HeldByUnfinishedRestores(t *testing.T) {
 	assert.Equal(t, []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: pgNamespace, Name: "group"}}},
 		podGroupRestoreToPodGroupSnapshot(ctx, running), "the restore's event reconciles its snapshot")
 	reconcileGroup(t, r)
-	assert.True(t, gone(), "released once its last unfinished restore has finished")
+	assert.True(t, gone(), "released once its last unfinished restore has finished; a restore of another name never held it")
 }
 
 // makeLaggingPodGroupReconciler returns a reconciler whose cache holds cached
