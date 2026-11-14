@@ -238,6 +238,9 @@ struct Relay<'a> {
 }
 
 impl Relay<'_> {
+    // Each mode runs at most once per attempt, which keeps these keys unique in the
+    // session. The Done command that ends a mode stays there, so a mode that ran again
+    // would collide with it.
     fn command_key(&self, round: u32) -> String {
         format!("{}.{round}.cmd", self.mode.key())
     }
