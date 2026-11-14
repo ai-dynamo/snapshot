@@ -19,7 +19,7 @@ import (
 func startKept(t *testing.T, ctx context.Context, socketsRestored func(context.Context) error) *keptConnections {
 	t.Helper()
 	k := newTestKept(t, socketsRestored)
-	go func() { k.served <- k.serve(ctx) }()
+	k.start(ctx)
 	return k
 }
 
@@ -110,6 +110,32 @@ func TestKeptConnectionsKeepTheStepOfAnNSRestoreThatFailedFirst(t *testing.T) {
 	err := k.wait(nsrestoreErr)
 	if StepOf(err) != StepRestoreCRIU || !strings.Contains(err.Error(), "did not report its restored sockets") {
 		t.Fatalf("wait = %v, want nsrestore's step first, then the unanswered peer sync", err)
+	}
+}
+
+func TestKeptConnectionsStopWaitingOnceNSRestoreExits(t *testing.T) {
+	waiting := make(chan struct{})
+	k := startKept(t, context.Background(), func(ctx context.Context) error {
+		close(waiting)
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	// nsrestore reports its restored sockets, then exits before the other
+	// members restore theirs.
+	if _, err := k.nsrestore.Write([]byte{0}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-waiting:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the barrier never ran")
+	}
+
+	nsrestoreErr := failStep(StepRestoreCRIU, errors.New("nsrestore was killed"))
+	done := make(chan error, 1)
+	go func() { done <- k.wait(nsrestoreErr) }()
+	if err := await(t, done); StepOf(err) != StepRestoreCRIU {
+		t.Fatalf("wait = %v, want nsrestore's failure first", err)
 	}
 }
 
