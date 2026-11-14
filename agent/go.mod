@@ -15,6 +15,7 @@ require (
 	github.com/go-logr/zapr v1.3.0
 	github.com/google/nftables v0.3.0
 	github.com/google/uuid v1.6.0
+	github.com/mdlayher/netlink v1.7.3-0.20250113171957-fbb4dce95f42
 	github.com/moby/sys/mountinfo v0.7.2
 	github.com/opencontainers/runtime-spec v1.3.0
 	github.com/prometheus/procfs v0.23.0
@@ -82,7 +83,6 @@ require (
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.20.3 // indirect
 	github.com/knqyf263/go-plugin v0.9.0 // indirect
-	github.com/mdlayher/netlink v1.7.3-0.20250113171957-fbb4dce95f42 // indirect
 	github.com/mdlayher/socket v0.6.0 // indirect
 	github.com/minio/highwayhash v1.0.4 // indirect
 	github.com/moby/locker v1.0.1 // indirect

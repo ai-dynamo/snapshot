@@ -18,8 +18,10 @@
 // chain on the input hook and one on the output hook, each with one rule that
 // drops a packet whose addresses and ports are in the set. The table is named
 // for the attempt, so an agent that restarted finds and lifts a hold it did not
-// install. Install and Lift each send one netlink batch, which the kernel
-// applies whole or not at all, so a hold is never partly there.
+// install. The kernel applies each netlink batch whole or not at all. Lift
+// sends one batch. Install sends the table with the first elements of its set
+// in one batch, and the other elements in batches of their own, so an Install
+// that fails may leave part of a hold, which Lift removes.
 package tcphold
 
 import (
@@ -29,6 +31,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"slices"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/binaryutil"
@@ -46,6 +49,12 @@ const (
 	// setID refers to the set from the rules of the same batch. It only has
 	// to be unique within one batch.
 	setID = 1
+	// elementsPerBatch bounds the elements of the set that one batch adds. A
+	// batch lists them in one netlink attribute, whose length field holds at
+	// most 65535 bytes, about 2300 elements, and the netlink library cuts a
+	// longer list short without an error. 1000 elements, about 28 KB, also
+	// keep a batch well within the socket's send buffer.
+	elementsPerBatch = 1000
 )
 
 // connectionType is the key of the set: source address, source port,
@@ -67,40 +76,57 @@ func Install(hostPID int, attempt string, connections []criu.TCPConnection) erro
 			nftables.SetElement{Key: key(c.Remote, c.Local)})
 	}
 	err := inNetworkNamespace(hostPID, func(conn *nftables.Conn) error {
-		table := removeTable(conn, attempt)
-		conn.AddTable(table)
-		set := &nftables.Set{
-			Table:         table,
-			ID:            setID,
-			Name:          setName,
-			KeyType:       connectionType,
-			Concatenation: true,
-			KeyByteOrder:  binaryutil.BigEndian,
-		}
-		if err := conn.AddSet(set, elements); err != nil {
-			return err
-		}
-		for _, hook := range []struct {
-			name string
-			hook *nftables.ChainHook
-		}{{"input", nftables.ChainHookInput}, {"output", nftables.ChainHookOutput}} {
-			// The raw priority runs ahead of conntrack and of every usual
-			// filter chain.
-			chain := conn.AddChain(&nftables.Chain{
-				Name:     hook.name,
-				Table:    table,
-				Type:     nftables.ChainTypeFilter,
-				Hooknum:  hook.hook,
-				Priority: nftables.ChainPriorityRaw,
-			})
-			conn.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: dropHeld(set)})
-		}
-		return nil
+		return install(conn, attempt, elements)
 	})
 	if err != nil {
 		return fmt.Errorf("install the restore hold %s: %w", tableName(attempt), err)
 	}
 	return nil
+}
+
+// install sends conn the hold of attempt, which drops the packets in elements.
+// The first batch replaces attempt's table with one that has the set, the
+// chains and their rules, and the first elements. Each further batch adds more
+// elements.
+func install(conn *nftables.Conn, attempt string, elements []nftables.SetElement) error {
+	table := removeTable(conn, attempt)
+	conn.AddTable(table)
+	set := &nftables.Set{
+		Table:         table,
+		ID:            setID,
+		Name:          setName,
+		KeyType:       connectionType,
+		Concatenation: true,
+		KeyByteOrder:  binaryutil.BigEndian,
+	}
+	if err := conn.AddSet(set, nil); err != nil {
+		return err
+	}
+	for _, hook := range []struct {
+		name string
+		hook *nftables.ChainHook
+	}{{"input", nftables.ChainHookInput}, {"output", nftables.ChainHookOutput}} {
+		// The raw priority runs ahead of conntrack and of every usual filter
+		// chain.
+		chain := conn.AddChain(&nftables.Chain{
+			Name:     hook.name,
+			Table:    table,
+			Type:     nftables.ChainTypeFilter,
+			Hooknum:  hook.hook,
+			Priority: nftables.ChainPriorityRaw,
+		})
+		conn.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: dropHeld(set)})
+	}
+	for batch := range slices.Chunk(elements, elementsPerBatch) {
+		if err := conn.SetAddElements(set, batch); err != nil {
+			return err
+		}
+		if err := conn.Flush(); err != nil {
+			return err
+		}
+	}
+	// With no elements, this sends the table.
+	return conn.Flush()
 }
 
 // Lift removes the hold of attempt from the network namespace of the process
@@ -109,7 +135,7 @@ func Install(hostPID int, attempt string, connections []criu.TCPConnection) erro
 func Lift(hostPID int, attempt string) error {
 	err := inNetworkNamespace(hostPID, func(conn *nftables.Conn) error {
 		removeTable(conn, attempt)
-		return nil
+		return conn.Flush()
 	})
 	if err != nil {
 		return fmt.Errorf("lift the restore hold %s: %w", tableName(attempt), err)
@@ -167,9 +193,9 @@ func key(from, to netip.AddrPort) []byte {
 	return append(k, 0, 0)
 }
 
-// inNetworkNamespace sends what queue adds to a connection to nftables in the
-// network namespace of hostPID, as one batch.
-func inNetworkNamespace(hostPID int, queue func(*nftables.Conn) error) error {
+// inNetworkNamespace runs send with a connection to nftables in the network
+// namespace of hostPID.
+func inNetworkNamespace(hostPID int, send func(*nftables.Conn) error) error {
 	namespace, err := os.Open(fmt.Sprintf("/proc/%d/ns/net", hostPID))
 	if err != nil {
 		return fmt.Errorf("open the network namespace of %d: %w", hostPID, err)
@@ -179,8 +205,5 @@ func inNetworkNamespace(hostPID int, queue func(*nftables.Conn) error) error {
 	if err != nil {
 		return err
 	}
-	if err := queue(conn); err != nil {
-		return err
-	}
-	return conn.Flush()
+	return send(conn)
 }
