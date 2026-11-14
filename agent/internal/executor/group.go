@@ -51,9 +51,12 @@ func groupManifest(g *group.Member) *types.PodGroupManifest {
 
 // admitRestore runs a restore's admission: the member checks that its artifact
 // is its own part of a group capture, publishes its new Pod IP and the capture
-// it restores, reads every other member's, and passes the admitted barrier,
-// after which the attempt commits.
-func admitRestore(ctx context.Context, g *group.Member, targetPodIP string, captured *types.PodGroupManifest) error {
+// it restores, reads every other member's, runs check, and passes the admitted
+// barrier, after which the attempt commits. check can read every member's
+// admission, and its failure refuses the attempt.
+func admitRestore(ctx context.Context, g *group.Member, targetPodIP string, captured *types.PodGroupManifest,
+	check func() error,
+) error {
 	if err := checkGroupArtifact(captured, g.ID(), g.Rank(), len(g.MemberIDs())); err != nil {
 		return err
 	}
@@ -62,6 +65,9 @@ func admitRestore(ctx context.Context, g *group.Member, targetPodIP string, capt
 		return fmt.Errorf("the restore Pod's IP: %w", err)
 	}
 	if err := g.Admit(ctx, group.Admission{PodIP: ip, CaptureID: captured.CaptureUID}); err != nil {
+		return err
+	}
+	if err := check(); err != nil {
 		return err
 	}
 	return g.Barrier(ctx, group.Admitted)

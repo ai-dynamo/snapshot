@@ -68,11 +68,7 @@ type keptConnections struct {
 func keepConnections(ctx context.Context, log logr.Logger, g *group.Member, manifest *types.CheckpointManifest,
 	targetPodIP string, pid int, checkpointPath string,
 ) (*keptConnections, error) {
-	peers, err := g.PeerIPs(manifest.PodGroup.Members)
-	if err != nil {
-		return nil, err
-	}
-	ipMap, err := criu.RestoreIPMap(manifest, targetPodIP, peers)
+	peers, ipMap, err := groupIPMaps(g, manifest, targetPodIP)
 	if err != nil {
 		return nil, err
 	}
@@ -105,6 +101,42 @@ func keepConnections(ctx context.Context, log logr.Logger, g *group.Member, mani
 	}
 	k.start(ctx)
 	return k, nil
+}
+
+// checkKeptConnections refuses, before g's attempt commits, a restore that
+// could not keep its connections to g's other members: one whose IP map moves
+// two Pods to one IP or maps an IP that is not IPv4, or, for a capture that
+// kept its established connections, one where the network namespace of the
+// placeholder pid cannot hold them.
+func checkKeptConnections(g *group.Member, manifest *types.CheckpointManifest, targetPodIP string, pid int) error {
+	if _, _, err := groupIPMaps(g, manifest, targetPodIP); err != nil {
+		return err
+	}
+	if !manifest.CRIUDump.CRIU.TcpEstablished {
+		return nil
+	}
+	return tcphold.Check(pid)
+}
+
+// groupIPMaps returns peers, which maps the IPs g's other members had at
+// capture to their IPs now, and the restore's IP map, which also maps this
+// Pod's own IP. It refuses an IP that is not IPv4, since neither the INET
+// remap nor the hold handles another.
+func groupIPMaps(g *group.Member, manifest *types.CheckpointManifest, targetPodIP string) (peers, ipMap criu.IPMap, err error) {
+	peers, err = g.PeerIPs(manifest.PodGroup.Members)
+	if err != nil {
+		return nil, nil, err
+	}
+	ipMap, err = criu.RestoreIPMap(manifest, targetPodIP, peers)
+	if err != nil {
+		return nil, nil, err
+	}
+	for from, to := range ipMap {
+		if !from.Is4() || !to.Is4() {
+			return nil, nil, fmt.Errorf("the restore maps IPv4 addresses only, not %s to %s", from, to)
+		}
+	}
+	return peers, ipMap, nil
 }
 
 // start runs serve under a context that wait ends.
