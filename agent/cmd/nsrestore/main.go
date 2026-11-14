@@ -58,6 +58,9 @@ func main() {
 		LSMProfile:     *lsmProfile,
 		TargetPodIP:    *targetPodIP,
 		BundleDir:      *bundleDir,
+		ReportProgress: func(progress executor.RestoreInNamespaceProgress) error {
+			return json.NewEncoder(os.Stdout).Encode(progress)
+		},
 	}
 
 	var err error
@@ -80,7 +83,7 @@ func main() {
 	result, err := executor.RestoreInNamespace(ctx, opts, log)
 	if err != nil {
 		// The host agent reads the cause from stdout; stderr only reaches its logs.
-		_ = json.NewEncoder(os.Stdout).Encode(executor.RestoreInNamespaceResult{Error: err.Error(), Step: string(executor.StepOf(err))})
+		_ = json.NewEncoder(os.Stdout).Encode(executor.NewRestoreInNamespaceFailure(err))
 		fatal(log, err, "restore failed")
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
