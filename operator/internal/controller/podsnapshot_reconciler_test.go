@@ -286,6 +286,41 @@ func TestSnapshotReconciler_StalePodReferenceFails(t *testing.T) {
 	}
 }
 
+func TestSnapshotReconciler_EndedSourcePodFails(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	for _, tc := range []struct {
+		name       string
+		mutate     func(pod *corev1.Pod)
+		wantReason string
+	}{
+		{"succeeded", func(pod *corev1.Pod) { pod.Status.Phase = corev1.PodSucceeded }, snapshotv1alpha1.ReasonSourceCompletedWithoutCapture},
+		{"failed", func(pod *corev1.Pod) { pod.Status.Phase = corev1.PodFailed }, podSnapshotReasonSourcePodGone},
+		{"being deleted", func(pod *corev1.Pod) {
+			pod.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+			pod.Finalizers = []string{"test/hold"}
+		}, podSnapshotReasonSourcePodGone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snap := makeSnapshotForReconcile()
+			pod := scheduledPod()
+			tc.mutate(pod)
+			r := makeSnapshotReconciler(s, snap, pod)
+
+			reconcileSnapshot(t, r, snap.Name)
+
+			updated := &snapshotv1alpha1.PodSnapshot{}
+			require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
+			cond := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+			require.NotNil(t, cond)
+			assert.Equal(t, tc.wantReason, cond.Reason)
+
+			var contents snapshotv1alpha1.PodSnapshotContentList
+			require.NoError(t, r.List(context.Background(), &contents))
+			assert.Empty(t, contents.Items)
+		})
+	}
+}
+
 func TestSnapshotReconciler_MissingSourcePodFails(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap := makeSnapshotForReconcile()

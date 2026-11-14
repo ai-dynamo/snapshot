@@ -5,11 +5,17 @@ package v1alpha1
 
 import "k8s.io/apimachinery/pkg/types"
 
+// PodGroupMaxDeadlineSeconds is the longest deadlineSeconds of a
+// PodGroupSnapshot or PodGroupRestore: the Maximum marker on both fields. A
+// group restore target's startup probe allows this many one-second failures.
+const PodGroupMaxDeadlineSeconds = 86400
+
 // PodGroupSnapshot and PodGroupRestore condition types. Only the operator sets
 // them, via meta.SetStatusCondition.
 const (
-	// PodGroupConditionAdmitted is True once every member has passed admission,
-	// which commits the attempt.
+	// PodGroupConditionAdmitted is True once every member has passed admission.
+	// It does not commit the attempt: the agents commit it at their admitted
+	// barrier, and can refuse it until then.
 	PodGroupConditionAdmitted = "Admitted"
 	// PodGroupConditionReleased is True once a PodGroupRestore's attempt has
 	// reached release, from which point its released members run whatever
@@ -29,9 +35,6 @@ const (
 	PodGroupReasonRefused = "Refused"
 	// PodGroupReasonDeadlineExceeded means spec.deadlineSeconds expired.
 	PodGroupReasonDeadlineExceeded = "DeadlineExceeded"
-	// PodGroupReasonGateBudgetTooShort means a restore target's startup probe
-	// cannot wait for what remains of the deadline.
-	PodGroupReasonGateBudgetTooShort = "GateBudgetTooShort"
 	// PodGroupReasonPodIPChanged means a restore Pod's IP or admitted container
 	// changed after the operator pinned it.
 	PodGroupReasonPodIPChanged = "PodIPChanged"

@@ -35,15 +35,15 @@ func TestPodGroupAttemptPassesRestoreReasons(t *testing.T) {
 		{"committed: PodIPChanged",
 			[]podGroupMemberView{failedView("a", 0, true, snapshotv1alpha1.PodGroupReasonPodIPChanged), running},
 			snapshotv1alpha1.PodGroupReasonPodIPChanged},
-		{"committed: GateBudgetTooShort is MemberFailed",
-			[]podGroupMemberView{failedView("a", 0, false, snapshotv1alpha1.PodGroupReasonGateBudgetTooShort), running},
+		{"committed: a member's own reason is MemberFailed",
+			[]podGroupMemberView{failedView("a", 0, false, "RestoreIncompatible"), running},
 			snapshotv1alpha1.PodGroupReasonMemberFailed},
-		{"not committed: GateBudgetTooShort",
+		{"not committed: CoordinatorLost",
 			[]podGroupMemberView{
-				failedView("a", 0, false, snapshotv1alpha1.PodGroupReasonGateBudgetTooShort),
+				failedView("a", 0, false, snapshotv1alpha1.PodGroupReasonCoordinatorLost),
 				failedView("b", 1, false, snapshotv1alpha1.PodGroupReasonRefused),
 			},
-			snapshotv1alpha1.PodGroupReasonGateBudgetTooShort},
+			snapshotv1alpha1.PodGroupReasonCoordinatorLost},
 		{"not committed: PodIPChanged",
 			[]podGroupMemberView{
 				failedView("a", 0, false, snapshotv1alpha1.PodGroupReasonRefused),
@@ -67,6 +67,19 @@ func TestPodGroupAttemptPassesRestoreReasons(t *testing.T) {
 			assert.Equal(t, tc.want, failed.Reason)
 		})
 	}
+}
+
+func TestPodGroupAttemptCancelsOnlyMembersWithoutWork(t *testing.T) {
+	// A restore-shaped view: a member whose Pod is pinned has work.
+	pinned := podGroupMemberView{id: "a", rank: 0, hasWork: true}
+	unpinned := podGroupMemberView{id: "b", rank: 1}
+	attempt := newPodGroupAttempt(&podGroupSnapshotKind, 600, podGroupAdmission{}, true, false,
+		[]podGroupMemberView{pinned, unpinned})
+
+	assert.Nil(t, attempt.memberCause(&pinned))
+	cause := attempt.memberCause(&unpinned)
+	require.NotNil(t, cause)
+	assert.Equal(t, snapshotv1alpha1.PodGroupReasonCancelled, cause.reason)
 }
 
 func TestPodGroupAttemptAdmittedTakesTheFailure(t *testing.T) {

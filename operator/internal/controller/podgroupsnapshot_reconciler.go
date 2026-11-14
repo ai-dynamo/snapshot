@@ -44,12 +44,14 @@ import (
 //
 // The operator never fails a group while member work runs, except at the
 // deadline and on deletion, both of which the coordinator observes itself.
-// The coordinator does not read group status, so a failure only the operator
-// knew about would leave every agent waiting until the deadline. The
-// reconciler therefore refuses a bad group before it creates any member work,
-// then creates all of it, and from then on only records what the members
-// report: each agent reports on its member's PodSnapshotContent, and the
-// PodSnapshot controller mirrors that to the PodSnapshot.
+// The coordinator reads group status to place its session and to remove it once
+// the attempt is final. It never ends a running session because of the status,
+// so a failure only the operator knew about would leave every agent waiting
+// until the deadline. The reconciler therefore refuses a bad group before it
+// creates any member work, then creates all of it, and from then on only
+// records what the members report: each agent reports on its member's
+// PodSnapshotContent, and the PodSnapshot controller mirrors that to the
+// PodSnapshot.
 type PodGroupSnapshotReconciler struct {
 	client.Client
 	NonCacheReadClient client.Reader

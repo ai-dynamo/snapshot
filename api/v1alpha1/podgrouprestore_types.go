@@ -15,8 +15,7 @@ import (
 // one and name distinct Pods, and that each target Pod exists, is a group
 // target that no PodGroupRestore has claimed, and has the destination that its
 // mapping names. Only then does it claim each target Pod for this
-// PodGroupRestore. The node agents then check that each target's startup
-// probe allows for what remains of the deadline.
+// PodGroupRestore.
 type PodGroupRestoreSpec struct {
 	// SnapshotRef names the PodGroupSnapshot to restore, in this namespace.
 	// Its UID is required, so a recreated PodGroupSnapshot with the same name
@@ -119,8 +118,9 @@ type RestorePhase string
 const (
 	// RestorePhasePending means the member has not yet passed admission.
 	RestorePhasePending RestorePhase = "Pending"
-	// RestorePhaseAdmitted means the member passed admission and its bindings
-	// are pinned. The restore commits once every member has.
+	// RestorePhaseAdmitted means the member passed admission, and its target is
+	// claimed and pinned. The restore commits only at the agents' admitted
+	// barrier.
 	RestorePhaseAdmitted RestorePhase = "Admitted"
 	// RestorePhaseRestoring means the member's processes are being restored.
 	RestorePhaseRestoring RestorePhase = "Restoring"

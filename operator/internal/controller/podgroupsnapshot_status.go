@@ -86,10 +86,10 @@ var podGroupSnapshotKind = podGroupKind{
 //	               message cut to maxMemberMessageLength bytes
 //	Failed         its pinned PodSnapshot is gone, as the API server confirmed:
 //	               PodSnapshotDeleted
-//	Failed         the group was refused, passed its deadline, or was deleted
-//	               before any member started, and the member is not
-//	               Checkpointed: that cause's reason, with a fixed message
-//	               pointing to the group's Failed condition
+//	Failed         the group was refused or passed its deadline, or was deleted
+//	               before any member started and the member has no PodSnapshot,
+//	               and the member is not Checkpointed: that cause's reason, with
+//	               a fixed message pointing to the group's Failed condition
 //	Checkpointed   its PodSnapshot is Ready and its content is seen: pins content
 //	Checkpointing  it has startedAt
 //	Admitted       it has a PodSnapshot: pins podSnapshot
@@ -133,11 +133,12 @@ func derivePodGroupSnapshotStatus(
 		next.Members[rank] = status
 	}
 
+	views := podGroupSnapshotMemberViews(next.Members)
 	attempt := newPodGroupAttempt(&podGroupSnapshotKind, spec.DeadlineSeconds, observed.admission,
-		observed.deleting, !now.Before(observed.deadline), podGroupSnapshotMemberViews(next.Members))
-	if cause := attempt.memberCause(); cause != nil {
-		for i := range next.Members {
-			if m := &next.Members[i]; !isCheckpointPhaseFinal(m.Phase) {
+		observed.deleting, !now.Before(observed.deadline), views)
+	for i := range next.Members {
+		if m := &next.Members[i]; !isCheckpointPhaseFinal(m.Phase) {
+			if cause := attempt.memberCause(&views[i]); cause != nil {
 				m.Phase, m.Reason, m.Message = snapshotv1alpha1.CheckpointPhaseFailed, cause.reason, cause.message
 			}
 		}
@@ -281,14 +282,13 @@ func isCheckpointPhaseFinal(phase snapshotv1alpha1.CheckpointPhase) bool {
 
 // podGroupSnapshotReleasable reports whether a PodGroupSnapshot that is being
 // deleted may drop its finalizer. It may once its own attempt has ended, Ready
-// or Failed, with no member still being checkpointed, so garbage collection
-// never deletes a member's PodSnapshot while its agent is dumping, and once
+// or Failed, with every member final by its own report, so garbage collection
+// never deletes a member's PodSnapshot while its agent works on it, and once
 // every observed PodGroupRestore that references it has finished, so it never
 // deletes one that an agent is restoring from. A group deleted before any
-// member started has ended with Cancelled. The deadlines bound the wait: a
-// group's turns every member still Checkpointing into Failed, and the group
-// into Failed if it was not already, and a restore's does the same for the
-// restore.
+// member started cancels only the members with no PodSnapshot. The deadlines
+// bound the wait: a group's fails every member that is not final, and the group
+// if it was not already Failed, and a restore's does the same for the restore.
 func podGroupSnapshotReleasable(observed podGroupSnapshotObservation, status *snapshotv1alpha1.PodGroupSnapshotStatus) bool {
 	ended := meta.FindStatusCondition(status.Conditions, snapshotv1alpha1.PodGroupConditionReady) != nil ||
 		meta.IsStatusConditionTrue(status.Conditions, snapshotv1alpha1.PodGroupConditionFailed)
@@ -296,7 +296,7 @@ func podGroupSnapshotReleasable(observed podGroupSnapshotObservation, status *sn
 		return false
 	}
 	for _, m := range status.Members {
-		if m.Phase == snapshotv1alpha1.CheckpointPhaseCheckpointing {
+		if !isCheckpointPhaseFinal(m.Phase) {
 			return false
 		}
 	}
