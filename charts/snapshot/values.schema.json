@@ -14,6 +14,15 @@
               "minimum": 0
             }
           }
+        },
+        "restore": {
+          "type": "object",
+          "properties": {
+            "retryLimit": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
         }
       }
     },

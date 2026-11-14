@@ -68,6 +68,27 @@ tests:
           path: data["config.yaml"]
           pattern: "skipCompatCheck: true"
 
+  - it: keeps restore retry off by default
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'restoreTimeoutSeconds: 7200\n  retryLimit: 0\n'
+
+  - it: renders the restore retry limit
+    set:
+      config.restore.retryLimit: 3
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'restoreTimeoutSeconds: 7200\n  retryLimit: 3\n'
+
+  - it: refuses a negative restore retry limit
+    set:
+      config.restore.retryLimit: -1
+    asserts:
+      - failedTemplate:
+          errorPattern: "retryLimit"
+
   - it: configures direct restore independently of CRIU I/O
     set:
       pageBroker.restoreMode: direct
