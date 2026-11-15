@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
+
+	"github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 const (
@@ -341,4 +343,49 @@ func nestedSlice(t *testing.T, object map[string]any, fields ...string) []any {
 		t.Fatalf("field %q in path %q has type %T, want array", field, strings.Join(fields, "."), parent[field])
 	}
 	return value
+}
+
+// Kubebuilder markers cannot name a Go constant, so this keeps the two
+// deadlineSeconds maxima equal to v1alpha1.PodGroupMaxDeadlineSeconds.
+func TestDeadlineMaximumMatchesTheConstant(t *testing.T) {
+	generated := readCRDDir(t, ".")
+	for _, name := range []string{"nvidia.com_podgroupsnapshots.yaml", "nvidia.com_podgrouprestores.yaml"} {
+		manifestJSON, err := utilyaml.ToJSON([]byte(generated[name]))
+		if err != nil {
+			t.Fatalf("%s: convert to JSON: %v", name, err)
+		}
+		var crd struct {
+			Spec struct {
+				Versions []struct {
+					Name   string `json:"name"`
+					Schema struct {
+						OpenAPIV3Schema struct {
+							Properties struct {
+								Spec struct {
+									Properties struct {
+										DeadlineSeconds struct {
+											Maximum *int64 `json:"maximum"`
+										} `json:"deadlineSeconds"`
+									} `json:"properties"`
+								} `json:"spec"`
+							} `json:"properties"`
+						} `json:"openAPIV3Schema"`
+					} `json:"schema"`
+				} `json:"versions"`
+			} `json:"spec"`
+		}
+		if err := json.Unmarshal(manifestJSON, &crd); err != nil {
+			t.Fatalf("%s: decode: %v", name, err)
+		}
+		if len(crd.Spec.Versions) == 0 {
+			t.Fatalf("%s: no versions", name)
+		}
+		for _, version := range crd.Spec.Versions {
+			maximum := version.Schema.OpenAPIV3Schema.Properties.Spec.Properties.DeadlineSeconds.Maximum
+			if maximum == nil || *maximum != v1alpha1.PodGroupMaxDeadlineSeconds {
+				t.Errorf("%s %s: spec.deadlineSeconds maximum = %v, want %d",
+					name, version.Name, maximum, v1alpha1.PodGroupMaxDeadlineSeconds)
+			}
+		}
+	}
 }

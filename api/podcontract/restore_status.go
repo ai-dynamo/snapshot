@@ -49,10 +49,9 @@ const (
 
 	// GroupRestoreFailedCondition is set to True on a group restore Pod whose
 	// member fails for a reason of the group: the session's reason, or one of
-	// the agent's group checks such as PodIPChanged or GateBudgetTooShort. The
-	// agent sets it in the same status update as nvidia.com/Restored, which
-	// stays the only signal that the member failed. A member that fails on its
-	// own leaves it unset.
+	// the agent's group checks such as PodIPChanged. The agent sets it in the
+	// same status update as nvidia.com/Restored, which stays the only signal
+	// that the member failed. A member that fails on its own leaves it unset.
 	GroupRestoreFailedCondition = "nvidia.com/GroupRestoreFailed"
 
 	// RestoreReasonInProgress marks active restore execution.
