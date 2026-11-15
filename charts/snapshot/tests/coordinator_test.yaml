@@ -122,6 +122,10 @@ tests:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
       # The agent stays the default container, and the Pod on the host's network.
       - equal:
           path: spec.template.metadata.annotations["kubectl.kubernetes.io/default-container"]
@@ -194,6 +198,29 @@ tests:
               memory: 128Mi
             limits:
               memory: 2Gi
+
+  # The heap holds every session. With the container's memory limit as a soft
+  # limit, the Go runtime collects garbage before the heap reaches it.
+  - it: gives the Go runtime the container's memory limit
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].env
+          content:
+            name: GOMEMLIMIT
+            valueFrom:
+              resourceFieldRef:
+                resource: limits.memory
+      # Only the coordinator's.
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "agent")].env
+          content:
+            name: GOMEMLIMIT
+            valueFrom:
+              resourceFieldRef:
+                resource: limits.memory
 
   - it: mounts tls.crt and tls.key from the optional issued Secret, and a small /tmp
     template: templates/daemonset.yaml

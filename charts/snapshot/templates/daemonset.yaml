@@ -312,6 +312,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            # A soft limit: the Go runtime collects garbage before the heap,
+            # which holds every session, reaches the container's memory limit,
+            # instead of letting it grow to twice the live data.
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
           # Host ports, the Pod being on the host's network, so the scheduler
           # keeps a second Pod that wants them off the node.
           ports:

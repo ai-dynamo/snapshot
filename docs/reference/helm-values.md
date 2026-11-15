@@ -142,7 +142,7 @@ Kubernetes than the baseline; see
 | `coordinator.maxValueBytes`           | `33554432`                          | Largest value, in bytes, an agent may write to a session.                                                                          |
 | `coordinator.maxLibraryValueBytes`    | `4096`                              | Largest value, in bytes, a communication library may write to a session.                                                           |
 | `coordinator.maxLibraryKeys`          | `4096`                              | How many keys communication libraries may write to a session, deleted ones included.                                               |
-| `coordinator.resources`               | 100m CPU / 128Mi request, 2Gi limit | Coordinator resources. Keep the memory limit at about twice `coordinator.maxMemoryBytes`.                                          |
+| `coordinator.resources`               | 100m CPU / 128Mi request, 2Gi limit | Coordinator resources. The memory limit is also its `GOMEMLIMIT`. Keep it at about twice `coordinator.maxMemoryBytes`.             |
 | `coordinator.tls.serving.secretName`  | `""`                                | Your own `kubernetes.io/tls` Secret with `tls.crt` and `tls.key`, in the release namespace. Empty: the operator issues one.        |
 | `coordinator.tls.trust.configMapName` | `""`                                | Your own ConfigMap holding the CA bundle agents trust, in the release namespace.                                                   |
 | `coordinator.tls.trust.secretName`    | `""`                                | Your own Secret holding that CA bundle, in the release namespace.                                                                  |
