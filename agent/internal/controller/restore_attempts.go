@@ -15,7 +15,7 @@ import (
 )
 
 // restoreAttemptsMaxBytes bounds the read of a record the Pod can rewrite.
-const restoreAttemptsMaxBytes = 4 << 10
+const restoreAttemptsMaxBytes = 4096
 
 // restoreAttempts is a destination container's record of its restore
 // attempts, kept in its directory of the Pod's snapshot-control volume. The
