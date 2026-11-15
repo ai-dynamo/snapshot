@@ -26,6 +26,21 @@ tests:
       - notExists:
           path: spec.template.spec.volumes[?(@.name == "coordinator-tmp")]
 
+  # /tmp holds the control buckets' file store, which maxMemoryBytes bounds, so
+  # the volume follows it, with a 64 MiB margin for JetStream's own files.
+  - it: sizes /tmp from maxMemoryBytes
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.maxMemoryBytes: 8388608
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[?(@.name == "coordinator-tmp")].emptyDir.sizeLimit
+          value: 75497472
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --max-memory-bytes=8388608
+
   - it: gives the operator no issuer flags by default
     template: templates/operator-deployment.yaml
     asserts:
@@ -222,7 +237,7 @@ tests:
               resourceFieldRef:
                 resource: limits.memory
 
-  - it: mounts tls.crt and tls.key from the optional issued Secret, and a small /tmp
+  - it: mounts tls.crt and tls.key from the optional issued Secret, and /tmp
     template: templates/daemonset.yaml
     set:
       podGroups.enabled: true
@@ -252,7 +267,8 @@ tests:
           content:
             name: coordinator-tmp
             emptyDir:
-              sizeLimit: 16Mi
+              # maxMemoryBytes, 1 GiB, plus 64 MiB.
+              sizeLimit: 1140850688
       # Only the coordinator mounts them.
       - notContains:
           path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts

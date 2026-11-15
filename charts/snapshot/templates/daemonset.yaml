@@ -271,8 +271,8 @@ spec:
             {{- end }}
         {{- if .Values.podGroups.enabled }}
         # The coordinator of pod groups. It runs as non-root with no
-        # capabilities: it needs only the API server, its serving certificate
-        # and its two ports, which are on the node's IP. It still shares the
+        # capabilities: it needs only the API server, its serving certificate,
+        # its two ports, which are on the node's IP, and /tmp. It still shares the
         # Pod's ServiceAccount and the host's network, PID and IPC namespaces,
         # so it holds the agent's API rights. Its readiness is the Pod's, so a
         # node whose coordinator does not admit agents gets no new groups.
@@ -360,8 +360,8 @@ spec:
             - name: coordinator-tls
               mountPath: {{ include "snapshot.coordinatorTLSDir" . }}
               readOnly: true
-            # JetStream checks that it can write here, although every session
-            # lives in memory.
+            # /tmp holds the control buckets' file store, a few hundred KB per
+            # session for honest use.
             - name: coordinator-tmp
               mountPath: /tmp
         {{- end }}
@@ -497,9 +497,14 @@ spec:
                 path: tls.crt
               - key: tls.key
                 path: tls.key
+        # maxMemoryBytes also bounds the coordinator's store, so with a 64 MiB
+        # margin for JetStream's own files the coordinator refuses a write
+        # before the kubelet would evict the Pod. Only an agent that misbehaves
+        # on purpose can write consumer files outside that bound, and eviction
+        # stays the backstop.
         - name: coordinator-tmp
           emptyDir:
-            sizeLimit: 16Mi
+            sizeLimit: {{ add (int64 .Values.coordinator.maxMemoryBytes) 67108864 }}
         {{- end }}
       {{- with .Values.daemonset.imagePullSecrets }}
       imagePullSecrets:
