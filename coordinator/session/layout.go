@@ -170,10 +170,10 @@ type Permissions struct {
 
 // MemberPermissions returns the permissions of a member's connection: its
 // attempt's buckets and nothing else, never another attempt's buckets, the
-// system account, or the API that creates and deletes buckets. In the Snapshot
-// bucket it may write the snapshot and cuinterpose namespaces, the ended key,
-// and its own arrivals and its own departure, never meta or another member's
-// barrier or left key; in the library bucket it may write anything. Its
+// system account, or the API that creates and deletes buckets. In the control
+// bucket it may write the ended key, its own arrivals and its own departure,
+// never meta or another member's barrier or left key; in the Snapshot bucket
+// the snapshot and cuinterpose namespaces; in the library bucket anything. Its
 // JetStream API requests are limited to what a client needs to bind a bucket,
 // Get a key, and Watch keys, and the only subscriptions it may make are on its
 // own inbox, where replies and watched entries arrive.

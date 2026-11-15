@@ -114,11 +114,11 @@ func (a *attempt) has(member string) bool {
 
 // Ensure creates the session of the attempt spec describes, unless it exists:
 // its three buckets, with their largest values, the library's key limit and the
-// control bucket's size, and meta, with a new random epoch. It arms the deadline, and starts following the
-// members' departures and the session's end. Ensuring an attempt again with the same
-// spec, whatever order it lists the members in, does nothing; a spec that
-// differs reports session.ErrInvalid, since an attempt's membership and deadline never
-// change. A session whose deadline has already passed is created already
+// control bucket's size, and meta, with a new random epoch. It arms the
+// deadline, and starts following the members' departures and the session's
+// end. Ensuring an attempt again with the same spec, whatever order it lists
+// the members in, does nothing; a spec that differs reports session.ErrInvalid,
+// since an attempt's membership and deadline never change. A session whose deadline has already passed is created already
 // failed with session.ReasonDeadlineExceeded, so a member that connects learns
 // why at once.
 //

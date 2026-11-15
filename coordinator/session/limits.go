@@ -61,12 +61,12 @@ func ControlBytes(members int) int64 { return ControlBytesBase + int64(members)*
 //
 // Every watch is an ordered consumer, and a reconnect replaces each one with a
 // new consumer while the old one is still being deleted, so each member's
-// share is twice what it watches at once. On the control bucket, the client
-// watches the session's end, and also each Barrier in progress. On the
-// Snapshot bucket, it watches each Get with a wait of a key that is absent:
-// four watches at once allow a Barrier, and a Get by the agent and one by its
-// cuInterpose relay. On the library bucket, the agent's library endpoint waits through Get once per key
-// per node, for the keys its Pod's libraries ask for at once, such as NCCL's
+// share is twice what it watches at once. On the Snapshot bucket, the client
+// watches each Get with a wait of a key that is absent: two watches at once
+// allow a Get by the agent and one by its cuInterpose relay. On the control
+// bucket, it watches the session's end, and also each Barrier in progress: two
+// watches at once. On the library bucket, the agent's library endpoint waits
+// through Get once per key per node, for the keys its Pod's libraries ask for at once, such as NCCL's
 // communicator identifiers.
 const MaxConsumersPerMember = 8
 

@@ -170,7 +170,7 @@ func TestAuthentication(t *testing.T) {
 			m := h.connect(spec, 0)
 			require.NoError(t, h.srv.Remove(within(t), spec.UID))
 			require.ErrorIs(t, awaitEnd(t, m), &session.AbortError{Reason: session.ReasonCancelled})
-			// The group resource is gone, so the Authorizer no longer places the
+			// The group resource is gone, so the Authorizer does not place the
 			// member. A held session still needs its placement, which a lagging
 			// cache may not show yet.
 			h.auth.unplace(true)

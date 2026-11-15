@@ -85,12 +85,10 @@ func ours(err error) bool {
 // transient reports whether an operation that failed with err may succeed if
 // sent again: the connection broke, including under a write in progress, which
 // fails with a *net.OpError, or is reconnecting, which refuses every publish
-// since the client buffers none, the server did not answer in time, or a watch
-// found its bucket at its most consumers, which free up as other waits end, or
-// the server dropped a write because the stream's ingest queue was full: see
-// throttled. An
-// operation is sent again only while the session is alive, so a
-// *net.OpError that wraps net.ErrClosed never reports a closed session.
+// since the client buffers none, the server did not answer in time, or the
+// coordinator is too busy for it: see throttled. An operation is sent again
+// only while the session is alive, so a *net.OpError that wraps net.ErrClosed
+// never reports a closed session.
 func transient(err error) bool {
 	if throttled(err) {
 		return true

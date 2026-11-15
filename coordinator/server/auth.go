@@ -40,21 +40,21 @@ var (
 //   - ErrUnauthenticated or ErrPermissionDenied: a refusal;
 //   - ErrUnavailable: a transient failure;
 //   - session.ErrNotFound: the attempt is not known yet, including when the
-//     Authorizer's own cache lags. The Authorizer returns it only for an
-//     attempt the coordinator holds.
+//     Authorizer's own cache lags.
 //
 // Any other error counts as ErrUnavailable, and is logged as a failure of the
-// Authorizer.
+// Authorizer. NATS reports every refusal to a client the same way, so a client
+// retries all of them until its own deadline; the distinction decides what the
+// coordinator logs.
 //
 // held reports whether the coordinator holds the attempt's session. A member
 // reconnecting to an attempt the coordinator does not hold, such as after its
 // group resource was removed, must be admitted so that it learns its session
 // is gone, with session.ErrCoordinatorLost: it presents an epoch, which cache
-// lag cannot explain. So for an attempt that is not held, the Authorizer checks
-// the token and the ServiceAccount only, and never refuses for the member's
-// placement or for not knowing the attempt. NATS reports every refusal to a client the same way, so a client
-// retries all of them until its own deadline; the distinction decides what the
-// coordinator logs.
+// lag cannot explain. So for an attempt that is not held, the Authorizer
+// checks the token and the ServiceAccount only, and never refuses for the
+// member's placement or for not knowing the attempt. It returns
+// session.ErrNotFound only for an attempt that is held.
 //
 // A member's grace period keeps running while its new connection is being
 // authorized, so Authorize must answer well within AuthorizeTimeout, for
