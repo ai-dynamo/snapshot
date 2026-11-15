@@ -127,7 +127,8 @@ type Config struct {
 	// session.ErrTooMany until it is removed. It never stops a session from
 	// ending: the control keys are in file storage, which MaxBytes also bounds,
 	// for the control buckets of every session together. It defaults to
-	// DefaultMaxBytes.
+	// DefaultMaxBytes, and must hold the control bucket of a session of
+	// session.MaxMembers, so that every group's session can open.
 	//
 	// MaxBytes is not the coordinator's whole memory. The process also holds,
 	// for each connection, up to session.MaxConcurrentGets values of what the
@@ -180,6 +181,9 @@ func (cfg Config) withDefaults() (Config, error) {
 	case cfg.MaxValue > 1<<30, cfg.MaxLibraryValue > cfg.MaxValue:
 		return cfg, fmt.Errorf("the largest values must not exceed 1 GiB, nor the library's the Snapshot's: %w",
 			session.ErrInvalid)
+	case cfg.MaxBytes < session.ControlBytes(session.MaxMembers):
+		return cfg, fmt.Errorf("MaxBytes must be at least %d bytes, the control bucket of a session of %d members: %w",
+			session.ControlBytes(session.MaxMembers), session.MaxMembers, session.ErrInvalid)
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = clock.RealClock{}
