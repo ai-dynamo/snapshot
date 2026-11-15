@@ -1,0 +1,130 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Build image
+description: >-
+  Build one Snapshot image through its make target with the shared layer cache,
+  and report the digest buildx produced.
+
+# The one place an image build is wired to the layer cache. Every workflow that
+# builds an image calls this, so the cache flags, the make invocation, and the
+# digest they report cannot drift apart between a pull request and a release.
+# A composite action rather than a reusable workflow because callers need the
+# build inside their own job: e2e-cpu.yaml pushes to a registry that exists only
+# on its runner, and push-artifacts.yaml signs the digest in the same job.
+
+inputs:
+  image:
+    description: Image to build -- operator, agent, or pagebroker.
+    required: true
+  registry:
+    description: Registry the image is tagged for, and pushed to when push is true.
+    required: false
+    default: ghcr.io/ai-dynamo/snapshot
+  tags:
+    description: Space-separated tags. Empty keeps the Makefile's VERSION.
+    required: false
+    default: ""
+  push:
+    description: >-
+      "true" to push the image under its tags, "digest" to push it by digest
+      alone with no tag, or "false" to only build it.
+    required: false
+    default: "true"
+  platform:
+    description: >-
+      Platform to build for. Each one other than linux/amd64 keeps a layer
+      cache of its own.
+    required: false
+    default: linux/amd64
+  cache_mode:
+    description: >-
+      read or write, as hack/ci-cache-flags.sh takes it. Only push-artifacts.yaml
+      writes: a cache a pull request can write is a cache a fork can poison.
+    required: false
+    default: read
+  cache_branch:
+    description: Branch whose layer cache is read, and written in write mode.
+    required: true
+  cache_ref_prefix:
+    description: Repository the layer cache tags live in.
+    required: false
+    default: ghcr.io/ai-dynamo/snapshot/cache
+  cache_tag_suffix:
+    description: Appended to every cache tag; see hack/ci-cache-flags.sh.
+    required: false
+    default: ""
+  build_args:
+    description: Extra docker buildx build flags, such as attestations.
+    required: false
+    default: ""
+  phase:
+    description: >-
+      When set, the label hack/ci-phase.sh records this build under. The
+      calling job must set CI_PHASE_LOG.
+    required: false
+    default: ""
+
+outputs:
+  digest:
+    description: Digest buildx reported for the image. Empty when it was not pushed.
+    value: ${{ steps.build.outputs.digest }}
+
+runs:
+  using: composite
+  steps:
+    - name: Build ${{ inputs.image }} image
+      id: build
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        REGISTRY: ${{ inputs.registry }}
+        TAGS: ${{ inputs.tags }}
+        PUSH: ${{ inputs.push }}
+        PLATFORM: ${{ inputs.platform }}
+        CACHE_MODE: ${{ inputs.cache_mode }}
+        CACHE_BRANCH: ${{ inputs.cache_branch }}
+        CACHE_REF_PREFIX: ${{ inputs.cache_ref_prefix }}
+        CACHE_TAG_SUFFIX: ${{ inputs.cache_tag_suffix }}
+        BUILD_ARGS: ${{ inputs.build_args }}
+        PHASE: ${{ inputs.phase }}
+      run: |
+        set -euo pipefail
+        start=$(date +%s)
+        case "${PUSH}" in
+          true) push_flag=--push ;;
+          # Untagged, so no tag ever points at a single architecture; whoever
+          # joins the architectures into an index tags that instead.
+          digest) push_flag="--output type=image,name=${REGISTRY}/${IMAGE},push-by-digest=true,name-canonical=true,push=true" ;;
+          false) push_flag= ;;
+          *) echo "::error::push must be \"true\", \"digest\", or \"false\", not \"${PUSH}\"" >&2; exit 2 ;;
+        esac
+        cache_key="${IMAGE}"
+        if [ "${PLATFORM}" != linux/amd64 ]; then
+          cache_key="${IMAGE}-${PLATFORM#linux/}"
+        fi
+        # Assigned, not inlined into the argument: a command substitution that
+        # fails inside a simple command does not trip `set -e`, so an inline
+        # call would drop the cache flags and still build -- silently cold, or
+        # silently publishing without --cache-to.
+        cache_flags="$(hack/ci-cache-flags.sh "${CACHE_MODE}" "${cache_key}" "${CACHE_BRANCH}")"
+        metadata="${RUNNER_TEMP}/build-image-${IMAGE}.json"
+        make_args=("REGISTRY=${REGISTRY}" "AGENT_PLATFORM=${PLATFORM}")
+        if [ "${PUSH}" = digest ]; then
+          make_args+=("TAGS=")
+        elif [ -n "${TAGS}" ]; then
+          make_args+=("TAGS=${TAGS}")
+        fi
+        make "docker-build-${IMAGE}" "${make_args[@]}" \
+          DOCKER_BUILD_ARGS="${push_flag} ${BUILD_ARGS} --metadata-file=${metadata} ${cache_flags}"
+        digest="$(jq -r '."containerimage.digest" // empty' "${metadata}")"
+        # A pushed image is consumed by digest -- signed, or installed -- so a
+        # push that reports none is a failure, not an empty output.
+        if [ "${PUSH}" != false ] && [ -z "${digest}" ]; then
+          echo "::error::buildx reported no digest for the pushed ${IMAGE} image" >&2
+          exit 1
+        fi
+        echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+        if [ -n "${PHASE}" ]; then
+          hack/ci-phase.sh "${PHASE}" "${start}" "${REGISTRY}/${IMAGE}:${TAGS%% *}"
+        fi

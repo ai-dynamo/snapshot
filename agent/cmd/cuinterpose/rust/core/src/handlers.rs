@@ -229,6 +229,10 @@ pub fn cuMemExportToShareableHandle(
         .memblocks
         .get_mut(&id)
         .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+    // CUDA refuses to export an imported handle, unicast or multicast.
+    if memblock.reference().creator_pid != namespace_pid {
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
+    }
     if let Memblock::Unicast(allocation) = memblock
         && allocation.properties.requestedHandleTypes.0 & kind.0 == 0
     {
