@@ -178,11 +178,13 @@ type Permissions struct {
 // Get a key, and Watch keys, and the only subscriptions it may make are on its
 // own inbox, where replies and watched entries arrive.
 //
-// The permissions do not bound where a consumer the member creates delivers
-// (nats-server#8274), so a member can add messages to another attempt's
-// buckets under its own subjects, which count against that attempt's limits
-// but never change its keys. SNEP-324 lists this with the memory cap every
-// session shares.
+// The permissions guard against an agent's mistakes, not a compromised agent:
+// every agent is equally trusted, as package server states. They do not bound
+// a request's reply subject, through which an agent could write any key in the
+// shared account. Nor do they bound where a consumer the member creates
+// delivers (nats-server#8274), so a member can add messages to another
+// attempt's buckets under its own subjects, which count against that attempt's
+// limits. Such a delivery keeps its own subject, so it never changes a key.
 func MemberPermissions(attempt, member string) Permissions {
 	publish := make([]string, 0, 16)
 	for _, bucket := range Buckets(attempt) {

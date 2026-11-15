@@ -172,12 +172,14 @@ func TestPermissionsConfineAllowedRequests(t *testing.T) {
 	})
 }
 
-// TestDeliveriesCannotChangeAnotherAttemptsKeys guards another attempt's keys
-// against a member. JetStream does not bound a push consumer's deliveries by
-// its creator's publish permissions (nats-server#8274), so a member may
-// deliver its own writes to another attempt's subjects. A delivery keeps its
-// original subject, under the member's own bucket, so it can never change
-// another attempt's keys; the test fails if that ever changes.
+// TestDeliveriesCannotChangeAnotherAttemptsKeys checks that a push consumer's
+// deliveries never change another attempt's keys. JetStream does not bound
+// them by their creator's publish permissions (nats-server#8274), so a member
+// may deliver its own writes to another attempt's subjects. A delivery keeps
+// its original subject, under the member's own bucket, so no bucket stores it;
+// the test fails if that ever changes. It covers deliveries only: the
+// permissions guard against an agent's mistakes, not a compromised agent, which
+// could write any key through a request's reply subject.
 func TestDeliveriesCannotChangeAnotherAttemptsKeys(t *testing.T) {
 	h := newHarness(t)
 	ctx := within(t)
@@ -222,8 +224,9 @@ func TestDeliveriesCannotChangeAnotherAttemptsKeys(t *testing.T) {
 	assert.Equal(t, meta.Value(), after.Value(), "another attempt's meta must stay unchanged")
 }
 
-// TestDeliveriesCannotReachTheJetStreamAPI guards another attempt's buckets
-// against a member that delivers its own writes to the JetStream API. Members
+// TestDeliveriesCannotReachTheJetStreamAPI checks that a member that delivers
+// its own writes to the JetStream API never acts on another attempt's buckets
+// through them. Members
 // share one account, which imports $JS.API.>, and JetStream does not bound a
 // push consumer's deliveries by its creator's publish permissions
 // (nats-server#8274; its fix, nats-server#8279, was closed, since a client
