@@ -93,6 +93,10 @@ const (
 
 	// retryWait spaces the resends of an operation that failed transiently.
 	retryWait = 100 * time.Millisecond
+
+	// maxRetryWait is the longest wait between the resends of an operation
+	// that fails because the coordinator is too busy for it.
+	maxRetryWait = time.Second
 )
 
 // Connect connects to the coordinator as cfg.Member of the attempt cfg.Attempt,
@@ -122,6 +126,7 @@ func Connect(ctx context.Context, cfg Config) (Session, error) {
 		clock:      cfg.Clock,
 		connected:  make(chan struct{}),
 		verify:     make(chan struct{}, 1),
+		reads:      make(chan struct{}, session.MaxConcurrentGets),
 		closing:    make(chan struct{}),
 		connClosed: make(chan struct{}),
 		done:       make(chan struct{}),
@@ -146,6 +151,8 @@ func (s *client) options(cfg Config) []nats.Option {
 	return []nats.Option{
 		// Both ends are ours, so neither needs anything older than TLS 1.3.
 		nats.Secure(&tls.Config{ServerName: cfg.ServerName, MinVersion: tls.VersionTLS13}),
+		// The coordinator expects the handshake before it sends anything.
+		nats.TLSHandshakeFirst(),
 		// nats.go retries a handshake that fails here without reporting why, so
 		// the client logs it. A nil pool would trust the host's CAs instead.
 		nats.ClientTLSConfig(nil, func() (*x509.CertPool, error) {
@@ -210,7 +217,7 @@ func (s *client) options(cfg Config) []nats.Option {
 	}
 }
 
-// join waits until the coordinator admits the connection, binds both buckets,
+// join waits until the coordinator admits the connection, binds the buckets,
 // reads Meta, and starts verifying the session when asked, following its end,
 // and timing its deadline.
 func (s *client) join(ctx context.Context) error {
@@ -226,17 +233,20 @@ func (s *client) join(ctx context.Context) error {
 	if err != nil {
 		return mapError(err)
 	}
-	if s.snapshot, err = s.bind(ctx, js, session.SnapshotBucket(s.attempt)); err != nil {
+	if s.control, err = s.bind(ctx, js, session.ControlBucket(s.attempt)); err != nil {
 		return err
 	}
-	if s.library, err = s.bind(ctx, js, session.LibraryBucket(s.attempt)); err != nil {
+	if s.snapshot, err = s.bind(ctx, js, session.NamespaceSnapshot.Bucket(s.attempt)); err != nil {
+		return err
+	}
+	if s.library, err = s.bind(ctx, js, session.NamespaceLibrary.Bucket(s.attempt)); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	target := s.target()
 	s.mu.Unlock()
 	if err := s.do(ctx, func(ctx context.Context) error {
-		s.meta, err = readMeta(ctx, s.snapshot)
+		s.meta, err = readMeta(ctx, s.control)
 		return err
 	}); err != nil {
 		return err

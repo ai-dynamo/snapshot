@@ -102,10 +102,10 @@ type client struct {
 
 	// Set by join, and read-only afterwards. joined is set last, as the
 	// verifier starts.
-	snapshot, library jetstream.KeyValue
-	meta              session.Meta
-	ranks             map[string]int
-	joined            bool
+	control, snapshot, library jetstream.KeyValue
+	meta                       session.Meta
+	ranks                      map[string]int
+	joined                     bool
 
 	// epoch is the epoch the client presents when it connects, zero until it
 	// has read Meta.
@@ -117,7 +117,10 @@ type client struct {
 	connect   sync.Once
 	// verify holds a pending request to verify the session, so requests made
 	// while one is pending coalesce.
-	verify  chan struct{}
+	verify chan struct{}
+	// reads holds a slot for each value being read over the connection, so no
+	// more are in flight than the coordinator buffers for it.
+	reads   chan struct{}
 	closing chan struct{}
 	// connClosed is closed once the connection is, by Close or as the session
 	// ends; nats.go then delivers nothing more to any watch.
@@ -146,7 +149,7 @@ type client struct {
 func (s *client) followEnd() {
 	defer s.wg.Done()
 	for {
-		err := s.await(context.Background(), s.snapshot, nil, func(string, []byte, bool) bool { return false })
+		err := s.await(context.Background(), s.control, nil, func(string, []byte, bool) bool { return false })
 		var abort *session.AbortError
 		switch {
 		case errors.As(err, &abort), errors.Is(err, session.ErrClosed):
@@ -242,14 +245,14 @@ func (s *client) Barrier(ctx context.Context, name string) error {
 	}
 	arrival := session.BarrierKey(name, s.member)
 	if err := s.do(ctx, func(ctx context.Context) error {
-		_, err := s.snapshot.Put(ctx, arrival, nil)
+		_, err := s.control.Put(ctx, arrival, nil)
 		return err
 	}); err != nil {
 		return err
 	}
 	prefix := session.BarrierKey(name, "")
 	arrived := make(map[string]bool, len(s.ranks))
-	if err := s.await(ctx, s.snapshot, []string{session.BarrierKey(name, "*")}, func(key string, _ []byte,
+	if err := s.await(ctx, s.control, []string{session.BarrierKey(name, "*")}, func(key string, _ []byte,
 		present bool) bool {
 		member := strings.TrimPrefix(key, prefix)
 		if _, ok := s.ranks[member]; ok && present {
@@ -268,7 +271,7 @@ func (s *client) Barrier(ctx context.Context, name string) error {
 func (s *client) Leave(ctx context.Context) error {
 	left := session.LeftKey(s.member)
 	err := s.do(ctx, func(ctx context.Context) error {
-		_, err := s.snapshot.Put(ctx, left, nil)
+		_, err := s.control.Put(ctx, left, nil)
 		return err
 	})
 	if errors.Is(err, session.ErrClosed) {
@@ -283,11 +286,11 @@ func (s *client) Fail(ctx context.Context, reason string) error {
 		return err
 	}
 	err := s.do(ctx, func(ctx context.Context) error {
-		_, err := s.snapshot.Create(ctx, session.KeyEnded, []byte(reason))
+		_, err := s.control.Create(ctx, session.KeyEnded, []byte(reason))
 		if !errors.Is(err, jetstream.ErrKeyExists) {
 			return err
 		}
-		entry, err := s.snapshot.Get(ctx, session.KeyEnded)
+		entry, err := s.control.Get(ctx, session.KeyEnded)
 		if err != nil {
 			return err
 		}
@@ -304,9 +307,11 @@ func (s *client) Fail(ctx context.Context, reason string) error {
 }
 
 // do runs op, sending it again while it fails transiently, until it succeeds,
-// fails for good, the session ends or is closed, or ctx is done. It never sends
-// op once ctx is done.
+// fails for good, the session ends or is closed, or ctx is done, waiting longer
+// each time the coordinator says it is too busy. It never sends op once ctx is
+// done.
 func (s *client) do(ctx context.Context, op func(context.Context) error) error {
+	var busy backoff
 	for {
 		if err := s.alive(); err != nil {
 			return err
@@ -337,8 +342,14 @@ func (s *client) do(ctx context.Context, op func(context.Context) error) error {
 		case !transient(err):
 			return mapError(err)
 		}
+		wait := retryWait
+		if throttled(err) {
+			wait = busy.next()
+		} else {
+			busy.reset()
+		}
 		select {
-		case <-time.After(retryWait):
+		case <-time.After(wait):
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-s.done:
@@ -348,6 +359,21 @@ func (s *client) do(ctx context.Context, op func(context.Context) error) error {
 		}
 	}
 }
+
+// backoff spaces the resends of an operation that fails because the
+// coordinator is too busy for it: retryWait first, then twice as long each
+// time, up to maxRetryWait. Its zero value is ready.
+type backoff struct{ wait time.Duration }
+
+// next returns how long to wait before the next resend.
+func (b *backoff) next() time.Duration {
+	wait := max(b.wait, retryWait)
+	b.wait = min(2*wait, maxRetryWait)
+	return wait
+}
+
+// reset starts the waits again from retryWait.
+func (b *backoff) reset() { b.wait = 0 }
 
 // try runs op once, bounded by attemptTimeout and by a disconnect.
 func (s *client) try(ctx context.Context, op func(context.Context) error) error {
@@ -363,6 +389,23 @@ func (s *client) try(ctx context.Context, op func(context.Context) error) error 
 	return err
 }
 
+// read runs op, which reads one value, once the connection has a slot for it,
+// and holds the slot until op returns. It returns how the session ended, or
+// ctx's error, if either comes first.
+func (s *client) read(ctx context.Context, op func(context.Context) error) error {
+	select {
+	case s.reads <- struct{}{}:
+		defer func() { <-s.reads }()
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.done:
+		return s.Err()
+	case <-s.closing:
+		return net.ErrClosed
+	}
+	return s.do(ctx, op)
+}
+
 // watcher is a watch, and the cancellation that ends it: a watch lives as long
 // as the context it was started with.
 type watcher struct {
@@ -370,15 +413,16 @@ type watcher struct {
 	cancel context.CancelFunc
 }
 
-// watch starts watching keys of kv. Its creation is bounded like any operation,
-// while the watch itself lives until stop.
-func (s *client) watch(ctx context.Context, kv jetstream.KeyValue, keys []string) (watcher, error) {
+// watch starts watching keys of kv, with opts. Its creation is bounded like any
+// operation, while the watch itself lives until stop.
+func (s *client) watch(ctx context.Context, kv jetstream.KeyValue, keys []string,
+	opts ...jetstream.WatchOpt) (watcher, error) {
 	var w watcher
 	err := s.do(ctx, func(attempt context.Context) error {
 		life, cancel := context.WithCancel(context.Background())
 		bounded := context.AfterFunc(attempt, cancel)
 		// WatchFiltered rewrites the slice it is given.
-		kw, err := kv.WatchFiltered(life, slices.Clone(keys))
+		kw, err := kv.WatchFiltered(life, slices.Clone(keys), opts...)
 		if !bounded() {
 			// The attempt ended first, which cancelled the watch.
 			err = context.Cause(attempt)
@@ -397,19 +441,20 @@ func (s *client) watch(ctx context.Context, kv jetstream.KeyValue, keys []string
 	return w, err
 }
 
-// await watches keys of kv, and the ended key whenever kv is the Snapshot
+// await watches keys of kv, and the ended key whenever kv is the control
 // bucket, and passes visit every entry of keys, each key's current entry first
 // and then every change, until visit reports true. present is false for a
 // deleted key. Watching ended in the same watch orders the session's end among
 // the entries, so an end recorded after the last entry visit needed does not
-// hide it. Watching the library bucket relies on Done instead.
+// hide it. Watching another bucket relies on Done instead. opts are the
+// watch's, such as jetstream.MetaOnly, which delivers entries with no values.
 func (s *client) await(ctx context.Context, kv jetstream.KeyValue, keys []string,
-	visit func(key string, value []byte, present bool) bool) error {
-	watchesEnd := kv == s.snapshot
+	visit func(key string, value []byte, present bool) bool, opts ...jetstream.WatchOpt) error {
+	watchesEnd := kv == s.control
 	if watchesEnd {
 		keys = append(slices.Clone(keys), session.KeyEnded)
 	}
-	w, err := s.watch(ctx, kv, keys)
+	w, err := s.watch(ctx, kv, keys, opts...)
 	if err != nil {
 		return err
 	}
@@ -425,7 +470,7 @@ func (s *client) await(ctx context.Context, kv jetstream.KeyValue, keys []string
 				if err := s.confirm(ctx); err != nil {
 					return err
 				}
-				again, err := s.watch(ctx, kv, keys)
+				again, err := s.watch(ctx, kv, keys, opts...)
 				if err != nil {
 					return err
 				}

@@ -3,8 +3,13 @@
 
 // Package agentauth authorizes the Snapshot agents that connect to a
 // coordinator hosted on Kubernetes, by their Pod-bound ServiceAccount tokens.
-// Its Authorizer is a server.Authorizer. A token must name its Pod's node,
-// which Kubernetes adds by default since 1.30, and always since 1.32.
+// Its Authorizer is a server.Authorizer. It needs two things of the cluster:
+//
+//   - A token must name its Pod's node, which Kubernetes adds by default since
+//     1.30, and always since 1.32.
+//   - The API server's --service-account-issuer must be an https URL. Only
+//     then does the API server serve its ServiceAccount issuer discovery
+//     endpoints, which the Authorizer reads.
 //
 // The host gives it a Placement, which reports the node each member of an
 // attempt runs on, and its ServiceAccount needs RBAC to create TokenReviews
@@ -14,6 +19,8 @@
 // system:service-account-issuer-discovery binding.
 //
 // The Authorizer says why it refuses a member in the error it returns, which
-// the coordinator logs and which never holds the token. It logs only failed
-// fetches of the issuer's keys and failed TokenReviews itself.
+// the coordinator logs. The error never holds the token, nor any part of a
+// token that does not verify. The Authorizer itself logs failed fetches of the
+// issuer's keys and failed TokenReviews, and, at V(1), why a token does not
+// verify.
 package agentauth

@@ -134,8 +134,9 @@ startup probe, so the builder then replaces any existing startup probe with the
 canonical restore-completion gate while preserving workload liveness and
 readiness probes. Its failure threshold allows 1,800 consecutive one-second
 failures; if restoration exceeds that budget, kubelet kills the container, and
-the restore is lost (see restart policy below). The node agent always writes
-the sentinel but does not require or inspect the optional probe.
+the restore is lost (see restart policy below). A group target's budget is
+longer: see [Group Restore Targets](#group-restore-targets). The node agent
+always writes the sentinel but does not require or inspect the optional probe.
 
 `Options.SeccompProfile` controls the localhost profile on restore destination
 containers only. The standard Snapshot Helm installation deploys
@@ -237,6 +238,14 @@ It adds the control volume, mount, and environment, and always the
 no annotation: do not set `nvidia.com/restore-from`,
 `nvidia.com/restore-container-map`, or `nvidia.com/restore-group-uid` on a
 group target.
+
+The probe of a group target allows 86,400 consecutive one-second failures, a
+day: the longest `deadlineSeconds` of a `PodGroupRestore`. A target's container
+starts only after the `PodGroupRestore` exists, so the probe cannot expire
+before the restore's deadline. That is safe because the probe never decides the
+outcome: the node agent fails a member at its deadline and stops the workload,
+and the probe only holds the container back until the agent releases it. A
+group target must carry exactly this probe, not the standalone one.
 
 Name the destination container in the `PodGroupRestore`, in the target's
 `containerMappings`. The operator claims the Pod in one patch: it writes
