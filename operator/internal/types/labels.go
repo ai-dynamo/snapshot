@@ -3,9 +3,9 @@
 
 package types
 
-// The operator labels each resource it writes outside Helm with ManagedByLabel
-// set to ManagedByOperator. helm uninstall leaves those resources, and the
-// label finds them.
+// The operator labels the Secrets and ConfigMaps it writes in its own
+// namespace, outside Helm, with ManagedByLabel set to ManagedByOperator. helm
+// uninstall leaves them, and the label finds them.
 const (
 	// ManagedByLabel is the well-known label that names the tool managing a
 	// resource.
