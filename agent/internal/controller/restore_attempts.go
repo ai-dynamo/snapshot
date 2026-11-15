@@ -144,7 +144,7 @@ func (op *restoreOperation) announceAttempt(ctx context.Context, record *restore
 	op.log.Info("Restore target detected, triggering external restore", keysAndValues...)
 	message := fmt.Sprintf("Restore requested from PodSnapshot %s for destination %s", op.artifact.SnapshotName, op.destination)
 	if record.Limit > 0 {
-		message += fmt.Sprintf(" (attempt %d of %d)", record.Attempt, record.Limit+1)
+		message += fmt.Sprintf(restoreRequestedAttemptSuffix, record.Attempt, record.Limit+1)
 	}
 	emitPodEvent(ctx, op.controller.clientset, op.log, op.pod, snapshotEventComponent, corev1.EventTypeNormal, restoreRequestedReason, message)
 }
