@@ -47,6 +47,10 @@ const (
 	MaxControlValue = 4 << 10
 )
 
+// MaxMembers is the largest membership a session is sized for: the most
+// members a PodGroupSnapshot or PodGroupRestore holds.
+const MaxMembers = 256
+
 // ControlBytes is the size of the control bucket of a session of members
 // members, in bytes. The coordinator's file storage holds the control buckets
 // of every session, so it bounds them in total by their sum.
