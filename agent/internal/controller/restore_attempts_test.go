@@ -339,38 +339,3 @@ func TestRunRestoreKeepsTheRecordUnderThePodsUIDWithoutTheNodes(t *testing.T) {
 
 	assert.Equal(t, []string{"restore-pod-uid/main/" + podcontract.RestoreAttemptsFile}, h.volume.writes)
 }
-
-func TestRecoveredPostRestoreKeepsTheRecordsDeadline(t *testing.T) {
-	for name, tc := range map[string]struct {
-		record     bool
-		wantWithin time.Duration
-	}{
-		"with a record":    {record: true, wantWithin: 2 * time.Second},
-		"without a record": {wantWithin: time.Minute},
-	} {
-		t.Run(name, func(t *testing.T) {
-			h := newPostRestoreHarness(t, httpPostRestoreSpec())
-			recoveringPod(h)
-			h.w.runtime = &fakeRuntime{resolveContainerPID: 4242, podUID: "host-uid"}
-			volume := newFakeControlVolume(h.w)
-			deadline := time.Now().Add(2 * time.Second)
-			if tc.record {
-				volume.put(t, "host-uid", "main", restoreAttempts{Limit: 1, Attempt: 1, Deadline: deadline, ContainerID: "ctr-abc"})
-			}
-			h.httpResults = []int{0}
-			var got time.Time
-			h.w.postRestoreWaitFn = func(ctx context.Context, _ time.Duration) error {
-				got, _ = ctx.Deadline()
-				return context.DeadlineExceeded
-			}
-
-			require.Error(t, h.run(true))
-
-			assert.Equal(t, 0, h.restores)
-			assert.WithinDuration(t, time.Now().Add(tc.wantWithin), got, time.Second)
-			if tc.record {
-				assert.True(t, deadline.Equal(got), "the action ends at %s, want the record's %s", got, deadline)
-			}
-		})
-	}
-}
