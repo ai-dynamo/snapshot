@@ -18,7 +18,7 @@ import (
 
 // restoreAttemptsMaxBytes bounds the read of a record the Pod can rewrite.
 // It holds a LastFailure whose cause JSON escapes to six times its size.
-const restoreAttemptsMaxBytes = 8 << 10
+const restoreAttemptsMaxBytes = 8192
 
 // restoreAttempts is a destination container's record of its restore
 // attempts, kept in its directory of the Pod's snapshot-control volume. The
@@ -158,7 +158,7 @@ func (op *restoreOperation) announceAttempt(ctx context.Context, record *restore
 	op.log.Info("Restore target detected, triggering external restore", keysAndValues...)
 	message := fmt.Sprintf("Restore requested from PodSnapshot %s for destination %s", op.artifact.SnapshotName, op.destination)
 	if record.Limit > 0 {
-		message += fmt.Sprintf(" (attempt %d of %d)", record.Attempt, record.Limit+1)
+		message += fmt.Sprintf(restoreRequestedAttemptSuffix, record.Attempt, record.Limit+1)
 	}
 	emitPodEvent(ctx, op.controller.clientset, op.log, op.pod, snapshotEventComponent, corev1.EventTypeNormal, restoreRequestedReason, message)
 }

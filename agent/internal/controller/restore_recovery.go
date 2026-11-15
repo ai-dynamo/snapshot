@@ -21,6 +21,19 @@ const (
 	restoreAttemptFailedReason    = "RestoreAttemptFailed"
 	restoreRetriesExhaustedReason = "RestoreRetriesExhausted"
 
+	restoreAttemptFailedMessage    = "Attempt %d of %d for destination %s failed: %s; %s"
+	restoreRetriesExhaustedMessage = "Destination %s: %s"
+	restoreRequestedAttemptSuffix  = " (attempt %d of %d)"
+
+	recoveryRetryInPlace  = "retrying in place in %s"
+	recoveryNoRetriesLeft = "no retries left"
+	recoveryNotRetried    = "not retried: "
+
+	notRetriedTimedOut         = "the restore timed out"
+	notRetriedFinal            = "no other attempt can succeed"
+	notRetriedPageBrokerCode   = "PageBroker reported %s"
+	notRetriedContainerChanged = "another attempt needs a new container"
+
 	// A pending restore gets a pass at least every restoreSafetyRequeueInterval,
 	// so a shorter backoff would still wait that long.
 	restoreRetryInitialBackoff = 30 * time.Second
@@ -73,6 +86,11 @@ func failureCode(err error) pagebroker.Failure_Code {
 	return pagebroker.Failure_UNSPECIFIED
 }
 
+// chooseRecovery decides what follows a failed attempt. The restore ends when
+// no retry can help: its deadline passed, the failure is final, PageBroker
+// reported a fault in the artifact or the request, or the attempt changed the
+// container. Otherwise it retries in the same container while attempts and
+// time remain, and runs out of retries when they do not.
 func chooseRecovery(f *executor.RestoreFailure, ctxErr error, left budget) recovery {
 	switch {
 	case ctxErr != nil, f.Final, finalCodes[failureCode(f.Cause)], f.ContainerChanged:
@@ -140,16 +158,16 @@ func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, recor
 		record.RetryAt = now.Add(backoff)
 		record.LastFailure = failureSummary(failure)
 		if saveErr := op.writeRestoreAttempts(op.nodeUID, record); saveErr != nil {
-			op.reportFailedAttempt(ctx, record, failure, "not retried: "+saveErr.Error())
+			op.reportFailedAttempt(ctx, record, failure, recoveryNotRetried+saveErr.Error())
 			return op.failRestore(ctx, errors.Join(err, saveErr))
 		}
-		op.reportFailedAttempt(ctx, record, failure, fmt.Sprintf("retrying in place in %s", backoff))
+		op.reportFailedAttempt(ctx, record, failure, fmt.Sprintf(recoveryRetryInPlace, backoff))
 		return errRetryScheduled
 	case retriesExhausted:
-		op.reportFailedAttempt(ctx, record, failure, "no retries left")
+		op.reportFailedAttempt(ctx, record, failure, recoveryNoRetriesLeft)
 		err = op.failRestore(ctx, op.retriesExhausted(ctx, record, left.attempts > 0, err))
 	default:
-		op.reportFailedAttempt(ctx, record, failure, "not retried: "+whyNotRetried(failure, restoreCtx.Err()))
+		op.reportFailedAttempt(ctx, record, failure, recoveryNotRetried+whyNotRetried(failure, restoreCtx.Err()))
 		err = op.failRestore(ctx, err)
 	}
 	op.recordLastFailure(record, failure)
@@ -198,13 +216,13 @@ func failureSummary(f *executor.RestoreFailure) *podcontract.FailureSummary {
 func whyNotRetried(f *executor.RestoreFailure, ctxErr error) string {
 	switch {
 	case ctxErr != nil:
-		return "the restore timed out"
+		return notRetriedTimedOut
 	case f.Final:
-		return "no other attempt can succeed"
+		return notRetriedFinal
 	case finalCodes[failureCode(f.Cause)]:
-		return fmt.Sprintf("PageBroker reported %s", failureCode(f.Cause))
+		return fmt.Sprintf(notRetriedPageBrokerCode, failureCode(f.Cause))
 	default:
-		return "another attempt needs a new container"
+		return notRetriedContainerChanged
 	}
 }
 
@@ -254,7 +272,7 @@ func (op *restoreOperation) reportFailedAttempt(ctx context.Context, record *res
 		return
 	}
 	emitPodEvent(ctx, op.controller.clientset, op.log, op.pod, snapshotEventComponent, corev1.EventTypeWarning, restoreAttemptFailedReason,
-		fmt.Sprintf("Attempt %d of %d for destination %s failed: %s; %s", record.Attempt, record.Limit+1, op.destination, f.Error(), recovery))
+		fmt.Sprintf(restoreAttemptFailedMessage, record.Attempt, record.Limit+1, op.destination, f.Error(), recovery))
 }
 
 // retriesExhausted emits RestoreRetriesExhausted for a restore that allowed
@@ -269,6 +287,6 @@ func (op *restoreOperation) retriesExhausted(ctx context.Context, record *restor
 		err = fmt.Errorf("restore ran out of time after attempt %d of %d: %w", record.Attempt, record.Limit+1, cause)
 	}
 	emitPodEvent(ctx, op.controller.clientset, op.log, op.pod, snapshotEventComponent, corev1.EventTypeWarning, restoreRetriesExhaustedReason,
-		fmt.Sprintf("Destination %s: %s", op.destination, err.Error()))
+		fmt.Sprintf(restoreRetriesExhaustedMessage, op.destination, err.Error()))
 	return err
 }
