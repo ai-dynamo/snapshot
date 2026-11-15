@@ -36,12 +36,12 @@ func (f *RestoreFailure) Unwrap() []error {
 	return []error{attempt, f.Cleanup}
 }
 
-func newRestoreFailure(err, cleanup error, abortFailed, mountLeft bool) *RestoreFailure {
+func newRestoreFailure(err, cleanup error) *RestoreFailure {
 	failure := &RestoreFailure{
 		Step:             StepOf(err),
 		Cause:            err,
-		Final:            abortFailed || isFinal(err),
-		ContainerChanged: mountLeft || containerChanged(err),
+		Final:            isFinal(err),
+		ContainerChanged: containerChanged(err),
 	}
 	var stepErr *StepError
 	if errors.As(err, &stepErr) {
