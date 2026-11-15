@@ -38,3 +38,9 @@ replace proposal review.
 The directory prefix is the tracking issue number. It supplies a stable,
 unique identifier for the SNEP and connects the design directly to the issue
 where its status and implementation work are tracked.
+
+## Drafts for Review
+
+The following proposal is a draft for author review:
+
+- [SNEP-644: Node Cache Preheat and Local Restore](644-node-cache/README.md)
