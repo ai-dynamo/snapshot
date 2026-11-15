@@ -28,8 +28,9 @@
 //     process runs, and /readyz, which is ok once the coordinator has ensured
 //     the sessions its node serves and admits clients. Run opens no other
 //     port, and serves no metrics.
-//   - A writable temporary directory, $TMPDIR or else /tmp: JetStream checks
-//     that it can write there, although every bucket lives in memory.
+//   - A writable temporary directory, $TMPDIR or else /tmp: the sessions'
+//     control buckets live in a file store there, which Config.MaxBytes
+//     bounds and which does not outlive the process.
 //
 // The ClusterRole:
 //
