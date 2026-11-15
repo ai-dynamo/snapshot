@@ -382,7 +382,7 @@ func newAttemptOperation(t *testing.T, annotations map[string]string) (*restoreO
 	return op, volume
 }
 
-func TestRetryLimit(t *testing.T) {
+func TestRestoreRetryLimit(t *testing.T) {
 	for name, tc := range map[string]struct {
 		annotation   string
 		agentDefault *int
@@ -404,7 +404,7 @@ func TestRetryLimit(t *testing.T) {
 			op, _ := newAttemptOperation(t, annotations)
 			op.controller.config.Restore.RetryLimit = tc.agentDefault
 
-			got, err := op.retryLimit()
+			got, err := op.controller.restoreRetryLimit(op.pod)
 
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
