@@ -696,6 +696,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     aggregate_parser.add_argument(
         "--run-attempt", type=int, default=os.environ.get("GITHUB_RUN_ATTEMPT")
     )
+    # Override the GitHub environment when aggregating another run's results,
+    # so a synthesized result names the commit and event that run tested.
+    aggregate_parser.add_argument("--source-commit")
+    aggregate_parser.add_argument("--source-ref")
+    aggregate_parser.add_argument("--source-event")
     aggregate_parser.add_argument("--generated-at")
     aggregate_parser.add_argument("--summary-file", type=Path)
     aggregate_parser.add_argument("--publish", action="store_true")
@@ -757,6 +762,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     generated_at = _parse_cli_timestamp(args.generated_at)
+    source = source_from_environment(str(args.run_id))
+    for key, value in (
+        ("commit", args.source_commit),
+        ("ref", args.source_ref),
+        ("event", args.source_event),
+    ):
+        if value:
+            source[key] = value
     output = aggregate(
         artifacts_dir=args.artifacts_dir,
         history_dir=_history_from_cli(args.history_dir),
@@ -767,7 +780,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_id=str(args.run_id),
         run_attempt=int(args.run_attempt),
         generated_at=generated_at,
-        source=source_from_environment(str(args.run_id)),
+        source=source,
         publish=bool(args.publish),
     )
     summary = render_summary(output)
