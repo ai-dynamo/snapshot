@@ -153,7 +153,7 @@ func TestLimits(t *testing.T) {
 	})
 
 	t.Run("the memory cap every session shares", func(t *testing.T) {
-		h := newHarness(t, func(cfg *Config) { cfg.MaxBytes, cfg.MaxValue = 2<<20, 64<<10 })
+		h := newHarness(t, func(cfg *Config) { cfg.MaxBytes, cfg.MaxValue = 8<<20, 64<<10 })
 		ctx := within(t)
 		first, second := h.ensure(1), h.ensure(1)
 		a, b := h.connect(first, 0), h.connect(second, 0)
@@ -166,10 +166,11 @@ func TestLimits(t *testing.T) {
 	})
 
 	t.Run("the control buckets of every session share the file storage bound", func(t *testing.T) {
-		// Room for one session of one member, which reserves its control bucket.
-		h := newHarness(t, func(cfg *Config) { cfg.MaxBytes = session.ControlBytes(1) + 1<<10 })
+		// Room for one session of the largest membership, which reserves its
+		// control bucket.
+		h := newHarness(t, func(cfg *Config) { cfg.MaxBytes = session.ControlBytes(session.MaxMembers) })
 		ctx := within(t)
-		first := h.ensure(1)
+		first := h.ensure(session.MaxMembers)
 
 		spec := h.spec(1)
 		require.Error(t, h.srv.Ensure(ctx, spec), "the bound must refuse a second control bucket")
@@ -249,6 +250,9 @@ func TestConfig(t *testing.T) {
 		{"no Authorizer", func(c *Config) { c.Authorizer = nil }},
 		{"a negative limit", func(c *Config) { c.MaxLibraryKeys = -1 }},
 		{"a library value over the Snapshot's", func(c *Config) { c.MaxValue, c.MaxLibraryValue = 1<<10, 2<<10 }},
+		{"no room for the largest session's control bucket", func(c *Config) {
+			c.MaxBytes = session.ControlBytes(session.MaxMembers) - 1
+		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := valid

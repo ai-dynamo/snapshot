@@ -108,7 +108,7 @@ func TestEnsure(t *testing.T) {
 // session fills the memory cap: the control keys are in file storage, so the
 // end is recorded, and every member learns it.
 func TestEndAtTheMemoryCap(t *testing.T) {
-	capped := func(cfg *Config) { cfg.MaxBytes, cfg.MaxValue = 2<<20, 64<<10 }
+	capped := func(cfg *Config) { cfg.MaxBytes, cfg.MaxValue = 8<<20, 64<<10 }
 	// atTheCap returns a session with n members, connected, and a session of
 	// another attempt that has filled the memory cap.
 	atTheCap := func(t *testing.T, h *harness, n int) (Spec, []*member) {
@@ -562,11 +562,11 @@ func TestBucketStorage(t *testing.T) {
 }
 
 // TestControlBucketFitsAnHonestSession writes what the largest honest session
-// puts in its control bucket, which its size must hold: 256 members with long
-// names, each with several barrier arrivals and a departure, then the ended
-// key. Meta is written by Ensure.
+// puts in its control bucket, which its size must hold: session.MaxMembers
+// members with long names, each with several barrier arrivals and a departure,
+// then the ended key. Meta is written by Ensure.
 func TestControlBucketFitsAnHonestSession(t *testing.T) {
-	const members, barriers = 256, 8
+	const members, barriers = session.MaxMembers, 8
 	h := newHarness(t)
 	ctx := within(t)
 	spec := Spec{UID: "uid-large", Deadline: h.clock.Now().Add(time.Hour)}
