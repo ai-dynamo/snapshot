@@ -28,7 +28,10 @@ const (
 )
 
 // recoverSourceAfterFailedDump decides what becomes of a workload whose dump
-// failed: hand it back its GPUs and leave it running, or kill it.
+// failed: hand it back its GPUs and leave it running, or kill it. It reports
+// whether the workload survived, which is what decides if another attempt can
+// run at all — a retry against a source that could not be put back has nothing
+// left to capture.
 //
 // The dump does not reach this path on success — it terminates the source
 // itself. On failure the workload is suspended but intact, so killing it
@@ -43,7 +46,7 @@ func (w *NodeController) recoverSourceAfterFailedDump(
 	containerPID int,
 	suspended executor.SuspendedSource,
 	retryWillFollow bool,
-) {
+) bool {
 	// Detached from the capture: a dump that failed on its deadline leaves that
 	// context dead, and probing the GPUs through it returns no processes rather
 	// than an error — so the workload would be reported left running with its
@@ -66,15 +69,16 @@ func (w *NodeController) recoverSourceAfterFailedDump(
 			log.Error(err, "Failed to kill target after checkpoint failure")
 			w.emitRecoveryEvent(recoveryCtx, log, pod, reasonSourcePodTerminationFailed,
 				fmt.Sprintf("Could not terminate the source Pod after a failed checkpoint, so it may still be suspended: %v", err))
-			return
+			return false
 		}
 		w.emitRecoveryEvent(recoveryCtx, log, pod, reasonSourcePodTerminated,
 			fmt.Sprintf("Terminated the source Pod after a failed checkpoint: %s", reason))
-		return
+		return false
 	}
 	log.Info("Source Pod resumed after a failed checkpoint", "pid", containerPID)
 	w.emitRecoveryEvent(recoveryCtx, log, pod, reasonSourcePodResumed,
 		"Resumed the source Pod after a failed checkpoint; it is still running")
+	return true
 }
 
 // emitRecoveryEvent tells the source Pod's owner what became of their workload.
