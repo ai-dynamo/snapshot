@@ -122,8 +122,8 @@ func New(ctx context.Context, cfg Config) (*Authorizer, error) {
 // asks the API server, so a token that fails any of these checks costs no
 // TokenReview. For an attempt the coordinator does not hold, it skips the
 // placement check: the member reconnects to learn that its session is gone,
-// and the attempt's group may be gone too. It logs no refusal: the coordinator
-// logs the error, which says why and never holds the token.
+// and the attempt's group may be gone too. It logs no refusal above V(1): the
+// coordinator logs the error, which says why and never holds the token.
 func (a *Authorizer) Authorize(ctx context.Context, uid types.UID, member, token string, held bool) error {
 	id, err := a.verify(ctx, token)
 	if err != nil {
