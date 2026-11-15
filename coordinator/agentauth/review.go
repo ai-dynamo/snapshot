@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/ai-dynamo/snapshot/coordinator/server"
@@ -70,7 +71,9 @@ func (a *Authorizer) review(ctx context.Context, token string, id identity) erro
 }
 
 // tokenReview asks the API server whether it accepts the token, which id
-// describes, for the audience, as the agents' ServiceAccount.
+// describes, for the audience, as the agents' ServiceAccount. The audience
+// must be among the review's status.audiences: an empty list means the token
+// is valid for the API server itself.
 func (a *Authorizer) tokenReview(ctx context.Context, token string, id identity) error {
 	r, err := a.cfg.TokenReviews.Create(ctx, &authenticationv1.TokenReview{
 		Spec: authenticationv1.TokenReviewSpec{Token: token, Audiences: []string{a.cfg.Audience}},
@@ -85,6 +88,9 @@ func (a *Authorizer) tokenReview(ctx context.Context, token string, id identity)
 	case r.Status.User.Username != a.user:
 		return fmt.Errorf("%w: the token of Pod %s authenticates %q, not %q", server.ErrUnauthenticated,
 			id.pod, r.Status.User.Username, a.user)
+	case !slices.Contains(r.Status.Audiences, a.cfg.Audience):
+		return fmt.Errorf("%w: the API server does not accept the token of Pod %s for the audience %q",
+			server.ErrUnauthenticated, id.pod, a.cfg.Audience)
 	}
 	return nil
 }

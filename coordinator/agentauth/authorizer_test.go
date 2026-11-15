@@ -453,6 +453,22 @@ func TestAuthorizeReviewsTheToken(t *testing.T) {
 			want: server.ErrUnauthenticated,
 			says: `the token of Pod snapshot/snapshot-agent-abcde authenticates "system:serviceaccount:snapshot:workload"`,
 		},
+		"authenticated for another audience": {
+			status: authenticationv1.TokenReviewStatus{
+				Authenticated: true,
+				User:          accepted.User,
+				Audiences:     []string{"another-audience"},
+			},
+			want: server.ErrUnauthenticated,
+			says: `the API server does not accept the token of Pod snapshot/snapshot-agent-abcde for the audience ` +
+				`"snapshot-coordinator"`,
+		},
+		"authenticated for the API server only": {
+			status: authenticationv1.TokenReviewStatus{Authenticated: true, User: accepted.User},
+			want:   server.ErrUnauthenticated,
+			says: `the API server does not accept the token of Pod snapshot/snapshot-agent-abcde for the audience ` +
+				`"snapshot-coordinator"`,
+		},
 		"a failed TokenReview": {err: forbidden, want: server.ErrUnavailable},
 	} {
 		t.Run(name, func(t *testing.T) {
