@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -280,7 +281,7 @@ func hugeKeyToken(t *testing.T) string {
 	p.SetBit(p, 0, 1)
 	n := new(big.Int).Lsh(big.NewInt(1), 2048)
 	enc := base64.RawURLEncoding.EncodeToString
-	header, err := json.Marshal(map[string]any{
+	return withHeader(t, map[string]any{
 		"alg": "ES256",
 		"jwk": map[string]string{
 			"kty": "RSA",
@@ -290,17 +291,48 @@ func hugeKeyToken(t *testing.T) string {
 			"p":   enc(p.Bytes()),
 			"q":   enc(big.NewInt(3).Bytes()),
 		},
-	})
-	require.NoError(t, err)
-	return enc(header) + "." + enc([]byte("{}")) + "." + enc([]byte("not-a-real-signature"))
+	}, tokenClaims{})
+}
+
+// go-jose quotes a token's header in its errors. The coordinator logs the
+// error Authorize returns on every connection, so that error holds none of
+// it, and the Authorizer logs it at V(1) only, cut short.
+func TestRefusalsHoldNoTextTheClientChose(t *testing.T) {
+	h := newHarness(t)
+	text := strings.Repeat("text the client chose ", 150)
+	token := withHeader(t, map[string]any{"alg": text, "kid": "key-0"}, h.issuer.claims(h.clock.Now()))
+	err := h.authorize(member, token)
+	require.ErrorIs(t, err, server.ErrUnauthenticated)
+	assert.NotContains(t, err.Error(), "text the client chose")
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	require.Len(t, h.logs, 1)
+	assert.Contains(t, h.logs[0], `"level"=1 "msg"="Refused a token"`)
+	assert.Contains(t, h.logs[0], "text the client chose")
+	assert.Less(t, len(h.logs[0]), 2*maxCause)
+}
+
+func TestTruncate(t *testing.T) {
+	assert.Equal(t, "short", truncate("short", 5))
+	assert.Equal(t, "sho...", truncate("short", 3))
+	assert.Equal(t, "h...", truncate("héllo", 2), "cut within a rune")
 }
 
 // unsigned returns a token with the claims c and no signature.
 func unsigned(t *testing.T, c tokenClaims) string {
+	return withHeader(t, map[string]any{"alg": "none", "typ": "JWT"}, c)
+}
+
+// withHeader returns a token with header and the claims c, and no signature.
+func withHeader(t *testing.T, header map[string]any, c tokenClaims) string {
+	t.Helper()
+	h, err := json.Marshal(header)
+	require.NoError(t, err)
 	payload, err := json.Marshal(c)
 	require.NoError(t, err)
 	enc := base64.RawURLEncoding.EncodeToString
-	return enc([]byte(`{"alg":"none","typ":"JWT"}`)) + "." + enc(payload) + "."
+	return enc(h) + "." + enc(payload) + "."
 }
 
 func TestAuthorizeChecksIdentityAndPlacement(t *testing.T) {
@@ -576,7 +608,7 @@ func TestAReviewOutlivesTheCallThatStartedIt(t *testing.T) {
 // The harness checks, in every test, that no error Authorize returns, which
 // the coordinator logs, and no log line holds any part of a token. This test
 // returns every kind of refusal and failure, and checks that the Authorizer
-// logs only the failed key fetch and the failed TokenReview.
+// logs only the failed key fetch and the failed TokenReview above V(1).
 func TestNoErrorOrLogHoldsTheToken(t *testing.T) {
 	h := newHarness(t)
 	now := h.clock.Now()
@@ -638,9 +670,8 @@ func TestNoErrorOrLogHoldsTheToken(t *testing.T) {
 	h.clock.Step(minKeyFetchInterval)
 	require.ErrorIs(t, h.authorize(member, h.signedWith("key-unknown")), server.ErrUnauthenticated)
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	require.Len(t, h.logs, 2)
-	assert.Contains(t, h.logs[0], `"msg"="A TokenReview failed"`)
-	assert.Contains(t, h.logs[1], `"msg"="A fetch of the issuer's keys failed"`)
+	logs := h.defaultLogs()
+	require.Len(t, logs, 2)
+	assert.Contains(t, logs[0], `"msg"="A TokenReview failed"`)
+	assert.Contains(t, logs[1], `"msg"="A fetch of the issuer's keys failed"`)
 }

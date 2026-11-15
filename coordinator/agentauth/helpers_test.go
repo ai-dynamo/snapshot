@@ -369,6 +369,20 @@ func (h *harness) logger() logr.Logger {
 	}, funcr.Options{Verbosity: 9})
 }
 
+// defaultLogs returns the lines logged above V(1), errors included, which a
+// coordinator logs by default.
+func (h *harness) defaultLogs() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var lines []string
+	for _, line := range h.logs {
+		if !strings.Contains(line, `"level"=`) || strings.Contains(line, `"level"=0`) {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
 // checkSecrets fails the test if an error Authorize returned, which the
 // coordinator logs, or a log line holds any part of a token presented.
 func (h *harness) checkSecrets() {

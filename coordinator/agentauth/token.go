@@ -30,6 +30,10 @@ const (
 // document is a few hundred bytes, and the key set a few kilobytes.
 const maxDocument = 1 << 20
 
+// maxCause bounds the cause of a refusal that an Authorizer logs. A client
+// chooses part of it, such as its token's header.
+const maxCause = 256
+
 // algorithms are the JWS algorithms a token may be signed with: every
 // asymmetric one go-oidc supports, and never HMAC. Only the issuer's keys
 // verify a signature, so this admits no token they do not, and the issuer may
@@ -166,7 +170,9 @@ func checkHeader(token string) error {
 
 // verify checks the token's header, signature, issuer, audience, and
 // lifetime, and that it is bound to a Pod and the Pod's node, and returns what
-// it says.
+// it says. The error it returns says why in fixed text: go-jose quotes the
+// token's header in its errors, and the coordinator logs the error on every
+// connection.
 func (a *Authorizer) verify(ctx context.Context, token string) (identity, error) {
 	if err := checkHeader(token); err != nil {
 		return identity{}, fmt.Errorf("%w: %v", server.ErrUnauthenticated, err)
@@ -175,13 +181,14 @@ func (a *Authorizer) verify(ctx context.Context, token string) (identity, error)
 	switch {
 	case err != nil && ctx.Err() != nil:
 		// The caller gave up waiting for a fetch of the issuer's keys.
-		return identity{}, fmt.Errorf("%w: %v", server.ErrUnavailable, err)
+		return identity{}, fmt.Errorf("%w: waiting for a fetch of the issuer's keys: %w", server.ErrUnavailable,
+			context.Cause(ctx))
 	case err != nil:
-		return identity{}, fmt.Errorf("%w: %v", server.ErrUnauthenticated, err)
+		return identity{}, a.refuse("the token does not verify", err)
 	}
 	var c claims
 	if err := t.Claims(&c); err != nil {
-		return identity{}, fmt.Errorf("%w: %v", server.ErrUnauthenticated, err)
+		return identity{}, a.refuse("the token's claims are malformed", err)
 	}
 	k := c.Kubernetes
 	if k.Pod.Name == "" || k.Node.Name == "" {
@@ -193,6 +200,21 @@ func (a *Authorizer) verify(ctx context.Context, token string) (identity, error)
 		node:           k.Node.Name,
 		expiry:         t.Expiry,
 	}, nil
+}
+
+// refuse returns ErrUnauthenticated, with reason, which is fixed text. It logs
+// cause at V(1) only, cut to maxCause bytes.
+func (a *Authorizer) refuse(reason string, cause error) error {
+	a.cfg.Log.V(1).Info("Refused a token", "reason", reason, "cause", truncate(cause.Error(), maxCause))
+	return fmt.Errorf("%w: %s", server.ErrUnauthenticated, reason)
+}
+
+// truncate returns s, cut to at most n bytes and marked as cut if it is.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return strings.ToValidUTF8(s[:n], "") + "..."
 }
 
 // serviceAccountUser returns the user name a token of sa authenticates as.

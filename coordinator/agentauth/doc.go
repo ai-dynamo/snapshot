@@ -19,6 +19,7 @@
 // system:service-account-issuer-discovery binding.
 //
 // The Authorizer says why it refuses a member in the error it returns, which
-// the coordinator logs and which never holds the token. It logs only failed
-// fetches of the issuer's keys and failed TokenReviews itself.
+// the coordinator logs. The error never holds the token, nor text the client
+// chose. The Authorizer itself logs failed fetches of the issuer's keys and
+// failed TokenReviews, and, at V(1), why a token does not verify.
 package agentauth

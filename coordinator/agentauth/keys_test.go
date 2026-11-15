@@ -190,10 +190,9 @@ func TestBadKeySetsKeepTheKeysHeld(t *testing.T) {
 			require.EqualValues(t, 2, h.issuer.keyFetches.Load())
 
 			require.NoError(t, h.authorize(member, h.token()))
-			h.mu.Lock()
-			defer h.mu.Unlock()
-			require.Len(t, h.logs, 1)
-			assert.Contains(t, h.logs[0], `"msg"="A fetch of the issuer's keys failed"`)
+			logs := h.defaultLogs()
+			require.Len(t, logs, 1)
+			assert.Contains(t, logs[0], `"msg"="A fetch of the issuer's keys failed"`)
 		})
 	}
 }

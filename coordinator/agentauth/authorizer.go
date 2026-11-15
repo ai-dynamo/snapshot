@@ -50,8 +50,9 @@ type Config struct {
 	// cooldown on fetching the issuer's keys. It defaults to the real clock.
 	Clock clock.PassiveClock
 
-	// Log receives failed fetches of the issuer's keys and failed
-	// TokenReviews, never a token. The zero Logger discards everything.
+	// Log receives failed fetches of the issuer's keys, failed TokenReviews,
+	// and, at V(1), why a token does not verify. It never receives a token.
+	// The zero Logger discards everything.
 	Log logr.Logger
 }
 
