@@ -201,11 +201,11 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	restoreComplete := false
 	// A mount left behind stays in the container, and an abort that failed
 	// may leave the transaction open: another attempt must not run beside it.
-	mountLeft, abortFailed := false, false
+	cleanupChangedContainer, cleanupFinal := false, false
 	cleanup := func() {
 		if err := cleanupRestoreMounts(ctx, activeMounts, restoreComplete); err != nil {
 			cleanupErr = errors.Join(cleanupErr, err)
-			mountLeft = true
+			cleanupChangedContainer = true
 		}
 		activeMounts = nil
 	}
@@ -222,7 +222,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 			}
 			if abortErr != nil {
 				if retErr != nil {
-					abortFailed = true
+					cleanupFinal = true
 					cleanupErr = errors.Join(cleanupErr, fmt.Errorf("abort PageBroker restore: %w", abortErr))
 				} else {
 					cleanupErr = errors.Join(cleanupErr, fmt.Errorf("release PageBroker restore: %w", abortErr))
@@ -235,7 +235,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		cleanup()
 		if !usePageBrokerGPU && transactionID != "" && !committed && preparationAttempted {
 			if err := abortPageBrokerTransaction(broker, transactionID); err != nil {
-				abortFailed = abortFailed || retErr != nil
+				cleanupFinal = cleanupFinal || retErr != nil
 				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("abort PageBroker restore %q: %w", transactionID, err))
 			}
 		}
@@ -243,7 +243,13 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 			log.Error(cleanupErr, "restore cleanup failed")
 		}
 		if retErr != nil {
-			retErr = newRestoreFailure(retErr, cleanupErr, abortFailed, mountLeft)
+			if cleanupFinal {
+				retErr = final(retErr)
+			}
+			if cleanupChangedContainer {
+				retErr = &changedContainerError{err: retErr}
+			}
+			retErr = newRestoreFailure(retErr, cleanupErr)
 			return
 		}
 		if cleanupErr != nil {
