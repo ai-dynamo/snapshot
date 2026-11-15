@@ -10,15 +10,12 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/pem"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -27,7 +24,6 @@ import (
 	"github.com/ai-dynamo/snapshot/coordinator/internal/testcert"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/go-logr/logr"
-	"github.com/go-logr/logr/funcr"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -152,6 +148,7 @@ func TestRun(t *testing.T) {
 
 	step("a client limited to TLS 1.2 is refused", func(t *testing.T) {
 		nc, err := nats.Connect("tls://"+addr, nats.NoReconnect(), nats.Timeout(time.Second),
+			nats.TLSHandshakeFirst(),
 			nats.Secure(&tls.Config{RootCAs: roots, ServerName: "localhost", MaxVersion: tls.VersionTLS12}))
 		if err == nil {
 			nc.Close()
@@ -211,12 +208,79 @@ func TestRun(t *testing.T) {
 			t.Fatal("the member did not learn that its coordinator stopped")
 		}
 		for name, a := range map[string]string{"client": addr, "health": health} {
-			conn, err := net.DialTimeout("tcp", a, time.Second)
-			if err == nil {
-				_ = conn.Close()
-			}
-			require.Error(t, err, "the %s port is still open", name)
+			require.True(t, closed(a), "the %s port is still open", name)
 		}
+	})
+}
+
+// TestRunWaitsForTheCertificate starts Run before its serving certificate's
+// files exist. It waits for them, live but not ready, with no client port
+// open, and then either stops when its context ends, or becomes ready once the
+// files are written.
+func TestRunWaitsForTheCertificate(t *testing.T) {
+	ctrllog.SetLogger(logr.Discard())
+	k := startCluster(t)
+	k.grantRBAC(t)
+	// waiting is a Run that waits for its certificate.
+	type waiting struct {
+		*running
+		addr, health, dir string
+		logs              *logLines
+	}
+	// startWaiting starts Run with an empty TLS directory, and returns it once
+	// it waits for the certificate.
+	startWaiting := func(t *testing.T) *waiting {
+		t.Helper()
+		port, healthPort := freePort(t), freePort(t)
+		w := &waiting{
+			addr:   net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
+			health: net.JoinHostPort("127.0.0.1", strconv.Itoa(healthPort)),
+			dir:    t.TempDir(),
+			logs:   &logLines{},
+		}
+		w.running = start(t, Config{
+			RESTConfig:     k.agentConfig(),
+			Node:           node,
+			ServiceAccount: agents,
+			Audience:       audience,
+			Host:           "127.0.0.1",
+			Port:           port,
+			HealthPort:     healthPort,
+			TLSDir:         w.dir,
+			Log:            w.logs.logger(),
+		})
+		poll(t, "the wait for the certificate", func() bool {
+			w.requireRunning(t)
+			return count(w.logs.all(), waitingLine) > 0
+		})
+		for end := time.Now().Add(time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+			require.Equal(t, http.StatusOK, probe(w.health, "/healthz"), "liveness")
+			require.NotEqual(t, http.StatusOK, probe(w.health, "/readyz"), "readiness")
+		}
+		require.True(t, closed(w.addr), "the client port is open")
+		return w
+	}
+
+	t.Run("its context ends", func(t *testing.T) {
+		w := startWaiting(t)
+		require.NoError(t, w.stop(t))
+		require.True(t, closed(w.health), "the health port is still open")
+	})
+
+	t.Run("the files are written", func(t *testing.T) {
+		w := startWaiting(t)
+		_, cert := testcert.New(t)
+		writeCert(t, w.dir, cert)
+		poll(t, "readiness", func() bool {
+			w.requireRunning(t)
+			require.Equal(t, http.StatusOK, probe(w.health, "/healthz"), "liveness")
+			return probe(w.health, "/readyz") == http.StatusOK
+		})
+		assert.Equal(t, cert.Certificate[0], servedCertificate(w.addr))
+		lines := w.logs.all()
+		assert.Equal(t, 1, count(lines, waitingLine), "logged once")
+		assert.Equal(t, 1, count(lines, foundLine), "logged once")
+		require.NoError(t, w.stop(t))
 	})
 }
 
@@ -417,16 +481,13 @@ func poll(t *testing.T, what string, check func() bool) {
 	}
 }
 
-// probe returns the status of a GET of path from the health endpoint at
-// addr, or 0 if it does not answer.
-func probe(addr, path string) int {
-	c := http.Client{Timeout: time.Second}
-	resp, err := c.Get("http://" + addr + path)
-	if err != nil {
-		return 0
+// closed reports whether nothing listens at addr.
+func closed(addr string) bool {
+	conn, err := net.DialTimeout("tcp", addr, time.Second)
+	if err == nil {
+		_ = conn.Close()
 	}
-	_ = resp.Body.Close()
-	return resp.StatusCode
+	return err != nil
 }
 
 // servedCertificate returns the certificate the client listener at addr
@@ -435,6 +496,7 @@ func probe(addr, path string) int {
 func servedCertificate(addr string) []byte {
 	var leaf []byte
 	nc, err := nats.Connect("tls://"+addr, nats.NoReconnect(), nats.Timeout(time.Second),
+		nats.TLSHandshakeFirst(),
 		nats.Secure(&tls.Config{
 			// The test reads the certificate; it does not trust it.
 			InsecureSkipVerify: true,
@@ -449,27 +511,6 @@ func servedCertificate(addr string) []byte {
 	return leaf
 }
 
-// writeCert writes cert and its key to dir as tls.crt and tls.key, as the
-// volume of a kubernetes.io/tls Secret holds them.
-func writeCert(t *testing.T, dir string, cert tls.Certificate) {
-	t.Helper()
-	key, err := x509.MarshalPKCS8PrivateKey(cert.PrivateKey)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(dir, corev1.TLSCertKey),
-		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]}), 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, corev1.TLSPrivateKeyKey),
-		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}), 0o600))
-}
-
-// freePort returns a port of 127.0.0.1 that nothing listens on.
-func freePort(t *testing.T) int {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer func() { _ = l.Close() }()
-	return l.Addr().(*net.TCPAddr).Port
-}
-
 // holdMetricsPort makes controller-runtime's default metrics address, :8080,
 // unavailable until the test ends: the test listens there, unless another
 // process already does.
@@ -480,25 +521,4 @@ func holdMetricsPort(t *testing.T) {
 		return
 	}
 	t.Cleanup(func() { _ = l.Close() })
-}
-
-// logLines records every line the coordinator logs, which never holds a key,
-// a value, a barrier name, or a token. The test never prints them.
-type logLines struct {
-	mu    sync.Mutex
-	lines []string
-}
-
-func (l *logLines) logger() logr.Logger {
-	return funcr.New(func(prefix, args string) {
-		l.mu.Lock()
-		defer l.mu.Unlock()
-		l.lines = append(l.lines, prefix+" "+args)
-	}, funcr.Options{})
-}
-
-func (l *logLines) all() []string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return slices.Clone(l.lines)
 }

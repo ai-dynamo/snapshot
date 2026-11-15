@@ -145,8 +145,24 @@ func (st *store) Get(ctx context.Context, key string, wait time.Duration) ([]byt
 	if err != nil {
 		return nil, err
 	}
+	value, err := st.read(ctx, k)
+	if errors.Is(err, session.ErrNotFound) && wait > 0 {
+		value, err = st.readWhenPresent(ctx, k, wait)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := st.s.settle(ctx); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+// read reads the value of k, or reports session.ErrNotFound. The connection
+// reads at most session.MaxConcurrentGets values at once.
+func (st *store) read(ctx context.Context, k string) ([]byte, error) {
 	var value []byte
-	err = st.s.do(ctx, func(ctx context.Context) error {
+	err := st.s.read(ctx, func(ctx context.Context) error {
 		entry, err := st.kv.Get(ctx, k)
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
 			return session.ErrNotFound
@@ -156,24 +172,33 @@ func (st *store) Get(ctx context.Context, key string, wait time.Duration) ([]byt
 		}
 		return err
 	})
-	if errors.Is(err, session.ErrNotFound) && wait > 0 {
-		waitCtx, cancel := context.WithTimeout(ctx, wait)
-		defer cancel()
-		err = st.s.await(waitCtx, st.kv, []string{k}, func(_ string, v []byte, present bool) bool {
-			value = v
-			return present
-		})
+	return value, err
+}
+
+// readWhenPresent waits up to wait for k to be present, then reads it, or
+// reports session.ErrNotYet. The wait watches no values, so a value is only
+// ever sent to answer a read, which keeps the reads of the connection within
+// its limit.
+func (st *store) readWhenPresent(ctx context.Context, k string, wait time.Duration) ([]byte, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	for {
+		err := st.s.await(waitCtx, st.kv, []string{k}, func(_ string, _ []byte, present bool) bool { return present },
+			jetstream.MetaOnly())
+		if err == nil {
+			// Read within the caller's context: the key is there, whatever
+			// the wait that remains. A key deleted since is waited for again.
+			var value []byte
+			if value, err = st.read(ctx, k); !errors.Is(err, session.ErrNotFound) {
+				return value, err
+			}
+			continue
+		}
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 			return nil, session.ErrNotYet
 		}
-	}
-	if err != nil {
 		return nil, err
 	}
-	if err := st.s.settle(ctx); err != nil {
-		return nil, err
-	}
-	return value, nil
 }
 
 // Delete implements Store.

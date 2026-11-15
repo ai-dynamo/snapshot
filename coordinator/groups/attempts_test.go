@@ -80,12 +80,26 @@ func TestAttempts(t *testing.T) {
 		require.ErrorIs(t, err, session.ErrNotFound)
 	})
 
-	t.Run("a restore whose PodGroupSnapshot is gone has no attempt", func(t *testing.T) {
+	t.Run("a restore whose PodGroupSnapshot is gone is read from the restore alone", func(t *testing.T) {
 		as := fakeAttempts(t, restore)
 		a, err := as.get(ctx, restore.UID)
+		require.NoError(t, err)
+		want, ok := restoreAttempt(restore, nil)
+		require.True(t, ok)
+		assertAttempt(t, want, a)
+		assert.False(t, a.ensurable)
+		nodes, err := as.MemberNodes(ctx, restore.UID)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"a": "", "b": "node-b"}, nodes)
+	})
+
+	t.Run("a restore whose targets are not its PodGroupSnapshot's members has no attempt", func(t *testing.T) {
+		mismatched := newRestore(snapshot, "a")
+		as := fakeAttempts(t, snapshot, mismatched)
+		a, err := as.get(ctx, mismatched.UID)
 		require.ErrorIs(t, err, session.ErrNotFound)
 		assert.Nil(t, a)
-		_, err = as.MemberNodes(ctx, restore.UID)
+		_, err = as.MemberNodes(ctx, mismatched.UID)
 		require.ErrorIs(t, err, session.ErrNotFound)
 	})
 }

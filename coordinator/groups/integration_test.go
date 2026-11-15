@@ -223,8 +223,10 @@ func readySnapshot(t *testing.T, ids []string) *v1alpha1.PodGroupSnapshot {
 }
 
 // createRestore creates a PodGroupRestore of snapshot whose targets, listed in
-// the order of members, are pinned to their nodes.
-func createRestore(t *testing.T, snapshot *v1alpha1.PodGroupSnapshot, members []member) *v1alpha1.PodGroupRestore {
+// the order of members, are pinned to their nodes. With finalizer, deleting it
+// leaves it until the test removes the in-use finalizer.
+func createRestore(t *testing.T, snapshot *v1alpha1.PodGroupSnapshot, members []member,
+	finalizer bool) *v1alpha1.PodGroupRestore {
 	t.Helper()
 	ctx := within(t)
 	r := &v1alpha1.PodGroupRestore{
@@ -233,6 +235,9 @@ func createRestore(t *testing.T, snapshot *v1alpha1.PodGroupSnapshot, members []
 			SnapshotRef:     v1alpha1.ObjectIdentity{Name: snapshot.Name, UID: snapshot.UID},
 			DeadlineSeconds: 600,
 		},
+	}
+	if finalizer {
+		r.Finalizers = []string{v1alpha1.PodGroupInUseFinalizer}
 	}
 	for _, m := range members {
 		r.Spec.Targets = append(r.Spec.Targets, v1alpha1.PodGroupRestoreTarget{ID: m.id,
@@ -335,7 +340,8 @@ func TestSessionNode(t *testing.T) {
 	})
 
 	t.Run("a restore", func(t *testing.T) {
-		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"b", names[1]}, {"a", names[0]}})
+		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"b", names[1]}, {"a", names[0]}},
+			false)
 		hosts[0].awaitHeld(t, r.UID, true)
 		hosts[1].awaitSeen(t, r.UID, func(a *attempt) bool { return a.memberWork })
 		hosts[1].requireNotHeld(t, r.UID)
@@ -347,6 +353,16 @@ func TestSessionNode(t *testing.T) {
 		hosts[0].awaitSeen(t, g.UID, func(a *attempt) bool { return a.sessionNode == names[0] })
 		hosts[0].requireNotHeld(t, g.UID)
 	})
+
+	t.Run("member work before the rank-0 member's node is recorded", func(t *testing.T) {
+		g := createCapture(t, []member{{"a", ""}, {"b", names[1]}}, true, false)
+		hosts[0].awaitSeen(t, g.UID, func(a *attempt) bool { return a.memberWork })
+		hosts[0].requireNotHeld(t, g.UID)
+		g.Status.Members[0].NodeName = names[0]
+		require.NoError(t, k8s.Status().Update(within(t), g))
+		hosts[0].awaitHeld(t, g.UID, true)
+		hosts[1].requireNotHeld(t, g.UID)
+	})
 }
 
 // TestHostOrder builds a host in the order the package doc gives, with the
@@ -356,13 +372,13 @@ func TestHostOrder(t *testing.T) {
 	ctx := within(t)
 	names := nodes(t, 2)
 	node := names[0]
-	agents := types.NamespacedName{Namespace: "snapshot-agents", Name: "snapshot-agent"}
 	const audience = "snapshot-coordinator"
 	admin, err := kubernetes.NewForConfig(restConfig)
 	require.NoError(t, err)
-	_, err = admin.CoreV1().Namespaces().Create(ctx,
-		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: agents.Namespace}}, metav1.CreateOptions{})
+	ns, err := admin.CoreV1().Namespaces().Create(ctx,
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "snapshot-agents-"}}, metav1.CreateOptions{})
 	require.NoError(t, err)
+	agents := types.NamespacedName{Namespace: ns.Name, Name: "snapshot-agent"}
 	_, err = admin.CoreV1().ServiceAccounts(agents.Namespace).Create(ctx,
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: agents.Name}}, metav1.CreateOptions{})
 	require.NoError(t, err)
@@ -462,21 +478,22 @@ func TestRestoreAndSnapshotOrder(t *testing.T) {
 
 	t.Run("the snapshot shows first", func(t *testing.T) {
 		h := startHost(t, names[0], coordinatortest.Start(t))
-		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), members(names[0]))
+		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), members(names[0]), false)
 		h.awaitHeld(t, r.UID, true)
 	})
 
 	t.Run("the restore shows first", func(t *testing.T) {
 		h := startHost(t, names[1], coordinatortest.Start(t), hideSnapshots)
 		snapshot := readySnapshot(t, []string{"a", "b"})
-		r := createRestore(t, snapshot, members(names[1]))
+		r := createRestore(t, snapshot, members(names[1]), false)
 		require.Eventually(t, func() bool {
 			var cached v1alpha1.PodGroupRestore
 			err := h.cache.Get(context.Background(), client.ObjectKeyFromObject(r), &cached)
 			return err == nil && len(cached.Status.Members) > 0 && cached.Status.Members[0].Pod != nil
 		}, timeout, 10*time.Millisecond, "the host's cache must show the pinned restore")
-		_, err := h.attempts.get(context.Background(), r.UID)
-		require.ErrorIs(t, err, session.ErrNotFound, "the host's cache must hide the snapshot")
+		a, err := h.attempts.get(context.Background(), r.UID)
+		require.NoError(t, err)
+		require.False(t, a.ensurable, "the host's cache must hide the snapshot")
 		h.requireNotHeld(t, r.UID)
 
 		showSnapshot(t, snapshot)
@@ -484,9 +501,9 @@ func TestRestoreAndSnapshotOrder(t *testing.T) {
 	})
 }
 
-// TestDeletion covers a group resource whose deletion starts: its session is
-// cancelled before every member has arrived at the admitted barrier, kept
-// open afterwards, and removed once the resource is gone.
+// TestDeletion covers a group resource of either kind whose deletion starts:
+// its session is cancelled before every member has arrived at the admitted
+// barrier, kept open afterwards, and removed once the resource is gone.
 func TestDeletion(t *testing.T) {
 	names := nodes(t, 1)
 	h := startHost(t, names[0], coordinatortest.Start(t))
@@ -527,6 +544,89 @@ func TestDeletion(t *testing.T) {
 		h.awaitHeld(t, g.UID, false)
 		require.Error(t, awaitEnd(t, a), "a member learns that its session is gone")
 	})
+
+	t.Run("a restore, before the admitted barrier completes", func(t *testing.T) {
+		ctx := within(t)
+		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"a", names[0]}, {"b", names[0]}}, true)
+		h.awaitHeld(t, r.UID, true)
+		a, b := h.connect(t, r.UID, "a"), h.connect(t, r.UID, "b")
+		arrived := make(chan error, 1)
+		go func() { arrived <- a.Barrier(ctx, session.BarrierAdmitted) }()
+		require.NoError(t, k8s.Delete(ctx, r))
+		require.ErrorIs(t, <-arrived, &session.AbortError{Reason: session.ReasonCancelled})
+		require.ErrorIs(t, awaitEnd(t, b), &session.AbortError{Reason: session.ReasonCancelled})
+		h.awaitSeen(t, r.UID, deleting)
+		_, holds := h.coord.Ended(r.UID)
+		require.True(t, holds, "the session of a restore still being deleted is kept")
+
+		release(t, r)
+		h.awaitHeld(t, r.UID, false)
+	})
+}
+
+// TestMemberFailed covers a group resource of either kind whose status shows
+// a Failed member: before every member has arrived at the admitted barrier,
+// its session fails with the member's reason, so the peers waiting there
+// learn it at once instead of at the deadline; afterwards, it stays open.
+func TestMemberFailed(t *testing.T) {
+	names := nodes(t, 1)
+	h := startHost(t, names[0], coordinatortest.Start(t))
+	pair := []member{{"a", names[0]}, {"b", names[0]}}
+	// admit makes member a of the attempt uid wait at the admitted barrier.
+	admit := func(t *testing.T, uid types.UID) <-chan error {
+		a := h.connect(t, uid, "a")
+		arrived := make(chan error, 1)
+		go func() { arrived <- a.Barrier(within(t), session.BarrierAdmitted) }()
+		return arrived
+	}
+
+	t.Run("a capture, before the admitted barrier completes", func(t *testing.T) {
+		g := createCapture(t, pair, true, false)
+		h.awaitHeld(t, g.UID, true)
+		arrived := admit(t, g.UID)
+		g.Status.Members[1].Phase = v1alpha1.CheckpointPhaseFailed
+		g.Status.Members[1].Reason = v1alpha1.ReasonPodSnapshotDeleted
+		require.NoError(t, k8s.Status().Update(within(t), g))
+		require.ErrorIs(t, <-arrived, &session.AbortError{Reason: v1alpha1.ReasonPodSnapshotDeleted})
+	})
+
+	t.Run("a restore, before the admitted barrier completes", func(t *testing.T) {
+		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), pair, false)
+		h.awaitHeld(t, r.UID, true)
+		arrived := admit(t, r.UID)
+		r.Status.Members[1].Phase = v1alpha1.RestorePhaseFailed
+		r.Status.Members[1].Reason = v1alpha1.PodGroupReasonTargetPodDeleted
+		require.NoError(t, k8s.Status().Update(within(t), r))
+		require.ErrorIs(t, <-arrived, &session.AbortError{Reason: v1alpha1.PodGroupReasonTargetPodDeleted})
+	})
+
+	t.Run("a member that failed before its session opened", func(t *testing.T) {
+		g := createCapture(t, pair, false, false)
+		for i := range g.Status.Members {
+			id := g.Status.Members[i].ID
+			g.Status.Members[i].PodSnapshot = &v1alpha1.ObjectIdentity{Name: g.Name + "-" + id,
+				UID: types.UID("podsnapshot-uid-" + id)}
+		}
+		g.Status.Members[1].Phase = v1alpha1.CheckpointPhaseFailed
+		g.Status.Members[1].Reason = v1alpha1.ReasonPodSnapshotDeleted
+		require.NoError(t, k8s.Status().Update(within(t), g), "member work and the failure in one change")
+		h.awaitHeld(t, g.UID, true)
+		require.ErrorIs(t, awaitEnd(t, h.connect(t, g.UID, "a")),
+			&session.AbortError{Reason: v1alpha1.ReasonPodSnapshotDeleted})
+	})
+
+	t.Run("once it has completed, the session stays open", func(t *testing.T) {
+		g := createCapture(t, pair, true, false)
+		h.awaitHeld(t, g.UID, true)
+		arrived := admit(t, g.UID)
+		require.NoError(t, h.connect(t, g.UID, "b").Barrier(within(t), session.BarrierAdmitted))
+		require.NoError(t, <-arrived)
+		g.Status.Members[1].Phase = v1alpha1.CheckpointPhaseFailed
+		g.Status.Members[1].Reason = v1alpha1.ReasonPodSnapshotDeleted
+		require.NoError(t, k8s.Status().Update(within(t), g))
+		h.awaitSeen(t, g.UID, func(a *attempt) bool { return a.failure != "" })
+		h.requireNotEnded(t, g.UID)
+	})
 }
 
 // TestRemoval covers removing the session of a group resource that is gone,
@@ -563,7 +663,9 @@ func TestRemoval(t *testing.T) {
 }
 
 // TestFinal covers a final attempt's session, which is removed once it has
-// ended, or at the attempt's deadline, as the host's clock measures it.
+// ended, or at the attempt's deadline, as the host's clock measures it. A
+// restore is final once its members are released, and its session stays open
+// until they leave.
 func TestFinal(t *testing.T) {
 	names := nodes(t, 1)
 	h := startHost(t, names[0], coordinatortest.Start(t))
@@ -592,6 +694,56 @@ func TestFinal(t *testing.T) {
 		h.clock.SetTime(g.CreationTimestamp.Add(time.Duration(g.Spec.DeadlineSeconds) * time.Second))
 		h.awaitHeld(t, g.UID, false)
 	})
+
+	t.Run("a restore, once its session has ended", func(t *testing.T) {
+		ctx := within(t)
+		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"a", names[0]}, {"b", names[0]}}, false)
+		h.awaitHeld(t, r.UID, true)
+		members := []coordinator.Session{h.connect(t, r.UID, "a"), h.connect(t, r.UID, "b")}
+		for i := range r.Status.Members {
+			r.Status.Members[i].Phase = v1alpha1.RestorePhaseReleased
+		}
+		require.NoError(t, k8s.Status().Update(ctx, r))
+		h.awaitSeen(t, r.UID, func(a *attempt) bool { return a.final })
+		h.requireNotEnded(t, r.UID)
+		for _, s := range members {
+			require.NoError(t, s.Leave(ctx))
+		}
+		h.awaitHeld(t, r.UID, false)
+	})
+}
+
+// TestSnapshotDeletedUnderRestore covers a released restore whose
+// PodGroupSnapshot is deleted, which the in-use finalizer allows once the
+// restore is finished. The released members may still rendezvous through the
+// session, so it stays, with its members' nodes, until it ends.
+func TestSnapshotDeletedUnderRestore(t *testing.T) {
+	names := nodes(t, 1)
+	h := startHost(t, names[0], coordinatortest.Start(t))
+	ctx := within(t)
+	snapshot := readySnapshot(t, []string{"a", "b"})
+	r := createRestore(t, snapshot, []member{{"a", names[0]}, {"b", names[0]}}, false)
+	h.awaitHeld(t, r.UID, true)
+	a, b := h.connect(t, r.UID, "a"), h.connect(t, r.UID, "b")
+	for i := range r.Status.Members {
+		r.Status.Members[i].Phase = v1alpha1.RestorePhaseReleased
+	}
+	require.NoError(t, k8s.Status().Update(ctx, r))
+	require.NoError(t, k8s.Delete(ctx, snapshot))
+	h.awaitSeen(t, r.UID, func(a *attempt) bool { return a.final && !a.ensurable })
+	h.requireNotEnded(t, r.UID)
+	nodes, err := h.attempts.MemberNodes(ctx, r.UID)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"a": names[0], "b": names[0]}, nodes)
+
+	require.NoError(t, a.Library().Insert(ctx, "nccl-id", []byte("id")))
+	value, err := b.Library().Get(ctx, "nccl-id", time.Second)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("id"), value, "the released members rendezvous through the session")
+	for _, s := range []coordinator.Session{a, b} {
+		require.NoError(t, s.Leave(ctx))
+	}
+	h.awaitHeld(t, r.UID, false)
 }
 
 // requireNotEnded fails the test unless h's coordinator still holds the open
@@ -613,7 +765,7 @@ func TestRestart(t *testing.T) {
 	here := names[0]
 	served := []types.UID{
 		createCapture(t, []member{{"a", here}, {"b", names[1]}}, true, false).UID,
-		createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"b", names[1]}, {"a", here}}).UID,
+		createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"b", names[1]}, {"a", here}}, false).UID,
 	}
 	final := createCapture(t, []member{{"a", here}}, true, false)
 	checkpointed(t, final)

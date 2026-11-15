@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package groups keeps the coordinator's sessions in step with the group
-// resources, PodGroupSnapshots and PodGroupRestores: it creates, cancels, and
+// resources, PodGroupSnapshots and PodGroupRestores: it creates, fails, and
 // removes the sessions of the attempts its node serves, those whose rank-0
 // member runs on it, as the group's status records. It is the only package
 // of the coordinator that knows the kinds' shapes, and Attempts.MemberNodes

@@ -8,7 +8,6 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -41,7 +40,7 @@ var errNewCA = errors.New("the CA is new")
 // decide returns what ensure must write, given the three resources as read
 // (with no data when absent), the server name and now. A new CA always brings
 // a new bundle and a new serving certificate. Otherwise the bundle must be
-// exactly what the CA Secret holds: its CA, and its previous CA while that
+// exactly what the CA Secret holds: its CA, then its previous CA while that
 // has not expired.
 func decide(ca *corev1.Secret, bundle *corev1.ConfigMap, serving *corev1.Secret, serverName string, now time.Time) plan {
 	current, err := validCA(ca.Data[caCertKey], ca.Data[caKeyKey], now, renewalWindow)
@@ -99,25 +98,16 @@ func validPrevious(previousPEM []byte, now time.Time) (*x509.Certificate, error)
 	return certs[0], nil
 }
 
-// validBundle checks that the trust bundle holds exactly what the CA Secret
-// dictates: one key, ca.crt, whose certificates are current and, unless it is
-// nil, previous, in any order.
+// validBundle checks that the trust bundle holds exactly what ensure writes
+// from the CA Secret: one key, ca.crt, which is buildBundle(current, previous)
+// byte for byte. The Issuer is the bundle's only writer, and buildBundle's
+// output is deterministic.
 func validBundle(bundle *corev1.ConfigMap, current, previous *x509.Certificate) error {
 	if len(bundle.Data) != 1 || len(bundle.BinaryData) != 0 {
 		return errors.New("the bundle does not hold ca.crt alone")
 	}
-	certs, err := parseCertificates([]byte(bundle.Data[bundleKey]))
-	if err != nil {
-		return fmt.Errorf("parse ca.crt: %w", err)
-	}
-	want := []*x509.Certificate{current}
-	if previous != nil {
-		want = append(want, previous)
-	}
-	if len(certs) != len(want) || slices.ContainsFunc(want, func(cert *x509.Certificate) bool {
-		return !slices.ContainsFunc(certs, cert.Equal)
-	}) {
-		return errors.New("ca.crt does not hold exactly the CA Secret's current and previous CA")
+	if bundle.Data[bundleKey] != string(buildBundle(current, previous)) {
+		return errors.New("ca.crt does not match the CA Secret")
 	}
 	return nil
 }
