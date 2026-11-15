@@ -102,10 +102,10 @@ type client struct {
 
 	// Set by join, and read-only afterwards. joined is set last, as the
 	// verifier starts.
-	snapshot, library jetstream.KeyValue
-	meta              session.Meta
-	ranks             map[string]int
-	joined            bool
+	control, snapshot, library jetstream.KeyValue
+	meta                       session.Meta
+	ranks                      map[string]int
+	joined                     bool
 
 	// epoch is the epoch the client presents when it connects, zero until it
 	// has read Meta.
@@ -146,7 +146,7 @@ type client struct {
 func (s *client) followEnd() {
 	defer s.wg.Done()
 	for {
-		err := s.await(context.Background(), s.snapshot, nil, func(string, []byte, bool) bool { return false })
+		err := s.await(context.Background(), s.control, nil, func(string, []byte, bool) bool { return false })
 		var abort *session.AbortError
 		switch {
 		case errors.As(err, &abort), errors.Is(err, session.ErrClosed):
@@ -242,14 +242,14 @@ func (s *client) Barrier(ctx context.Context, name string) error {
 	}
 	arrival := session.BarrierKey(name, s.member)
 	if err := s.do(ctx, func(ctx context.Context) error {
-		_, err := s.snapshot.Put(ctx, arrival, nil)
+		_, err := s.control.Put(ctx, arrival, nil)
 		return err
 	}); err != nil {
 		return err
 	}
 	prefix := session.BarrierKey(name, "")
 	arrived := make(map[string]bool, len(s.ranks))
-	if err := s.await(ctx, s.snapshot, []string{session.BarrierKey(name, "*")}, func(key string, _ []byte,
+	if err := s.await(ctx, s.control, []string{session.BarrierKey(name, "*")}, func(key string, _ []byte,
 		present bool) bool {
 		member := strings.TrimPrefix(key, prefix)
 		if _, ok := s.ranks[member]; ok && present {
@@ -268,7 +268,7 @@ func (s *client) Barrier(ctx context.Context, name string) error {
 func (s *client) Leave(ctx context.Context) error {
 	left := session.LeftKey(s.member)
 	err := s.do(ctx, func(ctx context.Context) error {
-		_, err := s.snapshot.Put(ctx, left, nil)
+		_, err := s.control.Put(ctx, left, nil)
 		return err
 	})
 	if errors.Is(err, session.ErrClosed) {
@@ -283,11 +283,11 @@ func (s *client) Fail(ctx context.Context, reason string) error {
 		return err
 	}
 	err := s.do(ctx, func(ctx context.Context) error {
-		_, err := s.snapshot.Create(ctx, session.KeyEnded, []byte(reason))
+		_, err := s.control.Create(ctx, session.KeyEnded, []byte(reason))
 		if !errors.Is(err, jetstream.ErrKeyExists) {
 			return err
 		}
-		entry, err := s.snapshot.Get(ctx, session.KeyEnded)
+		entry, err := s.control.Get(ctx, session.KeyEnded)
 		if err != nil {
 			return err
 		}
@@ -397,15 +397,15 @@ func (s *client) watch(ctx context.Context, kv jetstream.KeyValue, keys []string
 	return w, err
 }
 
-// await watches keys of kv, and the ended key whenever kv is the Snapshot
+// await watches keys of kv, and the ended key whenever kv is the control
 // bucket, and passes visit every entry of keys, each key's current entry first
 // and then every change, until visit reports true. present is false for a
 // deleted key. Watching ended in the same watch orders the session's end among
 // the entries, so an end recorded after the last entry visit needed does not
-// hide it. Watching the library bucket relies on Done instead.
+// hide it. Watching another bucket relies on Done instead.
 func (s *client) await(ctx context.Context, kv jetstream.KeyValue, keys []string,
 	visit func(key string, value []byte, present bool) bool) error {
-	watchesEnd := kv == s.snapshot
+	watchesEnd := kv == s.control
 	if watchesEnd {
 		keys = append(slices.Clone(keys), session.KeyEnded)
 	}

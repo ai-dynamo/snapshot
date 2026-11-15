@@ -132,15 +132,15 @@ func (h *harness) dial(spec Spec, member, token string, epoch uint64, opts ...na
 }
 
 // member is one member's connection, which the tests drive in place of the
-// session client: it has bound both of the attempt's buckets and read Meta,
+// session client: it has bound the attempt's buckets and read Meta,
 // and, like the client, it follows the ended key and closes its connection
 // once the session has ended.
 type member struct {
-	id                string
-	nc                *nats.Conn
-	snapshot, library jetstream.KeyValue
-	meta              session.Meta
-	done              chan struct{}
+	id                         string
+	nc                         *nats.Conn
+	control, snapshot, library jetstream.KeyValue
+	meta                       session.Meta
+	done                       chan struct{}
 	// err is how the session ended, set before done is closed.
 	err error
 }
@@ -156,18 +156,20 @@ func (h *harness) connect(spec Spec, i int) *member {
 	h.t.Cleanup(m.nc.Close)
 	js, err := jetstream.New(m.nc)
 	require.NoError(h.t, err)
+	m.control, err = js.KeyValue(ctx, session.ControlBucket(string(spec.UID)))
+	require.NoError(h.t, err)
 	m.snapshot, err = js.KeyValue(ctx, session.SnapshotBucket(string(spec.UID)))
 	require.NoError(h.t, err)
 	m.library, err = js.KeyValue(ctx, session.LibraryBucket(string(spec.UID)))
 	require.NoError(h.t, err)
-	entry, err := m.snapshot.Get(ctx, session.KeyMeta)
+	entry, err := m.control.Get(ctx, session.KeyMeta)
 	require.NoError(h.t, err)
 	require.NoError(h.t, json.Unmarshal(entry.Value(), &m.meta))
 
 	// The watch lives until cancel; its channel closes once its subscription
 	// has, which closing the connection does too.
 	life, cancel := context.WithCancel(context.Background())
-	w, err := m.snapshot.Watch(life, session.KeyEnded)
+	w, err := m.control.Watch(life, session.KeyEnded)
 	if err != nil {
 		cancel()
 		require.NoError(h.t, err)
@@ -225,7 +227,7 @@ func (m *member) insert(ctx context.Context, ns session.Namespace, key string, v
 
 // arrive records the member's arrival at a barrier.
 func (m *member) arrive(ctx context.Context, barrier string) error {
-	_, err := m.snapshot.Put(ctx, session.BarrierKey(barrier, m.id), nil)
+	_, err := m.control.Put(ctx, session.BarrierKey(barrier, m.id), nil)
 	return err
 }
 
@@ -234,7 +236,7 @@ func (m *member) arrive(ctx context.Context, barrier string) error {
 // watch may see that, and close the connection, before the write's reply
 // arrives.
 func (m *member) leave(ctx context.Context) error {
-	_, err := m.snapshot.Put(ctx, session.LeftKey(m.id), nil)
+	_, err := m.control.Put(ctx, session.LeftKey(m.id), nil)
 	if err != nil && errors.Is(m.Err(), session.ErrClosed) {
 		return nil
 	}
@@ -246,7 +248,7 @@ func (m *member) leave(ctx context.Context) error {
 // may see the ended key, and close the connection, before the write's reply
 // arrives.
 func (m *member) fail(ctx context.Context, reason string) error {
-	_, err := m.snapshot.Create(ctx, session.KeyEnded, []byte(reason))
+	_, err := m.control.Create(ctx, session.KeyEnded, []byte(reason))
 	if err != nil && errors.Is(m.Err(), &session.AbortError{Reason: reason}) {
 		return nil
 	}
@@ -289,7 +291,7 @@ func (h *harness) ended(spec Spec) (string, bool) {
 	h.t.Helper()
 	a := h.srv.lookup(spec.UID)
 	require.NotNil(h.t, a)
-	entry, err := a.snapshot.Get(within(h.t), session.KeyEnded)
+	entry, err := a.control.Get(within(h.t), session.KeyEnded)
 	if err != nil {
 		return "", false
 	}

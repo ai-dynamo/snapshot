@@ -37,8 +37,8 @@ var (
 	ErrTooLarge = errors.New("too large")
 
 	// ErrTooMany reports that a new key would take the library bucket past its
-	// most keys, or that the coordinator's memory cap, which every session
-	// shares, is reached.
+	// most keys, that the coordinator's memory cap, which every session shares,
+	// is reached, or that the session's control bucket is full.
 	ErrTooMany = errors.New("bucket full")
 
 	// ErrInvalid reports a malformed argument: a key, a name, a reason, a

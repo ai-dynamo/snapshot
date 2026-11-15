@@ -267,8 +267,9 @@ func TestDelete(t *testing.T) {
 	s := ses.connect(t, 0)
 	uid := string(ses.spec.UID)
 	buckets := map[session.Namespace]jetstream.KeyValue{
-		session.NamespaceSnapshot: ses.raw(t, 0), session.NamespaceCuInterpose: ses.raw(t, 0),
-		session.NamespaceLibrary: ses.rawBucket(t, 0, session.LibraryBucket(uid)),
+		session.NamespaceSnapshot:    ses.rawBucket(t, 0, session.SnapshotBucket(uid)),
+		session.NamespaceCuInterpose: ses.rawBucket(t, 0, session.SnapshotBucket(uid)),
+		session.NamespaceLibrary:     ses.rawBucket(t, 0, session.LibraryBucket(uid)),
 	}
 	messages := func(ns session.Namespace) uint64 {
 		status, err := buckets[ns].Status(ctx)

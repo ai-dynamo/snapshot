@@ -162,25 +162,21 @@ func TestLimits(t *testing.T) {
 			"removing a session frees its memory")
 	})
 
-	t.Run("a session that cannot open within the cap leaves no bucket behind", func(t *testing.T) {
-		h := newHarness(t, func(cfg *Config) { cfg.MaxBytes, cfg.MaxValue = 2<<20, 64<<10 })
+	t.Run("the control buckets of every session share the file storage bound", func(t *testing.T) {
+		// Room for one session of one member, which reserves its control bucket.
+		h := newHarness(t, func(cfg *Config) { cfg.MaxBytes = session.ControlBytes(1) + 1<<10 })
 		ctx := within(t)
-		filler := h.ensure(1)
-		requireCode(t, fill(ctx, h.connect(filler, 0), session.NamespaceSnapshot, 60<<10),
-			codeInsufficientResources)
+		first := h.ensure(1)
 
-		// Both buckets are created, since neither reserves memory; writing
-		// meta is what fails.
 		spec := h.spec(1)
-		require.Error(t, h.srv.Ensure(ctx, spec))
+		require.Error(t, h.srv.Ensure(ctx, spec), "the bound must refuse a second control bucket")
 		require.Nil(t, h.srv.lookup(spec.UID))
-		for _, bucket := range []string{session.SnapshotBucket(string(spec.UID)),
-			session.LibraryBucket(string(spec.UID))} {
+		for _, bucket := range session.Buckets(string(spec.UID)) {
 			_, err := h.srv.js.KeyValue(ctx, bucket)
 			require.ErrorIs(t, err, jetstream.ErrBucketNotFound, "bucket %s", bucket)
 		}
-		require.NoError(t, h.srv.Remove(ctx, filler.UID))
-		require.NoError(t, h.srv.Ensure(ctx, spec), "a retried Ensure starts afresh")
+		require.NoError(t, h.srv.Remove(ctx, first.UID))
+		require.NoError(t, h.srv.Ensure(ctx, spec), "removing a session frees its reservation")
 	})
 }
 
@@ -206,10 +202,10 @@ func TestLogsHoldNoSecrets(t *testing.T) {
 	for _, m := range members {
 		require.NoError(t, m.arrive(ctx, "secret-barrier"))
 	}
-	watchUntil(t, members[1].snapshot, session.BarrierKey("secret-barrier", "*"),
+	watchUntil(t, members[1].control, session.BarrierKey("secret-barrier", "*"),
 		func(present map[string]bool) bool { return len(present) == len(members) })
 	nc, violations := h.raw(spec, 0)
-	_, _ = nc.Request("$KV."+session.SnapshotBucket(string(spec.UID))+".barrier.secret-barrier.member-1", nil,
+	_, _ = nc.Request("$KV."+session.ControlBucket(string(spec.UID))+".barrier.secret-barrier.member-1", nil,
 		200*time.Millisecond)
 	requireViolation(t, violations, "secret-barrier")
 	h.kick(spec, 1)

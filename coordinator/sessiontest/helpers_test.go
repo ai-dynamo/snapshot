@@ -257,12 +257,12 @@ func in(s coordinator.Session, ns session.Namespace) coordinator.Store {
 // client reconnects.
 func (ses *testSession) cut(member int) { ses.proxies[member].cut() }
 
-// raw returns the session's Snapshot bucket over a plain NATS connection of
+// raw returns the session's control bucket over a plain NATS connection of
 // member, made the way package session defines, which reaches the keys the
 // client keeps to itself. The connection closes when the test ends.
 func (ses *testSession) raw(t *testing.T, member int) jetstream.KeyValue {
 	t.Helper()
-	return ses.rawBucket(t, member, session.SnapshotBucket(string(ses.spec.UID)))
+	return ses.rawBucket(t, member, session.ControlBucket(string(ses.spec.UID)))
 }
 
 // rawBucket returns one of the session's buckets over a plain NATS connection
@@ -286,17 +286,10 @@ func (ses *testSession) rawBucket(t *testing.T, member int, bucket string) jetst
 }
 
 // awaitWait waits until a wait of one member in namespace ns watches its keys:
-// until the namespace's bucket holds one consumer more than at rest, when the
-// coordinator watches the departures and each member, every one connected,
-// the session's end.
+// until the namespace's bucket holds a consumer, since nothing else watches it.
 func (ses *testSession) awaitWait(t *testing.T, ns session.Namespace) {
 	t.Helper()
-	uid := string(ses.spec.UID)
-	bucket, rest := session.SnapshotBucket(uid), len(ses.spec.Members)+1
-	if ns == session.NamespaceLibrary {
-		bucket, rest = session.LibraryBucket(uid), 0
-	}
-	ses.awaitConsumers(t, bucket, rest+1)
+	ses.awaitConsumers(t, ns.Bucket(string(ses.spec.UID)), 1)
 }
 
 // awaitMostConsumers waits until the session's Snapshot bucket holds its most

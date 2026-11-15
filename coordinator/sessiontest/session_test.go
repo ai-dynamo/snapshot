@@ -164,9 +164,10 @@ func TestBarrier(t *testing.T) {
 }
 
 // TestWaitsShareTheConsumerLimit covers a bucket's consumer limit, which a
-// session's members share: one member's waits that take every consumer delay
-// another member's Barrier, and their own waits past the limit, and fail none
-// of them; each completes once a consumer frees.
+// session's members share: one member's waits that take every consumer of the
+// Snapshot bucket delay another member's Get there, and their own waits past
+// the limit, and fail none of them; each completes once a consumer frees. A
+// Barrier watches the control bucket, so it is not delayed.
 func TestWaitsShareTheConsumerLimit(t *testing.T) {
 	h := newHarness(t)
 	ctx := within(t)
@@ -183,8 +184,16 @@ func TestWaitsShareTheConsumerLimit(t *testing.T) {
 		gets[i] = got
 	}
 	ses.awaitMostConsumers(t)
+	late := make(chan error, 1)
+	go func() {
+		_, err := sessions[1].Snapshot().Get(ctx, "late", time.Minute)
+		late <- err
+	}()
+	requireWaiting(t, late)
+	// Barriers watch the control bucket, which the Gets leave alone.
 	wait := barrier(ctx, sessions[1], "admitted")
-	requireWaiting(t, wait)
+	require.NoError(t, sessions[0].Barrier(ctx, "admitted"))
+	require.NoError(t, <-wait)
 	for i := range gets {
 		require.NoError(t, sessions[1].Snapshot().Insert(ctx, fmt.Sprintf("peer.%d", i), nil))
 	}
@@ -196,8 +205,8 @@ func TestWaitsShareTheConsumerLimit(t *testing.T) {
 			t.Fatalf("Get %d did not return", i)
 		}
 	}
-	require.NoError(t, sessions[0].Barrier(ctx, "admitted"))
-	require.NoError(t, <-wait)
+	require.NoError(t, sessions[1].Snapshot().Insert(ctx, "late", nil))
+	require.NoError(t, <-late)
 }
 
 // TestWaitsFreeTheirConsumers checks that a wait that ends deletes its watch's
@@ -211,11 +220,11 @@ func TestWaitsFreeTheirConsumers(t *testing.T) {
 	ses := h.session(t, 2)
 	sessions := ses.connectAll(t)
 	uid := string(ses.spec.UID)
-	snapshot, library := session.SnapshotBucket(uid), session.LibraryBucket(uid)
+	control, snapshot, library := session.ControlBucket(uid), session.SnapshotBucket(uid), session.LibraryBucket(uid)
 	// The coordinator watches the departures, and each member the session's
-	// end.
+	// end, in the control bucket.
 	idle := len(sessions) + 1
-	ses.awaitConsumers(t, snapshot, idle)
+	ses.awaitConsumers(t, control, idle)
 	freed := func(bucket string, n int) {
 		t.Helper()
 		ses.consumersWithin(t, bucket, time.Second, func(held, _ int) bool { return held == n })
@@ -226,16 +235,16 @@ func TestWaitsFreeTheirConsumers(t *testing.T) {
 		_, err := sessions[0].Snapshot().Get(ctx, "k", time.Minute)
 		got <- err
 	}()
-	ses.awaitConsumers(t, snapshot, idle+1)
+	ses.awaitConsumers(t, snapshot, 1)
 	require.NoError(t, sessions[1].Snapshot().Insert(ctx, "k", nil))
 	require.NoError(t, <-got)
-	freed(snapshot, idle)
+	freed(snapshot, 0)
 
 	wait := barrier(ctx, sessions[0], "admitted")
-	ses.awaitConsumers(t, snapshot, idle+1)
+	ses.awaitConsumers(t, control, idle+1)
 	require.NoError(t, sessions[1].Barrier(ctx, "admitted"))
 	require.NoError(t, <-wait)
-	freed(snapshot, idle)
+	freed(control, idle)
 
 	go func() {
 		_, err := sessions[0].Library().Get(ctx, "comm", time.Minute)
@@ -508,4 +517,77 @@ func TestCloseWhileWatching(t *testing.T) {
 			t.Fatalf("session %d: the Barrier did not return", i)
 		}
 	}
+}
+
+// TestSessionsEndAtTheMemoryCap covers a session filling the memory cap that
+// every session shares: no other session's Barrier, Leave or Fail fails, every
+// pending wait returns with the reason, the coordinator records the ends it
+// writes itself, and Shutdown reports no error. The control keys are in file
+// storage, which the memory cap does not limit.
+func TestSessionsEndAtTheMemoryCap(t *testing.T) {
+	h := newHarness(t, func(cfg *server.Config) { cfg.MaxBytes, cfg.MaxValue = 8<<20, 1<<20 })
+	ctx := within(t)
+	// Two members of a session wait, one at a barrier and one for a key, while
+	// another session fills the cap.
+	waiters := h.session(t, 3)
+	members := waiters.connectAll(t)
+	arrived := barrier(ctx, members[0], "admitted")
+	waiting := make(chan error, 1)
+	go func() {
+		_, err := members[1].Snapshot().Get(ctx, "never", time.Minute)
+		waiting <- err
+	}()
+	waiters.awaitWait(t, session.NamespaceSnapshot)
+
+	filler := h.session(t, 1)
+	store := filler.connect(t, 0).Snapshot()
+	var err error
+	for i := 0; err == nil; i++ {
+		err = store.Insert(ctx, fmt.Sprintf("fill-%d", i), make([]byte, 512<<10))
+	}
+	require.ErrorIs(t, err, session.ErrTooMany)
+
+	// Sessions that begin at the full cap still close once every member has
+	// left, and release a barrier.
+	closing := h.session(t, 2).connectAll(t)
+	for _, s := range closing {
+		require.NoError(t, s.Leave(ctx))
+	}
+	for _, s := range closing {
+		awaitDone(t, s)
+		require.ErrorIs(t, s.Err(), session.ErrClosed)
+	}
+	released := h.session(t, 2)
+	sessions := released.connectAll(t)
+	wait := barrier(ctx, sessions[0], "admitted")
+	require.NoError(t, sessions[1].Barrier(ctx, "admitted"))
+	require.NoError(t, <-wait)
+
+	// A deadline that passes is recorded by the coordinator.
+	late := h.sessionUntil(t, 1, h.clock.Now().Add(time.Minute))
+	lateMember := late.connect(t, 0)
+	h.clock.Await(t, time.Minute)
+	h.clock.Step(time.Minute)
+	awaitDone(t, lateMember)
+	require.ErrorIs(t, lateMember.Err(), &session.AbortError{Reason: session.ReasonDeadlineExceeded})
+
+	require.NoError(t, members[2].Fail(ctx, "Refused"))
+	for _, wait := range []<-chan error{arrived, waiting} {
+		select {
+		case err := <-wait:
+			require.ErrorIs(t, err, &session.AbortError{Reason: "Refused"})
+		case <-ctx.Done():
+			t.Fatal("a wait did not return")
+		}
+	}
+	for _, s := range members {
+		awaitDone(t, s)
+	}
+
+	// A session fails when the coordinator shuts down, with the cap still full.
+	last := h.session(t, 1)
+	lastMember := last.connect(t, 0)
+	require.NoError(t, h.srv.Shutdown(ctx))
+	awaitDone(t, lastMember)
+	require.ErrorIs(t, lastMember.Err(), &session.AbortError{Reason: session.ReasonCoordinatorLost})
 }

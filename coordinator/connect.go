@@ -210,7 +210,7 @@ func (s *client) options(cfg Config) []nats.Option {
 	}
 }
 
-// join waits until the coordinator admits the connection, binds both buckets,
+// join waits until the coordinator admits the connection, binds the buckets,
 // reads Meta, and starts verifying the session when asked, following its end,
 // and timing its deadline.
 func (s *client) join(ctx context.Context) error {
@@ -226,17 +226,20 @@ func (s *client) join(ctx context.Context) error {
 	if err != nil {
 		return mapError(err)
 	}
-	if s.snapshot, err = s.bind(ctx, js, session.SnapshotBucket(s.attempt)); err != nil {
+	if s.control, err = s.bind(ctx, js, session.ControlBucket(s.attempt)); err != nil {
 		return err
 	}
-	if s.library, err = s.bind(ctx, js, session.LibraryBucket(s.attempt)); err != nil {
+	if s.snapshot, err = s.bind(ctx, js, session.NamespaceSnapshot.Bucket(s.attempt)); err != nil {
+		return err
+	}
+	if s.library, err = s.bind(ctx, js, session.NamespaceLibrary.Bucket(s.attempt)); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	target := s.target()
 	s.mu.Unlock()
 	if err := s.do(ctx, func(ctx context.Context) error {
-		s.meta, err = readMeta(ctx, s.snapshot)
+		s.meta, err = readMeta(ctx, s.control)
 		return err
 	}); err != nil {
 		return err
