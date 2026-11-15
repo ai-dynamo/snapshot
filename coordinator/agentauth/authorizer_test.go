@@ -5,6 +5,11 @@ package agentauth
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -89,6 +94,18 @@ func TestNewReadsTheIssuerAndItsKeys(t *testing.T) {
 	}
 }
 
+// The API server serves issuer discovery only when its issuer is an https
+// URL, and answers 404 otherwise.
+func TestNewNamesTheHTTPSIssuerRequirement(t *testing.T) {
+	h := newHarness(t)
+	cfg := h.config()
+	host := notFound(t)
+	cfg.RESTConfig = &rest.Config{Host: host}
+	_, err := New(t.Context(), cfg)
+	require.EqualError(t, err, "read the ServiceAccount token issuer: GET "+host+discoveryPath+": 404 Not Found: "+
+		"the API server serves it only when its --service-account-issuer is an https URL")
+}
+
 // noIssuer serves a discovery document that names no issuer.
 func noIssuer(t *testing.T) string {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -125,6 +142,40 @@ func TestAuthorizeAdmits(t *testing.T) {
 	assert.Equal(t, authenticationv1.TokenReviewSpec{Token: token, Audiences: []string{audience}}, review.Spec)
 }
 
+// The issuer may sign with a key of any type: the verifier allows every
+// asymmetric algorithm, whatever the algorithms the discovery document names
+// and the keys New read.
+func TestAuthorizeAllowsEveryAsymmetricAlgorithm(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	p384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	require.NoError(t, err)
+	p521, err := ecdsa.GenerateKey(elliptic.P521(), rand.Reader)
+	require.NoError(t, err)
+	_, edKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	for _, k := range []jose.SigningKey{
+		{Algorithm: jose.RS256, Key: rsaKey},
+		{Algorithm: jose.RS384, Key: rsaKey},
+		{Algorithm: jose.RS512, Key: rsaKey},
+		{Algorithm: jose.PS256, Key: rsaKey},
+		{Algorithm: jose.PS384, Key: rsaKey},
+		{Algorithm: jose.PS512, Key: rsaKey},
+		{Algorithm: jose.ES384, Key: p384},
+		{Algorithm: jose.ES512, Key: p521},
+		{Algorithm: jose.EdDSA, Key: edKey},
+	} {
+		t.Run(string(k.Algorithm), func(t *testing.T) {
+			// The issuer names ES256 only, and New read only key-0, an ES256
+			// key.
+			h := newHarness(t)
+			h.issuer.publish("key-1", k)
+			h.clock.Step(minKeyFetchInterval)
+			require.NoError(t, h.authorize(member, h.signedWith("key-1")))
+		})
+	}
+}
+
 func TestAuthorizeRefusesTokensThatDoNotVerify(t *testing.T) {
 	for name, token := range map[string]func(*harness) string{
 		"not a token": func(*harness) string { return "not-a-token" },
@@ -133,6 +184,10 @@ func TestAuthorizeRefusesTokensThatDoNotVerify(t *testing.T) {
 		},
 		"signed with a key the issuer does not publish": func(h *harness) string {
 			return h.issuer.sign(t, "key-unknown", h.issuer.claims(h.clock.Now()))
+		},
+		"signed with HMAC": func(h *harness) string {
+			secret := jose.SigningKey{Algorithm: jose.HS256, Key: []byte("a-secret-of-at-least-32-bytes-long")}
+			return signWith(t, secret, "key-0", h.issuer.claims(h.clock.Now()), nil)
 		},
 		"another issuer":   func(h *harness) string { return h.token(set("iss", "https://issuer.invalid")) },
 		"another audience": func(h *harness) string { return h.token(set("aud", []string{"another-audience"})) },

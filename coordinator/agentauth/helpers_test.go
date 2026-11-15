@@ -5,6 +5,7 @@ package agentauth
 
 import (
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -77,7 +78,7 @@ type issuer struct {
 	srv *httptest.Server
 
 	mu   sync.Mutex
-	keys map[string]*ecdsa.PrivateKey // by key ID; signs with "key-0"
+	keys map[string]jose.SigningKey // by key ID; signs with "key-0", an ES256 key
 	// hold, when set, holds each request for the key set until it is closed,
 	// and respond, when set, answers it in place of the key set.
 	hold    chan struct{}
@@ -90,7 +91,7 @@ type issuer struct {
 // newIssuer starts an issuer with one key, "key-0".
 func newIssuer(t *testing.T) *issuer {
 	t.Helper()
-	is := &issuer{keys: map[string]*ecdsa.PrivateKey{}}
+	is := &issuer{keys: map[string]jose.SigningKey{}}
 	is.addKey(t, "key-0")
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+discoveryPath, func(w http.ResponseWriter, _ *http.Request) {
@@ -108,7 +109,9 @@ func newIssuer(t *testing.T) *issuer {
 		hold, respond := is.hold, is.respond
 		var set jose.JSONWebKeySet
 		for id, k := range is.keys {
-			set.Keys = append(set.Keys, jose.JSONWebKey{Key: &k.PublicKey, KeyID: id, Algorithm: "ES256", Use: "sig"})
+			set.Keys = append(set.Keys, jose.JSONWebKey{
+				Key: k.Key.(crypto.Signer).Public(), KeyID: id, Algorithm: string(k.Algorithm), Use: "sig",
+			})
 		}
 		is.mu.Unlock()
 		if hold != nil {
@@ -137,11 +140,16 @@ func writeJSON(w http.ResponseWriter, v any) {
 // url is the issuer's URL, which is also where it serves the endpoints.
 func (is *issuer) url() string { return is.srv.URL }
 
-// addKey publishes a new key under id.
+// addKey publishes a new ES256 key under id.
 func (is *issuer) addKey(t *testing.T, id string) {
 	t.Helper()
 	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
+	is.publish(id, jose.SigningKey{Algorithm: jose.ES256, Key: k})
+}
+
+// publish publishes k under id, and signs with its algorithm.
+func (is *issuer) publish(id string, k jose.SigningKey) {
 	is.mu.Lock()
 	defer is.mu.Unlock()
 	is.keys[id] = k
@@ -227,17 +235,17 @@ func forge(t *testing.T, id string, c tokenClaims) string {
 	t.Helper()
 	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
-	return signWith(t, k, id, c, nil)
+	return signWith(t, jose.SigningKey{Algorithm: jose.ES256, Key: k}, id, c, nil)
 }
 
 // signWith signs c with k, under the key ID id, with the header opts sets,
 // if any, as well.
-func signWith(t *testing.T, k *ecdsa.PrivateKey, id string, c tokenClaims, opts *jose.SignerOptions) string {
+func signWith(t *testing.T, k jose.SigningKey, id string, c tokenClaims, opts *jose.SignerOptions) string {
 	t.Helper()
 	if opts == nil {
 		opts = &jose.SignerOptions{}
 	}
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: jose.JSONWebKey{Key: k, KeyID: id}},
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: k.Algorithm, Key: jose.JSONWebKey{Key: k.Key, KeyID: id}},
 		opts.WithType("JWT"))
 	require.NoError(t, err)
 	token, err := jwt.Signed(signer).Claims(map[string]any(c)).Serialize()
