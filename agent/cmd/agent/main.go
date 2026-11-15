@@ -123,7 +123,7 @@ func waitForPageBroker(ctx context.Context, client pagebroker.Client) (*pagebrok
 			return capabilities, nil
 		}
 		if !errors.Is(err, syscall.ENOENT) && !errors.Is(err, syscall.ECONNREFUSED) {
-			return capabilities, fmt.Errorf("failed to connect to PageBroker: %w", err)
+			return capabilities, fmt.Errorf("failed to read PageBroker capabilities: %w", err)
 		}
 		select {
 		case <-ctx.Done():
