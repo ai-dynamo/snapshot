@@ -85,6 +85,12 @@ discovers its CUDA processes and GPUs.
 kubectl get pod <source-pod> -n <ns> -o jsonpath='{.status.containerStatuses}'
 ```
 
+If the cause is `unsupported NVIDIA_VISIBLE_DEVICES selection` with
+`/var/run/nvidia-container-devices` or `/run/nvidia-container-devices`, the
+agent lacks support for the NVIDIA device plugin's `volume-mounts` strategy.
+Upgrade the node agent to a release containing the GPU discovery fix; no
+workload or device-plugin configuration changes are required.
+
 ### preparing PageBroker checkpoint
 
 The agent asks PageBroker to open a transaction and provide the staging or
