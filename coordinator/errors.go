@@ -19,14 +19,17 @@ const (
 	// jsMessageTooLarge: a message over the stream's maximum message size,
 	// which is a bucket's maximum value size.
 	jsMessageTooLarge = 10054
-	// jsStoreFailed: the store refused a message. A session's only store
-	// limit is the library bucket's number of keys, so this is a full bucket.
+	// jsStoreFailed: the store refused a message, because the library bucket
+	// holds its most keys or the control bucket its most bytes: a full bucket.
 	jsStoreFailed = 10077
 	// jsInsufficientResources: the coordinator's memory cap is reached.
 	jsInsufficientResources = 10023
 	// jsMaximumConsumers: a watch would take its bucket past its most
 	// consumers, which the client waits out.
 	jsMaximumConsumers = 10026
+	// jsTooManyRequests: a stream's ingest queue is full, so the server
+	// dropped the message. Nothing was written, so sending it again is safe.
+	jsTooManyRequests = 10167
 )
 
 // mapError turns an error from nats.go into one of package session's, so no
@@ -45,7 +48,7 @@ func mapError(err error) error {
 	switch code, description := apiError(err); code {
 	case jsMessageTooLarge:
 		return fmt.Errorf("the value is over its bucket's maximum: %w", session.ErrTooLarge)
-	case jsStoreFailed, jsInsufficientResources:
+	case jsStoreFailed, jsInsufficientResources, jsTooManyRequests:
 		return fmt.Errorf("%s: %w", description, session.ErrTooMany)
 	}
 	return errors.New("coordinator: " + err.Error())
@@ -83,11 +86,12 @@ func ours(err error) bool {
 // sent again: the connection broke, including under a write in progress, which
 // fails with a *net.OpError, or is reconnecting, which refuses every publish
 // since the client buffers none, the server did not answer in time, or a watch
-// found its bucket at its most consumers, which free up as other waits end. An
+// found its bucket at its most consumers, which free up as other waits end, or
+// the server dropped a write because the stream's ingest queue was full. An
 // operation is sent again only while the session is alive, so a
 // *net.OpError that wraps net.ErrClosed never reports a closed session.
 func transient(err error) bool {
-	if code, _ := apiError(err); code == jsMaximumConsumers {
+	if code, _ := apiError(err); code == jsMaximumConsumers || throttled(err) {
 		return true
 	}
 	if _, ok := errors.AsType[*net.OpError](err); ok {
@@ -99,6 +103,14 @@ func transient(err error) bool {
 		errors.Is(err, nats.ErrConnectionReconnecting) ||
 		errors.Is(err, nats.ErrReconnectBufExceeded) ||
 		errors.Is(err, nats.ErrDisconnected)
+}
+
+// throttled reports whether err says the coordinator is too busy for the
+// operation now, which is sent again after a wait that grows while it stays
+// busy, so many clients do not press it at the pace they retry.
+func throttled(err error) bool {
+	code, _ := apiError(err)
+	return code == jsTooManyRequests
 }
 
 // missing reports whether an operation that failed with err may have found

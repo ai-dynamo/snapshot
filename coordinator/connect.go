@@ -93,6 +93,10 @@ const (
 
 	// retryWait spaces the resends of an operation that failed transiently.
 	retryWait = 100 * time.Millisecond
+
+	// maxRetryWait is the longest wait between the resends of an operation
+	// that fails because the coordinator is too busy for it.
+	maxRetryWait = time.Second
 )
 
 // Connect connects to the coordinator as cfg.Member of the attempt cfg.Attempt,

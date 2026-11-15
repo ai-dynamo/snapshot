@@ -304,9 +304,11 @@ func (s *client) Fail(ctx context.Context, reason string) error {
 }
 
 // do runs op, sending it again while it fails transiently, until it succeeds,
-// fails for good, the session ends or is closed, or ctx is done. It never sends
-// op once ctx is done.
+// fails for good, the session ends or is closed, or ctx is done, waiting longer
+// each time the coordinator says it is too busy. It never sends op once ctx is
+// done.
 func (s *client) do(ctx context.Context, op func(context.Context) error) error {
+	var busy backoff
 	for {
 		if err := s.alive(); err != nil {
 			return err
@@ -337,8 +339,14 @@ func (s *client) do(ctx context.Context, op func(context.Context) error) error {
 		case !transient(err):
 			return mapError(err)
 		}
+		wait := retryWait
+		if throttled(err) {
+			wait = busy.next()
+		} else {
+			busy.reset()
+		}
 		select {
-		case <-time.After(retryWait):
+		case <-time.After(wait):
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-s.done:
@@ -348,6 +356,21 @@ func (s *client) do(ctx context.Context, op func(context.Context) error) error {
 		}
 	}
 }
+
+// backoff spaces the resends of an operation that fails because the
+// coordinator is too busy for it: retryWait first, then twice as long each
+// time, up to maxRetryWait. Its zero value is ready.
+type backoff struct{ wait time.Duration }
+
+// next returns how long to wait before the next resend.
+func (b *backoff) next() time.Duration {
+	wait := max(b.wait, retryWait)
+	b.wait = min(2*wait, maxRetryWait)
+	return wait
+}
+
+// reset starts the waits again from retryWait.
+func (b *backoff) reset() { b.wait = 0 }
 
 // try runs op once, bounded by attemptTimeout and by a disconnect.
 func (s *client) try(ctx context.Context, op func(context.Context) error) error {
