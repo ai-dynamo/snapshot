@@ -75,11 +75,21 @@ follow the restored workload. See
 
 ### Pod Groups
 
-Requires Kubernetes 1.32 or newer, or Kubernetes 1.30 or 1.31 with the
-`ServiceAccountTokenPodNodeInfo` feature gate on, as it is by default. Pod
-groups are alpha and off by default. See
-[Pod Groups](../reference/helm-values.md#pod-groups).
+Pod groups are alpha and off by default. See
+[Pod Groups](../reference/helm-values.md#pod-groups). They require:
 
-The pod group coordinator admits an agent only by a ServiceAccount token that
-names the agent pod's node. On a cluster whose tokens do not name it, the
-coordinator refuses every agent and logs why.
+- Kubernetes 1.32 or newer. Older API servers refuse the `PodGroupSnapshot`
+  CRD, whose validation rules use the CEL `format` library.
+- Pod-bound ServiceAccount tokens that name the pod's node, as Kubernetes 1.32
+  and newer always issue them. The pod group coordinator admits an agent only
+  by such a token. On a cluster whose tokens do not name the node, the
+  coordinator refuses every agent and logs why.
+- An API server whose `--service-account-issuer` is an `https` URL. Only then
+  does the API server serve its ServiceAccount issuer discovery endpoints,
+  which the coordinator reads to verify tokens. Otherwise the coordinator exits
+  at startup, and its log says why.
+- Every node reaching every other node on TCP `coordinator.port`, `4224` by
+  default. An agent connects to the coordinator on its group's rank-0 node. The
+  health probes are node-local, so a blocked port does not show as an unready
+  pod. For example, OpenShift's default node-to-node rules open only ports 9000
+  to 9999.

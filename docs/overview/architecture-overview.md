@@ -26,7 +26,7 @@ the restore proxy, which Snapshot injects.
 | **CRD installer** | Init container of the operator | Applies the bundled CRDs on every rollout (`crdUpgrade.enabled`). |
 | **Node agent** | DaemonSet, privileged, GPU nodes | The node-local control loop. Watches this node's work orders and restore pods, and executes CRIU and CUDA checkpoint/restore against containers on the node. |
 | **PageBroker** | Container in the agent pod, privileged | Owns the movement of snapshot data between the node and the snapshot store, including the GPU engine that reads and writes GPU payloads. |
-| **Pod group coordinator** | Container in the agent pod, unprivileged, with `podGroups.enabled` (alpha) | Holds the coordination sessions of the pod groups whose rank-0 member runs on its node, for the agents of every member. |
+| **Pod group coordinator** | Container in the agent pod, non-root with no capabilities, with `podGroups.enabled` (alpha) | Holds the coordination sessions of the pod groups whose rank-0 member runs on its node, for the agents of every member. |
 | **Restore proxy** | PID 1 of each restore destination container | Injected by the agent's NRI plugin at container creation. Waits for the restore, then follows the restored process and exits with its status. |
 | **`nsrestore`** | Short-lived helper, exec'd by the agent | Performs the restore from *inside* the destination container's namespaces. |
 | **`snapshotctl`** | CLI | Lower-level checkpoint and restore from a pod manifest, without the CRDs. See [CLI](../reference/cli.md). |
@@ -286,9 +286,9 @@ blocking `io_uring`, which CRIU cannot checkpoint, and the chart ships one.
 A snapshot contains the workload's complete memory, so protect the store
 accordingly. See [Allow the Privileged Node Agent](../get-started/installation.md#allow-the-privileged-node-agent).
 
-The pod group coordinator, with `podGroups.enabled`, runs unprivileged and
-listens on the node's IP, at `coordinator.port` for agents and
-`coordinator.healthPort` for probes:
+The pod group coordinator, with `podGroups.enabled`, runs as non-root with no
+capabilities, and listens on the node's IP, at `coordinator.port` for agents
+and `coordinator.healthPort` for probes:
 
 - Agents connect over TLS. By default, the operator issues the serving
   certificate under a private CA. You can bring your own serving Secret and
@@ -301,6 +301,13 @@ listens on the node's IP, at `coordinator.port` for agents and
   addresses.
 - Every coordinator of a release serves the same certificate. It proves that a
   peer is one of this release's coordinators, not which node it runs on.
+
+The coordinator runs in the agent pod, so it shares the agent's ServiceAccount
+and the host's network, PID, and IPC namespaces. It therefore holds the agent's
+API rights, which include patching any pod. A flaw that let a client run code
+in the coordinator would expose those rights. The coordinator is the only
+process of the agent pod that listens on the network, and the host firewall
+advice above applies to it.
 
 The operator replaces its CA near expiry, or when the CA Secret is lost or
 damaged. After a replacement near expiry, the trust bundle keeps the replaced

@@ -203,9 +203,10 @@ pageBroker:
       cpu: 32
       memory: 256Gi
 
-# The coordinator of pod groups: an unprivileged container in each agent Pod
-# that holds the coordination sessions of the groups whose rank-0 member runs on
-# its node. Deployed only with podGroups.enabled.
+# The coordinator of pod groups: a container in each agent Pod that holds the
+# coordination sessions of the groups whose rank-0 member runs on its node. It
+# runs as non-root with no capabilities, but shares the agent's ServiceAccount
+# and the host's namespaces. Deployed only with podGroups.enabled.
 coordinator:
   # The port agents connect to, over TLS. The agent Pod uses the host's
   # network, so it is a port on the node's IP.

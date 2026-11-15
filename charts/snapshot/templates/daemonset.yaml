@@ -270,10 +270,12 @@ spec:
               readOnly: true
             {{- end }}
         {{- if .Values.podGroups.enabled }}
-        # The coordinator of pod groups. Unprivileged: it needs only the API
-        # server, its serving certificate and its two ports, which are on the
-        # node's IP. Its readiness is the Pod's, so a node whose coordinator
-        # does not admit agents gets no new groups.
+        # The coordinator of pod groups. It runs as non-root with no
+        # capabilities: it needs only the API server, its serving certificate
+        # and its two ports, which are on the node's IP. It still shares the
+        # Pod's ServiceAccount and the host's network, PID and IPC namespaces,
+        # so it holds the agent's API rights. Its readiness is the Pod's, so a
+        # node whose coordinator does not admit agents gets no new groups.
         - name: coordinator
           image: {{ include "snapshot.agentImage" . | quote }}
           imagePullPolicy: {{ .Values.image.agent.pullPolicy }}
@@ -474,8 +476,8 @@ spec:
         {{- if .Values.podGroups.enabled }}
         # The coordinator's serving certificate. Optional, so the agent and
         # PageBroker start before the operator has issued it; the kubelet fills
-        # the volume once the Secret exists, and the coordinator restarts until
-        # then.
+        # the volume once the Secret exists, and the coordinator waits for it,
+        # unready, until then.
         - name: coordinator-tls
           secret:
             secretName: {{ include "snapshot.coordinatorServingSecretName" . | quote }}

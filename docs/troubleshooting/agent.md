@@ -60,12 +60,15 @@ the agent's `CRIU restore tail` diagnostics.
 
 With `podGroups.enabled`, an agent pod is ready only once its `coordinator`
 container is. Until then, new pod groups with a member on that node wait at
-`AgentNotReady`, and a rollout of the agent DaemonSet pauses at that pod. Check
-these in order. `<fullname>` is `snapshot` for a release named `snapshot`.
+`AgentNotReady`, and a rollout of the agent DaemonSet pauses at that pod. For
+what that means for an upgrade, see
+[Pod Groups](../operate/upgrade.md#pod-groups). Check these in order.
+`<fullname>` is `snapshot` for a release named `snapshot`.
 
 1. The serving Secret, `<fullname>-coordinator-tls` or
-   `coordinator.tls.serving.secretName`. The coordinator restarts until it
-   exists. With the operator's issuer, the operator log says why it is missing:
+   `coordinator.tls.serving.secretName`. Until it exists, the coordinator waits
+   for it, unready, and logs `Waiting for the serving certificate`. With the
+   operator's issuer, the operator log says why it is missing:
 
    ```bash
    kubectl get secret <fullname>-coordinator-tls -n <namespace>

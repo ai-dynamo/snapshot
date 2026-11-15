@@ -144,7 +144,7 @@ tests:
               hostPort: 4225
               protocol: TCP
 
-  - it: runs the coordinator unprivileged
+  - it: runs the coordinator as non-root with no capabilities
     template: templates/daemonset.yaml
     set:
       podGroups.enabled: true
