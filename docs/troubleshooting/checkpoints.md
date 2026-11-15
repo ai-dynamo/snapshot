@@ -113,6 +113,24 @@ answer before the checkpoint becomes destructive.
 - The delivery mount is writable
 - The coordinator is not running
 
+### admitting the pod group
+
+For a member of a pod group, the agent publishes the Pod's IP, then waits for
+every other member's and for every member to accept. The cuInterpose coordinator
+of every Pod that runs one inspects as its Pod's relay in the group, and the
+lowest-ranked relay checks the group's topology. Nothing has changed in any
+workload yet, so the attempt ends as `Refused` and every member is left as
+Snapshot found it. A member that fails at any step fails the attempt for every
+other member. Each of them then fails at the step it was waiting in, with the
+reason the first member gave, such as `Refused` or `MemberFailed`.
+
+**Likely causes:**
+
+- The Pod has no IP yet
+- Another member refused first
+- The attempt's deadline passed before every member arrived
+- The cuInterpose relay refused the group's topology, for example memory one Pod imports that no member exported, which its error names
+
 ### staging CUDA job file
 
 For a driver-managed GPU checkpoint, the agent copies the CUDA checkpoint job
@@ -146,6 +164,23 @@ it.
 - A kernel still running or a stream still busy when the lock was taken
 - A driver without checkpoint support for this GPU
 - Another process holding the device, such as a GPU monitoring agent
+
+### waiting for the pod group's other members
+
+Once its GPU state is checkpointed, a member of a pod group waits at the
+`net-freeze` barrier until every other member arrives, so no member's network
+freezes while another member still needs it. The step fails when the attempt
+ends first. The source has stopped by then.
+
+**Likely causes:**
+
+- Another member failed, and its agent's log carries the step
+- The attempt's deadline passed
+- The coordinator was lost (`CoordinatorLost`)
+
+```bash
+kubectl logs $agent -n <snapshot-ns> -c agent | grep -i 'pod group'
+```
 
 ### dumping with CRIU
 

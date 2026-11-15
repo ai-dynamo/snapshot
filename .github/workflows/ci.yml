@@ -43,7 +43,7 @@ jobs:
       - run: make -C agent cuinterpose-test TEST_IMAGE="$SNAPSHOT_CUINTERPOSE_TEST_IMAGE"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.3"
+          go-version: "1.27.4"
           cache: true
           cache-dependency-path: |
             **/go.sum
@@ -58,7 +58,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.3"
+          go-version: "1.27.4"
           cache: true
           cache-dependency-path: |
             **/go.sum
@@ -68,6 +68,9 @@ jobs:
         working-directory: operator
         run: go test -tags snapshot_e2e ./...
       - run: make test-integration
+      # Match the oldest Kubernetes minor in e2e-cpu.yaml (k3s 1.32.13).
+      - name: Test CRD admission on Kubernetes 1.32
+        run: make test-integration ENVTEST_K8S_VERSION=1.32.0
 
   build:
     runs-on: ubuntu-24.04
@@ -75,7 +78,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.3"
+          go-version: "1.27.4"
           cache: true
           cache-dependency-path: |
             **/go.sum
@@ -88,7 +91,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.3"
+          go-version: "1.27.4"
           cache: true
           cache-dependency-path: |
             **/go.sum
@@ -122,6 +125,7 @@ jobs:
             e2e/tests/test_inference.py \
             e2e/tests/test_k8s.py \
             e2e/tests/test_pod_status_writers.py \
+            e2e/tests/test_pr_e2e_workflow.py \
             e2e/tests/test_prune_ghcr.py \
             e2e/tests/test_required_tests.py \
             e2e/tests/test_resolve_snapshot_image_tag.py \
@@ -129,6 +133,7 @@ jobs:
             e2e/tests/test_runtime_image_id.py \
             e2e/tests/test_setup_chart_command.py \
             e2e/tests/test_setup_helm_overrides.py \
+            e2e/tests/test_setup_image_digests.py \
             e2e/tests/test_upgrade_e2e_gate.py \
             e2e/tests/test_upgrade_harness.py \
             e2e/tests/test_workload_node_targeting.py \
@@ -197,10 +202,13 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - run: |
-          set -euo pipefail
-          # Assigned, not inlined into the argument: a command substitution
-          # that fails inside a simple command does not trip `set -e`, so an
-          # inline call would drop the cache flags and still build.
-          cache_flags="$(hack/ci-cache-flags.sh read pagebroker "${CACHE_BRANCH}")"
-          make docker-build-pagebroker REGISTRY=local VERSION=ci DOCKER_BUILD_ARGS="${cache_flags} --load"
+      - uses: ./.github/actions/build-image
+        with:
+          image: pagebroker
+          registry: local
+          tags: ci
+          push: "false"
+          build_args: --load
+          cache_mode: read
+          cache_branch: ${{ env.CACHE_BRANCH }}
+          cache_ref_prefix: ${{ env.CACHE_REF_PREFIX }}
