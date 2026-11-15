@@ -116,6 +116,9 @@ func cuInterposeInstaller(podSecurity *corev1.PodSecurityContext, installer oper
 			cuInterposeImageFrontend, cuInterposeImageCore, cuInterposeImageLauncher,
 			podcontract.CuInterposeMountPath + "/",
 		},
+		// The agent image is CUDA-based and requests every GPU. The copy needs none,
+		// and the NVIDIA runtime's device and driver setup can exceed the memory limit.
+		Env:          []corev1.EnvVar{{Name: "NVIDIA_VISIBLE_DEVICES", Value: "void"}},
 		VolumeMounts: []corev1.VolumeMount{{Name: cuInterposeVolumeName, MountPath: podcontract.CuInterposeMountPath}},
 		Resources:    corev1.ResourceRequirements{Requests: resources, Limits: resources.DeepCopy()},
 		SecurityContext: &corev1.SecurityContext{
