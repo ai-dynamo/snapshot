@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -32,6 +33,7 @@ type fakeControlVolume struct {
 	mu        sync.Mutex
 	files     map[string][]byte
 	readErr   error
+	removeErr error
 	writeErrs map[string]error // by file name
 	writes    []string
 }
@@ -47,6 +49,9 @@ func newFakeControlVolume(w *NodeController) *fakeControlVolume {
 func (v *fakeControlVolume) remove(uid, container, name string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.removeErr != nil {
+		return v.removeErr
+	}
 	delete(v.files, uid+"/"+container+"/"+name)
 	return nil
 }
@@ -344,37 +349,213 @@ func TestRunRestoreKeepsTheRecordUnderThePodsUIDWithoutTheNodes(t *testing.T) {
 	assert.Equal(t, []string{"restore-pod-uid/main/" + podcontract.RestoreAttemptsFile}, h.volume.writes)
 }
 
-func TestRecoveredPostRestoreKeepsTheRecordsDeadline(t *testing.T) {
+func newAttemptOperation(t *testing.T, annotations map[string]string) (*restoreOperation, *fakeControlVolume) {
+	t.Helper()
+	pod := restorePod(annotations)
+	w := makeTestController(t, pod)
+	w.runtime = &fakeRuntime{podUID: "host-uid"}
+	volume := newFakeControlVolume(w)
+	artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}
+	return w.newRestoreOperation(pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Now()), volume
+}
+
+func TestRetryLimit(t *testing.T) {
 	for name, tc := range map[string]struct {
-		record     bool
-		wantWithin time.Duration
+		annotation   string
+		agentDefault *int
+		want         int
+		wantErr      string
 	}{
-		"with a record":    {record: true, wantWithin: 2 * time.Second},
-		"without a record": {wantWithin: time.Minute},
+		"neither sets a limit":                  {want: 0},
+		"the agent's default":                   {agentDefault: ptr.To(3), want: 3},
+		"the Pod's limit over the agent's":      {annotation: "2", agentDefault: ptr.To(3), want: 2},
+		"the Pod's explicit 0 over the agent's": {annotation: "0", agentDefault: ptr.To(3), want: 0},
+		"a Pod limit that is not a number":      {annotation: "two", agentDefault: ptr.To(3), wantErr: "must be a non-negative integer"},
+		"a negative Pod limit":                  {annotation: "-1", wantErr: "must be a non-negative integer"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			h := newPostRestoreHarness(t, httpPostRestoreSpec())
-			recoveringPod(h)
-			h.w.runtime = &fakeRuntime{resolveContainerPID: 4242, podUID: "host-uid"}
-			volume := newFakeControlVolume(h.w)
-			deadline := time.Now().Add(2 * time.Second)
-			if tc.record {
-				volume.put(t, "host-uid", "main", restoreAttempts{Limit: 1, Attempt: 1, Deadline: deadline, ContainerID: "ctr-abc"})
+			annotations := map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"}
+			if tc.annotation != "" {
+				annotations[podcontract.RestoreRetryLimitAnnotation] = tc.annotation
 			}
-			h.httpResults = []int{0}
-			var got time.Time
-			h.w.postRestoreWaitFn = func(ctx context.Context, _ time.Duration) error {
-				got, _ = ctx.Deadline()
-				return context.DeadlineExceeded
+			op, _ := newAttemptOperation(t, annotations)
+			op.controller.config.Restore.RetryLimit = tc.agentDefault
+
+			got, err := op.retryLimit()
+
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestReadRestoreAttempts(t *testing.T) {
+	saved := restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "ctr-abc"}
+	for name, tc := range map[string]struct {
+		record    any
+		readErr   error
+		wantFound bool
+		wantErr   string
+	}{
+		"no record":          {},
+		"a record":           {record: saved, wantFound: true},
+		"a record not JSON":  {record: []byte("attempt=1"), wantErr: `restore attempt record "restore-attempts" is invalid`},
+		"an invalid record":  {record: []byte(`{"limit":2,"attempt":0,"containerID":"ctr-abc"}`), wantErr: "attempt 0 is not positive"},
+		"a record too large": {record: make([]byte, restoreAttemptsMaxBytes+1), wantErr: "read restore attempt record"},
+		"a read error":       {readErr: syscall.ELOOP, wantErr: "read restore attempt record"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			op, volume := newAttemptOperation(t, nil)
+			if tc.record != nil {
+				volume.put(t, "host-uid", "main", tc.record)
+			}
+			volume.readErr = tc.readErr
+
+			got, found, err := op.readRestoreAttempts("host-uid")
+
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				assert.False(t, found)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantFound, found)
+			if tc.wantFound {
+				assert.Equal(t, &saved, got)
+			}
+		})
+	}
+}
+
+func TestStartAttempt(t *testing.T) {
+	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	for name, tc := range map[string]struct {
+		annotation string
+		timeout    int
+		record     *restoreAttempts
+		saveErr    error
+		want       *restoreAttempts
+		wantErr    string
+	}{
+		"the first attempt": {
+			annotation: "2", timeout: 60,
+			want: &restoreAttempts{Limit: 2, Attempt: 1, Deadline: now.Add(time.Minute), ContainerID: "ctr-abc"},
+		},
+		"the first attempt without a timeout": {
+			annotation: "2",
+			want:       &restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "ctr-abc"},
+		},
+		"an interrupted attempt keeps its limit and deadline": {
+			annotation: "5", timeout: 60,
+			record: &restoreAttempts{Limit: 1, Attempt: 2, Deadline: now.Add(30 * time.Second), ContainerID: "ctr-old"},
+			want:   &restoreAttempts{Limit: 1, Attempt: 2, Deadline: now.Add(30 * time.Second), ContainerID: "ctr-abc"},
+		},
+		"an interrupted attempt without a timeout": {
+			timeout: 60,
+			record:  &restoreAttempts{Limit: 1, Attempt: 2, ContainerID: "ctr-old"},
+			want:    &restoreAttempts{Limit: 1, Attempt: 2, ContainerID: "ctr-abc"},
+		},
+		"the deadline passed": {
+			timeout: 60,
+			record:  &restoreAttempts{Limit: 1, Attempt: 2, Deadline: now.Add(-time.Second), ContainerID: "ctr-old"},
+			wantErr: "restore timed out at 2026-11-09T11:59:59Z, before attempt 2 could start",
+		},
+		"the deadline is now": {
+			timeout: 60,
+			record:  &restoreAttempts{Limit: 1, Attempt: 2, Deadline: now, ContainerID: "ctr-old"},
+			wantErr: "restore timed out at",
+		},
+		"an invalid Pod limit": {annotation: "two", timeout: 60, wantErr: "must be a non-negative integer"},
+		"the attempt cannot be saved": {
+			timeout: 60, saveErr: syscall.ENOSPC,
+			wantErr: "save restore attempt record",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			annotations := map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"}
+			if tc.annotation != "" {
+				annotations[podcontract.RestoreRetryLimitAnnotation] = tc.annotation
+			}
+			op, volume := newAttemptOperation(t, annotations)
+			op.controller.config.Restore.TimeoutSeconds = tc.timeout
+			op.controller.nowFn = func() time.Time { return now }
+			if tc.record != nil {
+				volume.put(t, "host-uid", "main", tc.record)
+			}
+			if tc.saveErr != nil {
+				volume.writeErrs[podcontract.RestoreAttemptsFile] = tc.saveErr
 			}
 
-			require.Error(t, h.run(true))
+			got, err := op.startAttempt(context.Background())
 
-			assert.Equal(t, 0, h.restores)
-			assert.WithinDuration(t, time.Now().Add(tc.wantWithin), got, time.Second)
-			if tc.record {
-				assert.True(t, deadline.Equal(got), "the action ends at %s, want the record's %s", got, deadline)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				if tc.saveErr == nil {
+					assert.Empty(t, volume.writes, "a refused attempt was saved")
+				}
+				if tc.record != nil {
+					assert.Equal(t, tc.record, volume.record(t, "host-uid", "main"), "a refused attempt rewrote the record")
+				}
+				return
 			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+			assert.Equal(t, tc.want, volume.record(t, "host-uid", "main"))
+		})
+	}
+}
+
+func TestForgetAttempts(t *testing.T) {
+	for name, tc := range map[string]struct {
+		record    bool
+		removeErr error
+		wantKept  bool
+		wantLog   string
+	}{
+		"a record":         {record: true},
+		"no record":        {},
+		"a failed removal": {record: true, removeErr: syscall.EBUSY, wantKept: true, wantLog: "Failed to remove the restore attempt record after the refusal"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			op, volume := newAttemptOperation(t, nil)
+			var lines []string
+			op.log = funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{})
+			if tc.record {
+				volume.put(t, "host-uid", "main", restoreAttempts{Limit: 1, Attempt: 1, ContainerID: "ctr-abc"})
+			}
+			volume.removeErr = tc.removeErr
+
+			op.forgetAttempts(context.Background())
+
+			_, kept := volume.files["host-uid/main/"+podcontract.RestoreAttemptsFile]
+			assert.Equal(t, tc.wantKept, kept)
+			if tc.wantLog == "" {
+				assert.Empty(t, lines)
+				return
+			}
+			require.Len(t, lines, 1)
+			assert.Contains(t, lines[0], tc.wantLog)
+		})
+	}
+}
+
+func TestNodePodUID(t *testing.T) {
+	for name, tc := range map[string]struct {
+		runtime *fakeRuntime
+		want    string
+	}{
+		"the runtime names the Pod on the node": {runtime: &fakeRuntime{podUID: "host-uid"}, want: "host-uid"},
+		"the runtime cannot name it":            {runtime: &fakeRuntime{}, want: "restore-pod-uid"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			op, _ := newAttemptOperation(t, nil)
+			op.controller.runtime = tc.runtime
+
+			assert.Equal(t, tc.want, op.nodePodUID(context.Background()))
 		})
 	}
 }

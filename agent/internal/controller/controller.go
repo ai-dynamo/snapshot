@@ -865,13 +865,14 @@ func (w *NodeController) resolveBoundRestoreArtifact(
 // Pod status; they report one result each and this coordinator publishes the
 // aggregate outcome.
 func (w *NodeController) restorePodContainers(ctx context.Context, pod *corev1.Pod, plan *restorePlan, podKey string) bool {
-	// Read the incoming state before persisting this pass. On agent restart,
-	// RestoreInProgress makes each worker check its completion sentinel before
+	// Read the incoming state before persisting this pass. RestoreInProgress
+	// means an earlier pass started the restore: the agent restarted during it,
+	// or a retry is due. Each worker then checks its completion sentinel before
 	// considering a CRIU replay.
-	recovering := restoreInProgress(pod)
+	restoreStarted := restoreInProgress(pod)
 	// Every Pod update starts a pass, so a pass that only waits must leave the
 	// condition as the last one wrote it.
-	if !recovering {
+	if !restoreStarted {
 		message := fmt.Sprintf("Restoring %d destination container(s) from PodSnapshot %s", len(plan.mappings), plan.artifact.SnapshotName)
 		if err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonInProgress, message); err != nil {
 			emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreStatusUpdateFailedReason, err.Error())
@@ -889,7 +890,7 @@ func (w *NodeController) restorePodContainers(ctx context.Context, pod *corev1.P
 			results[i] = restoreResult{destination: destination, state: restoreResultFailed,
 				reason: "agent panicked restoring this container"}
 			defer recoverPanic(w.log, "restore destination", nil, "pod", podKey, "destination", destination)
-			results[i] = w.restoreDestination(ctx, pod, plan, destination, podKey, recovering)
+			results[i] = w.restoreDestination(ctx, pod, plan, destination, podKey, restoreStarted)
 		})
 	}
 	workers.Wait()
@@ -1039,13 +1040,13 @@ func (w *NodeController) restoreDestination(
 	pod *corev1.Pod,
 	plan *restorePlan,
 	destination, podKey string,
-	recovering bool,
+	restoreStarted bool,
 ) restoreResult {
 	key := restoreContainerKey(pod.UID, destination)
 	if finished, ok := w.finishedRestoreDestinations.Load(key); ok {
 		return finished.(restoreResult)
 	}
-	result := w.restoreDestinationOnce(ctx, pod, plan, destination, podKey, recovering)
+	result := w.restoreDestinationOnce(ctx, pod, plan, destination, podKey, restoreStarted)
 	if result.state != restoreResultPending {
 		w.finishedRestoreDestinations.Store(key, result)
 	}
@@ -1057,7 +1058,7 @@ func (w *NodeController) restoreDestinationOnce(
 	pod *corev1.Pod,
 	plan *restorePlan,
 	destination, podKey string,
-	recovering bool,
+	restoreStarted bool,
 ) restoreResult {
 	artifact := plan.artifact
 	result := restoreResult{destination: destination, state: restoreResultPending}
@@ -1069,7 +1070,7 @@ func (w *NodeController) restoreDestinationOnce(
 	startedAt := time.Now()
 	log := w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "destination", destination)
 
-	if err := w.runRestore(ctx, pod, plan, destination, containerID, startedAt, recovering); err != nil {
+	if err := w.runRestore(ctx, pod, plan, destination, containerID, startedAt, restoreStarted); err != nil {
 		if errors.Is(err, errRestoreInterrupted) || errors.Is(err, errRetryScheduled) {
 			// Not an outcome: a later pass, or the next agent, carries it on.
 			return result
@@ -1159,13 +1160,13 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
 //     same deadline. The restore preflight already checked its settings;
 //     nothing checks its file before step 2, so the release is not delayed.
 //     A failure here also fails the restore and kills the container.
-func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *restorePlan, destination, containerID string, startedAt time.Time, recovering bool) (retErr error) {
+func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *restorePlan, destination, containerID string, startedAt time.Time, restoreStarted bool) (retErr error) {
 	op := w.newRestoreOperation(pod, plan, destination, containerID, startedAt)
 	// Without this the placeholder keeps waiting for a restore that panicked.
 	defer recoverPanic(op.log, "restore", func(err error) {
 		retErr = op.failRestore(ctx, err)
 	}, "destination", destination)
-	if recovering {
+	if restoreStarted {
 		completed, err := op.recoverCompletedRestore(ctx)
 		if err != nil {
 			return err
@@ -1227,25 +1228,14 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 // after restore-complete: only the post-restore action can be left, and CRIU
 // must never run again. This pass's preflight already checked its settings.
 //
-// The action keeps the deadline in the attempt record. A restore that an
-// agent without the record started gets a full config.restore.timeoutSeconds.
+// The interrupted run's deadline is gone with it, so the action gets a full
+// config.restore.timeoutSeconds again: a restart can extend it by one timeout.
 func (op *restoreOperation) recoverPostRestore(ctx context.Context) error {
 	postCtx := ctx
-	record, found, err := op.readRestoreAttempts(op.nodePodUID(ctx))
-	if err != nil {
-		op.log.Error(err, "Ignoring the attempt record; the post-restore action gets a full restore timeout")
-	}
-	switch {
-	case found && !record.Deadline.IsZero():
+	if timeout := op.controller.config.Restore.RestoreTimeout(); timeout > 0 {
 		var cancel context.CancelFunc
-		postCtx, cancel = context.WithDeadline(ctx, record.Deadline)
+		postCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
-	case !found:
-		if timeout := op.controller.config.Restore.RestoreTimeout(); timeout > 0 {
-			var cancel context.CancelFunc
-			postCtx, cancel = context.WithTimeout(ctx, timeout)
-			defer cancel()
-		}
 	}
 	if err := op.notifyPostRestore(postCtx); err != nil {
 		return op.failPostRestore(ctx, err)
