@@ -5,11 +5,13 @@ package agentauth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ai-dynamo/snapshot/coordinator/server"
@@ -111,9 +113,40 @@ func getJSON(ctx context.Context, client *http.Client, url string, v any) error 
 	return nil
 }
 
-// verify checks the token's signature, issuer, audience, and lifetime, and
-// that it is bound to a Pod and the Pod's node, and returns what it says.
+// allowedHeader holds the JWS header parameters a token may carry. The API
+// server sets only alg and kid. Any other, such as jwk, x5c or crit, only
+// gives the JOSE parser more work, on a path any client reaches without
+// credentials.
+var allowedHeader = map[string]bool{"alg": true, "kid": true, "typ": true}
+
+// checkHeader refuses a token whose protected header holds a parameter
+// allowedHeader does not. It reads the header with the standard library, so
+// that such a token never reaches the JOSE parser.
+func checkHeader(token string) error {
+	encoded, _, _ := strings.Cut(token, ".")
+	raw, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return errors.New("the token's header is not base64url")
+	}
+	var header map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &header); err != nil {
+		return errors.New("the token's header is not a JSON object")
+	}
+	for name := range header {
+		if !allowedHeader[name] {
+			return errors.New("the token's header holds a parameter other than alg, kid and typ")
+		}
+	}
+	return nil
+}
+
+// verify checks the token's header, signature, issuer, audience, and
+// lifetime, and that it is bound to a Pod and the Pod's node, and returns what
+// it says.
 func (a *Authorizer) verify(ctx context.Context, token string) (identity, error) {
+	if err := checkHeader(token); err != nil {
+		return identity{}, fmt.Errorf("%w: %v", server.ErrUnauthenticated, err)
+	}
 	t, err := a.verifier.Verify(ctx, token)
 	switch {
 	case err != nil && ctx.Err() != nil:

@@ -218,7 +218,7 @@ func (is *issuer) sign(t *testing.T, id string, c tokenClaims) string {
 	if !ok {
 		return forge(t, id, c)
 	}
-	return signWith(t, k, id, c)
+	return signWith(t, k, id, c, nil)
 }
 
 // forge signs c with a new key, which no issuer publishes, under the key ID
@@ -227,14 +227,18 @@ func forge(t *testing.T, id string, c tokenClaims) string {
 	t.Helper()
 	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
-	return signWith(t, k, id, c)
+	return signWith(t, k, id, c, nil)
 }
 
-// signWith signs c with k, under the key ID id.
-func signWith(t *testing.T, k *ecdsa.PrivateKey, id string, c tokenClaims) string {
+// signWith signs c with k, under the key ID id, with the header opts sets,
+// if any, as well.
+func signWith(t *testing.T, k *ecdsa.PrivateKey, id string, c tokenClaims, opts *jose.SignerOptions) string {
 	t.Helper()
+	if opts == nil {
+		opts = &jose.SignerOptions{}
+	}
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: jose.JSONWebKey{Key: k, KeyID: id}},
-		(&jose.SignerOptions{}).WithType("JWT"))
+		opts.WithType("JWT"))
 	require.NoError(t, err)
 	token, err := jwt.Signed(signer).Claims(map[string]any(c)).Serialize()
 	require.NoError(t, err)
@@ -386,6 +390,16 @@ func (h *harness) token(modify ...func(tokenClaims)) string {
 		m(c)
 	}
 	return h.issuer.sign(h.t, "key-0", c)
+}
+
+// tokenWithHeader returns a valid token of the agents' ServiceAccount, signed
+// with the issuer's key, whose header also holds what opts sets.
+func (h *harness) tokenWithHeader(opts *jose.SignerOptions) string {
+	h.t.Helper()
+	h.issuer.mu.Lock()
+	k := h.issuer.keys["key-0"]
+	h.issuer.mu.Unlock()
+	return signWith(h.t, k, "key-0", h.issuer.claims(h.clock.Now()), opts)
 }
 
 // signedWith returns a valid token of the agents' ServiceAccount, signed with

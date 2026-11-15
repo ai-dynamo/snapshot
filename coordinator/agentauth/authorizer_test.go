@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -171,6 +172,72 @@ func TestAuthorizeRefusesTokensThatDoNotVerify(t *testing.T) {
 // set returns a modifier that sets the claim name to value.
 func set(name string, value any) func(tokenClaims) {
 	return func(c tokenClaims) { c[name] = value }
+}
+
+func TestAuthorizeRefusesUnexpectedHeaders(t *testing.T) {
+	for name, opts := range map[string]*jose.SignerOptions{
+		"jwk":  {EmbedJWK: true},
+		"x5c":  (&jose.SignerOptions{}).WithHeader("x5c", []string{"bm90LWEtY2VydGlmaWNhdGU="}),
+		"crit": (&jose.SignerOptions{}).WithHeader("crit", []string{"exp"}).WithHeader("exp", 0),
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			err := h.authorize(member, h.tokenWithHeader(opts))
+			require.ErrorIs(t, err, server.ErrUnauthenticated)
+			assert.ErrorContains(t, err, "the token's header holds a parameter other than alg, kid and typ")
+			assert.Zero(t, h.placement.asked.Load(), "asked where the members run")
+		})
+	}
+	t.Run("alg, kid and typ", func(t *testing.T) {
+		h := newHarness(t)
+		require.NoError(t, h.authorize(member, h.token()))
+	})
+}
+
+// GHSA-mgcc-cww5-fp2q: go-jose up to v4.1.5 spent seconds validating an
+// RSA key with a huge prime, which a token's jwk header can carry, before any
+// other check. Both the header check and go-jose itself refuse it at once.
+func TestAuthorizeRefusesAHugeKeyInTheHeaderQuickly(t *testing.T) {
+	h := newHarness(t)
+	token := hugeKeyToken(t)
+	for name, refuse := range map[string]func() error{
+		"Authorize": func() error { return h.authorize(member, token) },
+		"the verifier, past the header check": func() error {
+			_, err := h.auth.verifier.Verify(t.Context(), token)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			start := time.Now()
+			require.Error(t, refuse())
+			assert.Less(t, time.Since(start), 100*time.Millisecond)
+		})
+	}
+}
+
+// hugeKeyToken returns a token whose header carries, as its jwk, an RSA
+// private key with a 16,384-bit prime, built as the advisory's proof of
+// concept builds it. Its algorithm is the issuer's, so that go-jose parses the
+// key.
+func hugeKeyToken(t *testing.T) string {
+	t.Helper()
+	p := new(big.Int).Lsh(big.NewInt(1), 16384-1)
+	p.SetBit(p, 0, 1)
+	n := new(big.Int).Lsh(big.NewInt(1), 2048)
+	enc := base64.RawURLEncoding.EncodeToString
+	header, err := json.Marshal(map[string]any{
+		"alg": "ES256",
+		"jwk": map[string]string{
+			"kty": "RSA",
+			"n":   enc(n.Bytes()),
+			"e":   enc(big.NewInt(65537).Bytes()),
+			"d":   enc(big.NewInt(3).Bytes()),
+			"p":   enc(p.Bytes()),
+			"q":   enc(big.NewInt(3).Bytes()),
+		},
+	})
+	require.NoError(t, err)
+	return enc(header) + "." + enc([]byte("{}")) + "." + enc([]byte("not-a-real-signature"))
 }
 
 // unsigned returns a token with the claims c and no signature.
