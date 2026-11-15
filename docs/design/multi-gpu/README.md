@@ -321,7 +321,8 @@ sequenceDiagram
 
 The shim gives each tracked allocation a random 128-bit ID and pairs it with the creator's PID in the container's PID namespace.
 This allocation reference remains stable across checkpoint and restore.
-Exporting an imported allocation again preserves this reference.
+A legacy IPC handle for an imported allocation preserves this reference.
+Like CUDA, `cuMemExportToShareableHandle` refuses an imported allocation or multicast object.
 The [appendix](#handle-and-state-formats) specifies the handle encodings.
 
 A reply to a unicast export request includes the full backing size and the CUDA location where the creator allocated it.
