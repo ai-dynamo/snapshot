@@ -27,6 +27,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 )
 
 func TestIssuer(t *testing.T) {
@@ -48,6 +50,9 @@ func TestIssuer(t *testing.T) {
 		assert.Equal(t, []string{corev1.TLSCertKey, corev1.TLSPrivateKeyKey}, slices.Sorted(maps.Keys(got.serving.Data)))
 		assert.Equal(t, []string{bundleKey}, slices.Sorted(maps.Keys(got.bundle.Data)))
 		assert.Empty(t, got.bundle.BinaryData)
+		for _, obj := range got.objects() {
+			assert.Equal(t, managedLabels, obj.GetLabels(), obj.GetName())
+		}
 
 		assert.Equal(t, serials(got.caCert(t)), serials(got.bundleCerts(t)...))
 		f.requireServes(got, got.caCert(t))
@@ -68,6 +73,24 @@ func TestIssuer(t *testing.T) {
 
 		f.requireWrites(f.ensure())
 		assert.Equal(t, before.resourceVersions(), f.read().resourceVersions())
+	})
+
+	t.Run("labels on update", func(t *testing.T) {
+		f := newFixture(t, cl)
+		f.ensure()
+		before := f.read()
+		for _, obj := range before.objects() {
+			obj.SetLabels(map[string]string{"other": "kept"})
+			require.NoError(t, cl.Update(t.Context(), obj))
+		}
+		f.clock.SetTime(before.caCert(t).NotAfter.Add(-renewalWindow).Add(time.Second))
+
+		f.requireWrites(f.ensure(), f.cfg.CASecret, f.cfg.CABundle, f.cfg.TLSSecret)
+		want := maps.Clone(managedLabels)
+		want["other"] = "kept"
+		for _, obj := range f.read().objects() {
+			assert.Equal(t, want, obj.GetLabels(), obj.GetName())
+		}
 	})
 
 	t.Run("renewal of the serving certificate", func(t *testing.T) {
@@ -355,6 +378,9 @@ func TestIssuer(t *testing.T) {
 // are.
 var start = time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
 
+// managedLabels are the labels each write sets.
+var managedLabels = map[string]string{operatortypes.ManagedByLabel: operatortypes.ManagedByOperator}
+
 // fixture is an Issuer's configuration in a namespace of its own.
 type fixture struct {
 	t     *testing.T
@@ -417,6 +443,10 @@ func (f *fixture) tryRead(t require.TestingT) (state, bool) {
 		}
 	}
 	return s, true
+}
+
+func (s state) objects() []client.Object {
+	return []client.Object{s.ca, s.bundle, s.serving}
 }
 
 func (s state) resourceVersions() []string {

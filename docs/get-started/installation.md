@@ -185,3 +185,19 @@ stored snapshots, delete the claim yourself:
 ```bash
 kubectl delete pvc <pvc-name> --namespace snapshot
 ```
+
+The operator writes some resources itself, and `helm uninstall` leaves them in
+the release namespace:
+
+- With S3 storage, the ConfigMap that holds PageBroker's S3 configuration.
+- When the operator issues the pod group coordinator's TLS certificate, three
+  resources: the CA Secret, which holds the CA's private key; the serving
+  Secret; and the trust bundle ConfigMap.
+
+Each carries the label `app.kubernetes.io/managed-by=snapshot-operator`. Once
+the operator's pod is gone, delete them:
+
+```bash
+kubectl delete secrets,configmaps --namespace snapshot \
+  --selector app.kubernetes.io/managed-by=snapshot-operator
+```
