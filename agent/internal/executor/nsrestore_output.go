@@ -58,8 +58,7 @@ func (o *nsrestoreOutput) parseResult() (RestoreInNamespaceResult, error) {
 func (o *nsrestoreOutput) result() (*RestoreInNamespaceResult, error) {
 	result, err := o.parseResult()
 	if err != nil {
-		_, other := o.stdoutLines()
-		return nil, fmt.Errorf("failed to parse nsrestore result: %w\nstdout: %s", err, strings.Join(other, "\n"))
+		return nil, fmt.Errorf("failed to parse nsrestore result: %w\nstdout: %s", err, o.Stdout())
 	}
 	if result.RestoredPID <= 0 {
 		return nil, fmt.Errorf("nsrestore returned invalid PID %d", result.RestoredPID)
@@ -170,8 +169,7 @@ func (o *nsrestoreOutput) detail() string {
 	if line == "" {
 		line = lastErrorLogLine(o.Stderr())
 	}
-	_, other := o.stdoutLines()
-	return snapshotruntime.JoinDetail(line, strings.Join(other, "\n"))
+	return o.DetailFrom(line)
 }
 
 // lastErrorLogLine reads zap's console encoding, which the agent and

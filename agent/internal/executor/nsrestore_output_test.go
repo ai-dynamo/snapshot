@@ -164,19 +164,13 @@ func TestNSRestoreOutputFailure(t *testing.T) {
 			name:   "killed right after the progress message",
 			stdout: changingContainerLine,
 			runErr: exitStatusError(t, "kill -KILL $$"),
-			want:   "nsrestore was killed (signal: killed)",
+			want:   `nsrestore was killed (signal: killed): stdout: {"changingContainer":true}`,
 		},
 		{
-			name:   "progress message is not quoted as stdout",
-			stdout: changingContainerLine,
-			runErr: exitStatusError(t, "exit 1"),
-			want:   "nsrestore exited with status 1 without reporting a cause",
-		},
-		{
-			name:   "other stdout is quoted without the progress message",
+			name:   "progress message is quoted with the rest of stdout",
 			stdout: changingContainerLine + "panic: boom\n",
 			runErr: exitStatusError(t, "exit 1"),
-			want:   "nsrestore exited with status 1 without reporting a cause: stdout: panic: boom",
+			want:   "nsrestore exited with status 1 without reporting a cause: stdout: {\"changingContainer\":true}\npanic: boom",
 		},
 		{
 			name:   "reported cause is the last line",
@@ -348,7 +342,7 @@ func TestNSRestoreOutputResult(t *testing.T) {
 		t.Fatalf("result(after progress) = %+v, %v", result, err)
 	}
 	_, err = nsrestoreOutputOf(t, changingContainerLine, "").result()
-	if err == nil || strings.Contains(err.Error(), "changingContainer") {
-		t.Fatalf("result(progress only) = %v, want a parse failure that does not quote the progress message", err)
+	if err == nil || !strings.Contains(err.Error(), "failed to parse nsrestore result") {
+		t.Fatalf("result(progress only) = %v, want a parse failure", err)
 	}
 }
