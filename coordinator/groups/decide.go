@@ -57,6 +57,7 @@ const recheck = 5 * time.Second
 //	remove  a is final, and its session has ended or its deadline has passed
 //	cancel  a's deletion has started, and its session is still open
 //	fail    a has a Failed member, and its session is still open
+//	none    a is not ensurable: a restore whose PodGroupSnapshot is gone
 //	ensure  node runs a's rank-0 member, member work exists, a is neither
 //	        final nor being deleted, and the coordinator holds no session
 //	none    otherwise
@@ -91,6 +92,8 @@ func decide(a *attempt, node string, h held, now time.Time) (action, time.Durati
 		return cancel, again
 	case a.failure != "" && open:
 		return fail, again
+	case !a.ensurable:
+		return none, again
 	case a.sessionNode == node && a.memberWork && !a.final && !a.deleting && !h.session:
 		if a.failure != "" {
 			return ensure, recheck

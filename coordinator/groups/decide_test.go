@@ -18,7 +18,8 @@ func TestDecide(t *testing.T) {
 	// served returns an unfinished attempt this node serves, whose member work
 	// exists, changed by change.
 	served := func(change func(*attempt)) *attempt {
-		a := &attempt{spec: server.Spec{UID: "uid", Deadline: deadline}, sessionNode: node, memberWork: true}
+		a := &attempt{spec: server.Spec{UID: "uid", Deadline: deadline}, ensurable: true, sessionNode: node,
+			memberWork: true}
 		if change != nil {
 			change(a)
 		}
@@ -27,6 +28,8 @@ func TestDecide(t *testing.T) {
 	final := func(a *attempt) { a.final = true }
 	deleting := func(a *attempt) { a.deleting = true }
 	failed := func(a *attempt) { a.failure = "PodIPChanged" }
+	// unranked is a restore whose PodGroupSnapshot is gone.
+	unranked := func(a *attempt) { a.ensurable = false }
 	both := func(changes ...func(*attempt)) func(*attempt) {
 		return func(a *attempt) {
 			for _, change := range changes {
@@ -84,6 +87,15 @@ func TestDecide(t *testing.T) {
 		{"a member failed and final, its session open", served(both(failed, final)), open, now, fail, recheck},
 		{"a member failed and final, its session ended", served(both(failed, final)), ended, now, remove, 0},
 		{"a member failed and deleting, its session open", served(both(failed, deleting)), open, now, cancel, 0},
+
+		{"not ensurable, served here, member work", served(unranked), notHeld, now, none, 0},
+		{"not ensurable, its session open", served(unranked), open, now, none, 0},
+		{"not ensurable and final, its session open", served(both(unranked, final)), open, now, none, recheck},
+		{"not ensurable and final, its session ended", served(both(unranked, final)), ended, now, remove, 0},
+		{"not ensurable and final, its session open past its deadline", served(both(unranked, final)), open,
+			deadline.Add(time.Second), remove, 0},
+		{"not ensurable and deleting, its session open", served(both(unranked, deleting)), open, now, cancel, 0},
+		{"not ensurable, a member failed, its session open", served(both(unranked, failed)), open, now, fail, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

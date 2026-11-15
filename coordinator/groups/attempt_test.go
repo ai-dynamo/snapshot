@@ -71,6 +71,7 @@ func TestCaptureAttempt(t *testing.T) {
 		assert.Equal(t, map[string]string{"a": "node-a", "b": "node-b", "c": ""}, a.nodes,
 			"a member with no status yet has no node")
 		assert.Equal(t, "node-b", a.sessionNode)
+		assert.True(t, a.ensurable)
 		assert.False(t, a.memberWork)
 		assert.False(t, a.final)
 		assert.False(t, a.deleting)
@@ -169,29 +170,53 @@ func TestRestoreAttempt(t *testing.T) {
 		assert.Equal(t, map[string]string{"a": "node-a", "b": "node-b", "c": ""}, a.nodes,
 			"a member not pinned yet has no node")
 		assert.Equal(t, "node-b", a.sessionNode)
+		assert.True(t, a.ensurable)
 		assert.False(t, a.memberWork)
 		assert.False(t, a.final)
 		assert.False(t, a.deleting)
 	})
 
 	t.Run("no attempt", func(t *testing.T) {
-		recreated := newSnapshot("recreated-uid", "b", "a", "c")
-		for name, tt := range map[string]struct {
-			restore  *v1alpha1.PodGroupRestore
-			snapshot *v1alpha1.PodGroupSnapshot
-		}{
-			"the PodGroupSnapshot is missing":    {newRestore(snapshot, "a", "b", "c"), nil},
-			"the PodGroupSnapshot was recreated": {newRestore(snapshot, "a", "b", "c"), recreated},
-			"a member has no target":             {newRestore(snapshot, "a", "b"), snapshot},
-			"a target is no member":              {newRestore(snapshot, "a", "b", "d"), snapshot},
-			"a target too many":                  {newRestore(snapshot, "a", "b", "c", "d"), snapshot},
+		for name, r := range map[string]*v1alpha1.PodGroupRestore{
+			"a member has no target": newRestore(snapshot, "a", "b"),
+			"a target is no member":  newRestore(snapshot, "a", "b", "d"),
+			"a target too many":      newRestore(snapshot, "a", "b", "c", "d"),
 		} {
 			t.Run(name, func(t *testing.T) {
-				_, ok := restoreAttempt(tt.restore, tt.snapshot)
+				_, ok := restoreAttempt(r, snapshot)
 				assert.False(t, ok)
 			})
 		}
 	})
+
+	recreated := newSnapshot("recreated-uid", "b", "a", "c")
+	for name, gone := range map[string]*v1alpha1.PodGroupSnapshot{
+		"the PodGroupSnapshot is missing":    nil,
+		"the PodGroupSnapshot was recreated": recreated,
+	} {
+		t.Run(name+": the attempt is read from the restore alone", func(t *testing.T) {
+			r := newRestore(snapshot, "c", "a", "b")
+			r.DeletionTimestamp = &now
+			r.Status.Members = []v1alpha1.PodGroupRestoreMemberStatus{
+				{ID: "a", NodeName: "node-a", Phase: v1alpha1.RestorePhaseFailed, Reason: "TargetPodDeleted",
+					Pod: &v1alpha1.ObjectIdentity{Name: "a", UID: "pod-a"}},
+				{ID: "b", NodeName: "node-b", Phase: v1alpha1.RestorePhaseReleased},
+				{ID: "c", NodeName: "node-c", Phase: v1alpha1.RestorePhaseFailed, Reason: "PodIPChanged"},
+			}
+			a, ok := restoreAttempt(r, gone)
+			require.True(t, ok)
+			assert.False(t, a.ensurable)
+			assert.Equal(t, types.UID("restore-uid"), a.spec.UID)
+			assert.Empty(t, a.spec.Members, "the ranks are not known")
+			assert.Equal(t, created.Add(5*time.Minute), a.spec.Deadline)
+			assert.Equal(t, map[string]string{"a": "node-a", "b": "node-b", "c": "node-c"}, a.nodes)
+			assert.Empty(t, a.sessionNode)
+			assert.True(t, a.memberWork)
+			assert.True(t, a.final)
+			assert.True(t, a.deleting)
+			assert.Equal(t, "PodIPChanged", a.failure, "c comes first in spec.targets")
+		})
+	}
 
 	t.Run("member work exists once the members are pinned", func(t *testing.T) {
 		r := newRestore(snapshot, "a", "b", "c")

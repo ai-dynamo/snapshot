@@ -475,8 +475,9 @@ func TestRestoreAndSnapshotOrder(t *testing.T) {
 			err := h.cache.Get(context.Background(), client.ObjectKeyFromObject(r), &cached)
 			return err == nil && len(cached.Status.Members) > 0 && cached.Status.Members[0].Pod != nil
 		}, timeout, 10*time.Millisecond, "the host's cache must show the pinned restore")
-		_, err := h.attempts.get(context.Background(), r.UID)
-		require.ErrorIs(t, err, session.ErrNotFound, "the host's cache must hide the snapshot")
+		a, err := h.attempts.get(context.Background(), r.UID)
+		require.NoError(t, err)
+		require.False(t, a.ensurable, "the host's cache must hide the snapshot")
 		h.requireNotHeld(t, r.UID)
 
 		showSnapshot(t, snapshot)
@@ -657,6 +658,39 @@ func TestFinal(t *testing.T) {
 		h.clock.SetTime(g.CreationTimestamp.Add(time.Duration(g.Spec.DeadlineSeconds) * time.Second))
 		h.awaitHeld(t, g.UID, false)
 	})
+}
+
+// TestSnapshotDeletedUnderRestore covers a released restore whose
+// PodGroupSnapshot is deleted, which the in-use finalizer allows once the
+// restore is finished. The released members may still rendezvous through the
+// session, so it stays, with its members' nodes, until it ends.
+func TestSnapshotDeletedUnderRestore(t *testing.T) {
+	names := nodes(t, 1)
+	h := startHost(t, names[0], coordinatortest.Start(t))
+	ctx := within(t)
+	snapshot := readySnapshot(t, []string{"a", "b"})
+	r := createRestore(t, snapshot, []member{{"a", names[0]}, {"b", names[0]}})
+	h.awaitHeld(t, r.UID, true)
+	a, b := h.connect(t, r.UID, "a"), h.connect(t, r.UID, "b")
+	for i := range r.Status.Members {
+		r.Status.Members[i].Phase = v1alpha1.RestorePhaseReleased
+	}
+	require.NoError(t, k8s.Status().Update(ctx, r))
+	require.NoError(t, k8s.Delete(ctx, snapshot))
+	h.awaitSeen(t, r.UID, func(a *attempt) bool { return a.final && !a.ensurable })
+	h.requireNotEnded(t, r.UID)
+	nodes, err := h.attempts.MemberNodes(ctx, r.UID)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"a": names[0], "b": names[0]}, nodes)
+
+	require.NoError(t, a.Library().Insert(ctx, "nccl-id", []byte("id")))
+	value, err := b.Library().Get(ctx, "nccl-id", time.Second)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("id"), value, "the released members rendezvous through the session")
+	for _, s := range []coordinator.Session{a, b} {
+		require.NoError(t, s.Leave(ctx))
+	}
+	h.awaitHeld(t, r.UID, false)
 }
 
 // requireNotEnded fails the test unless h's coordinator still holds the open

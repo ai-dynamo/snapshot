@@ -76,9 +76,10 @@ func enqueue[T client.Object](kind string) handler.TypedEventHandler[T, request]
 // snapshotRequests maps every event of a PodGroupSnapshot to its own request
 // and to the request of each PodGroupRestore that reads it, by UID. A
 // restore's attempt reads its PodGroupSnapshot, and the cache may show the
-// restore first, whose reconcile then finds no attempt: the snapshot's event
-// reconciles it again. When the restores cannot be listed, the event maps to
-// the snapshot's own request alone, and the failure is logged.
+// restore first, whose reconcile then finds an attempt it cannot ensure: the
+// snapshot's event reconciles it again. When the restores cannot be listed,
+// the event maps to the snapshot's own request alone, and the failure is
+// logged.
 func snapshotRequests(reader client.Reader, log logr.Logger) handler.TypedMapFunc[*v1alpha1.PodGroupSnapshot, request] {
 	return func(ctx context.Context, snapshot *v1alpha1.PodGroupSnapshot) []request {
 		reqs := []request{requestFor(snapshotKind, snapshot)}
