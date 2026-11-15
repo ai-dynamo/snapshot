@@ -408,7 +408,7 @@ func TestCancel(t *testing.T) {
 		require.NoError(t, members[0].arrive(ctx, session.BarrierAdmitted))
 		require.NoError(t, members[1].arrive(ctx, "other"), "another barrier does not count")
 		require.NoError(t, members[2].arrive(ctx, session.BarrierAdmitted))
-		require.NoError(t, members[2].snapshot.Delete(ctx, session.BarrierKey(session.BarrierAdmitted, members[2].id)),
+		require.NoError(t, members[2].control.Delete(ctx, session.BarrierKey(session.BarrierAdmitted, members[2].id)),
 			"an arrival deleted does not count")
 		require.NoError(t, h.srv.Cancel(ctx, spec.UID))
 		for _, m := range members {
@@ -429,7 +429,7 @@ func TestCancel(t *testing.T) {
 		require.NoError(t, h.srv.Cancel(ctx, spec.UID))
 		_, ok := h.ended(spec)
 		assert.False(t, ok)
-		assert.Equal(t, []string{"opened " + string(spec.UID)}, h.observer.of(spec.UID))
+		assert.Equal(t, []string{"opened"}, h.events(spec))
 	})
 
 	t.Run("a session that ended keeps its end", func(t *testing.T) {
@@ -465,7 +465,7 @@ func TestEnded(t *testing.T) {
 		requireEnded(t, spec.UID, false, false)
 		require.NoError(t, h.srv.Ensure(ctx, spec))
 		requireEnded(t, spec.UID, false, true)
-		require.NoError(t, h.srv.Fail(ctx, spec.UID, "Refused"))
+		require.NoError(t, h.srv.Cancel(ctx, spec.UID))
 		requireEnded(t, spec.UID, true, true)
 		require.NoError(t, h.srv.Remove(ctx, spec.UID))
 		requireEnded(t, spec.UID, false, false)

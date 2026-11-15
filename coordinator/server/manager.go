@@ -545,7 +545,7 @@ func (s *Server) Cancel(ctx context.Context, uid types.UID) error {
 // so it takes none of the consumers the bucket's members share.
 func (s *Server) committed(ctx context.Context, a *attempt) (bool, error) {
 	for _, m := range a.members {
-		_, err := a.snapshot.Get(ctx, session.BarrierKey(session.BarrierAdmitted, m.ID))
+		_, err := a.control.Get(ctx, session.BarrierKey(session.BarrierAdmitted, m.ID))
 		switch {
 		case errors.Is(err, jetstream.ErrKeyNotFound):
 			return false, nil
