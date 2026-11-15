@@ -70,7 +70,7 @@ func TestEnsure(t *testing.T) {
 			// Sessions never reach the disk.
 			assert.Equal(t, jetstream.MemoryStorage, stream.CachedInfo().Config.Storage, "bucket %s", bucket)
 		}
-		assert.Equal(t, []string{"opened " + string(spec.UID)}, h.observer.of(spec.UID))
+		assert.Equal(t, []string{"opened"}, h.events(spec))
 	})
 
 	t.Run("ensuring the same spec again does nothing", func(t *testing.T) {
@@ -81,7 +81,7 @@ func TestEnsure(t *testing.T) {
 		reordered.Members = []session.Member{spec.Members[1], spec.Members[0]}
 		require.NoError(t, h.srv.Ensure(within(t), reordered))
 		assert.Equal(t, epoch, h.srv.lookup(spec.UID).epoch)
-		assert.Len(t, h.observer.of(spec.UID), 1)
+		assert.Len(t, h.events(spec), 1)
 	})
 
 	t.Run("a different spec is refused", func(t *testing.T) {
@@ -156,9 +156,8 @@ func TestEndAtTheMemoryCap(t *testing.T) {
 			require.NoError(t, m.leave(within(t)))
 		}
 		endsSoon(t, members[0], session.ErrClosed)
-		require.Eventually(t, func() bool { return len(h.observer.of(spec.UID)) == 2 }, 5*time.Second,
-			5*time.Millisecond)
-		assert.Equal(t, "closed "+string(spec.UID), h.observer.of(spec.UID)[1])
+		require.Eventually(t, func() bool { return len(h.events(spec)) == 2 }, 5*time.Second, 5*time.Millisecond)
+		assert.Equal(t, "closed", h.events(spec)[1])
 	})
 
 	t.Run("a member fails the session", func(t *testing.T) {
@@ -346,7 +345,7 @@ func endsSoon(t *testing.T, m *member, want error) {
 
 // TestInvalidReason covers a member that writes the ended key with bytes that
 // are no condition reason: the session fails with InvalidReason, and the bytes
-// reach neither the Observer nor the log.
+// reach the log by their size only.
 func TestInvalidReason(t *testing.T) {
 	h := newHarness(t)
 	ctx := within(t)
@@ -361,9 +360,8 @@ func TestInvalidReason(t *testing.T) {
 	require.NoError(t, err)
 
 	require.ErrorIs(t, awaitEnd(t, m), &session.AbortError{Reason: session.ReasonInvalid})
-	require.Eventually(t, func() bool { return len(h.observer.of(spec.UID)) == 2 }, 5*time.Second,
-		5*time.Millisecond)
-	assert.Equal(t, "failed "+string(spec.UID)+" "+session.ReasonInvalid, h.observer.of(spec.UID)[1])
+	require.Eventually(t, func() bool { return len(h.events(spec)) == 2 }, 5*time.Second, 5*time.Millisecond)
+	assert.Equal(t, "failed "+session.ReasonInvalid, h.events(spec)[1])
 	for _, line := range h.logs.all() {
 		assert.NotContains(t, line, "secret")
 	}
@@ -380,11 +378,9 @@ func TestRemove(t *testing.T) {
 		h := h.sub(t)
 		spec := h.ensure(2)
 		require.NoError(t, h.srv.Remove(ctx, spec.UID))
-		require.Eventually(t, func() bool { return len(h.observer.of(spec.UID)) == 2 }, 5*time.Second,
-			5*time.Millisecond)
-		assert.Equal(t, "failed "+string(spec.UID)+" "+session.ReasonCancelled, h.observer.of(spec.UID)[1])
-		for _, bucket := range []string{session.SnapshotBucket(string(spec.UID)),
-			session.LibraryBucket(string(spec.UID))} {
+		require.Eventually(t, func() bool { return len(h.events(spec)) == 2 }, 5*time.Second, 5*time.Millisecond)
+		assert.Equal(t, "failed "+session.ReasonCancelled, h.events(spec)[1])
+		for _, bucket := range session.Buckets(string(spec.UID)) {
 			_, err := h.srv.js.KeyValue(ctx, bucket)
 			require.ErrorIs(t, err, jetstream.ErrBucketNotFound)
 		}

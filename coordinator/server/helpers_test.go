@@ -18,6 +18,7 @@ import (
 
 	"github.com/ai-dynamo/snapshot/coordinator/internal/testcert"
 	"github.com/ai-dynamo/snapshot/coordinator/internal/testclock"
+	"github.com/ai-dynamo/snapshot/coordinator/internal/testlog"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
@@ -33,16 +34,15 @@ import (
 const agentToken = "agent-token"
 
 // harness is a coordinator under test, with a fake clock, an Authorizer the
-// test controls, and an Observer that records what it sees.
+// test controls, and the log of what it does.
 type harness struct {
-	t        *testing.T
-	srv      *Server
-	clock    *testclock.Clock
-	auth     *testAuthorizer
-	observer *recorder
-	logs     *logLines
-	ca       *x509.CertPool
-	cfg      Config
+	t     *testing.T
+	srv   *Server
+	clock *testclock.Clock
+	auth  *testAuthorizer
+	logs  *logLines
+	ca    *x509.CertPool
+	cfg   Config
 }
 
 // newHarness starts a coordinator, marks it ready, and checks that the test
@@ -61,12 +61,11 @@ func startHarness(t *testing.T, modify ...func(*Config)) *harness {
 	t.Helper()
 	ca, cert := testcert.New(t)
 	h := &harness{
-		t:        t,
-		clock:    testclock.New(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)),
-		auth:     &testAuthorizer{},
-		observer: &recorder{},
-		logs:     &logLines{},
-		ca:       ca,
+		t:     t,
+		clock: testclock.New(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)),
+		auth:  &testAuthorizer{},
+		logs:  &logLines{},
+		ca:    ca,
 	}
 	h.cfg = Config{
 		Host:       "127.0.0.1",
@@ -74,7 +73,6 @@ func startHarness(t *testing.T, modify ...func(*Config)) *harness {
 		TLS:        &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 		Authorizer: h.auth,
 		Clock:      h.clock,
-		Observer:   h.observer,
 		Log:        h.logs.logger(),
 	}
 	for _, m := range modify {
@@ -399,43 +397,8 @@ func (a *testAuthorizer) fail(err error) {
 	a.err = err
 }
 
-// recorder is an Observer that records what it sees.
-type recorder struct {
-	mu     sync.Mutex
-	events []string
-}
-
-func (r *recorder) record(event string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.events = append(r.events, event)
-}
-
-// SessionOpened implements Observer.
-func (r *recorder) SessionOpened(uid types.UID) { r.record("opened " + string(uid)) }
-
-// SessionClosed implements Observer.
-func (r *recorder) SessionClosed(uid types.UID) { r.record("closed " + string(uid)) }
-
-// SessionFailed implements Observer.
-func (r *recorder) SessionFailed(uid types.UID, reason string) {
-	r.record("failed " + string(uid) + " " + reason)
-}
-
-// of returns what the recorder saw of one attempt.
-func (r *recorder) of(uid types.UID) []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	var events []string
-	for _, e := range r.events {
-		var kind, id string
-		_, _ = fmt.Sscanf(e, "%s %s", &kind, &id)
-		if id == string(uid) {
-			events = append(events, e)
-		}
-	}
-	return events
-}
+// events returns what the coordinator logged of the life of spec's session.
+func (h *harness) events(spec Spec) []string { return testlog.SessionEvents(h.logs.all(), spec.UID) }
 
 // logLines records every log line.
 type logLines struct {

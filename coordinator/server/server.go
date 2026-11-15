@@ -153,9 +153,6 @@ type Config struct {
 	// Clock times deadlines and grace periods. It defaults to the real clock.
 	Clock clock.WithDelayedExecution
 
-	// Observer receives what sessions do. It defaults to reporting nothing.
-	Observer Observer
-
 	// Log receives the server's life, sessions opening and ending, members
 	// refused, disconnected, and failed, and the embedded server's own log. It
 	// is never given a key, a value, a barrier name, or a token. The zero
@@ -186,9 +183,6 @@ func (cfg Config) withDefaults() (Config, error) {
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = clock.RealClock{}
-	}
-	if cfg.Observer == nil {
-		cfg.Observer = nopObserver{}
 	}
 	return cfg, nil
 }

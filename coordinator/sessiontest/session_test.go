@@ -478,7 +478,7 @@ func TestClose(t *testing.T) {
 		t.Fatal("closing must not end the session")
 	default:
 	}
-	assert.Equal(t, []string{"opened"}, h.observer.of(ses.spec.UID), "closing must not end the session")
+	assert.Equal(t, []string{"opened"}, h.events(ses.spec), "closing must not end the session")
 	require.NoError(t, sessions[1].Err())
 	h.clock.Await(t, server.DefaultGrace)
 	h.clock.Step(server.DefaultGrace)

@@ -149,7 +149,6 @@ func (s *Server) Ensure(ctx context.Context, spec Spec) error {
 	s.mu.Lock()
 	s.attempts[spec.UID] = a
 	s.mu.Unlock()
-	s.cfg.Observer.SessionOpened(spec.UID)
 	s.log.Info("Session opened", "attempt", spec.UID, "members", len(a.members))
 
 	remaining := spec.Deadline.Sub(s.cfg.Clock.Now())
@@ -519,26 +518,6 @@ func (s *Server) Remove(ctx context.Context, uid types.UID) error {
 	return nil
 }
 
-// Fail fails the session of an attempt on the coordinator's own authority,
-// with no member asking, as a member's Fail does: the reason must be a valid
-// condition reason, the first reason wins, and Fail returns nil if the session
-// failed with this reason, and how it ended otherwise. It reports session.ErrNotFound
-// for an attempt with no session.
-func (s *Server) Fail(ctx context.Context, uid types.UID, reason string) error {
-	if err := session.ValidateReason(reason); err != nil {
-		return err
-	}
-	a := s.lookup(uid)
-	if a == nil {
-		return fmt.Errorf("attempt %s: %w", uid, session.ErrNotFound)
-	}
-	err := s.endWith(ctx, a, []byte(reason))
-	if errors.Is(err, &session.AbortError{Reason: reason}) {
-		return nil
-	}
-	return err
-}
-
 // tryTimeout bounds each try to record a session's end, and each try to watch
 // a session again.
 const tryTimeout = 5 * time.Second
@@ -636,7 +615,7 @@ func ended(err error) bool {
 }
 
 // end records once how a session ended, from the value of its ended key: it
-// stops the session's deadline and grace timers, and reports the outcome. A
+// stops the session's deadline and grace timers, and logs the outcome. A
 // value that is no condition reason is reported as session.ReasonInvalid, and
 // logged only by its size.
 func (s *Server) end(a *attempt, value []byte) {
@@ -650,11 +629,9 @@ func (s *Server) end(a *attempt, value []byte) {
 	s.mu.Unlock()
 	var abort *session.AbortError
 	if !errors.As(session.EndedError(value), &abort) {
-		s.cfg.Observer.SessionClosed(a.spec.UID)
 		s.log.Info("Session closed", "attempt", a.spec.UID)
 		return
 	}
-	s.cfg.Observer.SessionFailed(a.spec.UID, abort.Reason)
 	log := s.log.WithValues("attempt", a.spec.UID, "reason", abort.Reason)
 	if abort.Reason == session.ReasonInvalid {
 		log = log.WithValues("bytes", len(value))

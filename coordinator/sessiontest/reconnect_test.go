@@ -240,7 +240,7 @@ func TestRemoved(t *testing.T) {
 		ses := h.session(t, 1)
 		require.NoError(t, ses.connect(t, 0).Fail(within(t), "Refused"))
 		require.NoError(t, h.srv.Remove(within(t), ses.spec.UID))
-		assert.Equal(t, []string{"opened", "failed Refused"}, h.observer.of(ses.spec.UID))
+		assert.Equal(t, []string{"opened", "failed Refused"}, h.events(ses.spec))
 	})
 
 	t.Run("with no room left in its control bucket to record its end", func(t *testing.T) {
@@ -260,7 +260,7 @@ func TestRemoved(t *testing.T) {
 
 		start := time.Now()
 		require.NoError(t, h.srv.Remove(ctx, ses.spec.UID))
-		assert.Equal(t, []string{"opened"}, h.observer.of(ses.spec.UID), "the end must not have been recorded")
+		assert.Equal(t, []string{"opened"}, h.events(ses.spec), "the end must not have been recorded")
 		for _, s := range sessions {
 			awaitDone(t, s)
 			require.ErrorIs(t, s.Err(), session.ErrCoordinatorLost)
