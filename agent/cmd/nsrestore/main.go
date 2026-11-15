@@ -58,9 +58,6 @@ func main() {
 		LSMProfile:     *lsmProfile,
 		TargetPodIP:    *targetPodIP,
 		BundleDir:      *bundleDir,
-		ReportProgress: func(progress executor.RestoreInNamespaceProgress) error {
-			return json.NewEncoder(os.Stdout).Encode(progress)
-		},
 	}
 
 	var err error
