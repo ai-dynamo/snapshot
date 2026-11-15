@@ -489,6 +489,7 @@ func TestControlBucketFitsAnHonestSession(t *testing.T) {
 	require.NoError(t, err)
 	info, err := stream.Info(ctx)
 	require.NoError(t, err)
-	assert.Less(t, int64(info.State.Bytes), session.ControlBytes(members), "the session's keys must fit with room to spare")
+	assert.Less(t, int64(info.State.Bytes), session.ControlBytes(members),
+		"the session's keys must fit with room to spare")
 	t.Logf("%d of %d bytes", info.State.Bytes, session.ControlBytes(members))
 }

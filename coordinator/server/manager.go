@@ -118,9 +118,9 @@ func (a *attempt) has(member string) bool {
 // deadline, and starts following the members' departures and the session's
 // end. Ensuring an attempt again with the same spec, whatever order it lists
 // the members in, does nothing; a spec that differs reports session.ErrInvalid,
-// since an attempt's membership and deadline never change. A session whose deadline has already passed is created already
-// failed with session.ReasonDeadlineExceeded, so a member that connects learns
-// why at once.
+// since an attempt's membership and deadline never change. A session whose
+// deadline has already passed is created already failed with
+// session.ReasonDeadlineExceeded, so a member that connects learns why at once.
 //
 // The host ensures an attempt only while its group resource is unfinished.
 // It never ensures one whose resource is final, which would open a session for
