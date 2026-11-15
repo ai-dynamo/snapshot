@@ -286,7 +286,8 @@ The proxy checks for the trigger in every check of the control directory, before
 1. It reads `workload-command`.
 2. It **removes the trigger**. The control directory is a Pod volume that outlives
    a container, so a trigger left behind would cold start the next container
-   without a restore attempt.
+   without a restore attempt. If it cannot remove the trigger, it runs nothing
+   and exits 113.
 3. It calls `exec` on the command, looking the program up in the container's
    `PATH`. The command is PID 1, with the environment and user the Pod spec gives.
 
