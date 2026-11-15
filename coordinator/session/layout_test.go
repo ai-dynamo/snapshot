@@ -40,3 +40,44 @@ func TestValidateName(t *testing.T) {
 		require.ErrorIs(t, ValidateName(name), ErrInvalid, "name %q", name)
 	}
 }
+
+// TestNamespaceBucket checks the one mapping from a namespace to its bucket,
+// and that every bucket name fits a stream name.
+func TestNamespaceBucket(t *testing.T) {
+	assert.Equal(t, SnapshotBucket("a"), NamespaceSnapshot.Bucket("a"))
+	assert.Equal(t, SnapshotBucket("a"), NamespaceCuInterpose.Bucket("a"))
+	assert.Equal(t, LibraryBucket("a"), NamespaceLibrary.Bucket("a"))
+	assert.ElementsMatch(t, []string{ControlBucket("a"), SnapshotBucket("a"), LibraryBucket("a")}, Buckets("a"))
+	for _, bucket := range Buckets(strings.Repeat("u", MaxAttemptLength)) {
+		assert.LessOrEqual(t, len("KV_"+bucket), maxStreamName, bucket)
+	}
+}
+
+// TestMemberPermissionsFollowTheBuckets checks that a member may write each
+// namespace in the bucket that holds it, and each control key in the control
+// bucket, and nowhere else.
+func TestMemberPermissionsFollowTheBuckets(t *testing.T) {
+	publish := MemberPermissions("a", "m").Publish
+	for _, subject := range []string{
+		"$KV." + NamespaceSnapshot.Bucket("a") + ".snapshot.>",
+		"$KV." + NamespaceCuInterpose.Bucket("a") + ".cuinterpose.>",
+		"$KV." + NamespaceLibrary.Bucket("a") + ".>",
+		"$KV." + ControlBucket("a") + ".ended",
+		"$KV." + ControlBucket("a") + ".barrier.*.m",
+		"$KV." + ControlBucket("a") + ".left.m",
+	} {
+		assert.Contains(t, publish, subject)
+	}
+	for _, subject := range publish {
+		assert.NotContains(t, subject, ControlBucket("a")+".snapshot", "an agent's key must not reach the control bucket")
+		assert.NotContains(t, subject, SnapshotBucket("a")+".ended", "a control key must not reach the Snapshot bucket")
+		assert.NotContains(t, subject, ".meta", "no member writes meta")
+	}
+}
+
+// TestControlBytes checks that the control bucket's size grows with the
+// membership.
+func TestControlBytes(t *testing.T) {
+	assert.Equal(t, int64(ControlBytesBase+ControlBytesPerMember), ControlBytes(1))
+	assert.Equal(t, int64(ControlBytesBase+256*ControlBytesPerMember), ControlBytes(256))
+}

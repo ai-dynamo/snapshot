@@ -4,6 +4,8 @@
 // Package session is what SNEP-324's session client, package coordinator, and
 // the Snapshot coordinator, package server, share: the layout of a session's
 // buckets, their limits, the user name and permissions of a member's
-// connection, Meta, and the errors either side reports. It imports no NATS
-// package.
+// connection, Meta, and the errors either side reports. A session lives in
+// memory except its control keys, which use a small file store that does not
+// outlive the coordinator's process, so a full memory cap never stops a
+// session from ending. It imports no NATS package.
 package session

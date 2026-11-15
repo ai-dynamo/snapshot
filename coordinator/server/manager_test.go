@@ -70,7 +70,7 @@ func TestEnsure(t *testing.T) {
 			// Sessions never reach the disk.
 			assert.Equal(t, jetstream.MemoryStorage, stream.CachedInfo().Config.Storage, "bucket %s", bucket)
 		}
-		assert.Equal(t, []string{"opened " + string(spec.UID)}, h.observer.of(spec.UID))
+		assert.Equal(t, []string{"opened"}, h.events(spec))
 	})
 
 	t.Run("ensuring the same spec again does nothing", func(t *testing.T) {
@@ -81,7 +81,7 @@ func TestEnsure(t *testing.T) {
 		reordered.Members = []session.Member{spec.Members[1], spec.Members[0]}
 		require.NoError(t, h.srv.Ensure(within(t), reordered))
 		assert.Equal(t, epoch, h.srv.lookup(spec.UID).epoch)
-		assert.Len(t, h.observer.of(spec.UID), 1)
+		assert.Len(t, h.events(spec), 1)
 	})
 
 	t.Run("a different spec is refused", func(t *testing.T) {
@@ -104,106 +104,140 @@ func TestEnsure(t *testing.T) {
 }
 
 // TestEndAtTheMemoryCap covers a session that every member left, or whose
-// deadline or grace period runs out, while the memory cap refuses the write
-// that records its end: the coordinator keeps trying, so the session ends once
-// memory frees, and stops once the session is removed or the coordinator shuts
-// down. A session whose own keys fill the cap never ends, and the host removes
-// it once its deadline has passed, which frees the cap.
+// deadline or grace period runs out, or that the host removes, while another
+// session fills the memory cap: the control keys are in file storage, so the
+// end is recorded, and every member learns it.
 func TestEndAtTheMemoryCap(t *testing.T) {
 	capped := func(cfg *Config) { cfg.MaxBytes, cfg.MaxValue = 2<<20, 64<<10 }
-
-	t.Run("a deadline that passes at the cap fails the session once memory frees", func(t *testing.T) {
-		h := newHarness(t, capped)
-		ctx := within(t)
-		spec := h.ensure(1)
-		m := h.connect(spec, 0)
-		filler := h.spec(1)
-		filler.Deadline = spec.Deadline.Add(time.Hour)
-		require.NoError(t, h.srv.Ensure(ctx, filler))
-		h.fillCap(h.connect(filler, 0))
-		h.clock.Step(time.Hour)
-		h.awaitRetry(spec)
-		_, ok := h.ended(spec)
-		require.False(t, ok, "the cap must refuse the end")
-		require.NoError(t, h.srv.Remove(ctx, filler.UID))
-		endsSoon(t, m, &session.AbortError{Reason: session.ReasonDeadlineExceeded})
-		require.Eventually(t, func() bool { return len(h.observer.of(spec.UID)) == 2 }, 5*time.Second,
-			5*time.Millisecond)
-		assert.Equal(t, "failed "+string(spec.UID)+" DeadlineExceeded", h.observer.of(spec.UID)[1])
-	})
-
-	t.Run("a grace period that runs out at the cap fails the session once memory frees", func(t *testing.T) {
-		h := newHarness(t, capped)
-		spec := h.ensure(2)
+	// atTheCap returns a session with n members, connected, and a session of
+	// another attempt that has filled the memory cap.
+	atTheCap := func(t *testing.T, h *harness, n int) (Spec, []*member) {
+		t.Helper()
+		spec := h.ensure(n)
 		members := h.connectAll(spec)
-		filler := h.ensure(1)
-		h.fillCap(h.connect(filler, 0))
-		members[0].nc.Close()
-		h.clock.Await(t, DefaultGrace)
-		h.clock.Step(DefaultGrace)
-		h.awaitRetry(spec)
-		_, ok := h.ended(spec)
-		require.False(t, ok, "the cap must refuse the end")
-		back := h.connect(spec, 0)
-		require.NoError(t, h.srv.Remove(within(t), filler.UID))
-		endsSoon(t, members[1], &session.AbortError{Reason: session.ReasonMemberFailed})
-		endsSoon(t, back, &session.AbortError{Reason: session.ReasonMemberFailed})
-	})
-
-	t.Run("a session every member left at the cap closes once memory frees", func(t *testing.T) {
-		h := newHarness(t, capped)
-		spec := h.ensure(1)
-		m := h.connect(spec, 0)
 		filler := h.spec(1)
 		filler.Deadline = spec.Deadline.Add(time.Hour)
 		require.NoError(t, h.srv.Ensure(within(t), filler))
-		// The member's departure takes the session past the cap, which then
-		// refuses the coordinator's write that closes it.
-		h.fillTo(h.connect(filler, 0), h.srv.cfg.MaxBytes)
-		require.NoError(t, m.leave(within(t)))
-		h.awaitRetry(spec)
-		_, ok := h.ended(spec)
-		require.False(t, ok, "the cap must refuse the end")
-		// The deadline that passes meanwhile does not fail a session that is
-		// closing.
-		h.clock.Step(time.Hour)
-		require.NoError(t, h.srv.Remove(within(t), filler.UID))
-		endsSoon(t, m, session.ErrClosed)
-		require.Eventually(t, func() bool { return len(h.observer.of(spec.UID)) == 2 }, 5*time.Second,
-			5*time.Millisecond)
-		assert.Equal(t, "closed "+string(spec.UID), h.observer.of(spec.UID)[1])
+		h.fillCap(h.connect(filler, 0))
+		return spec, members
+	}
+
+	t.Run("a session opens", func(t *testing.T) {
+		h := newHarness(t, capped)
+		h.fillCap(h.connect(h.ensure(1), 0))
+		spec := h.spec(1)
+		require.NoError(t, h.srv.Ensure(within(t), spec))
+		h.connect(spec, 0)
 	})
 
-	t.Run("a session whose own keys fill the cap is removed past its deadline, which frees the cap", func(t *testing.T) {
+	t.Run("a deadline that passes fails the session", func(t *testing.T) {
 		h := newHarness(t, capped)
-		ctx := within(t)
-		spec, other := h.ensure(1), h.spec(1)
-		other.Deadline = spec.Deadline.Add(time.Hour)
-		require.NoError(t, h.srv.Ensure(ctx, other))
-		o := h.connect(other, 0)
-		h.fillCap(h.connect(spec, 0))
+		spec, members := atTheCap(t, h, 1)
 		h.clock.Step(time.Hour)
-		h.awaitRetry(spec)
-		requireCode(t, o.insert(ctx, session.NamespaceSnapshot, "k", nil), codeInsufficientResources)
-		require.NoError(t, h.srv.Remove(ctx, spec.UID))
-		require.NoError(t, o.insert(ctx, session.NamespaceSnapshot, "k", nil), "removing the session frees the cap")
-		// Removing the session stops the retries, which Shutdown waits for.
+		endsSoon(t, members[0], &session.AbortError{Reason: session.ReasonDeadlineExceeded})
+		reason, ok := h.ended(spec)
+		require.True(t, ok)
+		assert.Equal(t, session.ReasonDeadlineExceeded, reason)
+	})
+
+	t.Run("a grace period that runs out fails the session", func(t *testing.T) {
+		h := newHarness(t, capped)
+		_, members := atTheCap(t, h, 2)
+		members[0].nc.Close()
+		h.clock.Await(t, DefaultGrace)
+		h.clock.Step(DefaultGrace)
+		endsSoon(t, members[1], &session.AbortError{Reason: session.ReasonMemberFailed})
+	})
+
+	t.Run("a session every member left closes", func(t *testing.T) {
+		h := newHarness(t, capped)
+		spec, members := atTheCap(t, h, 2)
+		for _, m := range members {
+			require.NoError(t, m.leave(within(t)))
+		}
+		endsSoon(t, members[0], session.ErrClosed)
+		require.Eventually(t, func() bool { return len(h.events(spec)) == 2 }, 5*time.Second, 5*time.Millisecond)
+		assert.Equal(t, "closed", h.events(spec)[1])
+	})
+
+	t.Run("a member fails the session", func(t *testing.T) {
+		h := newHarness(t, capped)
+		_, members := atTheCap(t, h, 2)
+		require.NoError(t, members[0].fail(within(t), "Refused"))
+		endsSoon(t, members[1], &session.AbortError{Reason: "Refused"})
+	})
+
+	t.Run("removing the session records Cancelled", func(t *testing.T) {
+		h := newHarness(t, capped)
+		spec, members := atTheCap(t, h, 1)
+		require.NoError(t, h.srv.Remove(within(t), spec.UID))
+		endsSoon(t, members[0], &session.AbortError{Reason: session.ReasonCancelled})
+	})
+
+	t.Run("shutting down fails every session with CoordinatorLost", func(t *testing.T) {
+		h := newHarness(t, capped)
+		_, members := atTheCap(t, h, 2)
 		require.NoError(t, returns(t, "Shutdown", func() error { return h.srv.Shutdown(within(t)) }))
-	})
-
-	t.Run("shutting down stops the retries", func(t *testing.T) {
-		h := newHarness(t, capped)
-		spec := h.ensure(1)
-		h.fillCap(h.connect(spec, 0))
-		h.clock.Step(time.Hour)
-		h.awaitRetry(spec)
-		require.Error(t, returns(t, "Shutdown", func() error { return h.srv.Shutdown(within(t)) }),
-			"the cap refuses CoordinatorLost too")
+		for _, m := range members {
+			endsSoon(t, m, &session.AbortError{Reason: session.ReasonCoordinatorLost})
+		}
 	})
 }
 
-// fillCap fills the memory cap through m until not even an empty value fits,
-// which leaves no room to record any session's end either.
+// TestEndAtAFullControlBucket covers a session whose own members fill its
+// control bucket, which only they can: no write fits, not even its end. The
+// coordinator keeps trying to record the end, stops once the session is
+// removed or the coordinator shuts down, and the host removes the session once
+// its deadline has passed.
+func TestEndAtAFullControlBucket(t *testing.T) {
+	t.Run("a session is removed past its deadline, which stops the retries", func(t *testing.T) {
+		h := newHarness(t)
+		ctx := within(t)
+		spec := h.ensure(1)
+		h.fillControl(h.connect(spec, 0))
+		h.clock.Step(time.Hour)
+		h.awaitRetry(spec)
+		_, ok := h.ended(spec)
+		require.False(t, ok, "the bucket must refuse the end")
+		require.NoError(t, h.srv.Remove(ctx, spec.UID))
+		require.NoError(t, returns(t, "Shutdown", func() error { return h.srv.Shutdown(within(t)) }))
+	})
+
+	t.Run("a full bucket does not reach another session", func(t *testing.T) {
+		h := newHarness(t)
+		spec, other := h.ensure(1), h.ensure(1)
+		h.fillControl(h.connect(spec, 0))
+		o := h.connect(other, 0)
+		require.NoError(t, o.arrive(within(t), "admitted"))
+		require.NoError(t, o.fail(within(t), "Refused"))
+		// Shutdown could not record the full session's end.
+		require.NoError(t, h.srv.Remove(within(t), spec.UID))
+	})
+
+	t.Run("shutting down stops the retries", func(t *testing.T) {
+		h := newHarness(t)
+		spec := h.ensure(1)
+		h.fillControl(h.connect(spec, 0))
+		h.clock.Step(time.Hour)
+		h.awaitRetry(spec)
+		require.Error(t, returns(t, "Shutdown", func() error { return h.srv.Shutdown(within(t)) }),
+			"the bucket refuses CoordinatorLost too")
+	})
+}
+
+// fillControl writes arrivals through m until its session's control bucket
+// refuses one, which leaves no room to record the session's end either.
+func (h *harness) fillControl(m *member) {
+	h.t.Helper()
+	ctx := within(h.t)
+	var err error
+	for i := 0; err == nil; i++ {
+		err = m.arrive(ctx, fmt.Sprintf("barrier-%d", i))
+	}
+	requireCode(h.t, err, codeStoreFailed)
+}
+
+// fillCap fills the memory cap through m until not even an empty value fits.
 func (h *harness) fillCap(m *member) {
 	h.t.Helper()
 	ctx := within(h.t)
@@ -213,27 +247,6 @@ func (h *harness) fillCap(m *member) {
 			err = m.insert(ctx, session.NamespaceSnapshot, fmt.Sprintf("%c%d", 'a'+pass, i), make([]byte, size))
 		}
 		requireCode(h.t, err, codeInsufficientResources)
-	}
-}
-
-// fillTo writes through m until the memory every session holds together is
-// used bytes. The cap refuses a write only once that memory is past it, so the
-// next write fits whatever its size, and no other does. Each write takes its
-// subject, its headers, which a Put has none of, and its value, and 16 bytes
-// more.
-func (h *harness) fillTo(m *member, used int64) {
-	h.t.Helper()
-	ctx := within(h.t)
-	for i := 0; ; i++ {
-		key := fmt.Sprintf("snapshot.f%d", i)
-		room := used - int64(h.srv.account.JetStreamUsage().Memory)
-		size := min(room-int64(len("$KV."+m.snapshot.Bucket()+"."+key))-16, int64(h.srv.cfg.MaxValue))
-		require.GreaterOrEqual(h.t, size, int64(0), "the memory in use must stop short of %d bytes", used)
-		_, err := m.snapshot.Put(ctx, key, make([]byte, size))
-		require.NoError(h.t, err)
-		if int64(h.srv.account.JetStreamUsage().Memory) == used {
-			return
-		}
 	}
 }
 
@@ -269,7 +282,7 @@ func TestWatchStopsOnItsOwn(t *testing.T) {
 	spec := h.ensure(1)
 	h.clock.Await(t, time.Hour)
 	m := h.connect(spec, 0)
-	stream := "KV_" + m.snapshot.Bucket()
+	stream := "KV_" + m.control.Bucket()
 	str, err := h.srv.js.Stream(ctx, stream)
 	require.NoError(t, err)
 	var watched string
@@ -287,7 +300,7 @@ func TestWatchStopsOnItsOwn(t *testing.T) {
 	life, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	hold := func(ctx context.Context) {
-		_, err := m.snapshot.Watch(ctx, "snapshot.x")
+		_, err := m.control.Watch(ctx, "barrier.x.*")
 		require.NoError(t, err)
 	}
 	for range session.MaxConsumersPerMember - 1 {
@@ -332,7 +345,7 @@ func endsSoon(t *testing.T, m *member, want error) {
 
 // TestInvalidReason covers a member that writes the ended key with bytes that
 // are no condition reason: the session fails with InvalidReason, and the bytes
-// reach neither the Observer nor the log.
+// reach the log by their size only.
 func TestInvalidReason(t *testing.T) {
 	h := newHarness(t)
 	ctx := within(t)
@@ -341,15 +354,14 @@ func TestInvalidReason(t *testing.T) {
 	nc, _ := h.raw(spec, 0)
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
-	kv, err := js.KeyValue(ctx, session.SnapshotBucket(string(spec.UID)))
+	kv, err := js.KeyValue(ctx, session.ControlBucket(string(spec.UID)))
 	require.NoError(t, err)
 	_, err = kv.Create(ctx, session.KeyEnded, []byte("not a reason: secret\x00"))
 	require.NoError(t, err)
 
 	require.ErrorIs(t, awaitEnd(t, m), &session.AbortError{Reason: session.ReasonInvalid})
-	require.Eventually(t, func() bool { return len(h.observer.of(spec.UID)) == 2 }, 5*time.Second,
-		5*time.Millisecond)
-	assert.Equal(t, "failed "+string(spec.UID)+" "+session.ReasonInvalid, h.observer.of(spec.UID)[1])
+	require.Eventually(t, func() bool { return len(h.events(spec)) == 2 }, 5*time.Second, 5*time.Millisecond)
+	assert.Equal(t, "failed "+session.ReasonInvalid, h.events(spec)[1])
 	for _, line := range h.logs.all() {
 		assert.NotContains(t, line, "secret")
 	}
@@ -366,11 +378,9 @@ func TestRemove(t *testing.T) {
 		h := h.sub(t)
 		spec := h.ensure(2)
 		require.NoError(t, h.srv.Remove(ctx, spec.UID))
-		require.Eventually(t, func() bool { return len(h.observer.of(spec.UID)) == 2 }, 5*time.Second,
-			5*time.Millisecond)
-		assert.Equal(t, "failed "+string(spec.UID)+" "+session.ReasonCancelled, h.observer.of(spec.UID)[1])
-		for _, bucket := range []string{session.SnapshotBucket(string(spec.UID)),
-			session.LibraryBucket(string(spec.UID))} {
+		require.Eventually(t, func() bool { return len(h.events(spec)) == 2 }, 5*time.Second, 5*time.Millisecond)
+		assert.Equal(t, "failed "+session.ReasonCancelled, h.events(spec)[1])
+		for _, bucket := range session.Buckets(string(spec.UID)) {
 			_, err := h.srv.js.KeyValue(ctx, bucket)
 			require.ErrorIs(t, err, jetstream.ErrBucketNotFound)
 		}
@@ -517,4 +527,60 @@ func returns(t *testing.T, what string, call func() error) error {
 		t.Fatalf("%s did not return", what)
 		return nil
 	}
+}
+
+// TestBucketStorage checks where a session's buckets live: the control bucket
+// in file storage, bounded by the membership, and the data buckets in memory.
+func TestBucketStorage(t *testing.T) {
+	h := newHarness(t)
+	spec := h.ensure(3)
+	for bucket, want := range map[string]struct {
+		storage  jetstream.StorageType
+		maxBytes int64
+	}{
+		session.ControlBucket(string(spec.UID)):  {jetstream.FileStorage, session.ControlBytes(3)},
+		session.SnapshotBucket(string(spec.UID)): {jetstream.MemoryStorage, -1},
+		session.LibraryBucket(string(spec.UID)):  {jetstream.MemoryStorage, -1},
+	} {
+		stream, err := h.srv.js.Stream(within(t), "KV_"+bucket)
+		require.NoError(t, err)
+		cfg := stream.CachedInfo().Config
+		assert.Equal(t, want.storage, cfg.Storage, bucket)
+		assert.Equal(t, want.maxBytes, cfg.MaxBytes, bucket)
+	}
+}
+
+// TestControlBucketFitsAnHonestSession writes what the largest honest session
+// puts in its control bucket, which its size must hold: 256 members with long
+// names, each with several barrier arrivals and a departure, then the ended
+// key. Meta is written by Ensure.
+func TestControlBucketFitsAnHonestSession(t *testing.T) {
+	const members, barriers = 256, 8
+	h := newHarness(t)
+	ctx := within(t)
+	spec := Spec{UID: "uid-large", Deadline: h.clock.Now().Add(time.Hour)}
+	for i := range members {
+		spec.Members = append(spec.Members,
+			session.Member{ID: fmt.Sprintf("snapshot-workload-pod-%03d-node-%03d", i, i), Rank: i})
+	}
+	require.NoError(t, h.srv.Ensure(ctx, spec))
+	kv, err := h.srv.js.KeyValue(ctx, session.ControlBucket(string(spec.UID)))
+	require.NoError(t, err)
+	for _, m := range spec.Members {
+		for b := range barriers {
+			_, err := kv.Put(ctx, session.BarrierKey(fmt.Sprintf("checkpoint-phase-%d-barrier", b), m.ID), nil)
+			require.NoError(t, err, "member %s barrier %d", m.ID, b)
+		}
+		_, err := kv.Put(ctx, session.LeftKey(m.ID), nil)
+		require.NoError(t, err)
+	}
+	// Every member left, so the session closes by the ended key.
+	require.Eventually(t, func() bool { _, ok := h.ended(spec); return ok }, 10*time.Second, 5*time.Millisecond)
+	stream, err := h.srv.js.Stream(ctx, "KV_"+session.ControlBucket(string(spec.UID)))
+	require.NoError(t, err)
+	info, err := stream.Info(ctx)
+	require.NoError(t, err)
+	assert.Less(t, int64(info.State.Bytes), session.ControlBytes(members),
+		"the session's keys must fit with room to spare")
+	t.Logf("%d of %d bytes", info.State.Bytes, session.ControlBytes(members))
 }

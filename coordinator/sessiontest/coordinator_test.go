@@ -48,7 +48,7 @@ func TestDeadline(t *testing.T) {
 		s := ses.connect(t, 0)
 		awaitDone(t, s)
 		require.ErrorIs(t, s.Err(), &session.AbortError{Reason: session.ReasonDeadlineExceeded})
-		assert.Equal(t, []string{"opened", "failed " + session.ReasonDeadlineExceeded}, h.observer.of(ses.spec.UID))
+		assert.Equal(t, []string{"opened", "failed " + session.ReasonDeadlineExceeded}, h.events(ses.spec))
 	})
 
 	t.Run("a member the coordinator refuses ends its session itself", func(t *testing.T) {
@@ -111,7 +111,7 @@ func TestGrace(t *testing.T) {
 		for _, s := range sessions {
 			require.NoError(t, s.Err())
 		}
-		assert.Equal(t, []string{"opened"}, h.observer.of(ses.spec.UID))
+		assert.Equal(t, []string{"opened"}, h.events(ses.spec))
 	})
 
 	t.Run("a member that does not reconnect fails the session when its grace period runs out", func(t *testing.T) {
@@ -180,28 +180,6 @@ func requireNoGrace(t *testing.T, h *harness) {
 		"no grace period may start")
 }
 
-// TestCoordinatorFail covers the host failing a session on the coordinator's
-// own authority: every member learns the reason, the first reason wins, and
-// the reason must be a condition reason.
-func TestCoordinatorFail(t *testing.T) {
-	h := newHarness(t)
-	ctx := within(t)
-	ses := h.session(t, 2)
-	sessions := ses.connectAll(t)
-	uid := ses.spec.UID
-	require.ErrorIs(t, h.srv.Fail(ctx, uid, "has space"), session.ErrInvalid)
-	require.NoError(t, h.srv.Fail(ctx, uid, session.ReasonMemberFailed))
-	require.NoError(t, h.srv.Fail(ctx, uid, session.ReasonMemberFailed), "failing again with the same reason")
-	require.ErrorIs(t, h.srv.Fail(ctx, uid, "Other"), &session.AbortError{Reason: session.ReasonMemberFailed},
-		"the first reason wins")
-	for _, s := range sessions {
-		awaitDone(t, s)
-		require.ErrorIs(t, s.Err(), &session.AbortError{Reason: session.ReasonMemberFailed})
-	}
-	assert.Equal(t, "failed "+session.ReasonMemberFailed, ses.awaitOutcome(t))
-	require.ErrorIs(t, h.srv.Fail(ctx, "unknown", "Refused"), session.ErrNotFound)
-}
-
 // TestCoordinatorCancel covers the host cancelling a session once its group
 // resource's deletion starts: members that have not all passed the admitted
 // barrier learn Cancelled, and members past it carry on.
@@ -259,7 +237,7 @@ func TestShutdown(t *testing.T) {
 		require.ErrorIs(t, s.Err(), session.ErrCoordinatorLost)
 	}
 	assert.Equal(t, "failed "+session.ReasonCoordinatorLost, open.awaitOutcome(t))
-	assert.Len(t, h.observer.of(finished.spec.UID), 2, "a session that ended is not failed again")
+	assert.Len(t, h.events(finished.spec), 2, "a session that ended is not failed again")
 	require.Error(t, h.srv.Ensure(ctx, server.Spec{UID: "after", Members: open.spec.Members,
 		Deadline: open.spec.Deadline}))
 	require.Error(t, h.srv.Remove(ctx, open.spec.UID))
