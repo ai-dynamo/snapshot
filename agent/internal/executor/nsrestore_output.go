@@ -45,17 +45,19 @@ func (o *nsrestoreOutput) stdoutLines() (changingContainer bool, other []string)
 	return changingContainer, other
 }
 
-func (o *nsrestoreOutput) resultLine() string {
-	_, other := o.stdoutLines()
-	if len(other) == 0 {
-		return ""
+func (o *nsrestoreOutput) parseResult() (RestoreInNamespaceResult, error) {
+	var result RestoreInNamespaceResult
+	last := ""
+	if _, other := o.stdoutLines(); len(other) > 0 {
+		last = other[len(other)-1]
 	}
-	return other[len(other)-1]
+	err := json.Unmarshal([]byte(last), &result)
+	return result, err
 }
 
 func (o *nsrestoreOutput) result() (*RestoreInNamespaceResult, error) {
-	var result RestoreInNamespaceResult
-	if err := json.Unmarshal([]byte(o.resultLine()), &result); err != nil {
+	result, err := o.parseResult()
+	if err != nil {
 		_, other := o.stdoutLines()
 		return nil, fmt.Errorf("failed to parse nsrestore result: %w\nstdout: %s", err, strings.Join(other, "\n"))
 	}
@@ -107,8 +109,7 @@ func containerChanged(err error) bool {
 }
 
 func (o *nsrestoreOutput) cause(runErr error) error {
-	var result RestoreInNamespaceResult
-	if err := json.Unmarshal([]byte(o.resultLine()), &result); err == nil && result.Error != "" {
+	if result, err := o.parseResult(); err == nil && result.Error != "" {
 		return reportedCause(result)
 	}
 	detail := o.detail()
