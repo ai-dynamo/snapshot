@@ -199,8 +199,8 @@ tests:
             limits:
               memory: 2Gi
 
-  # The heap holds every session. With the container's memory limit as a soft
-  # limit, the Go runtime collects garbage before the heap reaches it.
+  # The heap holds the sessions' data. With the container's memory limit as a
+  # soft limit, the Go runtime collects garbage as the heap nears it.
   - it: gives the Go runtime the container's memory limit
     template: templates/daemonset.yaml
     set:

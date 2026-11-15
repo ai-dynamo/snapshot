@@ -226,8 +226,9 @@ coordinator:
   # How many keys libraries may write to a session, deleted ones included.
   maxLibraryKeys: 4096
   # The Go runtime takes limits.memory as its soft memory limit, GOMEMLIMIT, so
-  # it collects garbage before the heap reaches it. At about twice
-  # maxMemoryBytes, the sessions' live data stays well below it.
+  # it collects garbage as the heap nears it. At about twice maxMemoryBytes, the
+  # sessions' live data stays well below it. Without a memory limit, GOMEMLIMIT
+  # is the node's allocatable memory, and does nothing.
   resources:
     requests:
       cpu: 100m

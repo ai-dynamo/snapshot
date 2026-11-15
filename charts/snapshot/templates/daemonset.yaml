@@ -312,9 +312,9 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            # A soft limit: the Go runtime collects garbage before the heap,
-            # which holds every session, reaches the container's memory limit,
-            # instead of letting it grow to twice the live data.
+            # A soft limit: the Go runtime collects garbage as the heap, which
+            # holds the sessions' data, nears the container's memory limit,
+            # rather than letting it grow past the limit to twice the live data.
             - name: GOMEMLIMIT
               valueFrom:
                 resourceFieldRef:
