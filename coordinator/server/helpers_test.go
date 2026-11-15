@@ -351,16 +351,23 @@ func within(t *testing.T) context.Context {
 }
 
 // testAuthorizer admits agentToken, and returns err for any other, or for
-// every token while err is set.
+// every token while err is set. Like an Authorizer that checks a member's
+// placement, it refuses an attempt's member with session.ErrNotFound while
+// the attempt is unplaced, unless the coordinator does not hold the attempt.
 type testAuthorizer struct {
-	mu    sync.Mutex
-	err   error
-	calls atomic.Int64
+	mu       sync.Mutex
+	err      error
+	unplaced bool
+	calls    atomic.Int64
+	// held is what the last call was told of whether the coordinator holds the
+	// attempt.
+	held atomic.Bool
 }
 
 // Authorize implements Authorizer.
-func (a *testAuthorizer) Authorize(_ context.Context, _ types.UID, _, token string) error {
+func (a *testAuthorizer) Authorize(_ context.Context, _ types.UID, _, token string, held bool) error {
 	a.calls.Add(1)
+	a.held.Store(held)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	switch {
@@ -368,8 +375,19 @@ func (a *testAuthorizer) Authorize(_ context.Context, _ types.UID, _, token stri
 		return a.err
 	case token != agentToken:
 		return ErrUnauthenticated
+	case held && a.unplaced:
+		return session.ErrNotFound
 	}
 	return nil
+}
+
+// unplace makes the Authorizer refuse the members of every attempt the
+// coordinator holds with session.ErrNotFound, as one that checks their
+// placement does once their group resource is gone, or admit them again.
+func (a *testAuthorizer) unplace(unplaced bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.unplaced = unplaced
 }
 
 // fail makes the Authorizer return err for every token, or admit agentToken

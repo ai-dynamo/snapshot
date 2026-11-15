@@ -147,8 +147,52 @@ func TestAuthentication(t *testing.T) {
 		defer nc.Close()
 		js, err := jetstream.New(nc)
 		require.NoError(t, err)
-		_, err = js.KeyValue(within(t), session.SnapshotBucket(string(spec.UID)))
+		_, err = js.KeyValue(within(t), session.ControlBucket(string(spec.UID)))
 		require.ErrorIs(t, err, jetstream.ErrBucketNotFound)
+	})
+
+	t.Run("tells the Authorizer whether the coordinator holds the session", func(t *testing.T) {
+		h := h.sub(t)
+		spec := h.ensure(1)
+		h.connect(spec, 0)
+		assert.True(t, h.auth.held.Load(), "a member of a session the coordinator holds")
+		unheld := h.spec(1)
+		nc, err := h.dial(unheld, unheld.Members[0].ID, agentToken, 1)
+		require.NoError(t, err)
+		nc.Close()
+		assert.False(t, h.auth.held.Load(), "a member reconnecting to a session the coordinator lost")
+	})
+
+	t.Run("admits a member of a removed session, whatever its placement, so it learns the session is gone",
+		func(t *testing.T) {
+			h := h.sub(t)
+			spec := h.ensure(1)
+			m := h.connect(spec, 0)
+			require.NoError(t, h.srv.Remove(within(t), spec.UID))
+			require.ErrorIs(t, awaitEnd(t, m), &session.AbortError{Reason: session.ReasonCancelled})
+			// The group resource is gone, so the Authorizer no longer places the
+			// member. A held session still needs its placement, which a lagging
+			// cache may not show yet.
+			h.auth.unplace(true)
+			defer h.auth.unplace(false)
+			nc, err := h.dial(spec, spec.Members[0].ID, agentToken, m.meta.Epoch)
+			require.NoError(t, err)
+			defer nc.Close()
+			js, err := jetstream.New(nc)
+			require.NoError(t, err)
+			_, err = js.KeyValue(within(t), session.ControlBucket(string(spec.UID)))
+			require.ErrorIs(t, err, jetstream.ErrBucketNotFound, "the member must reach the coordinator to learn that")
+		})
+
+	t.Run("refuses a member of a held session while its placement is unknown", func(t *testing.T) {
+		h := h.sub(t)
+		spec := h.ensure(1)
+		h.auth.unplace(true)
+		defer h.auth.unplace(false)
+		connected := connectLater(h, spec, 0)
+		requirePending(t, connected)
+		h.auth.unplace(false)
+		require.NoError(t, <-connected)
 	})
 
 	t.Run("a refused client starts no grace period for the member it names", func(t *testing.T) {
