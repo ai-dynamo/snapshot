@@ -482,8 +482,12 @@ func TestRemovePodControlFile(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRemovePodControlFileRejectsPaths(t *testing.T) {
+	podsDir, _ := podsDirWithControlVolume(t)
 	for _, name := range []string{"", "..", "a/b", "../x"} {
-		if err := removePodControlFile(t.TempDir(), "uid", "main", name); err == nil {
+		if err := removePodControlFile(podsDir, "uid", "main", name); err == nil {
 			t.Errorf("removePodControlFile(%q) succeeded, want a refusal", name)
 		}
 	}
