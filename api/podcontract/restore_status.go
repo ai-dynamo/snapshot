@@ -96,7 +96,8 @@ const RestoreRetryStatusAnnotation = "nvidia.com/restore-retry-status"
 const FailureCauseMaxBytes = 1024
 
 // RestoreRetryStatus holds one entry per destination container with a failed
-// attempt, keyed by container name.
+// attempt, keyed by container name. Decode it with
+// RestoreRetryStatusFromAnnotations, which checks each entry.
 type RestoreRetryStatus map[string]ContainerRetryStatus
 
 // ContainerRetryStatus is one destination container's attempts.

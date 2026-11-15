@@ -1214,25 +1214,14 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 // after restore-complete: only the post-restore action can be left, and CRIU
 // must never run again. This pass's preflight already checked its settings.
 //
-// The action keeps the deadline in the attempt record. A restore that an
-// agent without the record started gets a full config.restore.timeoutSeconds.
+// The interrupted run's deadline is gone with it, so the action gets a full
+// config.restore.timeoutSeconds again: a restart can extend it by one timeout.
 func (op *restoreOperation) recoverPostRestore(ctx context.Context) error {
 	postCtx := ctx
-	record, found, err := op.readRestoreAttempts(op.nodePodUID(ctx))
-	if err != nil {
-		op.log.Error(err, "Ignoring the attempt record; the post-restore action gets a full restore timeout")
-	}
-	switch {
-	case found && !record.Deadline.IsZero():
+	if timeout := op.controller.config.Restore.RestoreTimeout(); timeout > 0 {
 		var cancel context.CancelFunc
-		postCtx, cancel = context.WithDeadline(ctx, record.Deadline)
+		postCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
-	case !found:
-		if timeout := op.controller.config.Restore.RestoreTimeout(); timeout > 0 {
-			var cancel context.CancelFunc
-			postCtx, cancel = context.WithTimeout(ctx, timeout)
-			defer cancel()
-		}
 	}
 	if err := op.notifyPostRestore(postCtx); err != nil {
 		return op.failPostRestore(ctx, err)
