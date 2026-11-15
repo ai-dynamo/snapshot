@@ -77,11 +77,17 @@ func openContainerControlDir(procRoot string, hostPID int) (*os.File, error) {
 // medium: Memory.
 const KubeletPodsDir = HostProcPath + "/1/root/var/lib/kubelet/pods"
 
+// plainName reports whether name is one entry in a directory, never a path
+// that leaves it.
+func plainName(name string) bool {
+	return name != "" && name == filepath.Base(name) && name != ".."
+}
+
 // podControlVolumeDir is the Pod's snapshot-control emptyDir under podsDir. It
 // also checks containerName, which callers open inside it.
 func podControlVolumeDir(podsDir, podUID, containerName string) (string, error) {
 	for _, part := range []string{podUID, containerName} {
-		if part == "" || part != filepath.Base(part) || part == ".." {
+		if !plainName(part) {
 			return "", fmt.Errorf("invalid control directory part %q", part)
 		}
 	}
@@ -127,7 +133,7 @@ func openPodControlDir(podsDir, podUID, containerName string) (*os.File, error) 
 // name, which is then renamed over name. Readers never see a partial file, and
 // the rename replaces whatever name was, without following it.
 func WriteFileInDir(dir *os.File, name string, perm os.FileMode, write func(io.Writer) error) (retErr error) {
-	if name == "" || name != filepath.Base(name) || name == ".." {
+	if !plainName(name) {
 		return fmt.Errorf("invalid file name %q", name)
 	}
 	dfd := int(dir.Fd())
@@ -190,7 +196,7 @@ func ReadPodControlFile(podUID, containerName, name string, maxBytes int64) ([]b
 }
 
 func readPodControlFile(podsDir, podUID, containerName, name string, maxBytes int64) ([]byte, error) {
-	if name == "" || name != filepath.Base(name) || name == ".." {
+	if !plainName(name) {
 		return nil, fmt.Errorf("invalid file name %q", name)
 	}
 	dir, err := openPodControlDir(podsDir, podUID, containerName)
@@ -229,7 +235,7 @@ func RemovePodControlFile(podUID, containerName, name string) error {
 }
 
 func removePodControlFile(podsDir, podUID, containerName, name string) error {
-	if name == "" || name != filepath.Base(name) || name == ".." {
+	if !plainName(name) {
 		return fmt.Errorf("invalid file name %q", name)
 	}
 	dir, err := openPodControlDir(podsDir, podUID, containerName)
@@ -256,7 +262,7 @@ func ControlSentinelExists(hostPID int, name string) (bool, error) {
 }
 
 func controlSentinelExists(procRoot string, hostPID int, name string) (bool, error) {
-	if name == "" || name != filepath.Base(name) || name == ".." {
+	if !plainName(name) {
 		return false, fmt.Errorf("invalid control sentinel name %q", name)
 	}
 	dir, err := openContainerControlDir(procRoot, hostPID)
