@@ -215,8 +215,16 @@ coordinator:
   # on the node's IP.
   healthPort: 4225
   # The memory, in bytes, that every session's data shares. A group's writes
-  # fail once it is full. Keep resources.limits.memory at about twice this.
+  # fail once it is full. Keep resources.limits.memory at about twice this. The
+  # coordinator refuses to start with less than a group of 256 members needs,
+  # about 4 MiB.
   maxMemoryBytes: 1073741824
+  # The largest value, in bytes, an agent may write to a session.
+  maxValueBytes: 33554432
+  # The largest value, in bytes, a communication library may write to a session.
+  maxLibraryValueBytes: 4096
+  # How many keys libraries may write to a session, deleted ones included.
+  maxLibraryKeys: 4096
   resources:
     requests:
       cpu: 100m

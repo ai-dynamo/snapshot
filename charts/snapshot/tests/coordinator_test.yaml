@@ -100,6 +100,9 @@ tests:
             - --port=4224
             - --health-port=4225
             - --max-memory-bytes=1073741824
+            - --max-value-bytes=33554432
+            - --max-library-value-bytes=4096
+            - --max-library-keys=4096
       - equal:
           path: spec.template.spec.containers[2].env
           value:
@@ -273,6 +276,41 @@ tests:
               memory: 256Mi
             limits:
               memory: 8Gi
+
+  # The session limits default to the coordinator's own, which checks them
+  # when it starts.
+  - it: passes the coordinator's own session limits by default
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --max-value-bytes=33554432
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --max-library-value-bytes=4096
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --max-library-keys=4096
+
+  - it: takes the session limits from the values
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.maxValueBytes: 67108864
+      coordinator.maxLibraryValueBytes: 8192
+      coordinator.maxLibraryKeys: 8192
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --max-value-bytes=67108864
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --max-library-value-bytes=8192
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --max-library-keys=8192
 
   - it: names the token audience after the release
     template: templates/daemonset.yaml
@@ -750,6 +788,30 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "coordinator.maxMemoryBytes: Must be greater than or equal to 1"
+
+  - it: refuses no largest value
+    template: templates/daemonset.yaml
+    set:
+      coordinator.maxValueBytes: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: "coordinator.maxValueBytes: Must be greater than or equal to 1"
+
+  - it: refuses no largest library value
+    template: templates/daemonset.yaml
+    set:
+      coordinator.maxLibraryValueBytes: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: "coordinator.maxLibraryValueBytes: Must be greater than or equal to 1"
+
+  - it: refuses no library keys
+    template: templates/daemonset.yaml
+    set:
+      coordinator.maxLibraryKeys: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: "coordinator.maxLibraryKeys: Must be greater than or equal to 1"
 
   - it: refuses an empty trust key
     template: templates/daemonset.yaml

@@ -35,6 +35,21 @@
           "minimum": 1,
           "maximum": 9007199254740991
         },
+        "maxValueBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "maxLibraryValueBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "maxLibraryKeys": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
         "tls": {
           "type": "object",
           "properties": {

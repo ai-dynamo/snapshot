@@ -291,6 +291,9 @@ spec:
             - {{ printf "--port=%d" (int64 .Values.coordinator.port) | quote }}
             - {{ printf "--health-port=%d" (int64 .Values.coordinator.healthPort) | quote }}
             - {{ printf "--max-memory-bytes=%d" (int64 .Values.coordinator.maxMemoryBytes) | quote }}
+            - {{ printf "--max-value-bytes=%d" (int64 .Values.coordinator.maxValueBytes) | quote }}
+            - {{ printf "--max-library-value-bytes=%d" (int64 .Values.coordinator.maxLibraryValueBytes) | quote }}
+            - {{ printf "--max-library-keys=%d" (int64 .Values.coordinator.maxLibraryKeys) | quote }}
           env:
             - name: NODE_NAME
               valueFrom:
