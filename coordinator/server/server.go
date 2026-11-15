@@ -126,6 +126,13 @@ type Config struct {
 	// ending: the control keys are in file storage, which MaxBytes also bounds,
 	// for the control buckets of every session together. It defaults to
 	// DefaultMaxBytes.
+	//
+	// MaxBytes is not the coordinator's whole memory. The process also holds,
+	// for each connection, up to session.MaxConcurrentGets values of what the
+	// connection is sent and has not yet taken, each up to MaxValue plus 64
+	// KiB; and, for each bucket, an ingest queue of up to 128 MiB, which
+	// nats-server fills with the writes it has not stored yet. Size the
+	// container's memory limit for MaxBytes plus those.
 	MaxBytes int64
 
 	// MaxValue and MaxLibraryValue are the largest values of the Snapshot and
@@ -284,7 +291,7 @@ func (s *Server) start() error {
 		NoLog:         true,
 		TLSConfig:     s.cfg.TLS,
 		MaxPayload:    maxPayload,
-		MaxPending:    2 * int64(maxPayload),
+		MaxPending:    session.MaxConcurrentGets * int64(maxPayload),
 		WriteDeadline: writeDeadline,
 		PingInterval:  serverPingInterval,
 		MaxPingsOut:   serverMaxPingsOut,

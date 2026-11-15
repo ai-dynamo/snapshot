@@ -70,6 +70,13 @@ func ControlBytes(members int) int64 { return ControlBytesBase + int64(members)*
 // communicator identifiers.
 const MaxConsumersPerMember = 8
 
+// MaxConcurrentGets is how many values a client reads at once over its
+// connection, and how many of the largest values the coordinator buffers for a
+// connection before it drops the connection as a slow consumer. The client
+// reads no more at once than the coordinator holds, so concurrent Gets never
+// cost a reconnect.
+const MaxConcurrentGets = 2
+
 // MaxNameLength bounds a member ID and a barrier name.
 const MaxNameLength = 253
 

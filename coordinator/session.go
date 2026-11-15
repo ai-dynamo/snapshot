@@ -117,7 +117,10 @@ type client struct {
 	connect   sync.Once
 	// verify holds a pending request to verify the session, so requests made
 	// while one is pending coalesce.
-	verify  chan struct{}
+	verify chan struct{}
+	// reads holds a slot for each value being read over the connection, so no
+	// more are in flight than the coordinator buffers for it.
+	reads   chan struct{}
 	closing chan struct{}
 	// connClosed is closed once the connection is, by Close or as the session
 	// ends; nats.go then delivers nothing more to any watch.
@@ -386,6 +389,23 @@ func (s *client) try(ctx context.Context, op func(context.Context) error) error 
 	return err
 }
 
+// read runs op, which reads one value, once the connection has a slot for it,
+// and holds the slot until op returns. It returns how the session ended, or
+// ctx's error, if either comes first.
+func (s *client) read(ctx context.Context, op func(context.Context) error) error {
+	select {
+	case s.reads <- struct{}{}:
+		defer func() { <-s.reads }()
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.done:
+		return s.Err()
+	case <-s.closing:
+		return net.ErrClosed
+	}
+	return s.do(ctx, op)
+}
+
 // watcher is a watch, and the cancellation that ends it: a watch lives as long
 // as the context it was started with.
 type watcher struct {
@@ -393,15 +413,16 @@ type watcher struct {
 	cancel context.CancelFunc
 }
 
-// watch starts watching keys of kv. Its creation is bounded like any operation,
-// while the watch itself lives until stop.
-func (s *client) watch(ctx context.Context, kv jetstream.KeyValue, keys []string) (watcher, error) {
+// watch starts watching keys of kv, with opts. Its creation is bounded like any
+// operation, while the watch itself lives until stop.
+func (s *client) watch(ctx context.Context, kv jetstream.KeyValue, keys []string,
+	opts ...jetstream.WatchOpt) (watcher, error) {
 	var w watcher
 	err := s.do(ctx, func(attempt context.Context) error {
 		life, cancel := context.WithCancel(context.Background())
 		bounded := context.AfterFunc(attempt, cancel)
 		// WatchFiltered rewrites the slice it is given.
-		kw, err := kv.WatchFiltered(life, slices.Clone(keys))
+		kw, err := kv.WatchFiltered(life, slices.Clone(keys), opts...)
 		if !bounded() {
 			// The attempt ended first, which cancelled the watch.
 			err = context.Cause(attempt)
@@ -425,14 +446,15 @@ func (s *client) watch(ctx context.Context, kv jetstream.KeyValue, keys []string
 // and then every change, until visit reports true. present is false for a
 // deleted key. Watching ended in the same watch orders the session's end among
 // the entries, so an end recorded after the last entry visit needed does not
-// hide it. Watching another bucket relies on Done instead.
+// hide it. Watching another bucket relies on Done instead. opts are the
+// watch's, such as jetstream.MetaOnly, which delivers entries with no values.
 func (s *client) await(ctx context.Context, kv jetstream.KeyValue, keys []string,
-	visit func(key string, value []byte, present bool) bool) error {
+	visit func(key string, value []byte, present bool) bool, opts ...jetstream.WatchOpt) error {
 	watchesEnd := kv == s.control
 	if watchesEnd {
 		keys = append(slices.Clone(keys), session.KeyEnded)
 	}
-	w, err := s.watch(ctx, kv, keys)
+	w, err := s.watch(ctx, kv, keys, opts...)
 	if err != nil {
 		return err
 	}
@@ -448,7 +470,7 @@ func (s *client) await(ctx context.Context, kv jetstream.KeyValue, keys []string
 				if err := s.confirm(ctx); err != nil {
 					return err
 				}
-				again, err := s.watch(ctx, kv, keys)
+				again, err := s.watch(ctx, kv, keys, opts...)
 				if err != nil {
 					return err
 				}

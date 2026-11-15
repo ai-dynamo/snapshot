@@ -126,6 +126,7 @@ func Connect(ctx context.Context, cfg Config) (Session, error) {
 		clock:      cfg.Clock,
 		connected:  make(chan struct{}),
 		verify:     make(chan struct{}, 1),
+		reads:      make(chan struct{}, session.MaxConcurrentGets),
 		closing:    make(chan struct{}),
 		connClosed: make(chan struct{}),
 		done:       make(chan struct{}),
