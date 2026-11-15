@@ -30,6 +30,7 @@ import (
 	"github.com/ai-dynamo/snapshot/coordinator/coordinatortest"
 	"github.com/ai-dynamo/snapshot/coordinator/internal/testcert"
 	"github.com/ai-dynamo/snapshot/coordinator/internal/testclock"
+	"github.com/ai-dynamo/snapshot/coordinator/internal/testlog"
 	"github.com/ai-dynamo/snapshot/coordinator/server"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/go-logr/logr"
@@ -55,9 +56,9 @@ type harness struct {
 	clock *testclock.Clock
 	// logs records what every member's client logs.
 	logs *logLines
-	// observer records what the current coordinator sees of sessions.
-	observer *recorder
-	proxies  []*proxy
+	// serverLogs records what the current coordinator logs.
+	serverLogs *logLines
+	proxies    []*proxy
 }
 
 // newHarness starts a ready coordinator, configured by modify, and checks
@@ -97,12 +98,12 @@ func newHarness(t *testing.T, modify ...func(*server.Config)) *harness {
 	return h
 }
 
-// start starts a coordinator, not ready yet, with an Observer of its own, and
+// start starts a coordinator, not ready yet, with a log of its own, and
 // shuts it down when the test ends.
 func (h *harness) start() {
 	h.t.Helper()
-	h.observer = &recorder{}
-	h.cfg.Observer = h.observer
+	h.serverLogs = &logLines{}
+	h.cfg.Log = h.serverLogs.logger()
 	srv, err := server.New(h.cfg)
 	require.NoError(h.t, err)
 	h.t.Cleanup(func() { require.NoError(h.t, srv.Shutdown(context.Background())) })
@@ -257,12 +258,12 @@ func in(s coordinator.Session, ns session.Namespace) coordinator.Store {
 // client reconnects.
 func (ses *testSession) cut(member int) { ses.proxies[member].cut() }
 
-// raw returns the session's Snapshot bucket over a plain NATS connection of
+// raw returns the session's control bucket over a plain NATS connection of
 // member, made the way package session defines, which reaches the keys the
 // client keeps to itself. The connection closes when the test ends.
 func (ses *testSession) raw(t *testing.T, member int) jetstream.KeyValue {
 	t.Helper()
-	return ses.rawBucket(t, member, session.SnapshotBucket(string(ses.spec.UID)))
+	return ses.rawBucket(t, member, session.ControlBucket(string(ses.spec.UID)))
 }
 
 // rawBucket returns one of the session's buckets over a plain NATS connection
@@ -272,6 +273,7 @@ func (ses *testSession) rawBucket(t *testing.T, member int, bucket string) jetst
 	uid, id := string(ses.spec.UID), ses.spec.Members[member].ID
 	nc, err := nats.Connect("tls://"+ses.h.srv.Addr().String(),
 		nats.Secure(&tls.Config{RootCAs: ses.h.ca, ServerName: "localhost", MinVersion: tls.VersionTLS12}),
+		nats.TLSHandshakeFirst(),
 		nats.UserInfo(session.UserName(uid, id), ""),
 		nats.Token(coordinatortest.Token),
 		nats.CustomInboxPrefix(session.InboxPrefix(uid, id)),
@@ -286,17 +288,10 @@ func (ses *testSession) rawBucket(t *testing.T, member int, bucket string) jetst
 }
 
 // awaitWait waits until a wait of one member in namespace ns watches its keys:
-// until the namespace's bucket holds one consumer more than at rest, when the
-// coordinator watches the departures and each member, every one connected,
-// the session's end.
+// until the namespace's bucket holds a consumer, since nothing else watches it.
 func (ses *testSession) awaitWait(t *testing.T, ns session.Namespace) {
 	t.Helper()
-	uid := string(ses.spec.UID)
-	bucket, rest := session.SnapshotBucket(uid), len(ses.spec.Members)+1
-	if ns == session.NamespaceLibrary {
-		bucket, rest = session.LibraryBucket(uid), 0
-	}
-	ses.awaitConsumers(t, bucket, rest+1)
+	ses.awaitConsumers(t, ns.Bucket(string(ses.spec.UID)), 1)
 }
 
 // awaitMostConsumers waits until the session's Snapshot bucket holds its most
@@ -369,7 +364,7 @@ func (ses *testSession) awaitOutcome(t *testing.T) string {
 	t.Helper()
 	var events []string
 	require.Eventually(t, func() bool {
-		events = ses.h.observer.of(ses.spec.UID)
+		events = ses.h.events(ses.spec)
 		return len(events) > 1
 	}, 10*time.Second, 5*time.Millisecond)
 	return events[1]
@@ -413,35 +408,10 @@ func (l *logLines) all() []string {
 	return slices.Clone(l.lines)
 }
 
-// recorder is an Observer that records what it sees of each attempt.
-type recorder struct {
-	mu     sync.Mutex
-	events map[types.UID][]string
-}
-
-func (r *recorder) record(uid types.UID, event string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.events == nil {
-		r.events = make(map[types.UID][]string)
-	}
-	r.events[uid] = append(r.events[uid], event)
-}
-
-// SessionOpened implements server.Observer.
-func (r *recorder) SessionOpened(uid types.UID) { r.record(uid, "opened") }
-
-// SessionClosed implements server.Observer.
-func (r *recorder) SessionClosed(uid types.UID) { r.record(uid, "closed") }
-
-// SessionFailed implements server.Observer.
-func (r *recorder) SessionFailed(uid types.UID, reason string) { r.record(uid, "failed "+reason) }
-
-// of returns what the recorder saw of one attempt.
-func (r *recorder) of(uid types.UID) []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return slices.Clone(r.events[uid])
+// events returns what the current coordinator logged of the life of the
+// session: "opened", then "closed" or "failed" and the reason.
+func (h *harness) events(spec server.Spec) []string {
+	return testlog.SessionEvents(h.serverLogs.all(), spec.UID)
 }
 
 // proxy forwards TCP connections to the coordinator, so a test can break them

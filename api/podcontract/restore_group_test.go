@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 const gangGate = "example.com/gang"
@@ -77,7 +79,7 @@ func TestBuildGroupTargetShapesTheDestination(t *testing.T) {
 			t.Fatalf("%s = %q, want %q", name, got, SnapshotControlMountPath)
 		}
 	}
-	if !reflect.DeepEqual(server.StartupProbe, canonicalRestoreStartupProbe()) {
+	if !reflect.DeepEqual(server.StartupProbe, canonicalRestoreStartupProbe(v1alpha1.PodGroupMaxDeadlineSeconds)) {
 		t.Fatalf("a group target lacks the restore startup probe: %#v", server.StartupProbe)
 	}
 	if server.SecurityContext == nil ||
@@ -109,11 +111,33 @@ func TestBuildGroupTargetAlwaysAddsTheStartupProbe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildGroupTarget() failed: %v", err)
 	}
-	if !reflect.DeepEqual(shaped.Spec.Containers[0].StartupProbe, canonicalRestoreStartupProbe()) {
+	want := canonicalRestoreStartupProbe(v1alpha1.PodGroupMaxDeadlineSeconds)
+	if !reflect.DeepEqual(shaped.Spec.Containers[0].StartupProbe, want) {
 		t.Fatalf("startup probe = %#v, want the restore startup probe", shaped.Spec.Containers[0].StartupProbe)
 	}
 	if shaped.Spec.Containers[0].SecurityContext != nil {
 		t.Fatal("an empty SeccompProfile changed the destination's security context")
+	}
+}
+
+func TestGroupTargetProbeBudgetIsTheLongestDeadline(t *testing.T) {
+	shaped, err := BuildGroupTarget(groupTargetFixture(), toServer(), Options{})
+	if err != nil {
+		t.Fatalf("BuildGroupTarget() failed: %v", err)
+	}
+	probe := shaped.Spec.Containers[0].StartupProbe
+	if probe.FailureThreshold != 86400 || probe.PeriodSeconds != 1 {
+		t.Fatalf("group probe = %d failures at a period of %ds, want 86400 at 1s",
+			probe.FailureThreshold, probe.PeriodSeconds)
+	}
+	standalone := canonicalRestoreStartupProbe(restoreStartupFailureThreshold)
+	if standalone.FailureThreshold != 1800 {
+		t.Fatalf("standalone failure threshold = %d, want 1800", standalone.FailureThreshold)
+	}
+	group := probe.DeepCopy()
+	group.FailureThreshold = standalone.FailureThreshold
+	if !reflect.DeepEqual(group, standalone) {
+		t.Fatalf("group and standalone probes differ beyond the threshold: %#v and %#v", probe, standalone)
 	}
 }
 
@@ -234,6 +258,11 @@ func TestValidateGroupTarget(t *testing.T) {
 		},
 		"another startup probe": {
 			mutate: func(pod *corev1.Pod) { pod.Spec.Containers[0].StartupProbe.FailureThreshold = 7200 },
+		},
+		"the standalone startup probe": {
+			mutate: func(pod *corev1.Pod) {
+				pod.Spec.Containers[0].StartupProbe = canonicalRestoreStartupProbe(restoreStartupFailureThreshold)
+			},
 		},
 		"no control volume": {
 			mutate: func(pod *corev1.Pod) { pod.Spec.Volumes = nil },
@@ -374,6 +403,14 @@ func TestClaimGroupTarget(t *testing.T) {
 			mutate:  func(pod *corev1.Pod) { pod.Spec.Containers[0].VolumeMounts = nil },
 			claim:   claim,
 			refusal: "is missing " + SnapshotControlVolumeName,
+		},
+		{
+			name: "a destination with the standalone startup probe",
+			mutate: func(pod *corev1.Pod) {
+				pod.Spec.Containers[0].StartupProbe = canonicalRestoreStartupProbe(restoreStartupFailureThreshold)
+			},
+			claim:   claim,
+			refusal: "restore startup gate",
 		},
 		{
 			name:    "a destination without the startup probe",

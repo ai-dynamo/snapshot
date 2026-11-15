@@ -85,7 +85,7 @@ func TestAuthorizeAgainstAnAPIServer(t *testing.T) {
 	authorize := func(auth *Authorizer, member, token string) error {
 		ctx, cancel := context.WithTimeout(t.Context(), server.AuthorizeTimeout)
 		defer cancel()
-		return auth.Authorize(ctx, attempt, member, token)
+		return auth.Authorize(ctx, attempt, member, token, true)
 	}
 	token := k.token(agents.Name, agent, audience)
 
