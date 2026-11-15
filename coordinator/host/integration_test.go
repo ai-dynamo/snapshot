@@ -152,6 +152,7 @@ func TestRun(t *testing.T) {
 
 	step("a client limited to TLS 1.2 is refused", func(t *testing.T) {
 		nc, err := nats.Connect("tls://"+addr, nats.NoReconnect(), nats.Timeout(time.Second),
+			nats.TLSHandshakeFirst(),
 			nats.Secure(&tls.Config{RootCAs: roots, ServerName: "localhost", MaxVersion: tls.VersionTLS12}))
 		if err == nil {
 			nc.Close()
@@ -435,6 +436,7 @@ func probe(addr, path string) int {
 func servedCertificate(addr string) []byte {
 	var leaf []byte
 	nc, err := nats.Connect("tls://"+addr, nats.NoReconnect(), nats.Timeout(time.Second),
+		nats.TLSHandshakeFirst(),
 		nats.Secure(&tls.Config{
 			// The test reads the certificate; it does not trust it.
 			InsecureSkipVerify: true,
