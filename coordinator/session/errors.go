@@ -71,10 +71,10 @@ func (e *AbortError) Is(target error) bool {
 	return ok && t.Reason == e.Reason
 }
 
-// The reasons a session fails with besides those a member supplies to Fail:
-// the coordinator's, and the one that replaces an ended key that holds no
-// reason. They match the condition
-// reasons the operator reports on the group resource.
+// The reasons a session fails with besides those a member supplies to Fail, or
+// the host to Server.FailUncommitted: the coordinator's, and the one that
+// replaces an ended key that holds no reason. They match the condition reasons
+// the operator reports on the group resource.
 const (
 	// ReasonDeadlineExceeded is the reason the coordinator fails a session
 	// with when its deadline passes.

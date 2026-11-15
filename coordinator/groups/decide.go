@@ -44,7 +44,8 @@ type held struct {
 // session ends, so the reconciler looks for it: a capture's session closes
 // once every member has left, soon after the attempt is final, while a
 // restore's stays open past release for as long as the members' libraries
-// rendezvous through it.
+// rendezvous through it. It is also the wait after ensuring the session of an
+// attempt with a Failed member, which the next pass then fails.
 const recheck = 5 * time.Second
 
 // decide returns what to do to the session of attempt a, on the coordinator of
