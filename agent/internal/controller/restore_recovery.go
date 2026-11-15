@@ -64,6 +64,11 @@ func failureCode(err error) pagebroker.Failure_Code {
 	return pagebroker.Failure_UNSPECIFIED
 }
 
+// chooseRecovery decides what follows a failed attempt. The restore ends when
+// no retry can help: its deadline passed, the failure is final, PageBroker
+// reported a fault in the artifact or the request, or the attempt changed the
+// container. Otherwise it retries in the same container while attempts and
+// time remain, and runs out of retries when they do not.
 func chooseRecovery(f *executor.RestoreFailure, ctxErr error, left budget) recovery {
 	switch {
 	case ctxErr != nil, f.Final, finalCodes[failureCode(f.Cause)], f.ContainerChanged:
