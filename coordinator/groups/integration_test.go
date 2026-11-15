@@ -529,6 +529,71 @@ func TestDeletion(t *testing.T) {
 	})
 }
 
+// TestMemberFailed covers a group resource of either kind whose status shows
+// a Failed member: before every member has arrived at the admitted barrier,
+// its session fails with the member's reason, so the peers waiting there
+// learn it at once instead of at the deadline; afterwards, it stays open.
+func TestMemberFailed(t *testing.T) {
+	names := nodes(t, 1)
+	h := startHost(t, names[0], coordinatortest.Start(t))
+	pair := []member{{"a", names[0]}, {"b", names[0]}}
+	// admit makes member a of the attempt uid wait at the admitted barrier.
+	admit := func(t *testing.T, uid types.UID) <-chan error {
+		a := h.connect(t, uid, "a")
+		arrived := make(chan error, 1)
+		go func() { arrived <- a.Barrier(within(t), session.BarrierAdmitted) }()
+		return arrived
+	}
+
+	t.Run("a capture, before the admitted barrier completes", func(t *testing.T) {
+		g := createCapture(t, pair, true, false)
+		h.awaitHeld(t, g.UID, true)
+		arrived := admit(t, g.UID)
+		g.Status.Members[1].Phase = v1alpha1.CheckpointPhaseFailed
+		g.Status.Members[1].Reason = v1alpha1.ReasonPodSnapshotDeleted
+		require.NoError(t, k8s.Status().Update(within(t), g))
+		require.ErrorIs(t, <-arrived, &session.AbortError{Reason: v1alpha1.ReasonPodSnapshotDeleted})
+	})
+
+	t.Run("a restore, before the admitted barrier completes", func(t *testing.T) {
+		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), pair)
+		h.awaitHeld(t, r.UID, true)
+		arrived := admit(t, r.UID)
+		r.Status.Members[1].Phase = v1alpha1.RestorePhaseFailed
+		r.Status.Members[1].Reason = v1alpha1.PodGroupReasonTargetPodDeleted
+		require.NoError(t, k8s.Status().Update(within(t), r))
+		require.ErrorIs(t, <-arrived, &session.AbortError{Reason: v1alpha1.PodGroupReasonTargetPodDeleted})
+	})
+
+	t.Run("a member that failed before its session opened", func(t *testing.T) {
+		g := createCapture(t, pair, false, false)
+		for i := range g.Status.Members {
+			id := g.Status.Members[i].ID
+			g.Status.Members[i].PodSnapshot = &v1alpha1.ObjectIdentity{Name: g.Name + "-" + id,
+				UID: types.UID("podsnapshot-uid-" + id)}
+		}
+		g.Status.Members[1].Phase = v1alpha1.CheckpointPhaseFailed
+		g.Status.Members[1].Reason = v1alpha1.ReasonPodSnapshotDeleted
+		require.NoError(t, k8s.Status().Update(within(t), g), "member work and the failure in one change")
+		h.awaitHeld(t, g.UID, true)
+		require.ErrorIs(t, awaitEnd(t, h.connect(t, g.UID, "a")),
+			&session.AbortError{Reason: v1alpha1.ReasonPodSnapshotDeleted})
+	})
+
+	t.Run("once it has completed, the session stays open", func(t *testing.T) {
+		g := createCapture(t, pair, true, false)
+		h.awaitHeld(t, g.UID, true)
+		arrived := admit(t, g.UID)
+		require.NoError(t, h.connect(t, g.UID, "b").Barrier(within(t), session.BarrierAdmitted))
+		require.NoError(t, <-arrived)
+		g.Status.Members[1].Phase = v1alpha1.CheckpointPhaseFailed
+		g.Status.Members[1].Reason = v1alpha1.ReasonPodSnapshotDeleted
+		require.NoError(t, k8s.Status().Update(within(t), g))
+		h.awaitSeen(t, g.UID, func(a *attempt) bool { return a.failure != "" })
+		h.requireNotEnded(t, g.UID)
+	})
+}
+
 // TestRemoval covers removing the session of a group resource that is gone,
 // including when another resource takes its name.
 func TestRemoval(t *testing.T) {

@@ -41,6 +41,10 @@ type attempt struct {
 	// True, or every member is in a final phase.
 	final bool
 
+	// failure is the reason of the first Failed member, in rank order, that
+	// records one, or "" while none does.
+	failure string
+
 	// deleting reports whether the resource's deletion has started.
 	deleting bool
 }
@@ -60,6 +64,9 @@ func captureAttempt(group *v1alpha1.PodGroupSnapshot) attempt {
 		a.memberWork = a.memberWork || status.PodSnapshot != nil
 		everyFinal = everyFinal &&
 			(status.Phase == v1alpha1.CheckpointPhaseCheckpointed || status.Phase == v1alpha1.CheckpointPhaseFailed)
+		if status.Phase == v1alpha1.CheckpointPhaseFailed && a.failure == "" {
+			a.failure = status.Reason
+		}
 	}
 	a.final = a.final || everyFinal
 	return a
@@ -95,6 +102,9 @@ func restoreAttempt(restore *v1alpha1.PodGroupRestore, snapshot *v1alpha1.PodGro
 		a.memberWork = a.memberWork || status.Pod != nil
 		everyFinal = everyFinal &&
 			(status.Phase == v1alpha1.RestorePhaseReleased || status.Phase == v1alpha1.RestorePhaseFailed)
+		if status.Phase == v1alpha1.RestorePhaseFailed && a.failure == "" {
+			a.failure = status.Reason
+		}
 	}
 	a.final = a.final || everyFinal
 	return a, true

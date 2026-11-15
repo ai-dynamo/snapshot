@@ -12,6 +12,7 @@ const (
 	none action = iota
 	ensure
 	cancel
+	fail
 	remove
 )
 
@@ -22,6 +23,8 @@ func (a action) String() string {
 		return "ensure"
 	case cancel:
 		return "cancel"
+	case fail:
+		return "fail"
 	case remove:
 		return "remove"
 	}
@@ -53,14 +56,21 @@ const recheck = 5 * time.Second
 //	remove  a is nil, and the coordinator holds the session
 //	remove  a is final, and its session has ended or its deadline has passed
 //	cancel  a's deletion has started, and its session is still open
+//	fail    a has a Failed member, and its session is still open
 //	ensure  node runs a's rank-0 member, member work exists, a is neither
 //	        final nor being deleted, and the coordinator holds no session
 //	none    otherwise
 //
+// cancel and fail end the session through server.Server.FailUncommitted:
+// cancel with session.ReasonCancelled, fail with the Failed member's reason.
+// The server leaves the session open once every member has arrived at the
+// admitted barrier, since members may then have started.
+//
 // A final attempt whose session is still open is looked at again after
-// recheck, or at its deadline if that is sooner. Ensure never revives a
-// removed session: a resource is final or being deleted, or gone, before its
-// session is removed, and stays so, since a UID names one attempt.
+// recheck, or at its deadline if that is sooner. So is an attempt ensured
+// after a member has failed, whose session fail then ends. Ensure never
+// revives a removed session: a resource is final or being deleted, or gone,
+// before its session is removed, and stays so, since a UID names one attempt.
 func decide(a *attempt, node string, h held, now time.Time) (action, time.Duration) {
 	if a == nil {
 		if h.session {
@@ -79,7 +89,12 @@ func decide(a *attempt, node string, h held, now time.Time) (action, time.Durati
 	switch {
 	case a.deleting && open:
 		return cancel, again
+	case a.failure != "" && open:
+		return fail, again
 	case a.sessionNode == node && a.memberWork && !a.final && !a.deleting && !h.session:
+		if a.failure != "" {
+			return ensure, recheck
+		}
 		return ensure, 0
 	}
 	return none, again

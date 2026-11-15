@@ -393,11 +393,12 @@ func TestRemove(t *testing.T) {
 	})
 }
 
-// TestCancel covers cancelling a session, as the host does once its group
-// resource's deletion starts: the session fails with Cancelled unless every
-// member has arrived at the admitted barrier, and a session that ended keeps
-// its end. What a member makes of it is sessiontest's to test.
-func TestCancel(t *testing.T) {
+// TestFailUncommitted covers failing a session before the commit, as the host
+// does once its group resource's deletion starts, or once a member fails: the
+// session fails with the reason unless every member has arrived at the
+// admitted barrier, and a session that ended keeps its end. What a member
+// makes of it is sessiontest's to test.
+func TestFailUncommitted(t *testing.T) {
 	h := newHarness(t)
 	ctx := within(t)
 
@@ -410,13 +411,13 @@ func TestCancel(t *testing.T) {
 		require.NoError(t, members[2].arrive(ctx, session.BarrierAdmitted))
 		require.NoError(t, members[2].control.Delete(ctx, session.BarrierKey(session.BarrierAdmitted, members[2].id)),
 			"an arrival deleted does not count")
-		require.NoError(t, h.srv.Cancel(ctx, spec.UID))
+		require.NoError(t, h.srv.FailUncommitted(ctx, spec.UID, "PodIPChanged"))
 		for _, m := range members {
-			require.ErrorIs(t, awaitEnd(t, m), &session.AbortError{Reason: session.ReasonCancelled})
+			require.ErrorIs(t, awaitEnd(t, m), &session.AbortError{Reason: "PodIPChanged"})
 		}
 		value, ok := h.ended(spec)
 		require.True(t, ok)
-		assert.Equal(t, session.ReasonCancelled, value)
+		assert.Equal(t, "PodIPChanged", value)
 	})
 
 	t.Run("a session every member has arrived in stays open", func(t *testing.T) {
@@ -426,7 +427,7 @@ func TestCancel(t *testing.T) {
 		for _, m := range members {
 			require.NoError(t, m.arrive(ctx, session.BarrierAdmitted))
 		}
-		require.NoError(t, h.srv.Cancel(ctx, spec.UID))
+		require.NoError(t, h.srv.FailUncommitted(ctx, spec.UID, session.ReasonCancelled))
 		_, ok := h.ended(spec)
 		assert.False(t, ok)
 		assert.Equal(t, []string{"opened"}, h.events(spec))
@@ -437,13 +438,23 @@ func TestCancel(t *testing.T) {
 		spec := h.ensure(1)
 		m := h.connect(spec, 0)
 		require.NoError(t, m.fail(ctx, "Refused"))
-		require.NoError(t, h.srv.Cancel(ctx, spec.UID))
+		require.NoError(t, h.srv.FailUncommitted(ctx, spec.UID, session.ReasonCancelled))
 		value, _ := h.ended(spec)
 		assert.Equal(t, "Refused", value)
 	})
 
+	t.Run("a reason that is no condition reason", func(t *testing.T) {
+		h := h.sub(t)
+		spec := h.ensure(1)
+		for _, reason := range []string{"", "not a reason", strings.Repeat("A", 1025)} {
+			require.ErrorIs(t, h.srv.FailUncommitted(ctx, spec.UID, reason), session.ErrInvalid, "%q", reason)
+		}
+		_, ok := h.ended(spec)
+		assert.False(t, ok, "the session must stay open")
+	})
+
 	t.Run("an unknown attempt", func(t *testing.T) {
-		require.ErrorIs(t, h.srv.Cancel(ctx, "unknown"), session.ErrNotFound)
+		require.ErrorIs(t, h.srv.FailUncommitted(ctx, "unknown", session.ReasonCancelled), session.ErrNotFound)
 	})
 }
 
@@ -465,7 +476,7 @@ func TestEnded(t *testing.T) {
 		requireEnded(t, spec.UID, false, false)
 		require.NoError(t, h.srv.Ensure(ctx, spec))
 		requireEnded(t, spec.UID, false, true)
-		require.NoError(t, h.srv.Cancel(ctx, spec.UID))
+		require.NoError(t, h.srv.FailUncommitted(ctx, spec.UID, "Refused"))
 		requireEnded(t, spec.UID, true, true)
 		require.NoError(t, h.srv.Remove(ctx, spec.UID))
 		requireEnded(t, spec.UID, false, false)

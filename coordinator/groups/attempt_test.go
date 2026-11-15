@@ -123,6 +123,31 @@ func TestCaptureAttempt(t *testing.T) {
 		g.DeletionTimestamp = &now
 		assert.True(t, captureAttempt(g).deleting)
 	})
+
+	for _, tt := range []struct {
+		name     string
+		statuses []v1alpha1.PodGroupSnapshotMemberStatus
+		failure  string
+	}{
+		{"no member failed", []v1alpha1.PodGroupSnapshotMemberStatus{
+			{ID: "a", Phase: v1alpha1.CheckpointPhaseCheckpointing},
+			{ID: "b", Phase: v1alpha1.CheckpointPhaseCheckpointed},
+		}, ""},
+		{"the first failed member in rank order", []v1alpha1.PodGroupSnapshotMemberStatus{
+			{ID: "c", Phase: v1alpha1.CheckpointPhaseFailed, Reason: "Refused"},
+			{ID: "b", Phase: v1alpha1.CheckpointPhaseFailed, Reason: "PodSnapshotDeleted"},
+		}, "PodSnapshotDeleted"},
+		{"a failed member that records no reason", []v1alpha1.PodGroupSnapshotMemberStatus{
+			{ID: "a", Phase: v1alpha1.CheckpointPhaseFailed},
+			{ID: "c", Phase: v1alpha1.CheckpointPhaseFailed, Reason: "Refused"},
+		}, "Refused"},
+	} {
+		t.Run("failure: "+tt.name, func(t *testing.T) {
+			g := newSnapshot("snapshot-uid", "a", "b", "c")
+			g.Status.Members = tt.statuses
+			assert.Equal(t, tt.failure, captureAttempt(g).failure)
+		})
+	}
 }
 
 func TestRestoreAttempt(t *testing.T) {
@@ -215,5 +240,17 @@ func TestRestoreAttempt(t *testing.T) {
 		a, ok := restoreAttempt(r, snapshot)
 		require.True(t, ok)
 		assert.True(t, a.deleting)
+	})
+
+	t.Run("failure: the first failed member in the PodGroupSnapshot's rank order", func(t *testing.T) {
+		r := newRestore(snapshot, "c", "b", "a")
+		r.Status.Members = []v1alpha1.PodGroupRestoreMemberStatus{
+			{ID: "c", Phase: v1alpha1.RestorePhaseFailed, Reason: "PodIPChanged"},
+			{ID: "b", Phase: v1alpha1.RestorePhaseRestoring},
+			{ID: "a", Phase: v1alpha1.RestorePhaseFailed, Reason: "TargetPodDeleted"},
+		}
+		a, ok := restoreAttempt(r, snapshot)
+		require.True(t, ok)
+		assert.Equal(t, "TargetPodDeleted", a.failure, "a ranks before c, which comes first in spec.targets")
 	})
 }

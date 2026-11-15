@@ -54,7 +54,9 @@ func (r *reconciler) Reconcile(ctx context.Context, req request) (reconcile.Resu
 	case ensure:
 		err = r.server.Ensure(ctx, a.spec)
 	case cancel:
-		err = r.server.Cancel(ctx, req.uid)
+		err = r.server.FailUncommitted(ctx, req.uid, session.ReasonCancelled)
+	case fail:
+		err = r.server.FailUncommitted(ctx, req.uid, a.failure)
 	case remove:
 		err = r.server.Remove(ctx, req.uid)
 	}

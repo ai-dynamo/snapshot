@@ -518,15 +518,20 @@ func (s *Server) Remove(ctx context.Context, uid types.UID) error {
 	return nil
 }
 
-// Cancel fails the session of an attempt with session.ReasonCancelled, unless
-// every member has arrived at session.BarrierAdmitted, which commits the
-// attempt. The host cancels a session once its group resource's deletion has
-// started. It is best effort: members decide on their own that the barrier is
-// complete, so a member that saw it complete just before Cancel read the
-// arrivals can still start. Cancel returns nil once the session has ended,
-// however it ended, and when it leaves a committed session open. It reports
-// session.ErrNotFound for an attempt with no session.
-func (s *Server) Cancel(ctx context.Context, uid types.UID) error {
+// FailUncommitted fails the session of an attempt with reason, which must be a
+// valid condition reason, unless every member has arrived at
+// session.BarrierAdmitted, which commits the attempt. The host fails a session
+// this way before the commit: with session.ReasonCancelled once its group
+// resource's deletion has started, and with a member's reason once that member
+// has failed. It is best effort: members decide on their own that the barrier
+// is complete, so a member that saw it complete just before FailUncommitted
+// read the arrivals can still start. FailUncommitted returns nil once the
+// session has ended, however it ended, and when it leaves a committed session
+// open. It reports session.ErrNotFound for an attempt with no session.
+func (s *Server) FailUncommitted(ctx context.Context, uid types.UID, reason string) error {
+	if err := session.ValidateReason(reason); err != nil {
+		return err
+	}
 	a := s.lookup(uid)
 	if a == nil {
 		return fmt.Errorf("attempt %s: %w", uid, session.ErrNotFound)
@@ -534,7 +539,7 @@ func (s *Server) Cancel(ctx context.Context, uid types.UID) error {
 	if committed, err := s.committed(ctx, a); err != nil || committed {
 		return err
 	}
-	if err := s.endWith(ctx, a, []byte(session.ReasonCancelled)); err != nil && !ended(err) {
+	if err := s.endWith(ctx, a, []byte(reason)); err != nil && !ended(err) {
 		return err
 	}
 	return nil
