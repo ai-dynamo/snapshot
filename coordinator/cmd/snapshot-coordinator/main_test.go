@@ -94,7 +94,8 @@ func TestLogging(t *testing.T) {
 		_, logOpts, err := parse(t, append(required, args...)...)
 		require.NoError(t, err)
 		out := &bytes.Buffer{}
-		return zap.New(zap.UseFlagOptions(&logOpts), zap.WriteTo(out)), out
+		logOpts.DestWriter = out
+		return newLogger(&logOpts), out
 	}
 
 	t.Run("production mode by default", func(t *testing.T) {

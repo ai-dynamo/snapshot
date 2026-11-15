@@ -12,6 +12,7 @@ import (
 	"github.com/ai-dynamo/snapshot/coordinator/host"
 	"github.com/ai-dynamo/snapshot/coordinator/server"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
+	"github.com/go-logr/logr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
@@ -26,7 +27,7 @@ const (
 func main() {
 	cfg, logOpts := bindFlags(flag.CommandLine)
 	flag.Parse()
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(logOpts)))
+	ctrl.SetLogger(newLogger(logOpts))
 
 	restConfig, err := ctrl.GetConfig()
 	if err != nil {
@@ -40,6 +41,9 @@ func main() {
 		os.Exit(1)
 	}
 }
+
+// newLogger returns the logger that the logging options configure.
+func newLogger(opts *zap.Options) logr.Logger { return zap.New(zap.UseFlagOptions(opts)) }
 
 // bindFlags defines the coordinator's flags on fs, controller-runtime's zap
 // flags included, and returns the Config and the logging options they set once
