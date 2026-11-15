@@ -73,8 +73,9 @@ func (cfg Config) validate() error {
 }
 
 // Authorizer admits an agent for a member of an attempt when the agent's token
-// is a token of the agents' ServiceAccount for the audience, bound to a Pod on
-// the node the member runs on, and the API server still accepts it.
+// is a token of the agents' ServiceAccount for the audience, bound to a Pod and
+// its node, and the API server still accepts it. For an attempt the
+// coordinator holds, the Pod must also run on the node the member runs on.
 type Authorizer struct {
 	cfg Config
 
@@ -114,30 +115,34 @@ func New(ctx context.Context, cfg Config) (*Authorizer, error) {
 	}, nil
 }
 
-// Authorize implements server.Authorizer. It verifies the token locally, then
-// checks it against where the attempt's members run, and only then asks the
-// API server, so a token that fails either check costs no TokenReview. It
-// logs no refusal: the coordinator logs the error, which says why and never
-// holds the token.
-func (a *Authorizer) Authorize(ctx context.Context, uid types.UID, member, token string) error {
+// Authorize implements server.Authorizer. It verifies the token locally and
+// checks its ServiceAccount, then, if the coordinator holds the attempt,
+// checks the token against where the attempt's members run, and only then
+// asks the API server, so a token that fails any of these checks costs no
+// TokenReview. For an attempt the coordinator does not hold, it skips the
+// placement check: the member reconnects to learn that its session is gone,
+// and the attempt's group may be gone too. It logs no refusal: the coordinator
+// logs the error, which says why and never holds the token.
+func (a *Authorizer) Authorize(ctx context.Context, uid types.UID, member, token string, held bool) error {
 	id, err := a.verify(ctx, token)
 	if err != nil {
 		return err
 	}
-	if err := a.checkPlacement(ctx, uid, member, id); err != nil {
-		return err
-	}
-	return a.review(ctx, token, id)
-}
-
-// checkPlacement checks that the token is the agents' ServiceAccount's, and
-// that member belongs to the attempt uid and runs on the node the token is
-// bound to.
-func (a *Authorizer) checkPlacement(ctx context.Context, uid types.UID, member string, id identity) error {
 	if id.serviceAccount != a.cfg.ServiceAccount {
 		return fmt.Errorf("%w: the token is ServiceAccount %s's, not the agents' %s", server.ErrPermissionDenied,
 			id.serviceAccount, a.cfg.ServiceAccount)
 	}
+	if held {
+		if err := a.checkPlacement(ctx, uid, member, id); err != nil {
+			return err
+		}
+	}
+	return a.review(ctx, token, id)
+}
+
+// checkPlacement checks that member belongs to the attempt uid and runs on the
+// node the token is bound to.
+func (a *Authorizer) checkPlacement(ctx context.Context, uid types.UID, member string, id identity) error {
 	nodes, err := a.cfg.Placement.MemberNodes(ctx, uid)
 	switch {
 	case errors.Is(err, session.ErrNotFound):

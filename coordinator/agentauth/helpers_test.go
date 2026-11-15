@@ -397,17 +397,26 @@ func (h *harness) signedWith(id string) string {
 }
 
 // authorize asks the Authorizer, within server.AuthorizeTimeout as the
-// coordinator does, to admit token for member of attempt.
+// coordinator does, to admit token for member of attempt, which the
+// coordinator holds.
 func (h *harness) authorize(member, token string) error {
 	ctx, cancel := context.WithTimeout(h.t.Context(), server.AuthorizeTimeout)
 	defer cancel()
-	return h.authorizeWithin(ctx, member, token)
+	return h.authorizeWithin(ctx, member, token, true)
+}
+
+// authorizeNotHeld asks the same as authorize for an attempt the coordinator
+// does not hold, as it does for a member reconnecting to a session it lost.
+func (h *harness) authorizeNotHeld(member, token string) error {
+	ctx, cancel := context.WithTimeout(h.t.Context(), server.AuthorizeTimeout)
+	defer cancel()
+	return h.authorizeWithin(ctx, member, token, false)
 }
 
 // authorizeWithin asks the Authorizer, within ctx, to admit token for member
-// of attempt.
-func (h *harness) authorizeWithin(ctx context.Context, member, token string) error {
-	err := h.auth.Authorize(ctx, attempt, member, token)
+// of attempt, which the coordinator holds if held.
+func (h *harness) authorizeWithin(ctx context.Context, member, token string, held bool) error {
+	err := h.auth.Authorize(ctx, attempt, member, token, held)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.tokens = append(h.tokens, token)

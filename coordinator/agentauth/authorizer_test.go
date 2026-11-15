@@ -242,6 +242,40 @@ func TestAuthorizeChecksIdentityAndPlacement(t *testing.T) {
 	}
 }
 
+// A member reconnecting to an attempt the coordinator does not hold, such as
+// after its group was removed, must be admitted, so that it learns that its
+// session is gone, with session.ErrCoordinatorLost. Its token is still checked.
+func TestAuthorizeAMemberOfAnAttemptNotHeld(t *testing.T) {
+	t.Run("admits a valid token for a removed group", func(t *testing.T) {
+		h := newHarness(t)
+		h.placement.nodes = nil
+		require.NoError(t, h.authorizeNotHeld(member, h.token()))
+		assert.Zero(t, h.placement.asked.Load(), "asked where the members run")
+		assert.EqualValues(t, 1, h.reviewer.calls.Load())
+	})
+	t.Run("refuses a token that does not verify", func(t *testing.T) {
+		h := newHarness(t)
+		h.placement.nodes = nil
+		err := h.authorizeNotHeld(member, h.token(set("aud", []string{"another-audience"})))
+		require.ErrorIs(t, err, server.ErrUnauthenticated)
+		assert.Zero(t, h.reviewer.calls.Load(), "reviewed the token")
+	})
+	t.Run("refuses a token of another ServiceAccount", func(t *testing.T) {
+		h := newHarness(t)
+		h.placement.nodes = nil
+		workload := func(c tokenClaims) { c.kubernetes()["serviceaccount"] = map[string]any{"name": "workload"} }
+		require.ErrorIs(t, h.authorizeNotHeld(member, h.token(workload)), server.ErrPermissionDenied)
+		assert.Zero(t, h.reviewer.calls.Load(), "reviewed the token")
+	})
+	t.Run("refuses a token the API server does not accept", func(t *testing.T) {
+		h := newHarness(t)
+		h.placement.nodes = nil
+		h.reviewer.answerWith(authenticationv1.TokenReviewStatus{Error: "pod not found"}, nil)
+		require.ErrorIs(t, h.authorizeNotHeld(member, h.token()), server.ErrUnauthenticated)
+		assert.EqualValues(t, 1, h.reviewer.calls.Load())
+	})
+}
+
 func TestAuthorizeReviewsTheToken(t *testing.T) {
 	forbidden := apierrors.NewForbidden(schema.GroupResource{Group: "authentication.k8s.io", Resource: "tokenreviews"},
 		"", errors.New("RBAC: not allowed"))
@@ -401,7 +435,7 @@ func TestAReviewOutlivesTheCallThatStartedIt(t *testing.T) {
 	// The first call gives up while its review is held.
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
-	err := h.authorizeWithin(ctx, member, token)
+	err := h.authorizeWithin(ctx, member, token, true)
 	require.ErrorIs(t, err, server.ErrUnavailable)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 
@@ -465,7 +499,7 @@ func TestNoErrorOrLogHoldsTheToken(t *testing.T) {
 	h.reviewer.release = make(chan struct{})
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
-	require.ErrorIs(t, h.authorizeWithin(ctx, member, h.token()), server.ErrUnavailable)
+	require.ErrorIs(t, h.authorizeWithin(ctx, member, h.token(), true), server.ErrUnavailable)
 	close(h.reviewer.release)
 
 	// The keys: a caller gives up waiting for a fetch, another is refused
@@ -475,7 +509,7 @@ func TestNoErrorOrLogHoldsTheToken(t *testing.T) {
 	release := h.issuer.holdKeys(t)
 	ctx, cancel = context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
-	require.ErrorIs(t, h.authorizeWithin(ctx, member, h.signedWith("key-unknown")), server.ErrUnavailable)
+	require.ErrorIs(t, h.authorizeWithin(ctx, member, h.signedWith("key-unknown"), true), server.ErrUnavailable)
 	release()
 	require.ErrorIs(t, h.authorize(member, h.signedWith("key-unknown")), server.ErrUnauthenticated)
 	h.issuer.respondWith(unavailable)

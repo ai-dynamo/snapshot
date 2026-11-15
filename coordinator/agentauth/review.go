@@ -28,9 +28,8 @@ const maxReviewAge = 2 * time.Minute
 const maxRefusalAge = 5 * time.Second
 
 // maxReviews bounds the TokenReview answers held. Only tokens the issuer
-// signed for the agents' ServiceAccount, bound to the node of a member they
-// name, reach a TokenReview, so this is far more than the agents that connect
-// to one coordinator within maxReviewAge.
+// signed for the agents' ServiceAccount reach a TokenReview, so this is far
+// more than the agents that connect to one coordinator within maxReviewAge.
 const maxReviews = 1024
 
 // review reports whether the API server accepts the token, which a TokenReview
