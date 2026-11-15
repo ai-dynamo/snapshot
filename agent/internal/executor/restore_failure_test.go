@@ -23,7 +23,7 @@ import (
 func TestRestoreFailureKeepsCauseAndCleanupApart(t *testing.T) {
 	cause := pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "busy")
 	cleanup := pagebroker.NewFailureError(pagebroker.Failure_ARTIFACT_CORRUPT, "abort refused")
-	failure := newRestoreFailure(failStep(StepPrepareRestore, cause), cleanup, false, false)
+	failure := newRestoreFailure(failStep(StepPrepareRestore, cause), cleanup)
 
 	if failure.Step != StepPrepareRestore || failure.Cause != error(cause) {
 		t.Fatalf("failure = %+v, want the step and its cause", failure)
@@ -42,7 +42,7 @@ func TestRestoreFailureKeepsCauseAndCleanupApart(t *testing.T) {
 		t.Fatalf("cleanup = %v, want a marked cleanup failure reachable from the failure", failure.Cleanup)
 	}
 
-	bare := newRestoreFailure(errors.New("restore mounter is required"), nil, false, false)
+	bare := newRestoreFailure(errors.New("restore mounter is required"), nil)
 	if bare.Step != "" || bare.Error() != "restore mounter is required" || len(bare.Unwrap()) != 1 {
 		t.Fatalf("failure without a step or cleanup = %+v (%q)", bare, bare.Error())
 	}
@@ -53,20 +53,16 @@ func TestNewRestoreFailureReadsTheMarks(t *testing.T) {
 	tests := []struct {
 		name        string
 		err         error
-		abortFailed bool
-		mountLeft   bool
 		wantFinal   bool
 		wantChanged bool
 	}{
 		{name: "unmarked", err: failStep(StepRestoreCRIU, cause)},
 		{name: "final inside the step", err: failStep(StepValidateManifest, final(cause)), wantFinal: true},
 		{name: "changed outside the step", err: &changedContainerError{err: failStep(StepRestoreCRIU, cause)}, wantChanged: true},
-		{name: "abort failed", err: failStep(StepRestoreCRIU, cause), abortFailed: true, wantFinal: true},
-		{name: "a mount was left", err: failStep(StepRestoreCRIU, cause), mountLeft: true, wantChanged: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			failure := newRestoreFailure(tt.err, nil, tt.abortFailed, tt.mountLeft)
+			failure := newRestoreFailure(tt.err, nil)
 			if failure.Final != tt.wantFinal || failure.ContainerChanged != tt.wantChanged {
 				t.Fatalf("failure = %+v, want Final %v and ContainerChanged %v", failure, tt.wantFinal, tt.wantChanged)
 			}
