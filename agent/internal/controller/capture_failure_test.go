@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 )
@@ -25,6 +27,33 @@ func TestClassifyCaptureFailure(t *testing.T) {
 		{"an unrecognised error says no more than it knows", errors.New("criu exited 1"), reasonCheckpointFailed, false},
 		{"the capture ran out of time", context.DeadlineExceeded, reasonCheckpointTimeout, false},
 		{"staging refused under contention frees up", pagebroker.NewFailureError(pagebroker.Failure_INSUFFICIENT_STORAGE, ""), reasonStagingUnavailable, true},
+		{
+			"the destination store running out is not staging",
+			&executor.StepError{Step: executor.StepCommitCheckpoint,
+				Err: pagebroker.NewFailureError(pagebroker.Failure_INSUFFICIENT_STORAGE, "")},
+			reasonStoreExhausted, false,
+		},
+		{
+			// Observed on a node whose destination PVC filled: PageBroker reports it
+			// as a generic storage error, not as INSUFFICIENT_STORAGE.
+			"a destination that filled while writing the artifact",
+			&executor.StepError{Step: executor.StepCommitCheckpoint,
+				Err: pagebroker.NewFailureError(pagebroker.Failure_STORAGE_ERROR,
+					"filesystem error: cannot copy file: No space left on device [pages-2.img]")},
+			reasonStoreExhausted, false,
+		},
+		{
+			"a storage error that is not a full store may still clear",
+			&executor.StepError{Step: executor.StepCommitCheckpoint,
+				Err: pagebroker.NewFailureError(pagebroker.Failure_STORAGE_ERROR, "transient read error")},
+			reasonCheckpointFailed, true,
+		},
+		{
+			"staging running out at the dump is still staging",
+			&executor.StepError{Step: executor.StepDumpCRIU,
+				Err: pagebroker.NewFailureError(pagebroker.Failure_INSUFFICIENT_STORAGE, "")},
+			reasonStagingUnavailable, true,
+		},
 		{"a storage error may clear", pagebroker.NewFailureError(pagebroker.Failure_STORAGE_ERROR, ""), reasonCheckpointFailed, true},
 		{"an internal error may clear", pagebroker.NewFailureError(pagebroker.Failure_INTERNAL_ERROR, ""), reasonCheckpointFailed, true},
 		{"the broker may come back", pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, ""), reasonCheckpointFailed, true},
@@ -123,4 +152,18 @@ func TestCaptureCauseLeavesAPlainErrorIntact(t *testing.T) {
 	if got := captureCause(fmt.Errorf("checkpoint: %w", plain)); !errors.Is(got, error(plain)) {
 		t.Errorf("captureCause() dropped the chain of an unjoined error: %v", got)
 	}
+}
+
+// The cleanup an executor joins onto a failure is not the failure. A full-disk
+// message coming from a failed abort would otherwise turn a transient commit
+// error into a terminal full store, and skip the retries it should have had.
+func TestClassifyCaptureFailureIgnoresCleanupText(t *testing.T) {
+	transient := &executor.StepError{Step: executor.StepCommitCheckpoint,
+		Err: pagebroker.NewFailureError(pagebroker.Failure_STORAGE_ERROR, "transient read error")}
+	withNoisyCleanup := errors.Join(transient,
+		executor.CleanupFailure(errors.New("abort: no space left on device")))
+
+	got := classifyCaptureFailure(withNoisyCleanup)
+	assert.Equal(t, reasonCheckpointFailed, got.reason, "the cleanup text must not set the reason")
+	assert.True(t, got.retryable, "a transient commit failure keeps its retries")
 }

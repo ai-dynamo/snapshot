@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-GO_VERSION             ?= 1.27.3
+GO_VERSION             ?= 1.27.4
 
 CONTROLLER_GEN_VERSION ?= v0.19.0
 GOLANGCI_LINT_VERSION  ?= v2.14.0

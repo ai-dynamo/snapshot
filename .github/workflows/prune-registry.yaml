@@ -8,11 +8,13 @@ name: Prune Registry
 # hack/prune-ghcr.py deletes only digests that are both untagged and unreachable
 # from any tagged version — see its module docstring for why "untagged" alone
 # would break published releases, and why the cache is kept for days rather than
-# months.
+# months. It also expires the images e2e-pr.yaml publishes for pull requests,
+# which are tagged and so would otherwise never go.
 on:
   schedule:
-    # Fridays 04:00 UTC. Off-hours, so a bad run is noticed before the next release.
-    - cron: '0 4 * * 5'
+    # Daily 04:00 UTC, off-hours. Daily so pull request images go close to their
+    # keep_days rather than up to a week after it.
+    - cron: '0 4 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -25,6 +27,10 @@ on:
         default: '90'
       cache_keep_days:
         description: 'Same, for the layer cache, which turns over far faster'
+        type: string
+        default: '7'
+      pr_keep_days:
+        description: 'Keep pull request images (v0.0.0-pull-request-*) newer than this many days'
         type: string
         default: '7'
 
@@ -52,6 +58,11 @@ jobs:
       # artifacts, so it reports for a few cycles and a maintainer flips the
       # default here once the output has been reviewed.
       #
+      # Pull request images are the exception, deleted for real on the schedule:
+      # they are disposable by construction, and expiring them is selected by
+      # their tag rather than inferred from reachability. A dispatch's dry_run
+      # still covers both.
+      #
       # The github.event_name guard is load-bearing. `inputs` is only populated
       # for workflow_dispatch and workflow_call, so on the schedule inputs.dry_run
       # is null — and GitHub coerces both null and false to 0, making
@@ -65,9 +76,17 @@ jobs:
                  && inputs.dry_run == false) && 'false' || 'true' }}
           KEEP_DAYS: ${{ inputs.keep_days || '90' }}
           CACHE_KEEP_DAYS: ${{ inputs.cache_keep_days || '7' }}
+          PR_KEEP_DAYS: ${{ inputs.pr_keep_days || '7' }}
         run: |
+          set -euo pipefail
+          pr_dry_run="${DRY_RUN}"
+          if [ "${GITHUB_EVENT_NAME}" = schedule ]; then
+            pr_dry_run=false
+          fi
           python3 hack/prune-ghcr.py \
             --org "${GITHUB_REPOSITORY%%/*}" \
             --keep-days "${KEEP_DAYS}" \
             --cache-keep-days "${CACHE_KEEP_DAYS}" \
-            --dry-run "${DRY_RUN}"
+            --pr-keep-days "${PR_KEEP_DAYS}" \
+            --dry-run "${DRY_RUN}" \
+            --pr-dry-run "${pr_dry_run}"

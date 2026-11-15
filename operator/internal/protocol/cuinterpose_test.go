@@ -67,6 +67,7 @@ func TestShapeCuInterposeCapture(t *testing.T) {
 		"/usr/local/lib/snapshot/libcuinterpose.so", "/usr/local/lib/snapshot/libcuinterpose_core.so",
 		"/usr/local/bin/cuinterpose-launch", podcontract.CuInterposeMountPath + "/",
 	}, installer.Args)
+	assert.Equal(t, []corev1.EnvVar{{Name: "NVIDIA_VISIBLE_DEVICES", Value: "void"}}, installer.Env)
 	assert.Equal(t, []corev1.VolumeMount{{
 		Name: cuInterposeVolumeName, MountPath: podcontract.CuInterposeMountPath, ReadOnly: false,
 	}}, installer.VolumeMounts)
