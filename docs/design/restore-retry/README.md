@@ -105,8 +105,8 @@ before.
 
 A pass after an agent restart first checks what the destination already
 wrote. A `restore-failed` reports the failure again. A `restore-complete` runs
-only the post-restore action, within the record's deadline. CRIU never runs
-again after either one.
+only the post-restore action, with a full `restore.timeoutSeconds` again. CRIU
+never runs again after either one.
 
 A record that shows an attempt with no retry saved is an attempt that no agent
 saw finish. At every limit, the attempt runs again within the same deadline and
