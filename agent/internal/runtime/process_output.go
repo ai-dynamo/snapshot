@@ -78,17 +78,11 @@ func (o *ProcessOutput) Detail() string {
 // callers that know how to read their process's stderr better than the last
 // line heuristic does.
 func (o *ProcessOutput) DetailFrom(stderrLine string) string {
-	return JoinDetail(stderrLine, o.stdout.String())
-}
-
-// JoinDetail builds a detail from a stderr line and the part of stdout worth
-// quoting, for callers whose stdout also carries lines that explain nothing.
-func JoinDetail(stderrLine, stdout string) string {
 	var parts []string
 	if stderrLine != "" {
 		parts = append(parts, truncateDetail(stderrLine))
 	}
-	if out := strings.TrimSpace(stdout); out != "" {
+	if out := strings.TrimSpace(o.stdout.String()); out != "" {
 		parts = append(parts, "stdout: "+truncateDetail(out))
 	}
 	return strings.Join(parts, "; ")
