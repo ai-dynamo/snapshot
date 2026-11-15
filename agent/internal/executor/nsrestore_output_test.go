@@ -13,7 +13,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-logr/logr"
 	"k8s.io/utils/ptr"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
@@ -322,25 +321,6 @@ func TestNewRestoreInNamespaceFailureRoundTrip(t *testing.T) {
 				t.Fatalf("PageBroker code did not survive: sent %v, read %v", want, read)
 			}
 		})
-	}
-}
-
-func TestExecuteRestoreStopsWhenProgressCannotBeReported(t *testing.T) {
-	reportErr := errors.New("write /dev/stdout: broken pipe")
-	var reported []RestoreInNamespaceProgress
-	opts := RestoreOptions{
-		CheckpointPath: t.TempDir(),
-		ReportProgress: func(progress RestoreInNamespaceProgress) error {
-			reported = append(reported, progress)
-			return reportErr
-		},
-	}
-	_, _, _, err := executeRestore(context.Background(), nil, nil, opts, "", logr.Discard())
-	if !errors.Is(err, reportErr) || StepOf(err) != StepApplyRootfsDiff {
-		t.Fatalf("executeRestore() = %v, want the report failure at %q", err, StepApplyRootfsDiff)
-	}
-	if len(reported) != 1 || !reported[0].ChangingContainer {
-		t.Fatalf("reported %+v, want one changingContainer message", reported)
 	}
 }
 

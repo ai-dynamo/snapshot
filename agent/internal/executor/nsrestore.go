@@ -5,6 +5,7 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -38,9 +39,6 @@ type RestoreOptions struct {
 	TargetPodIP            string
 	// BundleDir is the path where the agent's binary bundle is mounted inside this namespace.
 	BundleDir string
-	// ReportProgress tells the agent how far the restore got. The restore stops
-	// when it fails, so the agent never misses a change to the container.
-	ReportProgress func(RestoreInNamespaceProgress) error
 }
 
 // RestoreInNamespaceProgress is a line nsrestore writes on stdout ahead of its
@@ -175,10 +173,8 @@ func executeRestore(
 ) (timings *nsrestorePhaseTimings, restoredPID int, cleanupErr error, retErr error) {
 	timings = &nsrestorePhaseTimings{}
 
-	if opts.ReportProgress != nil {
-		if err := opts.ReportProgress(RestoreInNamespaceProgress{ChangingContainer: true}); err != nil {
-			return nil, 0, nil, failStep(StepApplyRootfsDiff, fmt.Errorf("report restore progress: %w", err))
-		}
+	if err := json.NewEncoder(os.Stdout).Encode(RestoreInNamespaceProgress{ChangingContainer: true}); err != nil {
+		return nil, 0, nil, failStep(StepApplyRootfsDiff, fmt.Errorf("report restore progress: %w", err))
 	}
 	overlayStart := time.Now()
 	if err := snapshotruntime.ApplyRootfsDiff(opts.CheckpointPath, "/", opts.BundleDir, log); err != nil {
