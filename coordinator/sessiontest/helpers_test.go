@@ -272,6 +272,7 @@ func (ses *testSession) rawBucket(t *testing.T, member int, bucket string) jetst
 	uid, id := string(ses.spec.UID), ses.spec.Members[member].ID
 	nc, err := nats.Connect("tls://"+ses.h.srv.Addr().String(),
 		nats.Secure(&tls.Config{RootCAs: ses.h.ca, ServerName: "localhost", MinVersion: tls.VersionTLS12}),
+		nats.TLSHandshakeFirst(),
 		nats.UserInfo(session.UserName(uid, id), ""),
 		nats.Token(coordinatortest.Token),
 		nats.CustomInboxPrefix(session.InboxPrefix(uid, id)),

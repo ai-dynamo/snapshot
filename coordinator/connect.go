@@ -151,6 +151,8 @@ func (s *client) options(cfg Config) []nats.Option {
 	return []nats.Option{
 		// Both ends are ours, so neither needs anything older than TLS 1.3.
 		nats.Secure(&tls.Config{ServerName: cfg.ServerName, MinVersion: tls.VersionTLS13}),
+		// The coordinator expects the handshake before it sends anything.
+		nats.TLSHandshakeFirst(),
 		// nats.go retries a handshake that fails here without reporting why, so
 		// the client logs it. A nil pool would trust the host's CAs instead.
 		nats.ClientTLSConfig(nil, func() (*x509.CertPool, error) {

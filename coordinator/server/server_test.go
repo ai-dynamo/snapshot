@@ -7,6 +7,9 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
+	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -255,4 +258,45 @@ func TestConfig(t *testing.T) {
 		})
 	}
 
+}
+
+// TestTLSHandshakeFirst checks that the coordinator sends nothing before the
+// client's TLS handshake, so its INFO line never goes out in plaintext, and
+// refuses a client that begins in plaintext.
+func TestTLSHandshakeFirst(t *testing.T) {
+	h := newHarness(t)
+
+	t.Run("sends nothing to a client that has not begun", func(t *testing.T) {
+		conn, err := net.Dial("tcp", h.srv.Addr().String())
+		require.NoError(t, err)
+		defer conn.Close()
+		require.NoError(t, conn.SetReadDeadline(time.Now().Add(pending)))
+		n, err := conn.Read(make([]byte, 64))
+		require.ErrorIs(t, err, os.ErrDeadlineExceeded, "the coordinator must wait for the client")
+		assert.Zero(t, n)
+	})
+
+	t.Run("refuses a client that begins in plaintext", func(t *testing.T) {
+		conn, err := net.Dial("tcp", h.srv.Addr().String())
+		require.NoError(t, err)
+		defer conn.Close()
+		_, err = conn.Write([]byte("CONNECT {}\r\nPING\r\n"))
+		require.NoError(t, err)
+		require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+		reply, err := io.ReadAll(conn)
+		assert.NotContains(t, string(reply), "INFO", "no INFO line may reach a client that is not on TLS")
+		assert.NotContains(t, string(reply), "PONG")
+		if err != nil {
+			assert.NotErrorIs(t, err, os.ErrDeadlineExceeded, "the coordinator must close the connection")
+		}
+	})
+
+	t.Run("refuses a client that waits for the INFO line first", func(t *testing.T) {
+		spec := h.ensure(1)
+		_, err := nats.Connect("tls://"+h.srv.Addr().String(),
+			nats.Secure(&tls.Config{RootCAs: h.ca, ServerName: "localhost", MinVersion: tls.VersionTLS12}),
+			nats.UserInfo(session.UserName(string(spec.UID), spec.Members[0].ID), ""), nats.Token(agentToken),
+			nats.NoReconnect(), nats.Timeout(time.Second))
+		require.Error(t, err)
+	})
 }

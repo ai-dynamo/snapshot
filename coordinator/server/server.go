@@ -113,6 +113,8 @@ type Config struct {
 	// configuration returns at that moment, so a GetCertificate that follows a
 	// rotated certificate, such as controller-runtime's certwatcher, rotates
 	// it without restarting anything.
+	// A client must begin with the TLS handshake, as the session client does:
+	// the server sends nothing, its INFO line included, before it.
 	TLS *tls.Config
 
 	// Authorizer decides who may act for which member. There is no allow-all
@@ -288,14 +290,17 @@ func (s *Server) start() error {
 		// The process owns its signals.
 		NoSigs: true,
 		// Logs go through SetLoggerV2 below, never to standard error.
-		NoLog:         true,
-		TLSConfig:     s.cfg.TLS,
-		MaxPayload:    maxPayload,
-		MaxPending:    session.MaxConcurrentGets * int64(maxPayload),
-		WriteDeadline: writeDeadline,
-		PingInterval:  serverPingInterval,
-		MaxPingsOut:   serverMaxPingsOut,
-		JetStream:     true,
+		NoLog:     true,
+		TLSConfig: s.cfg.TLS,
+		// The client speaks first, with its TLS handshake, so the server's INFO
+		// line, which names it, never goes out in plaintext.
+		TLSHandshakeFirst: true,
+		MaxPayload:        maxPayload,
+		MaxPending:        session.MaxConcurrentGets * int64(maxPayload),
+		WriteDeadline:     writeDeadline,
+		PingInterval:      serverPingInterval,
+		MaxPingsOut:       serverMaxPingsOut,
+		JetStream:         true,
 		// Memory holds the data buckets and file storage the control buckets,
 		// and each has its own limit: a full memory cap leaves file storage
 		// writable.

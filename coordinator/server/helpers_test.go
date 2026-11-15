@@ -124,6 +124,7 @@ func (h *harness) dial(spec Spec, member, token string, epoch uint64, opts ...na
 	uid := string(spec.UID)
 	return nats.Connect("tls://"+h.srv.Addr().String(), append([]nats.Option{
 		nats.Secure(&tls.Config{RootCAs: h.ca, ServerName: "localhost", MinVersion: tls.VersionTLS12}),
+		nats.TLSHandshakeFirst(),
 		nats.UserInfo(session.UserName(uid, member), password),
 		nats.Token(token),
 		nats.CustomInboxPrefix(session.InboxPrefix(uid, member)),
