@@ -17,9 +17,10 @@
 //   - The serving Secret, of type kubernetes.io/tls: tls.crt and tls.key. The
 //     certificate names the server name as its only DNS name.
 //   - The trust bundle ConfigMap: ca.crt, the CA certificates the agents
-//     trust, which are exactly the CA Secret's ca.crt and previous.crt. The
-//     Issuer builds it from the CA Secret alone, never from its own content,
-//     so anything else written into it is rewritten at the next check.
+//     trust, which are exactly the CA Secret's ca.crt and previous.crt, in
+//     that order. The Issuer builds it from the CA Secret alone, never from
+//     its own content, so anything else written into it is rewritten at the
+//     next check.
 //
 // Each write labels the resource app.kubernetes.io/managed-by:
 // snapshot-operator. The resources have no owner reference, so that deleting
