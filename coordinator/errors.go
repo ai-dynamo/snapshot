@@ -87,11 +87,12 @@ func ours(err error) bool {
 // fails with a *net.OpError, or is reconnecting, which refuses every publish
 // since the client buffers none, the server did not answer in time, or a watch
 // found its bucket at its most consumers, which free up as other waits end, or
-// the server dropped a write because the stream's ingest queue was full. An
+// the server dropped a write because the stream's ingest queue was full: see
+// throttled. An
 // operation is sent again only while the session is alive, so a
 // *net.OpError that wraps net.ErrClosed never reports a closed session.
 func transient(err error) bool {
-	if code, _ := apiError(err); code == jsMaximumConsumers || throttled(err) {
+	if throttled(err) {
 		return true
 	}
 	if _, ok := errors.AsType[*net.OpError](err); ok {
@@ -106,11 +107,13 @@ func transient(err error) bool {
 }
 
 // throttled reports whether err says the coordinator is too busy for the
-// operation now, which is sent again after a wait that grows while it stays
-// busy, so many clients do not press it at the pace they retry.
+// operation now: a write dropped for a full ingest queue, or a watch refused at
+// its bucket's consumer limit. It is sent again after a wait that grows while
+// the coordinator stays busy, so many clients do not press it at the pace they
+// retry.
 func throttled(err error) bool {
 	code, _ := apiError(err)
-	return code == jsTooManyRequests
+	return code == jsMaximumConsumers || code == jsTooManyRequests
 }
 
 // missing reports whether an operation that failed with err may have found
