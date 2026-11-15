@@ -397,11 +397,10 @@ func TestRestoreRetryLimit(t *testing.T) {
 		"a negative Pod limit":                  {annotation: "-1", wantErr: "must be a non-negative integer"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			annotations := map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"}
+			op, _ := newAttemptOperation(t, map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 			if tc.annotation != "" {
-				annotations[podcontract.RestoreRetryLimitAnnotation] = tc.annotation
+				op.pod.Annotations[podcontract.RestoreRetryLimitAnnotation] = tc.annotation
 			}
-			op, _ := newAttemptOperation(t, annotations)
 			op.controller.config.Restore.RetryLimit = tc.agentDefault
 
 			got, err := op.controller.restoreRetryLimit(op.pod)
@@ -499,11 +498,10 @@ func TestStartAttempt(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			annotations := map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"}
+			op, volume := newAttemptOperation(t, map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 			if tc.annotation != "" {
-				annotations[podcontract.RestoreRetryLimitAnnotation] = tc.annotation
+				op.pod.Annotations[podcontract.RestoreRetryLimitAnnotation] = tc.annotation
 			}
-			op, volume := newAttemptOperation(t, annotations)
 			op.controller.config.Restore.TimeoutSeconds = tc.timeout
 			op.controller.nowFn = func() time.Time { return now }
 			if tc.record != nil {
