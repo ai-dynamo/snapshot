@@ -4,11 +4,13 @@
 package sessiontest
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/ai-dynamo/snapshot/coordinator/session"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -252,11 +254,17 @@ func TestRemoved(t *testing.T) {
 		// the ended key is no smaller.
 		control := ses.raw(t, 0)
 		for i := 0; ; i++ {
-			if _, err := control.Put(ctx, session.BarrierKey(fmt.Sprintf("fill-%d", i), ses.spec.Members[0].ID),
-				nil); err != nil {
-				break
+			_, err := control.Put(ctx, session.BarrierKey(fmt.Sprintf("fill-%d", i), ses.spec.Members[0].ID), nil)
+			if err == nil {
+				continue
 			}
+			apiErr, ok := errors.AsType[*jetstream.APIError](err)
+			require.True(t, ok, "the bucket must refuse with an API error: %v", err)
+			require.EqualValues(t, 10077, apiErr.ErrorCode, "the bucket must refuse because it is full")
+			break
 		}
+		// The members of the full session get an answer, not a hang.
+		require.ErrorIs(t, sessions[1].Fail(ctx, "Refused"), session.ErrTooMany)
 
 		start := time.Now()
 		require.NoError(t, h.srv.Remove(ctx, ses.spec.UID))

@@ -458,3 +458,37 @@ func TestBucketStorage(t *testing.T) {
 		assert.Equal(t, want.maxBytes, cfg.MaxBytes, bucket)
 	}
 }
+
+// TestControlBucketFitsAnHonestSession writes what the largest honest session
+// puts in its control bucket, which its size must hold: 256 members with long
+// names, each with several barrier arrivals and a departure, then the ended
+// key. Meta is written by Ensure.
+func TestControlBucketFitsAnHonestSession(t *testing.T) {
+	const members, barriers = 256, 8
+	h := newHarness(t)
+	ctx := within(t)
+	spec := Spec{UID: "uid-large", Deadline: h.clock.Now().Add(time.Hour)}
+	for i := range members {
+		spec.Members = append(spec.Members,
+			session.Member{ID: fmt.Sprintf("snapshot-workload-pod-%03d-node-%03d", i, i), Rank: i})
+	}
+	require.NoError(t, h.srv.Ensure(ctx, spec))
+	kv, err := h.srv.js.KeyValue(ctx, session.ControlBucket(string(spec.UID)))
+	require.NoError(t, err)
+	for _, m := range spec.Members {
+		for b := range barriers {
+			_, err := kv.Put(ctx, session.BarrierKey(fmt.Sprintf("checkpoint-phase-%d-barrier", b), m.ID), nil)
+			require.NoError(t, err, "member %s barrier %d", m.ID, b)
+		}
+		_, err := kv.Put(ctx, session.LeftKey(m.ID), nil)
+		require.NoError(t, err)
+	}
+	// Every member left, so the session closes by the ended key.
+	require.Eventually(t, func() bool { _, ok := h.ended(spec); return ok }, 10*time.Second, 5*time.Millisecond)
+	stream, err := h.srv.js.Stream(ctx, "KV_"+session.ControlBucket(string(spec.UID)))
+	require.NoError(t, err)
+	info, err := stream.Info(ctx)
+	require.NoError(t, err)
+	assert.Less(t, int64(info.State.Bytes), session.ControlBytes(members), "the session's keys must fit with room to spare")
+	t.Logf("%d of %d bytes", info.State.Bytes, session.ControlBytes(members))
+}

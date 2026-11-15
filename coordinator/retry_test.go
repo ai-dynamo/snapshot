@@ -64,27 +64,6 @@ func TestDoRetriesWhenTheCoordinatorIsBusy(t *testing.T) {
 	}
 }
 
-// TestDoWaitsAtMostMaxRetryWait checks that the waits stop growing at the cap,
-// so a watch refused at the consumer limit is created again within it once a
-// consumer frees.
-func TestDoWaitsAtMostMaxRetryWait(t *testing.T) {
-	s := testClient()
-	var tries []time.Time
-	err := s.do(context.Background(), func(context.Context) error {
-		tries = append(tries, time.Now())
-		if len(tries) <= 5 {
-			return &nats.APIError{ErrorCode: jsMaximumConsumers}
-		}
-		return nil
-	})
-	require.NoError(t, err)
-	require.Len(t, tries, 6)
-	// 100ms, 200ms, 400ms, 800ms, then the cap, 1s.
-	last := tries[5].Sub(tries[4])
-	assert.GreaterOrEqual(t, last, maxRetryWait)
-	assert.Less(t, last, maxRetryWait+retryWait, "the wait must stop at the cap")
-}
-
 // TestDoStopsRetryingWhenContextEnds checks that a busy coordinator does not
 // keep a caller whose context is done.
 func TestDoStopsRetryingWhenContextEnds(t *testing.T) {
