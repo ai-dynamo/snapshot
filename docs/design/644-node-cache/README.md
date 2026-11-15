@@ -42,23 +42,19 @@ Tracking issue: [#644](https://github.com/ai-dynamo/snapshot/issues/644).
 
 ## Summary
 
-Snapshot can restore a workload from a snapshot already stored on the node's
-local disk. If no usable copy exists, it restores from S3. When preheat is
-enabled, agents download eligible snapshots ahead of restores. Workloads do
-not wait for preheat to finish. S3 remains the source of truth.
+The Snapshot agent can restore a workload from a snapshot already stored on
+the node's local disk. If no usable copy exists, it restores from S3. When
+preheat is enabled, the agent asks PageBroker to download eligible snapshots
+ahead of restores. Workloads do not wait for preheat to finish. S3 remains
+the source of truth.
 
 ## Motivation
 
 Today, every restore from S3 downloads the whole snapshot first. Restoring the
 same snapshot again downloads it again.
 
-This proposal lets Snapshot keep eligible snapshots on the local NVMe of
-participating nodes, subject to available space. A restore reads the local
-copy and skips the download. If a node has no copy, the restore uses S3 as it
-does today.
-
-Issue #644 requests this node cache. This proposal covers S3 installations
-first.
+Keeping snapshots on local NVMe avoids repeated downloads. This proposal
+addresses issue #644 for S3 installations.
 
 ### Goals
 
@@ -75,8 +71,8 @@ with S3 as the shared store in place of a PVC:
   where the agent runs with the cache enabled. The policy is one cluster-wide
   setting.
 - **Cleanup (requirement 6, in part):** remove local copies after their
-  snapshot is deleted. A cache-deletion command and per-node status are
-  outside this proposal.
+  snapshot is deleted. A user-facing cache-deletion command and per-node
+  status are outside this proposal.
 
 This proposal also meets requirements 7 and 8 in part. See
 [Cache Identity and Layout](#cache-identity-and-layout) and [API](#api).
@@ -104,33 +100,29 @@ Multi-cluster support is also excluded. Issue #644 does not request it.
 
 ## Proposal
 
-A **node cache** is a directory on the node's local NVMe. **Preheat** is the
-agent's background download of snapshots from S3 into that cache, ahead of
-restores.
+A **node cache** is a directory on the node's local NVMe. **Preheat** is a
+background download from S3 into that cache, ahead of restores. The agent
+schedules the download, and PageBroker performs it.
 
-The cache is optional and disabled by default. A restore still requires a
-live, Ready snapshot object. A deleted snapshot cannot be restored, even if
-its files are still on a node's disk.
+The cache is optional and disabled by default. The owning
+`PodSnapshotContent` controls whether a cached copy can be restored or removed;
+see [Restore Source](#restore-source) and [Cleanup](#cleanup).
 
 Preheat is a separate setting, also disabled by default. When both settings
-are enabled, each agent attempts to keep a local copy of eligible Ready
-snapshots. A restore uses the existing S3 path if its local copy is not yet
-available. See [Preheat](#preheat) for eligibility and scheduling.
+are enabled, each agent schedules local copies of eligible Ready snapshots.
+See [Preheat](#preheat) for eligibility and scheduling.
 
 This is eventual replication, not a guarantee. A node skips snapshots that
 do not fit or have known CPU or kernel incompatibilities. Failed preheats
-have limited retries as described in [Preheat](#preheat). Each agent
-downloads its own copy from S3. Nodes do not transfer snapshots to each other.
-
-A preheat must not break an S3 restore, and its effect on restore speed must
-stay within agreed limits. Both are open today; see
-[Graduation Criteria](#graduation-criteria).
-
-An administrator can also place copies with another tool; see
-[Copies Placed by an Administrator](#copies-placed-by-an-administrator).
+have limited retries as described in [Preheat](#preheat). Each node's
+PageBroker downloads its own copy from S3. Nodes do not transfer snapshots
+to each other.
 
 ### Limitations, Risks, and Mitigations
 
+- **Missing cache directory.** With caching enabled, a missing directory prevents
+  the agent pod from starting, including for S3 restores. Prepare each node
+  before enabling the cache; see [Node preparation](#api).
 - **Deletion during a restore.** Cleanup does not track active readers.
   Deleting a snapshot or removing its local copy can break a restore using it.
   Administrators must wait until those restores finish before deleting either.
@@ -144,21 +136,15 @@ An administrator can also place copies with another tool; see
   must remove it. Later restores use S3 until automatic preheat, when enabled,
   refills the copy or an administrator places a valid copy.
 
-Administrators manage retention by deleting old snapshots. Agents then remove
-their local copies. Copies of live snapshots are not evicted to make room.
-When a snapshot does not fit, preheat skips it and restores use S3.
+Administrators manage retention by deleting old snapshots. Agents then ask
+PageBroker to remove their local copies. Copies of live snapshots are not
+evicted to make room.
 
 ## Design Details
 
 Snapshot runs one agent pod on each selected node. The pod holds the node
 agent and PageBroker, and it mounts a directory on the node's NVMe as the node
-cache. A local copy serves only restore pods scheduled on that node. If the
-cache directory is missing on a node, that node behaves as if the cache is
-disabled: restores there use S3, and no preheat runs.
-
-Each node agent watches snapshot objects and periodically checks its cache
-against them. [Preheat](#preheat) defines download scheduling;
-[Cleanup](#cleanup) defines removal of published copies.
+cache. A local copy serves only restore pods scheduled on that node.
 
 The design has three flows:
 
@@ -166,21 +152,23 @@ The design has three flows:
 - **Preheat, from S3 to the NVMe.** The node agent decides what to download
   and checks its identity. PageBroker downloads and publishes the copy.
   This adds a download to NVMe alongside its existing S3 to tmpfs flow.
-- **Restore from the NVMe.** The existing PVC restore flow. The node agent
-  mounts the local copy, and CRIU reads it. PageBroker opens the directory
-  without downloading from S3. On nodes with CUDA custom storage, it also
-  loads the GPU data.
+- **Restore from the NVMe.** Reuse the existing filesystem restore machinery.
+  The agent mounts the validated local copy read-only, and CRIU reads it.
+  PageBroker opens the directory without downloading from S3. On nodes with
+  CUDA custom storage, it also loads the GPU data.
 
 ### Changes by Component
 
 Three components change:
 
-- **Node agent:** selects the [Restore Source](#restore-source), schedules
-  [Preheat](#preheat) and its download retries, and reports failures. It
-  removes deleted snapshots through [Cleanup](#cleanup).
-- **PageBroker:** downloads, validates, publishes, and cleans up preheat
-  requests, including after restart. It also opens local copies for reading
-  on S3 installations.
+- **Node agent:** checks snapshot readiness and compatibility, selects the
+  [Restore Source](#restore-source), and arranges restore mounts. It schedules
+  [Preheat](#preheat) and retries, reads Kubernetes state, decides which copies
+  need [Cleanup](#cleanup), requests removal, and reports failures.
+- **PageBroker:** lists cached copies, checks their files, and opens usable
+  copies for local restore. It downloads and publishes preheat copies, cleans
+  temporary files after failure or restart, and removes published copies only
+  when the agent explicitly requests it.
 - **Helm chart:** adds the settings and cache mount described in [API](#api).
 
 The operator, CRDs, S3 restore flow, and CRIU do not change.
@@ -204,15 +192,15 @@ the proposed mount path, the path inside the agent pod is also the same:
 artifacts/<snapshot-uid>/containers/<container>/
 ```
 
-A copy in the node cache is meant to look to the restore code exactly like a
-snapshot on a PVC, so that a restore from the NVMe can use the existing PVC
-restore flow unchanged. This is the key assumption, and the
-[Test Plan](#test-plan) proves it first.
+This layout lets local restores reuse the existing filesystem restore
+machinery while preserving snapshot identity and compatibility checks.
+The [Test Plan](#test-plan) verifies that reuse.
 
 `<snapshot-uid>` is the UID of the snapshot's `PodSnapshotContent` object.
 
-Before it uses a copy, a restore rejects symlinks and non-directories at that
-entry. It checks that the manifest names this snapshot and container.
+Before a local restore, PageBroker rejects symlinks and non-directories at
+the cache entry. It checks that the manifest names the requested snapshot
+and container, then returns the metadata and local path to the agent.
 
 Validation has three separate meanings:
 
@@ -221,46 +209,58 @@ Validation has three separate meanings:
   modes, and empty directories.
 - **Content integrity:** checksums are not included.
 
-Copies preserve file and directory modes and empty directories. Before
-publication, PageBroker flushes the files and directories and closes writable
-descriptors and mappings.
+Copies preserve file and directory modes and empty directories.
+Published copies are complete and cannot be changed by remaining download work.
 
 A snapshot never changes after it is taken, so a local copy cannot become out
 of date.
 
 ### Restore Source
 
-Reject a restore whose snapshot object is missing or not Ready. For an
-eligible snapshot, choose its source as shown in I1.
+Before selecting a source, the agent requires an existing, Ready
+`PodSnapshotContent` with no deletion timestamp. Otherwise, the restore
+attempt fails.
+
+With caching enabled, the agent asks PageBroker to check the local copy.
+If the request fails, including a timeout or filesystem read error, the
+restore attempt fails. The agent reports the error in its log and a pod event.
+A failed check does not select S3.
 
 **Illustration 1 (I1): Choose the Restore Source**
 
 ```mermaid
 flowchart TD
-    A["Node agent:<br/>finds the Ready snapshot"] --> B{"Node agent:<br/>usable local copy?"}
-    B -->|"Yes"| C{"Node agent:<br/>compatible with this node?"}
-    C -->|"Yes"| D["Agent makes the cached directory available to the restore pod.<br/>Restore reads the local copy without downloading from S3."]
-    C -->|"No"| E["Node agent:<br/>fails the restore"]
-    B -->|"No"| F["PageBroker:<br/>downloads from S3,<br/>the existing path"]
+    B{"Cache enabled?"} -->|"No"| S["Use the existing S3 restore path"]
+    B -->|"Yes"| C["Agent requests a cache check"]
+    C --> D{"PageBroker check result"}
+    D -->|"Request failed"| E["Fail restore attempt<br/>and report the error"]
+    D -->|"Copy absent or manifest invalid"| S
+    D -->|"Usable copy"| F{"Agent: compatible<br/>with this node?"}
+    F -->|"No"| E
+    F -->|"Yes"| G["Agent mounts the cached directory read-only<br/>Restore reads the local copy"]
 ```
 
-A disabled cache, absent copy, or invalid manifest selects S3. A compatible
-copy can originate from another node. A restore from the NVMe always reads in
-place, regardless of `pageBroker.restoreMode`. A restore does not switch
-source after it starts.
+A disabled cache, confirmed absent copy, or invalid manifest selects S3.
+For a usable copy, the agent checks compatibility using PageBroker's returned
+metadata. A compatible copy can originate from another node.
+
+The agent mounts the cached snapshot directory read-only into the restore pod.
+Writable restore files stay outside the published cache. Local restore reads
+in place, regardless of `pageBroker.restoreMode`, and does not switch source
+after it starts.
 
 ### Preheat
 
 Preheat requires both `storage.nodeCache.enabled` and
-`storage.nodeCache.preheat.enabled`; see [API](#api). The agent checks for
-missing copies when snapshots become Ready, nodes join, or the agent restarts,
-and during periodic checks. No restore pod is needed.
+`storage.nodeCache.preheat.enabled`; see [API](#api). The agent asks PageBroker
+about local copies when snapshots become Ready, nodes join, or the agent
+restarts, and during periodic checks. No restore pod is needed.
 
-Before each attempt, the agent checks that preheat is enabled and the snapshot
-is Ready, S3-backed, not being deleted, and has attempts remaining. It skips
-published local copies and known CPU architecture, kernel, or CPU-feature
-mismatches; missing values are allowed. GPU model and driver checks wait for
-the restore pod.
+Before each attempt, the agent checks that preheat is enabled and the owning
+`PodSnapshotContent` is Ready, S3-backed, not being deleted, and has attempts
+remaining. It skips published copies reported by PageBroker and known CPU
+architecture, kernel, or CPU-feature mismatches; missing values are allowed.
+GPU model and driver checks wait for the restore pod.
 
 One preheat runs per node, newest first among snapshots ready for an attempt.
 While one snapshot waits to retry, the agent can preheat another once
@@ -274,9 +274,9 @@ to preheat requests.
 flowchart TD
     A["Agent requests a missing snapshot"] --> B{"PageBroker checks space:<br/>does the snapshot fit?"}
     B -->|No| C["Skip preheat"]
-    B -->|Yes| D["PageBroker downloads, validates,<br/>and flushes the snapshot files"]
+    B -->|Yes| D["PageBroker downloads and validates<br/>the snapshot files"]
     D --> E["Agent checks snapshot identity and status,<br/>then requests publication"]
-    E --> F["PageBroker renames the directory<br/>and makes the rename durable"]
+    E --> F["PageBroker publishes the copy<br/>atomically and durably"]
     F --> G["PageBroker reports success"]
 ```
 
@@ -286,18 +286,18 @@ and a deadline. The timeout and whether it is configurable remain
 filesystem overhead and the free-space reserve. File requirements are in
 [Cache Identity and Layout](#cache-identity-and-layout).
 
-Before requesting publication, the agent confirms snapshot identity and that
-the snapshot still exists, is Ready, and is not being deleted. Deletion
-triggers cancellation; normal [Cleanup](#cleanup) removes any copy published
-before cancellation takes effect.
+Before requesting publication, the agent confirms the owning
+`PodSnapshotContent` UID, that the object still exists, is Ready, and has no
+deletion timestamp. Deletion triggers cancellation; normal [Cleanup](#cleanup)
+removes any copy published before cancellation takes effect.
 
 PageBroker uses one lock per request to serialize publication, cancellation,
 and cleanup. Publication requires a complete, validated snapshot and an
-unexpired request whose cleanup has not started. It renames without overwrite,
-then flushes the affected parent directories. Cancellation and timeout cleanup
-wait for publication to finish. Rename makes the copy visible; flushing makes it
-durable. If that flush fails, PageBroker keeps the copy and reports failure;
-the copy might not survive a node crash.
+unexpired request whose cleanup has not started. It is atomic and never
+overwrites an existing copy. Cancellation and timeout cleanup wait for
+publication to finish. PageBroker reports success only after the copy is
+durable. If durability fails after publication, it keeps the copy and reports
+failure; the copy might not survive a node crash.
 
 Recovery follows these rules; preheat cleanup never removes published copies:
 
@@ -307,17 +307,16 @@ Recovery follows these rules; preheat cleanup never removes published copies:
   the cleanup failure rule below.
 - **Agent stops or loses a reply:** PageBroker finishes publication if started;
   otherwise the deadline triggers cleanup. A connection error or timeout means
-  the outcome is unknown. Before retrying, the agent checks for a published
-  copy.
+  the outcome is unknown. Before retrying, the agent asks PageBroker whether
+  the copy was published.
 - **PageBroker crashes or restarts:** temporary files can remain while it is
   down. On startup, it rejects old requests, stops any remaining writers, and
   removes abandoned temporary directories before accepting new preheats.
 
 **Download retries.** On each node, the agent tries a snapshot up to three
-times. After a failure, it waits 10 seconds before the second attempt and
-30 seconds before the third. Each attempt starts the download from scratch.
-After three failures, preheat stops for that snapshot. Restores use S3
-whenever no usable local copy is available and do not wait for preheat.
+times, with increasing delays chosen during implementation. Each attempt
+starts the download from scratch. After three failures, preheat stops for
+that snapshot.
 
 A lost response counts as an attempt. Requests rejected because PageBroker
 is busy, recovering, or lacks space do not count.
@@ -330,7 +329,7 @@ reset it.
 PageBroker tries to remove it once. If removal fails, it reports the error and
 blocks new preheats on that node until administrator recovery. On startup,
 PageBroker tries cleanup again and accepts preheats only after it succeeds.
-It does not retry removal in the background or delete published copies.
+Temporary cleanup does not retry removal in the background.
 
 **Administrator recovery.** Fix the cleanup problem. Prevent new restores
 from starting on the node, including pods already assigned to it, and wait
@@ -344,27 +343,51 @@ enabled.
 
 ### Cleanup
 
-The node agent watches snapshot objects. When it receives a deletion event,
-it starts cleanup of that snapshot's local copy. Periodic checks also remove
-copies whose snapshots no longer exist, covering deletions missed while the
-agent was down. This applies to copies placed by preheat or by an
-administrator.
+The agent starts a cleanup pass after a `PodSnapshotContent` deletion event
+and during periodic checks. A copy is removed only after its owning content
+UID no longer exists, not merely when a deletion timestamp is set.
+PageBroker performs the file operations. Each pass follows these steps:
+
+1. The agent asks PageBroker to scan published directories under `artifacts/`
+   and return a fixed list of candidate snapshot UIDs.
+2. After receiving the complete candidate list, the agent obtains a current,
+   consistent list of `PodSnapshotContent` objects directly from the Kubernetes
+   API server, bypassing its local informer cache.
+3. For each candidate whose UID is absent from the Kubernetes list, the agent
+   asks PageBroker to remove that copy. All other candidates are kept.
+
+If either list fails or is incomplete, the agent requests no removals.
+Copies published after the scan wait for the next pass. A copy found by the
+scan belongs to an object that existed before publication. The later API
+list includes that object unless it has been deleted. Compare UIDs, not names.
+
+PageBroker reports the result of each removal. An already absent copy counts
+as success. If removal fails or the response is lost, the agent logs the
+failure or unknown result. The next cleanup pass checks again before retrying.
+
+These rules apply to copies placed by preheat or by an administrator.
+Periodic checks cover deletions missed while the agent was down.
 
 **Illustration 3 (I3): Clean Up Node Copies**
 
 ```mermaid
 flowchart TD
-    A["Agent receives a snapshot deletion event,<br/>or a periodic check runs"] --> B{"Snapshot list<br/>available?"}
-    B -->|"No"| C["Remove nothing"]
-    B -->|"Yes"| D{"Snapshot<br/>exists?"}
-    D -->|"Yes"| E["Keep the copy"]
-    D -->|"No"| F["Remove the copy"]
+    A["Agent: deletion event or periodic check"] --> B["Agent requests cache list<br/>PageBroker scans artifacts/"]
+    B --> C{"Complete candidate list<br/>received?"}
+    C -->|"No"| D["Request no removals"]
+    C -->|"Yes"| E["Agent reads current PodSnapshotContent list<br/>directly from the API server"]
+    E --> F{"Complete API list<br/>received?"}
+    F -->|"No"| D
+    F -->|"Yes"| G{"For each candidate:<br/>UID in API list?"}
+    G -->|"Yes"| H["Keep the copy"]
+    G -->|"No"| I["Agent requests removal by UID"]
+    I --> J["PageBroker removes the copy<br/>and reports the result"]
 ```
 
-The agent checks only published copies under `artifacts/`. PageBroker's
-preheat cleanup removes temporary directories only under `.preheat/`.
-Both ignore administrator-managed temporary files outside those areas.
-The agent does not check whether a restore is reading a copy; see
+PageBroker lists and removes published copies only under `artifacts/`.
+Its preheat cleanup removes temporary directories only under `.preheat/`.
+It ignores administrator-managed temporary files outside those areas.
+Cache removal does not track active restores; see
 [Limitations, Risks, and Mitigations](#limitations-risks-and-mitigations).
 
 ### Copies Placed by an Administrator
@@ -375,7 +398,8 @@ automatic preheat disabled.
 
 A placed copy must meet these rules:
 
-1. Its snapshot object exists in this cluster and is Ready.
+1. Its owning `PodSnapshotContent` exists in this cluster, is Ready, and has
+   no deletion timestamp.
 2. It follows [Cache Identity and Layout](#cache-identity-and-layout), with
    the same files that a PVC installation holds for that snapshot.
 3. Write the complete snapshot to a temporary location of your choice,
@@ -384,9 +408,22 @@ A placed copy must meet these rules:
    overwriting an entry. Your tool manages its own temporary files.
 4. It is not changed after it is published.
 
-Administrator-placed copies must match the layout and contents produced by
-PageBroker preheat. The snapshot must already be registered and Ready in this
-cluster. Copying files alone does not import a snapshot from another cluster.
+Copying files alone does not import a snapshot from another cluster.
+
+After preparing the nodes as described in [API](#api) and setting
+`storage.nodeCache.hostPath`, use these settings to restore from
+administrator-placed copies without automatic preheat:
+
+```yaml
+storage:
+  nodeCache:
+    enabled: true
+    preheat:
+      enabled: false
+```
+
+To also download eligible snapshots automatically, set
+`storage.nodeCache.preheat.enabled` to `true`.
 
 ### API
 
@@ -397,84 +434,79 @@ decisions.
 **Helm values.** The proposed values are:
 
 - `storage.nodeCache.enabled`: disabled by default; S3 installations only.
-- `storage.nodeCache.hostPath`: the local cache directory.
+- `storage.nodeCache.hostPath`: an existing local cache directory; required when
+  the cache is enabled.
 - `storage.nodeCache.minFreeSpace`: space to retain after a preheat copy.
 - `storage.nodeCache.preheat.enabled`: disabled by default; when enabled with
   the cache, each agent preheats every eligible snapshot.
 
-Units, required values, and defaults other than enablement are open.
+Units and defaults for the free-space reserve remain open.
 A free-space check does not reserve disk space against other writers.
-
-**Administrator-placed copies.** After preparing the nodes and setting
-`storage.nodeCache.hostPath`, use these settings to restore from copies placed
-by an administrator with preheat disabled:
-
-```yaml
-storage:
-  nodeCache:
-    enabled: true
-    preheat:
-      enabled: false
-```
-
-The agent checks the NVMe cache first and uses S3 when no usable copy exists.
-To also download eligible snapshots automatically, set
-`storage.nodeCache.preheat.enabled` to `true` while keeping the cache enabled.
 
 **Node preparation.** The participating nodes are the nodes where the agent
 runs with the cache enabled. The chart's existing agent placement settings
-choose those nodes. The chart mounts the `hostPath` directory into the agent
-pod. Before enabling the cache, an administrator prepares each node that
-should hold copies:
+choose those nodes. When caching is enabled, the chart mounts the configured
+path with `hostPath.type: Directory`. Kubernetes requires an existing directory
+and does not create it. A missing path or a path that is not a directory
+prevents the agent pod from starting.
+
+Before enabling the cache, an administrator prepares every selected node:
 
 1. Format the NVMe and mount it on the node.
-2. Use the same path on every such node. The setting is one value for the
-   installation.
+2. Create the cache directory on the mounted NVMe, using the same path on every
+   selected node. The setting is one value for the installation.
 3. Confirm that the path is on the NVMe and not on the root disk.
 
-Snapshot never creates the cache directory, and it does not format or mount
-disks.
+Snapshot does not format or mount disks. When caching is disabled, the chart
+omits the cache mount.
 
 **Mount path.** The proposed mount path is `/checkpoints`, which reuses the
 local restore path. A dedicated path adds mount-helper changes. Resolve this
 choice against related storage designs before implementation.
 
-**Finding snapshots.** These commands list registered snapshots and inspect
-their details. They do not start preheat:
+**Internal PageBroker requests.** The agent needs these cache operations:
 
-```bash
-# List snapshots across all namespaces
-kubectl get podsnapshots.nvidia.com --all-namespaces
+- **List copies:** PageBroker scans `artifacts/` and returns a fixed set of
+  snapshot UIDs using responses within the protocol's message-size limit.
+  The agent must receive the complete candidate set before requesting removal.
+  Transfer mechanics are left to implementation. A failed or incomplete scan
+  must be reported as such. Listing does not validate every copy for restore.
+- **Check a copy:** given a snapshot UID and container name, PageBroker checks
+  the local entry and manifest. It returns usable metadata and a local path,
+  or reports that the copy is absent or invalid. A request failure is reported
+  separately from a cache miss.
+- **Remove a copy:** given a snapshot UID, PageBroker removes only that
+  snapshot's directory under `artifacts/`. It reports success when the copy
+  is gone, including when it was already absent. Failures are returned to
+  the agent.
 
-# List cluster-wide snapshot content records
-kubectl get podsnapshotcontents.nvidia.com
+Reuse existing metadata or restore requests where they fit. Add requests
+where needed; exact message names and fields remain implementation details.
+The agent supplies snapshot identities, not arbitrary filesystem paths.
+These are internal operations, not new user-facing commands.
 
-# Inspect one snapshot, including its Ready condition and content binding
-kubectl get podsnapshots.nvidia.com <name> --namespace <namespace> -o yaml
-```
-
-For placement requirements and the supported layout, see
-[Copies Placed by an Administrator](#copies-placed-by-an-administrator).
-
-Preheat requests and responses between the node agent and PageBroker are
-internal. PageBroker rejects new preheat while busy or recovering, or
-after temporary cleanup fails. Retry and recovery rules are in
-[Preheat](#preheat).
-Preheat needs no new agent permission.
+Preheat requests are also internal and need no new agent permission.
+Their behavior is described in [Preheat](#preheat).
 
 ### Security
 
 Snapshot files contain process memory and can contain application secrets.
 Treat the cache as sensitive node storage. Restrict its ownership and access
-to the privileged components that need it.
+to the privileged components that need it. Restore pods receive the cached
+snapshot directory read-only. Any writable restore files must be separate
+from the published cache.
 
 A cache writer can supply process state, so write access is
 administrator-level trust.
-PageBroker writes preheat snapshot data only in `.preheat/`. It also
-needs permission to publish a new entry by rename and flush its parent
-directories. It must not overwrite, modify, or remove published copies.
-Verify that writable descriptors or mappings cannot bypass this rule.
-Preserve PageBroker's existing S3 credential path.
+PageBroker writes preheat data only in `.preheat/` and publishes completed
+copies under `artifacts/`. Published copies remain immutable. PageBroker removes
+them only through an explicit cache-removal request from the agent.
+Temporary-download cleanup must never remove published copies.
+
+PageBroker validates request identities and keeps cache operations within
+the configured cache. Removal must not follow symlinks outside the requested
+entry or touch S3 artifacts. The agent must not scan, validate, or delete cache
+files directly. Preserve PageBroker's existing S3 credential path.
 
 Preheat can copy eligible snapshots from every namespace to participating
 nodes, subject to available space and without administrator action for each
@@ -496,7 +528,8 @@ available space. If the same 1 TiB snapshot set fits on all 50 nodes, it uses
 about 50 TiB in total, plus reserves and temporary working space. Each node
 downloads its own copy from S3. A new node downloads the eligible copies that
 fit. Each agent keeps one subscription to snapshot objects and lists them when
-it starts.
+it starts. Each cleanup pass also reads a current API-server list, as described
+in [Cleanup](#cleanup).
 
 Measure preheat duration, local versus S3 restore latency, peak memory during
 a preheat, disk use, and restore slowdown during a preheat. Include GPU
@@ -505,8 +538,9 @@ catch-up time on a new node.
 
 ### Monitoring
 
-Each restore emits a log and pod event naming its selected source. The agent
-logs failures to remove copies of deleted snapshots.
+Each restore emits a log and pod event naming its selected source. PageBroker
+reports cache listing and removal errors to the agent. The agent logs failed
+cleanup requests and lost responses, including the snapshot UID for removal.
 
 For preheat, the agent logs per-snapshot results and emits an event on a skip
 or failure, naming the node and reason. Connection errors are reported as an
@@ -515,9 +549,9 @@ the retry limit is reached, the agent reports that preheat has stopped
 for that snapshot on that node. Repeated events are rate-limited.
 
 PageBroker logs temporary cleanup failures and startup recovery results.
-A cleanup error identifies the request and states that preheat is blocked
-until an administrator completes the recovery procedure in
-[Preheat](#preheat).
+A temporary-download cleanup error identifies the request and states that
+preheat is blocked until administrator recovery; see [Preheat](#preheat).
+Failed removal of a published copy is retried in a later cleanup pass.
 
 This proposal has no cluster-wide cache inventory or per-node API status.
 
@@ -531,77 +565,38 @@ The design was checked against `main` at `3e143360`.
 
 ### Test Plan
 
-First, prove the key assumption: download from S3 straight to disk, and
-restore through the existing PVC restore flow. Include GPU data, restrictive
-modes, and empty directories.
+The implementation must verify these outcomes:
 
-The implementation needs these tests:
-
-- **Restore:** use a valid local copy; use S3 when the copy is absent or its
-  manifest is invalid. PageBroker opens local copies on S3 installations
-  for reading only, and refuses to write a checkpoint into the cache.
-  S3 restore behaves the same with the cache disabled.
-- **Preheat:** a complete, flushed copy with modes and empty directories,
-  repeated requests, no space, a flush failure, and an already published
-  snapshot skipped without changing its copy.
-  At most one preheat runs per node. PageBroker cannot change a published
-  copy through a descriptor or mapping that it kept open.
-- **Interruption:** cover download failure, timeout, agent restart, PageBroker
-  crash and restart, and lost replies before and after rename. No incomplete
-  copy is published. Cleanup waits for writers to stop. Startup rejects old
-  requests and removes abandoned downloads before accepting new preheat.
-  Failed cleanup keeps preheat blocked until startup cleanup succeeds after
-  administrator recovery. Recovery does not delete published copies. An
-  unknown outcome triggers a published-copy check; only missing copies
-  with attempts remaining are downloaded from scratch.
-- **Publication:** cancellation or expiry before publication prevents rename.
-  Once publication starts, cleanup waits for it to finish. Cover a failed
-  rename and a destination created by an administrator during preheat; neither
-  overwrites the existing copy. A failed durability flush reports failure and
-  preserves the published copy. The agent never performs the preheat rename.
-- **Deletion during preheat:** deletion before the publication request cancels
-  the download. If deletion races with publication, normal cleanup removes
-  any published copy, including one found after an agent restart. A failed
-  snapshot lookup prevents a new publication request.
-- **Cleanup:** remove copies of deleted snapshots and keep all others. Cover a
-  snapshot deleted while the agent is down. Remove nothing after a failed
-  snapshot listing. Verify that the agent scans only `artifacts/` and
-  PageBroker cleans only `.preheat/` for preheat recovery. Neither removes
-  administrator-managed temporary files outside those areas.
-- **Scheduling:** a newly Ready snapshot, catch-up on a new node, newest-first
-  ordering among snapshots whose retry delay has passed, and skips for
-  mismatch or space. One snapshot's retry delay does not block others.
-  PageBroker rejects new preheat while previous work or cleanup is unfinished.
-  Disabling preheat lets the running request finish and stops new downloads.
-- **Download retries:** verify one initial attempt and two retries, with
-  delays of 10 and 30 seconds after failures. No fourth attempt starts
-  during periodic checks or after a PageBroker restart. Verify the reset
-  rules in [Preheat](#preheat), including waiting for old cleanup. Unknown
-  outcomes count as attempts; explicit busy, recovery, and space skips do
-  not. Recheck eligibility and published copies before retrying. A failed
-  durability flush preserves the copy without another download. Restores
-  use S3 on a cache miss during retries and after the limit is reached.
-- **Cleanup failure:** try temporary-file removal once after writes stop.
-  If it fails, report the error and reject new preheats without background
-  cleanup retries. Agent retries, agent restart, and toggling preheat do
-  not clear the block. Exercise administrator recovery with new restores
-  prevented and active restores finished before restarting PageBroker.
-  Startup cleanup must succeed before preheat resumes; another failure
-  keeps it blocked. Restore requests remain outside this preheat gate.
-- **Reporting:** the agent reports skips, failures, unknown outcomes, and
-  exhausted retries without flooding events. PageBroker logs failed
-  cleanup, the required administrator action, and startup recovery.
-- **Administrator-placed copies:** with the cache enabled and preheat disabled,
-  a valid placed copy serves restores and a cache miss uses S3. No background
-  preheat runs, and snapshot deletion still triggers normal cleanup. Verify
-  publication by rename from a chosen temporary location on the same
-  filesystem, outside `artifacts/` and `.preheat/`.
-- **Isolation:** during a concurrent S3 restore, cause a full disk, a write
-  failure, an S3 failure, and a timeout in a preheat. Measure restore slowdown
-  and memory with a snapshot larger than available RAM, under the real
-  container limits.
-- **End to end:** a cache hit makes no S3 reads, a miss uses S3, and GPU state
-  restores from the cache.
+- **Setup and restore:** caching requires an existing directory. Valid local
+  copies, including administrator-placed copies, support CPU and GPU restores
+  without S3 reads. Disabled caching, missing copies, and invalid manifests
+  use S3. Failed cache checks fail the restore and report the error. Snapshot
+  readiness, identity, and compatibility checks remain enforced.
+- **Access and file safety:** restore pods receive cached files read-only,
+  with writable restore files kept separately. Copies preserve the required
+  files, permissions, and empty directories. Cache operations cannot affect
+  files outside their allowed locations or delete S3 artifacts.
+- **Preheat and retries:** verify eligibility, scheduling, one preheat per
+  node, and the retry and disable behavior defined in [Preheat](#preheat).
+  Downloads go directly to disk without staging the whole snapshot in RAM.
+- **Publication and recovery:** only complete copies become visible, existing
+  copies are never overwritten, and success requires durability. Exercise
+  failures, cancellation, timeouts, restarts, and lost replies. Verify the
+  defined recovery behavior in [Preheat](#preheat), including durability
+  failure after publication, without exposing incomplete copies or deleting
+  files still being written.
+- **Published-copy cleanup:** remove copies only after their owning content
+  UID is gone. Cover deletion during preheat, concurrent publication, missed
+  deletion events, large listings, incomplete or failed listings, and failed
+  removal. These cases must preserve the ordering and safety rules in
+  [Cleanup](#cleanup).
+- **Temporary cleanup failure:** failed cleanup blocks new preheats until
+  administrator recovery succeeds. Verify that the documented recovery
+  procedure works and that the preheat block does not itself block restores.
+- **Performance and reporting:** preheat failures must not fail concurrent
+  restores. Measure restore slowdown and memory use, including snapshots
+  larger than RAM. Verify that logs and events explain failures and recovery
+  without excessive repetition.
 
 ### Graduation Criteria
 
@@ -687,9 +682,7 @@ Reviewers need to settle these points:
 6. Confirm the newest-first order among snapshots ready for a preheat attempt.
 7. Accept eligible snapshots from every namespace on participating nodes,
    subject to available space.
-8. Confirm that the chart can mount the cache without Kubernetes creating a
-   missing directory.
-9. Choose the preheat request timeout and whether it is configurable. It
+8. Choose the preheat request timeout and whether it is configurable. It
    must allow large snapshots to finish while ensuring abandoned downloads
    are cleaned up.
 
