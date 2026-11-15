@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -118,12 +119,15 @@ const pageBrokerStartupTimeout = 5 * time.Minute
 func waitForPageBroker(ctx context.Context, client pagebroker.Client) (*pagebroker.Capabilities, error) {
 	for {
 		capabilities, err := client.Capabilities(ctx)
-		if err == nil || !(errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)) {
-			return capabilities, err
+		if err == nil {
+			return capabilities, nil
+		}
+		if !errors.Is(err, syscall.ENOENT) && !errors.Is(err, syscall.ECONNREFUSED) {
+			return capabilities, fmt.Errorf("failed to connect to PageBroker: %w", err)
 		}
 		select {
 		case <-ctx.Done():
-			return nil, err
+			return nil, fmt.Errorf("failed to connect to PageBroker: %w", err)
 		case <-time.After(time.Second):
 		}
 	}
