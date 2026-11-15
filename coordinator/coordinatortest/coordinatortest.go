@@ -34,7 +34,7 @@ type Authorizer struct {
 }
 
 // Authorize implements server.Authorizer.
-func (a *Authorizer) Authorize(_ context.Context, _ types.UID, _, token string) error {
+func (a *Authorizer) Authorize(_ context.Context, _ types.UID, _, token string, _ bool) error {
 	switch {
 	case a.Unavailable.Load():
 		return server.ErrUnavailable

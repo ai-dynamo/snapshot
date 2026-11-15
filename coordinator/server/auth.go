@@ -47,6 +47,15 @@ var (
 // retries all of them until its own deadline; the distinction decides what the
 // coordinator logs.
 //
+// held reports whether the coordinator holds the attempt's session. A member
+// reconnecting to an attempt the coordinator does not hold, such as after its
+// group resource was removed, must be admitted so that it learns its session
+// is gone, with session.ErrCoordinatorLost: it presents an epoch, which cache
+// lag cannot explain. So for an attempt that is not held, the Authorizer
+// checks the token and the ServiceAccount only, and never refuses for the
+// member's placement or for not knowing the attempt. It returns
+// session.ErrNotFound only for an attempt that is held.
+//
 // A member's grace period keeps running while its new connection is being
 // authorized, so Authorize must answer well within AuthorizeTimeout, for
 // example by caching TokenReviews. It must also refuse cheaply: the
@@ -57,7 +66,7 @@ var (
 // account issuer, before any TokenReview, and cache refusals as well as
 // admissions.
 type Authorizer interface {
-	Authorize(ctx context.Context, uid types.UID, member, token string) error
+	Authorize(ctx context.Context, uid types.UID, member, token string, held bool) error
 }
 
 // AuthorizeTimeout bounds authenticating a member's connection: the call to the
@@ -152,7 +161,7 @@ func parseEpoch(password string) (uint64, error) {
 // that is logged at Info. Without one, any client can make the Authorizer
 // refuse it, by presenting an epoch, so that is logged at V(1).
 func (s *Server) authorize(ctx context.Context, log logr.Logger, a *attempt, uid types.UID, member, token string) bool {
-	err := s.cfg.Authorizer.Authorize(ctx, uid, member, token)
+	err := s.cfg.Authorizer.Authorize(ctx, uid, member, token, a != nil)
 	switch {
 	case err == nil:
 		return true

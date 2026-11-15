@@ -18,6 +18,12 @@ const LayoutVersion = "v1"
 // bucketPrefix starts every bucket name.
 const bucketPrefix = "snapshot-" + LayoutVersion + "-"
 
+// ControlBucket names the bucket of an attempt that holds the session's own
+// keys: how it started, who arrived and left, and how it ended. It lives in
+// file storage, which the coordinator's memory cap does not limit, so a session
+// can always end however full that cap is.
+func ControlBucket(attempt string) string { return bucketPrefix + attempt + "-c" }
+
 // SnapshotBucket names the bucket of an attempt that Snapshot's own components
 // use: the agents and the cuInterpose relays.
 func SnapshotBucket(attempt string) string { return bucketPrefix + attempt + "-s" }
@@ -26,18 +32,27 @@ func SnapshotBucket(attempt string) string { return bucketPrefix + attempt + "-s
 // through the agent's per-Pod endpoint.
 func LibraryBucket(attempt string) string { return bucketPrefix + attempt + "-l" }
 
-// The keys of the Snapshot bucket that the session itself uses. The Snapshot
-// bucket, SnapshotBucket(attempt), serves Snapshot's components:
+// Buckets lists the buckets of an attempt.
+func Buckets(attempt string) []string {
+	return []string{ControlBucket(attempt), SnapshotBucket(attempt), LibraryBucket(attempt)}
+}
+
+// The keys of the control bucket, ControlBucket(attempt), which the session
+// itself uses:
 //
 //	meta                     the Meta, written by the coordinator only
 //	ended                    how the session ended, created once
 //	barrier.<name>.<member>  a member's arrival, written by its own connection
 //	left.<member>            a member's departure, written by its own connection
+//
+// The Snapshot bucket, SnapshotBucket(attempt), serves Snapshot's components:
+//
 //	snapshot.<key>           the agents' keys
 //	cuinterpose.<key>        the cuInterpose relays' keys
 //
 // The library bucket, LibraryBucket(attempt), holds library.<key> keys, which
-// any workload library writes through the agent's library endpoint.
+// any workload library writes through the agent's library endpoint. Namespace
+// maps each namespace to its bucket.
 const (
 	// KeyMeta holds the session's Meta, as JSON. Only the coordinator writes it.
 	KeyMeta = "meta"
@@ -46,7 +61,10 @@ const (
 	// at all when it closed because every member left. It is only ever
 	// created, so the first outcome wins. Every member's connection may write
 	// it, so a misbehaving member can overwrite or delete it within its own
-	// attempt, which is no worse than failing the session through Fail.
+	// attempt, which is no worse than failing the session through Fail. It can
+	// also fill the control bucket with arrivals, so that no end fits; the
+	// coordinator keeps trying to record the end, and the host removes the
+	// session once its deadline has passed.
 	KeyEnded = "ended"
 
 	// barrierPrefix starts each member's arrival at a barrier:
@@ -84,6 +102,16 @@ const (
 	// one sent a key, so the namespace names none.
 	NamespaceLibrary Namespace = "library"
 )
+
+// Bucket names the bucket of an attempt that holds the namespace's keys. It is
+// the one place that maps a namespace to a bucket, so the client, the
+// coordinator and the member permissions agree.
+func (n Namespace) Bucket(attempt string) string {
+	if n == NamespaceLibrary {
+		return LibraryBucket(attempt)
+	}
+	return SnapshotBucket(attempt)
+}
 
 // nameRE matches one key token that is safe in a user name and an inbox
 // subject too.
@@ -140,12 +168,12 @@ type Permissions struct {
 	Subscribe []string
 }
 
-// MemberPermissions returns the permissions of a member's connection: both of
-// its attempt's buckets and nothing else, never another attempt's buckets, the
-// system account, or the API that creates and deletes buckets. In the Snapshot
-// bucket it may write the snapshot and cuinterpose namespaces, the ended key,
-// and its own arrivals and its own departure, never meta or another member's
-// barrier or left key; in the library bucket it may write anything. Its
+// MemberPermissions returns the permissions of a member's connection: its
+// attempt's buckets and nothing else, never another attempt's buckets, the
+// system account, or the API that creates and deletes buckets. In the control
+// bucket it may write the ended key, its own arrivals and its own departure,
+// never meta or another member's barrier or left key; in the Snapshot bucket
+// the snapshot and cuinterpose namespaces; in the library bucket anything. Its
 // JetStream API requests are limited to what a client needs to bind a bucket,
 // Get a key, and Watch keys, and the only subscriptions it may make are on its
 // own inbox, where replies and watched entries arrive.
@@ -156,9 +184,8 @@ type Permissions struct {
 // but never change its keys. SNEP-324 lists this with the memory cap every
 // session shares.
 func MemberPermissions(attempt, member string) Permissions {
-	snapshot, library := SnapshotBucket(attempt), LibraryBucket(attempt)
 	publish := make([]string, 0, 16)
-	for _, bucket := range []string{snapshot, library} {
+	for _, bucket := range Buckets(attempt) {
 		stream := "KV_" + bucket
 		publish = append(publish,
 			"$JS.API.STREAM.INFO."+stream,          // binding the bucket
@@ -168,20 +195,20 @@ func MemberPermissions(attempt, member string) Permissions {
 			// A watch's flow control replies, which nats.go sends whenever the
 			// server asks, once a value past its threshold has been delivered.
 			// Refusing one logs a violation on both sides, and stalls a watch
-			// that then receives a second large value, such as a Barrier's
-			// that faces a misbehaving member's large arrivals.
+			// that then receives a second large value.
 			"$JS.FC."+stream+".>",
 		)
 	}
-	kv := "$KV." + snapshot + "."
+	control := "$KV." + ControlBucket(attempt) + "."
 	publish = append(publish,
-		kv+string(NamespaceSnapshot)+".>",
-		kv+string(NamespaceCuInterpose)+".>",
-		kv+KeyEnded,
-		kv+BarrierKey("*", member),
-		kv+LeftKey(member),
-		"$KV."+library+".>",
+		control+KeyEnded,
+		control+BarrierKey("*", member),
+		control+LeftKey(member),
+		"$KV."+NamespaceLibrary.Bucket(attempt)+".>",
 	)
+	for _, ns := range []Namespace{NamespaceSnapshot, NamespaceCuInterpose} {
+		publish = append(publish, "$KV."+ns.Bucket(attempt)+"."+string(ns)+".>")
+	}
 	return Permissions{Publish: publish, Subscribe: []string{InboxPrefix(attempt, member) + ".>"}}
 }
 

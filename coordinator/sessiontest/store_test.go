@@ -4,7 +4,9 @@
 package sessiontest
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -267,8 +269,9 @@ func TestDelete(t *testing.T) {
 	s := ses.connect(t, 0)
 	uid := string(ses.spec.UID)
 	buckets := map[session.Namespace]jetstream.KeyValue{
-		session.NamespaceSnapshot: ses.raw(t, 0), session.NamespaceCuInterpose: ses.raw(t, 0),
-		session.NamespaceLibrary: ses.rawBucket(t, 0, session.LibraryBucket(uid)),
+		session.NamespaceSnapshot:    ses.rawBucket(t, 0, session.SnapshotBucket(uid)),
+		session.NamespaceCuInterpose: ses.rawBucket(t, 0, session.SnapshotBucket(uid)),
+		session.NamespaceLibrary:     ses.rawBucket(t, 0, session.LibraryBucket(uid)),
 	}
 	messages := func(ns session.Namespace) uint64 {
 		status, err := buckets[ns].Status(ctx)
@@ -347,4 +350,75 @@ func TestStoreLimits(t *testing.T) {
 		require.NoError(t, store.Delete(ctx, "k0"), "a key that exists")
 		require.NoError(t, store.Insert(ctx, "k0", []byte("again")), "an Insert after a Delete")
 	})
+}
+
+// TestConcurrentLargeGets reads several of the largest values at once over one
+// connection. The coordinator drops a connection as a slow consumer once it
+// holds more unsent data than MaxPending, so the client reads no more than
+// session.MaxConcurrentGets values at once: every Get returns its value, and
+// the connection is never dropped.
+func TestConcurrentLargeGets(t *testing.T) {
+	h := newHarness(t)
+	ctx := within(t)
+	ses := h.session(t, 2)
+	sessions := ses.connectAll(t)
+	value := bytes.Repeat([]byte{'v'}, session.MaxValue-1<<20)
+	const keys = 4
+	for i := range keys {
+		require.NoError(t, sessions[1].Snapshot().Insert(ctx, fmt.Sprintf("large.%d", i), value))
+	}
+
+	got := make(chan error, keys)
+	for i := range keys {
+		go func() {
+			read, err := sessions[0].Snapshot().Get(ctx, fmt.Sprintf("large.%d", i), 0)
+			if err == nil && !bytes.Equal(read, value) {
+				err = errors.New("a Get returned another value")
+			}
+			got <- err
+		}()
+	}
+	for range keys {
+		require.NoError(t, <-got)
+	}
+	for _, line := range h.logs.all() {
+		assert.NotContains(t, line, "Lost the connection", "a Get must not cost the connection")
+	}
+}
+
+// TestGetWaitsHoldNoReadSlot checks that a Get that waits for an absent key
+// holds none of the connection's read slots, so reads of other keys go on, and
+// that it reads its value, once inserted, within them.
+func TestGetWaitsHoldNoReadSlot(t *testing.T) {
+	h := newHarness(t)
+	ctx := within(t)
+	ses := h.session(t, 2)
+	sessions := ses.connectAll(t)
+	value := bytes.Repeat([]byte{'v'}, session.MaxValue-1<<20)
+	got := make(chan error, session.MaxConcurrentGets+1)
+	for i := range session.MaxConcurrentGets + 1 {
+		go func() {
+			read, err := sessions[0].Snapshot().Get(ctx, fmt.Sprintf("late.%d", i), time.Minute)
+			if err == nil && !bytes.Equal(read, value) {
+				err = errors.New("a Get returned another value")
+			}
+			got <- err
+		}()
+	}
+	ses.awaitConsumers(t, session.SnapshotBucket(string(ses.spec.UID)), session.MaxConcurrentGets+1)
+
+	require.NoError(t, sessions[1].Snapshot().Insert(ctx, "present", []byte("v")))
+	read, err := sessions[0].Snapshot().Get(ctx, "present", 0)
+	require.NoError(t, err, "waits must not hold the slots a read needs")
+	assert.Equal(t, []byte("v"), read)
+
+	for i := range session.MaxConcurrentGets + 1 {
+		require.NoError(t, sessions[1].Snapshot().Insert(ctx, fmt.Sprintf("late.%d", i), value))
+	}
+	for range session.MaxConcurrentGets + 1 {
+		require.NoError(t, <-got)
+	}
+	for _, line := range h.logs.all() {
+		assert.NotContains(t, line, "Lost the connection", "a Get must not cost the connection")
+	}
 }
