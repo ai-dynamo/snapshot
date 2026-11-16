@@ -2020,7 +2020,6 @@ func TestRunRestoreFailureMarksAStoppedContainerThroughHostPath(t *testing.T) {
 		"write 4242 " + podcontract.RestoreFailedFile,
 		"write host-uid/main/" + podcontract.RestoreFailedFile,
 		"kill",
-		"write host-uid/main/" + podcontract.RestoreAttemptsFile,
 	}, calls)
 }
 
