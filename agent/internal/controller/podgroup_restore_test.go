@@ -962,6 +962,10 @@ func TestRunChecksThatPodGroupRestoresAreReadable(t *testing.T) {
 			err:  apierrors.NewForbidden(podGroupRestoreGVR.GroupResource(), "", errors.New("RBAC denied the list")),
 			want: "pod groups need permission to list and watch podgrouprestores.nvidia.com in every namespace",
 		},
+		"credentials the API server refuses": {
+			err:  apierrors.NewUnauthorized("the token expired"),
+			want: "the API server refused the agent's credentials when it listed podgrouprestores.nvidia.com",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			w := makeTestController(t, nil)

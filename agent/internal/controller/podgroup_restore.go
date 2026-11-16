@@ -43,9 +43,10 @@ const podGroupRestoreResync = 30 * time.Second
 
 // checkPodGroupRestoresReadable lists one PodGroupRestore, so that an agent
 // with pod groups on fails at once when the API server does not serve the
-// CRD or the agent may not read it, rather than waiting on an informer that
-// never syncs, which would hold up every capture and restore on the node. A
-// failure that is neither is left to the informer, which retries it.
+// CRD, refuses the agent's credentials, or does not let the agent read it,
+// rather than waiting on an informer that never syncs, which would hold up
+// every capture and restore on the node. Any other failure is left to the
+// informer, which retries it.
 func (w *NodeController) checkPodGroupRestoresReadable(ctx context.Context) error {
 	resource := podGroupRestoreGVR.GroupResource().String()
 	_, err := w.dynClient.Resource(podGroupRestoreGVR).List(ctx, metav1.ListOptions{Limit: 1})
@@ -54,7 +55,9 @@ func (w *NodeController) checkPodGroupRestoresReadable(ctx context.Context) erro
 		return nil
 	case apierrors.IsNotFound(err):
 		return fmt.Errorf("pod groups need the %s CRD, which the API server does not serve: %w", resource, err)
-	case apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err):
+	case apierrors.IsUnauthorized(err):
+		return fmt.Errorf("the API server refused the agent's credentials when it listed %s: %w", resource, err)
+	case apierrors.IsForbidden(err):
 		return fmt.Errorf("pod groups need permission to list and watch %s in every namespace: %w", resource, err)
 	}
 	w.log.Error(err, "Cannot check that PodGroupRestores are readable; the informer tries again", "resource", resource)
