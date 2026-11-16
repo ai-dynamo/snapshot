@@ -610,12 +610,20 @@ func TestGroupRestoreThatCannotRecordItsStartFailsTheAttempt(t *testing.T) {
 	assert.Equal(t, podcontract.RestoreReasonFailed, podCondition(t, w, "target-1", podcontract.RestoredCondition).Reason)
 	assert.Nil(t, podCondition(t, w, "target-1", podcontract.GroupRestoreFailedCondition), "its own failure")
 
-	assert.NotNil(t, podCondition(t, w, "target-0", podcontract.RestoreStartedCondition))
 	assert.Equal(t, podcontract.RestoreReasonFailed, podCondition(t, w, "target-0", podcontract.RestoredCondition).Reason)
-	assert.Equal(t, session.ReasonMemberFailed, podCondition(t, w, "target-0", podcontract.GroupRestoreFailedCondition).Reason)
-	assert.Equal(t, []int{7}, k.list(), "only the member that started is failed, which ends its processes")
-	assert.Equal(t, string(restoreFailedSentinelContents), s.get("7/"+podcontract.RestoreFailedFile))
+	assert.Equal(t, session.ReasonMemberFailed, podCondition(t, w, "target-0", podcontract.GroupRestoreFailedCondition).Reason,
+		"the leader reports the attempt's reason")
 	assert.NotContains(t, executorFake.steps(), "leader released")
+	// The leader may learn that the attempt failed before its admitted barrier
+	// returns, and then never start. Both outcomes are legitimate; only a
+	// member that started is failed, which ends its processes.
+	if podCondition(t, w, "target-0", podcontract.RestoreStartedCondition) != nil {
+		assert.Equal(t, []int{7}, k.list(), "only the member that started is failed, which ends its processes")
+		assert.Equal(t, string(restoreFailedSentinelContents), s.get("7/"+podcontract.RestoreFailedFile))
+	} else {
+		assert.Empty(t, k.list(), "no member started, so no placeholder is touched")
+		assert.Empty(t, s.get("7/"+podcontract.RestoreFailedFile), "a leader that never started is left as found")
+	}
 }
 
 func TestGroupRestoreThatPanicsAfterItStartedFailsTheMember(t *testing.T) {
@@ -630,12 +638,21 @@ func TestGroupRestoreThatPanicsAfterItStartedFailsTheMember(t *testing.T) {
 	restored := podCondition(t, w, "target-0", podcontract.RestoredCondition)
 	assert.Equal(t, podcontract.RestoreReasonFailed, restored.Reason)
 	assert.Contains(t, restored.Message, "panic")
-	// Both members had started, and the fake runtime gives both placeholders
-	// PID 7: each learns that no restore is coming, and is killed.
-	assert.Equal(t, strings.Repeat(string(restoreFailedSentinelContents), 2), s.get("7/"+podcontract.RestoreFailedFile))
-	assert.Equal(t, []int{7, 7}, k.list())
 	assert.Equal(t, session.ReasonMemberFailed, podCondition(t, w, "target-1", podcontract.GroupRestoreFailedCondition).Reason,
 		"the attempt fails for the peer")
+	// The fake runtime gives both placeholders PID 7. The leader started, so
+	// its placeholder learns that no restore is coming, and is killed. The
+	// peer may learn that the attempt failed before its admitted barrier
+	// returns, and then never start. Both outcomes are legitimate; only a
+	// member that started is failed, which ends its processes.
+	if podCondition(t, w, "target-1", podcontract.RestoreStartedCondition) != nil {
+		assert.Equal(t, strings.Repeat(string(restoreFailedSentinelContents), 2), s.get("7/"+podcontract.RestoreFailedFile))
+		assert.Equal(t, []int{7, 7}, k.list())
+	} else {
+		assert.Equal(t, string(restoreFailedSentinelContents), s.get("7/"+podcontract.RestoreFailedFile),
+			"a peer that never started is left as found")
+		assert.Equal(t, []int{7}, k.list())
+	}
 }
 
 func TestGroupRestoreIsBoundByTheGroupsDeadlineOnly(t *testing.T) {
