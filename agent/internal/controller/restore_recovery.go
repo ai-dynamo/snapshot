@@ -134,7 +134,7 @@ func restoreFailureOf(err error) *executor.RestoreFailure {
 // ends the restore, including a failure that changed the container.
 func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, record *restoreAttempts, err error) error {
 	failure := restoreFailureOf(err)
-	if !failure.ContainerChanged && record.Limit > 0 && op.containerStopped(ctx) {
+	if !failure.ContainerChanged && record.Limit > 0 && !op.containerRunning(ctx) {
 		failure = restoreFailureOf(stoppedDuringAttempt(failure))
 		err = failure
 	}
@@ -173,15 +173,15 @@ func whyNotRetried(f *executor.RestoreFailure, ctxErr error) string {
 	}
 }
 
-// containerStopped reports whether the attempt's container no longer runs,
-// which the attempt's own error may not show.
-func (op *restoreOperation) containerStopped(ctx context.Context) bool {
+// containerRunning reports whether the attempt's container still runs, which
+// the attempt's own error may not show.
+func (op *restoreOperation) containerRunning(ctx context.Context) bool {
 	running, err := op.controller.runtime.ContainerRunning(ctx, op.containerID)
 	if err != nil {
 		op.log.V(1).Info("Cannot read the container's state; taking it as running", "error", err.Error())
-		return false
+		return true
 	}
-	return !running
+	return running
 }
 
 // watchContainer returns the attempt's context, which RestoreContainerStopped
