@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"maps"
 	"net"
+	"os"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -147,6 +148,13 @@ type Config struct {
 	// again. It defaults to DefaultGrace.
 	Grace time.Duration
 
+	// StoreDir is the directory of the file store that holds the sessions'
+	// control keys. The server owns it: New empties it, creating it if it
+	// does not exist, and Shutdown removes it. It defaults to a new directory
+	// under the temporary directory, which a process that crashes leaves
+	// behind, so a host that restarts names a fixed one.
+	StoreDir string
+
 	// Clock times deadlines and grace periods. It defaults to the real clock.
 	Clock clock.WithDelayedExecution
 
@@ -215,10 +223,11 @@ func setDefault[T comparable](v *T, def T) {
 //
 // A Server is safe for concurrent use.
 type Server struct {
-	cfg   Config
-	log   logr.Logger
-	ns    *natsserver.Server
-	store *storeDir
+	cfg Config
+	log logr.Logger
+	ns  *natsserver.Server
+	// storeDir is the directory of the embedded server's file store.
+	storeDir string
 	// token authenticates the coordinator's in-process connections. It is
 	// drawn at random at startup and never leaves the process's memory.
 	token   string
@@ -254,14 +263,14 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("draw the coordinator's token: %w", err)
 	}
 	// The control buckets live here, and nothing outlives the process.
-	store, err := newStoreDir(cfg.Log)
+	storeDir, err := newStoreDir(cfg.StoreDir)
 	if err != nil {
 		return nil, err
 	}
 	s := &Server{
 		cfg:        cfg,
 		log:        cfg.Log,
-		store:      store,
+		storeDir:   storeDir,
 		token:      hex.EncodeToString(token),
 		connClosed: make(chan struct{}),
 		attempts:   make(map[types.UID]*attempt),
@@ -299,7 +308,7 @@ func (s *Server) start() error {
 		// writable.
 		JetStreamMaxMemory:     s.cfg.MaxBytes,
 		JetStreamMaxStore:      s.cfg.MaxBytes,
-		StoreDir:               s.store.path,
+		StoreDir:               s.storeDir,
 		DisableJetStreamBanner: true,
 		Accounts: []*natsserver.Account{
 			natsserver.NewAccount(appAccount), natsserver.NewAccount(systemAccount),
@@ -431,7 +440,7 @@ func (s *Server) awaitMembers(ctx context.Context) {
 }
 
 // stop closes the coordinator's connections, shuts the embedded server down,
-// and waits for everything the server started.
+// waits for everything the server started, and removes the store directory.
 func (s *Server) stop() {
 	if s.events != nil {
 		s.events.Close()
@@ -444,5 +453,7 @@ func (s *Server) stop() {
 		s.ns.WaitForShutdown()
 	}
 	s.wg.Wait()
-	s.store.remove()
+	if err := os.RemoveAll(s.storeDir); err != nil {
+		s.log.Error(err, "Removing the store directory failed", "directory", s.storeDir)
+	}
 }
