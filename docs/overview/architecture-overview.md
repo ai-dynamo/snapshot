@@ -170,9 +170,10 @@ restore time into:
    The agent sets `nvidia.com/Restored=True`, and the proxy follows the restored
    process from there, forwarding signals and exiting with its code.
 
-A pod gets exactly one restore. On failure the agent writes `restore-failed`,
-kills the destination container, and reports the reason on the pod condition;
-restoring again means creating a new pod.
+On failure the agent writes `restore-failed`, kills the destination container,
+and reports the reason on the pod condition. A destination container that
+starts again after the restore has ended is restored again; see
+[When a Container Starts Again](../reference/restore-pod-contract.md#when-a-container-starts-again).
 
 ```mermaid
 sequenceDiagram

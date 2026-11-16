@@ -69,6 +69,7 @@ Requires a container runtime with NRI v0.10 or newer, enabled: containerd 2.2 or
 newer.
 
 On a node without NRI, or with an older runtime, the agent restores without the
-proxy. Restore pods then need an inert command, and the container does not
-follow the restored workload. See
+proxy. Restore pods then need an inert command, the container does not follow
+the restored workload, and a container that starts again is not restored again.
+See
 [Nodes Without the Restore Proxy](../reference/restore-pod-contract.md#nodes-without-the-restore-proxy).

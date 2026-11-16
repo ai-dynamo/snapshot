@@ -170,16 +170,30 @@ which holds liveness and readiness back until `restore-complete` exists, or
 give liveness probes an `initialDelaySeconds` or `failureThreshold` that covers
 the longest restore you expect.
 
-Restore Pods are expected to use `restartPolicy: Never`. A Pod gets one restore:
-a container that starts again in the same Pod finds that restore already used,
-and its proxy exits with code 112. With `restartPolicy: Always` or `OnFailure`,
-as in a Deployment, the container then ends in `CrashLoopBackOff` once the
-restored workload exits. Delete the Pod to restore again.
+## When a Container Starts Again
+
+Restore Pods are expected to use `restartPolicy: Never`, which keeps a Pod to
+one restore. With `restartPolicy: Always` or `OnFailure`, as in a Deployment, a
+destination container starts again when the restored workload exits, or when
+the agent kills the container after a failed restore. Once the Pod's restore
+has ended, whatever its outcome, the agent restores that container again from
+the same `PodSnapshot`:
+
+- The `nvidia.com/Restored` condition returns to `RestoreInProgress`, and the
+  Pod gets a `RestoreRepeated` event.
+- A destination container whose restored workload still runs keeps it. Its
+  `lifecycle.postRestore` action, if set, runs again.
+- A container that starts again while the Pod's restore is still running exits
+  with code 112. Kubelet starts it again after its back-off.
+
+This needs the restore proxy. See
+[Nodes Without the Restore Proxy](#nodes-without-the-restore-proxy).
 
 The proxy reserves two exit codes:
 
-- 112 (`RestoreNotRepeatableExitCode`): the Pod's one restore is used up. The
-  restore failed, or an earlier container in the Pod already used it.
+- 112 (`RestoreNotRepeatableExitCode`): no restore is coming for this
+  container. The restore failed, or an earlier container in the Pod left its
+  result while the Pod's restore was still running.
 - 113 (`RestoreProxyErrorExitCode`): the proxy could not follow the restored
   process.
 
@@ -206,6 +220,7 @@ Without the proxy:
   workload; the liveness probe is what notices.
 - Signals reach the inert command, not the workload. When the Pod is deleted,
   the workload gets no `SIGTERM`; it is killed at the end of the grace period.
-- After a failed restore, the agent kills the container. If it starts again, it
-  runs the inert command and is not restored. Delete the Pod to restore again.
+- After a failed restore, the agent kills the container. A container that
+  starts again, after any restore, runs the inert command and is not restored
+  again. Delete the Pod to restore again.
 - The proxy's exit codes, 112 and 113, do not apply.

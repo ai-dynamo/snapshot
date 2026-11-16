@@ -117,12 +117,12 @@ kubectl get pods --namespace "$WORKLOAD_NAMESPACE" \
 It prints `True`. If the restore does not complete, see
 [Troubleshoot Restores](../troubleshooting/restores.md).
 
-## One Restore per Pod
+## When the Restored Process Exits
 
-A pod gets one restore. The supported frameworks use a Deployment, which restarts
-containers, so if the restored process exits, the container ends in
-`CrashLoopBackOff` instead of starting again. Delete the pod to restore a new
-replica.
+The supported frameworks use a Deployment, which starts a container again when
+its process exits. The agent then restores the container again from the same
+`PodSnapshot`. See
+[When a Container Starts Again](../reference/restore-pod-contract.md#when-a-container-starts-again).
 
 ## Generate Restore Pods Programmatically
 

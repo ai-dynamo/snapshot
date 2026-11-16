@@ -114,6 +114,10 @@ again, never CRIU:
 - The action gets a full `config.restore.timeoutSeconds` again, so a restart
   can extend the deadline by one timeout.
 
+The same recovery runs when a destination container starts again after the
+restore has ended. The agent restores that container again, and each other
+destination that has `restore-complete` runs only the action again.
+
 ## Safety of the actions
 
 Each action can do only what the application itself could:

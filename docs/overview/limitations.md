@@ -17,12 +17,9 @@ roadmap.
   containerd 2.2 or newer. The node agent uses NRI to make the proxy PID 1 in
   restore containers. On a node without NRI, or with an older runtime, the
   agent restores without the proxy: restore Pods need an inert command there,
-  and the container does not follow the restored workload. See
+  the container does not follow the restored workload, and a container that
+  starts again is not restored again. See
   [Nodes Without the Restore Proxy](../reference/restore-pod-contract.md#nodes-without-the-restore-proxy).
-- A Pod gets one restore. If a restored container starts again, for example
-  under `restartPolicy: Always` after the restored process exits, it ends in
-  `CrashLoopBackOff`. Delete the Pod to restore again. Retrying a restore in
-  the same Pod is on the roadmap.
 - Several Snapshot installations whose clusters share nodes, such as vCluster
   tenants, work only when each sets `daemonset.nriHostNamespace` to its own host
   namespace. An installation with it empty acts on every restore Pod on its

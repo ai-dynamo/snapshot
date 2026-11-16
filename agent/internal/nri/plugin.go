@@ -52,11 +52,13 @@ const (
 	// drops the connection in between would hold the agent there forever.
 	registerTimeout = 30 * time.Second
 
-	// lookupTimeout bounds the API read for Pods without a container map. It
-	// runs inside the runtime's CreateContainer call. NRI gives that whole call
-	// 2 s by default, and drops a plugin that takes longer, so the read gets
-	// 1 s and copying the proxy the rest.
-	lookupTimeout = time.Second
+	// lookupTimeout bounds the API read for Pods without a container map, and
+	// restoreAgainTimeout the status write that restores a container again.
+	// Both run inside the runtime's CreateContainer call. NRI gives that whole
+	// call 2 s by default, and drops a plugin that takes longer, so the read
+	// gets 1 s, the write 500 ms, and copying the proxy the rest.
+	lookupTimeout       = time.Second
+	restoreAgainTimeout = 500 * time.Millisecond
 )
 
 // vCluster syncs a Pod to the host under another name, namespace and UID, and
@@ -78,6 +80,12 @@ type Restorer interface {
 	// RestoreContainerStopped withdraws that report once the container stops,
 	// so a restore waits for its replacement instead.
 	RestoreContainerStopped(uid ktypes.UID, container, containerID string)
+	// RestoreEnded reports whether the Pod's restore has ended, so a
+	// destination container that starts again now is restored again.
+	RestoreEnded(pod *corev1.Pod) bool
+	// RestoreAgain starts a new restore of the Pod for a destination container
+	// that starts again after its restore ended.
+	RestoreAgain(ctx context.Context, pod *corev1.Pod, container string) error
 }
 
 // destination is a restore destination container the plugin shaped, by the
@@ -212,6 +220,13 @@ func dropsArgs(nriVersion string) bool {
 // other container alone. An error fails the container's creation, and kubelet
 // retries it: running the image's own command instead would start the
 // workload from scratch in a container the agent is about to restore into.
+//
+// A destination container that starts again after its Pod's restore ended is
+// restored again. The control directory outlives the container, so the plugin
+// first removes the result an earlier container left, which would make the
+// proxy exit. While the restore still runs, that result stays, since the
+// running restore may be done with this destination already: the proxy exits,
+// and kubelet creates the container again after its back-off.
 func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
 	if _, ok := pod.GetAnnotations()[podcontract.RestoreFromAnnotation]; !ok {
 		return nil, nil, nil
@@ -224,12 +239,13 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 
 	lookupCtx, cancel := context.WithTimeout(ctx, lookupTimeout)
 	defer cancel()
-	destinations, err := p.restorer.RestoreDestinations(lookupCtx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+	restorePod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name:        name,
 		Namespace:   namespace,
 		UID:         ktypes.UID(uid),
 		Annotations: pod.GetAnnotations(),
-	}})
+	}}
+	destinations, err := p.restorer.RestoreDestinations(lookupCtx, restorePod)
 	if err != nil {
 		log.Error(err, "Cannot resolve restore destinations")
 		return nil, nil, fmt.Errorf("snapshot: resolve restore destinations: %w", err)
@@ -238,15 +254,25 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 		return nil, nil, nil
 	}
 
+	again := p.restorer.RestoreEnded(restorePod)
 	// kubelet's directories use the UID of the Pod on the node.
 	dir, err := p.openControlDir(pod.GetUid(), ctr.GetName())
 	if err == nil {
-		err = installProxy(p.proxyPath, dir)
+		again, err = prepareControlDir(p.proxyPath, dir, again)
 		_ = dir.Close()
 	}
 	if err != nil {
 		log.Error(err, "Cannot install restore proxy")
 		return nil, nil, fmt.Errorf("snapshot: install restore proxy: %w", err)
+	}
+	if again {
+		againCtx, cancelAgain := context.WithTimeout(ctx, restoreAgainTimeout)
+		defer cancelAgain()
+		if err := p.restorer.RestoreAgain(againCtx, restorePod, ctr.GetName()); err != nil {
+			log.Error(err, "Cannot restore the container again")
+			return nil, nil, fmt.Errorf("snapshot: restore again: %w", err)
+		}
+		log.Info("Container starts again after its Pod's restore ended; it is restored again")
 	}
 
 	adjust := &api.ContainerAdjustment{}
@@ -301,6 +327,35 @@ func podIdentity(pod *api.PodSandbox) (namespace, name, uid string) {
 		return pod.GetNamespace(), pod.GetName(), pod.GetUid()
 	}
 	return namespace, name, uid
+}
+
+// prepareControlDir installs the proxy in a destination's control directory
+// and reports whether the container starts again after the Pod's restore
+// ended. A proxy already there shows that an earlier container of the
+// destination was created: the restore can also end before the first one is,
+// for example when it is refused while the Pod still pulls images. For a
+// container that starts again, it removes the restore-complete or
+// restore-failed that the earlier container left.
+func prepareControlDir(proxyPath string, dir *os.File, restoreEnded bool) (bool, error) {
+	again := false
+	if restoreEnded {
+		var err error
+		if again, err = snapshotruntime.FileExistsInDir(dir, podcontract.RestoreProxyBinaryName); err != nil {
+			return false, err
+		}
+	}
+	if err := installProxy(proxyPath, dir); err != nil {
+		return false, err
+	}
+	if !again {
+		return false, nil
+	}
+	for _, name := range []string{podcontract.RestoreCompleteFile, podcontract.RestoreFailedFile} {
+		if err := snapshotruntime.RemoveFileInDir(dir, name); err != nil {
+			return false, fmt.Errorf("clear the earlier container's restore result: %w", err)
+		}
+	}
+	return true, nil
 }
 
 // installProxy copies the proxy binary into dir. It copies on every creation:

@@ -168,6 +168,33 @@ func WriteFileInDir(dir *os.File, name string, perm os.FileMode, write func(io.W
 	return nil
 }
 
+// FileExistsInDir reports whether name exists in dir, without following it.
+func FileExistsInDir(dir *os.File, name string) (bool, error) {
+	if name == "" || name != filepath.Base(name) || name == ".." {
+		return false, fmt.Errorf("invalid file name %q", name)
+	}
+	var st unix.Stat_t
+	if err := unix.Fstatat(int(dir.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat %s in %s: %w", name, dir.Name(), err)
+	}
+	return true, nil
+}
+
+// RemoveFileInDir removes name from dir, without following it. A file that is
+// already gone is not an error.
+func RemoveFileInDir(dir *os.File, name string) error {
+	if name == "" || name != filepath.Base(name) || name == ".." {
+		return fmt.Errorf("invalid file name %q", name)
+	}
+	if err := unix.Unlinkat(int(dir.Fd()), name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+		return fmt.Errorf("remove %s in %s: %w", name, dir.Name(), err)
+	}
+	return nil
+}
+
 // WritePodControlSentinel writes a sentinel into OpenPodControlDir.
 func WritePodControlSentinel(podUID, containerName, name string, contents []byte) error {
 	dir, err := OpenPodControlDir(podUID, containerName)
