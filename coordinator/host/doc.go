@@ -4,10 +4,10 @@
 // Package host runs SNEP-324's Snapshot coordinator in an agent's Pod. Run
 // wires package groups, package agentauth and package server together in a
 // controller-runtime manager, in the order package groups gives, and serves the
-// health endpoint the Pod's probes read. Every agent runs it, in a container of
-// the agent's Pod, non-root with no capabilities, that shares the agent's
-// ServiceAccount and host namespaces. It serves the sessions of the attempts
-// whose rank-0 member runs on the agent's node.
+// health endpoint the Pod's probes read. Every agent Pod runs it in a
+// container, non-root with no capabilities, that shares the agent's
+// ServiceAccount and the host's network, PID and IPC namespaces. It serves the
+// sessions of the attempts whose rank-0 member runs on the agent's node.
 //
 // The host needs:
 //
