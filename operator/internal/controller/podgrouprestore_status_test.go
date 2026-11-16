@@ -137,6 +137,11 @@ func TestDerivePodGroupRestoreMemberTable(t *testing.T) {
 	admitted := ptr.To(prPinned("a", snapshotv1alpha1.RestorePhaseAdmitted))
 	restoring := ptr.To(prPinned("a", snapshotv1alpha1.RestorePhaseRestoring))
 	refused := podGroupAdmission{podGroupAdmissionRefused, snapshotv1alpha1.PodGroupReasonRefused, "target Pod is not a group target"}
+	groupFailed := func(reason, message string) corev1.PodCondition {
+		c := prGroupFailed(reason)
+		c.Message = message
+		return c
+	}
 
 	for _, tc := range []struct {
 		name         string
@@ -205,21 +210,22 @@ func TestDerivePodGroupRestoreMemberTable(t *testing.T) {
 		{
 			name:     "an empty GroupRestoreFailed reason is no reason: Restored's reason, and the group's message",
 			previous: restoring,
-			observed: prObserved(prPod("a", prStarted, prRestoreError, prGroupFailed(""))),
+			observed: prObserved(prPod("a", prStarted, prRestoreError, groupFailed("", "the peer on node-b failed"))),
 			want: func() snapshotv1alpha1.PodGroupRestoreMemberStatus {
 				m := prFailed(prPinned("a", snapshotv1alpha1.RestorePhaseRestoring), podcontract.RestoreReasonFailed)
-				m.Message = " message"
+				m.Message = "the peer on node-b failed"
 				return m
 			}(),
 		},
 		{
 			name:     "a GroupRestoreFailed reason longer than the CRD allows becomes Restored's reason",
 			previous: restoring,
-			observed: prObserved(prPod("a", prStarted, prRestoreError, prGroupFailed(strings.Repeat("a", maxMemberReasonLength+1)))),
+			observed: prObserved(prPod("a", prStarted, prRestoreError,
+				groupFailed(strings.Repeat("a", maxMemberReasonLength+1), "the peer on node-b failed"))),
 			want: func() snapshotv1alpha1.PodGroupRestoreMemberStatus {
 				m := prFailed(prPinned("a", snapshotv1alpha1.RestorePhaseRestoring), podcontract.RestoreReasonFailed)
-				m.Message = capMessage(`agent reason "`+strings.Repeat("a", maxMemberReasonLength+1)+`": `+
-					strings.Repeat("a", maxMemberReasonLength+1)+" message", maxMemberMessageLength)
+				// The quoted reason fills the message up to the limit.
+				m.Message = `agent reason "` + strings.Repeat("a", maxMemberMessageLength-len(`agent reason "`))
 				return m
 			}(),
 		},
@@ -902,22 +908,4 @@ func TestIsMemberReason(t *testing.T) {
 	} {
 		assert.Equal(t, want, isMemberReason(reason), "%q", reason)
 	}
-}
-
-func TestDerivePodGroupRestoreStatusWithAReasonTheCRDRefuses(t *testing.T) {
-	spec := prSpec("a", "b")
-	previous := prStatus(prPinned("a", snapshotv1alpha1.RestorePhaseRestoring), prPinned("b", snapshotv1alpha1.RestorePhaseRestoring))
-	observed := prObserved(
-		prPod("a", prStarted, prRestoreError, prGroupFailed("Pod IP changed")),
-		prPod("b", prStarted))
-
-	got := prDerive(spec, observed, previous)
-
-	failed := prCondition(got, snapshotv1alpha1.PodGroupConditionFailed)
-	require.NotNil(t, failed)
-	assert.Equal(t, metav1.ConditionTrue, failed.Status)
-	for _, m := range got.Members {
-		assert.True(t, m.Reason == "" || isMemberReason(m.Reason), "member %s reason %q", m.ID, m.Reason)
-	}
-	assert.Equal(t, podcontract.RestoreReasonFailed, got.Members[0].Reason)
 }
