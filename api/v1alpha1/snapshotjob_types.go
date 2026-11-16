@@ -173,6 +173,8 @@ type SnapshotJobSpec struct {
 // controller fills in identity, ownership, and spec.source automatically.
 // +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-job' in self.metadata.labels)",message="metadata.labels must not set controller-owned label nvidia.com/snapshot-job"
 // +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-job-uid' in self.metadata.labels)",message="metadata.labels must not set controller-owned label nvidia.com/snapshot-job-uid"
+// +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-podgroup' in self.metadata.labels)",message="metadata.labels must not set controller-owned label nvidia.com/snapshot-podgroup"
+// +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-podgroup-member' in self.metadata.labels)",message="metadata.labels must not set controller-owned label nvidia.com/snapshot-podgroup-member"
 // +kubebuilder:validation:XValidation:rule="!has(self.containers) || self.containers.all(c, c.name in self.targetContainers)",message="containers must name containers in targetContainers"
 type PodSnapshotTemplate struct {
 	// Metadata contains labels and annotations copied to the generated

@@ -110,6 +110,9 @@ type attempt struct {
 	// ending is set once recordEnd has started recording the session's end.
 	ending bool
 	ended  bool
+	// committed is set once FailUncommitted has seen every member arrive at
+	// session.BarrierAdmitted, and never cleared.
+	committed bool
 }
 
 // has reports whether member is a member of the attempt.
@@ -531,6 +534,72 @@ func (s *Server) Remove(ctx context.Context, uid types.UID) error {
 	s.mu.Unlock()
 	s.log.Info("Session removed", "attempt", uid)
 	return nil
+}
+
+// FailUncommitted fails the session of an attempt with reason, which must be a
+// valid condition reason, unless every member has arrived at
+// session.BarrierAdmitted, which commits the attempt. The host fails a session
+// this way before the commit: with session.ReasonCancelled once its group
+// resource's deletion has started, and with session.ReasonRefused once one of
+// its members has failed. It is best effort: members decide on their own that
+// the barrier is complete, so a member that saw it complete just before
+// FailUncommitted read the arrivals can still start. The commit is final: once
+// FailUncommitted has seen it, it leaves the session open from then on, even if
+// an arrival is deleted. FailUncommitted returns nil once the session has
+// ended, however it ended, and when it leaves a committed session open. It
+// reports session.ErrNotFound for an attempt with no session.
+func (s *Server) FailUncommitted(ctx context.Context, uid types.UID, reason string) error {
+	if err := session.ValidateReason(reason); err != nil {
+		return err
+	}
+	a := s.lookup(uid)
+	if a == nil {
+		return fmt.Errorf("attempt %s: %w", uid, session.ErrNotFound)
+	}
+	if committed, err := s.committed(ctx, a); err != nil || committed {
+		return err
+	}
+	if err := s.endWith(ctx, a, []byte(reason)); err != nil && !ended(err) {
+		return err
+	}
+	return nil
+}
+
+// committed reports whether every member of a session has arrived at
+// session.BarrierAdmitted. It reads the arrivals one by one, as direct reads,
+// so it takes none of the consumers the bucket's members share. It records the
+// commit the first time it sees it, and reads no arrivals from then on.
+func (s *Server) committed(ctx context.Context, a *attempt) (bool, error) {
+	s.mu.Lock()
+	seen := a.committed
+	s.mu.Unlock()
+	if seen {
+		return true, nil
+	}
+	for _, m := range a.members {
+		_, err := a.control.Get(ctx, session.BarrierKey(session.BarrierAdmitted, m.ID))
+		switch {
+		case errors.Is(err, jetstream.ErrKeyNotFound):
+			return false, nil
+		case err != nil:
+			return false, fmt.Errorf("read the arrivals of attempt %s: %w", a.spec.UID, err)
+		}
+	}
+	s.mu.Lock()
+	a.committed = true
+	s.mu.Unlock()
+	return true, nil
+}
+
+// Ended reports whether the session of an attempt has ended, and held whether
+// the coordinator holds it at all: it holds a session from Ensure until
+// Remove. A session has ended once the coordinator has recorded its end, or
+// seen a member's, which it does shortly after the member writes it.
+func (s *Server) Ended(uid types.UID) (ended, held bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, held := s.attempts[uid]
+	return held && a.ended, held
 }
 
 // tryTimeout bounds each try to record a session's end, and each try to watch

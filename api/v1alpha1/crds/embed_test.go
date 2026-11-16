@@ -12,9 +12,14 @@ import (
 	"testing"
 
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
+
+	"github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
-const chartCRDDir = "../../../charts/snapshot/crds"
+const (
+	chartCRDDir       = "../../../charts/snapshot/crds"
+	chartOperatorRBAC = "../../../charts/snapshot/templates/operator-rbac.yaml"
+)
 
 func readCRDDir(t *testing.T, dir string) map[string]string {
 	t.Helper()
@@ -88,6 +93,44 @@ func TestNamedAccessorsAreEmbedded(t *testing.T) {
 		}
 		if !slices.Contains(All(), manifest) {
 			t.Errorf("%s: accessor returns a manifest that is not in All()", name)
+		}
+	}
+}
+
+// The group kinds have no named accessor: the crd-installer reaches them only
+// through All().
+func TestAllIncludesThePodGroupCRDs(t *testing.T) {
+	for _, name := range []string{"podgroupsnapshots.nvidia.com", "podgrouprestores.nvidia.com"} {
+		if !slices.ContainsFunc(All(), func(manifest string) bool {
+			return strings.Contains(manifest, "\n  name: "+name+"\n")
+		}) {
+			t.Errorf("All() has no CRD named %s; run 'make generate'", name)
+		}
+	}
+}
+
+// The crd-installer may get and patch only the CRDs that the chart names, so a
+// CRD missing from that list stops the operator from starting.
+func TestChartLetsTheInstallerApplyEveryCRD(t *testing.T) {
+	rbac, err := os.ReadFile(chartOperatorRBAC)
+	if err != nil {
+		t.Fatalf("read %s: %v", chartOperatorRBAC, err)
+	}
+	for _, manifest := range All() {
+		manifestJSON, err := utilyaml.ToJSON([]byte(manifest))
+		if err != nil {
+			t.Fatalf("convert CRD to JSON: %v", err)
+		}
+		var crd struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		}
+		if err := json.Unmarshal(manifestJSON, &crd); err != nil {
+			t.Fatalf("decode CRD: %v", err)
+		}
+		if !strings.Contains(string(rbac), "- "+crd.Metadata.Name+"\n") {
+			t.Errorf("%s does not let the crd-installer apply %s", chartOperatorRBAC, crd.Metadata.Name)
 		}
 	}
 }
@@ -187,6 +230,8 @@ func TestSnapshotJobIncludesTemplateMetadataAdmissionRules(t *testing.T) {
 	wantTemplateRules := []string{
 		"!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-job' in self.metadata.labels)",
 		"!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-job-uid' in self.metadata.labels)",
+		"!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-podgroup' in self.metadata.labels)",
+		"!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-podgroup-member' in self.metadata.labels)",
 	}
 	for _, rule := range wantTemplateRules {
 		if !containsValidationRule(templateValidations, rule) {
@@ -298,4 +343,49 @@ func nestedSlice(t *testing.T, object map[string]any, fields ...string) []any {
 		t.Fatalf("field %q in path %q has type %T, want array", field, strings.Join(fields, "."), parent[field])
 	}
 	return value
+}
+
+// Kubebuilder markers cannot name a Go constant, so this keeps the two
+// deadlineSeconds maxima equal to v1alpha1.PodGroupMaxDeadlineSeconds.
+func TestDeadlineMaximumMatchesTheConstant(t *testing.T) {
+	generated := readCRDDir(t, ".")
+	for _, name := range []string{"nvidia.com_podgroupsnapshots.yaml", "nvidia.com_podgrouprestores.yaml"} {
+		manifestJSON, err := utilyaml.ToJSON([]byte(generated[name]))
+		if err != nil {
+			t.Fatalf("%s: convert to JSON: %v", name, err)
+		}
+		var crd struct {
+			Spec struct {
+				Versions []struct {
+					Name   string `json:"name"`
+					Schema struct {
+						OpenAPIV3Schema struct {
+							Properties struct {
+								Spec struct {
+									Properties struct {
+										DeadlineSeconds struct {
+											Maximum *int64 `json:"maximum"`
+										} `json:"deadlineSeconds"`
+									} `json:"properties"`
+								} `json:"spec"`
+							} `json:"properties"`
+						} `json:"openAPIV3Schema"`
+					} `json:"schema"`
+				} `json:"versions"`
+			} `json:"spec"`
+		}
+		if err := json.Unmarshal(manifestJSON, &crd); err != nil {
+			t.Fatalf("%s: decode: %v", name, err)
+		}
+		if len(crd.Spec.Versions) == 0 {
+			t.Fatalf("%s: no versions", name)
+		}
+		for _, version := range crd.Spec.Versions {
+			maximum := version.Schema.OpenAPIV3Schema.Properties.Spec.Properties.DeadlineSeconds.Maximum
+			if maximum == nil || *maximum != v1alpha1.PodGroupMaxDeadlineSeconds {
+				t.Errorf("%s %s: spec.deadlineSeconds maximum = %v, want %d",
+					name, version.Name, maximum, v1alpha1.PodGroupMaxDeadlineSeconds)
+			}
+		}
+	}
 }

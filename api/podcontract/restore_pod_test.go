@@ -184,7 +184,7 @@ func TestBuildStartupGateIsOptIn(t *testing.T) {
 	if !reflect.DeepEqual(pod.Spec.Containers[0].StartupProbe, beforeStartup) {
 		t.Fatal("Build() mutated the input startup probe")
 	}
-	if !reflect.DeepEqual(main.StartupProbe, canonicalRestoreStartupProbe()) {
+	if !reflect.DeepEqual(main.StartupProbe, canonicalRestoreStartupProbe(1800)) {
 		t.Fatalf("unexpected restore startup gate: %#v", main.StartupProbe)
 	}
 }

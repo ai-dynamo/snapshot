@@ -61,6 +61,16 @@ type Coordinator struct {
 // test then ensures the sessions its members join.
 func Start(t testing.TB, modify ...func(*server.Config)) *Coordinator {
 	t.Helper()
+	c := StartUnready(t, modify...)
+	c.MarkReady()
+	return c
+}
+
+// StartUnready starts a coordinator as Start does, but leaves it refusing
+// every client until MarkReady, which a host calls once it has ensured the
+// sessions it serves.
+func StartUnready(t testing.TB, modify ...func(*server.Config)) *Coordinator {
+	t.Helper()
 	roots, cert := testcert.New(t)
 	auth := &Authorizer{}
 	cfg := server.Config{Host: "127.0.0.1", Port: natsserver.RANDOM_PORT}
@@ -78,7 +88,6 @@ func Start(t testing.TB, modify ...func(*server.Config)) *Coordinator {
 			t.Errorf("shut the coordinator down: %v", err)
 		}
 	})
-	srv.MarkReady()
 	return &Coordinator{Server: srv, RootCAs: roots, Authorizer: auth}
 }
 

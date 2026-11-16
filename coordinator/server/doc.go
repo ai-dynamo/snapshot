@@ -4,11 +4,13 @@
 // Package server is SNEP-324's Snapshot coordinator: it serves each attempt's
 // coordination session from a NATS server with JetStream embedded in the
 // process, and authenticates every client. The host, the process that embeds
-// it, ensures and removes sessions and provides the Authorizer, under the rules
-// Ensure, Remove, and MarkReady state. Sessions live in memory, except their
-// control keys, which use a small file store that does not outlive the process,
-// so a full memory cap never stops a session from ending. Package session holds
-// what the coordinator shares with the session client, package coordinator.
+// it, ensures, fails, and removes sessions and provides the Authorizer, under
+// the rules Ensure, FailUncommitted, Remove, and MarkReady state; package
+// groups does that from the group resources. Sessions live in memory, except
+// their control keys, which use a small file store that does not outlive the
+// process, so a full memory cap never stops a session from ending. Package
+// session holds what the coordinator shares with the session client, package
+// coordinator.
 //
 // Every member the coordinator admits is an agent, and every agent is equally
 // trusted. A member's permissions keep an agent from changing what is not its

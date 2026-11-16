@@ -16,4 +16,25 @@ const (
 	SnapshotNodeLabel = "nvidia.com/snapshot-node"
 
 	CheckpointVolumeName = "checkpoint-storage"
+
+	// PodGroupLabel holds the name of the PodGroupSnapshot that owns a
+	// PodSnapshot, on each PodSnapshot that a PodGroupSnapshot creates for its
+	// members.
+	PodGroupLabel = "nvidia.com/snapshot-podgroup"
+
+	// PodGroupMemberLabel holds the member ID of a PodSnapshot that a
+	// PodGroupSnapshot creates for one of its members.
+	PodGroupMemberLabel = "nvidia.com/snapshot-podgroup-member"
+
+	// PodGroupProtocolsAnnotation on the node agent DaemonSet's Pod template,
+	// and so on every agent Pod, lists the group protocol versions that the
+	// agent supports, as a comma-separated list such as "v1,v2". The group
+	// controllers place member work only on nodes whose agent lists a
+	// compatible version.
+	PodGroupProtocolsAnnotation = "nvidia.com/snapshot-podgroup-protocols"
+
+	// PodGroupInUseFinalizer keeps a group resource, of either kind, while its
+	// own attempt runs, and a PodGroupSnapshot, with the snapshots of its
+	// members, also while any unfinished PodGroupRestore references its UID.
+	PodGroupInUseFinalizer = "nvidia.com/snapshot-podgroup-in-use"
 )

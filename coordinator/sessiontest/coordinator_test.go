@@ -180,6 +180,46 @@ func requireNoGrace(t *testing.T, h *harness) {
 		"no grace period may start")
 }
 
+// TestCoordinatorFailUncommitted covers the host failing a session before the
+// commit, once its group resource's deletion starts or a member fails:
+// members that have not all passed the admitted barrier learn the reason, and
+// members past it carry on.
+func TestCoordinatorFailUncommitted(t *testing.T) {
+	h := newHarness(t)
+	ctx := within(t)
+
+	t.Run("before the admitted barrier completes, every member learns the reason", func(t *testing.T) {
+		ses := h.session(t, 2)
+		sessions := ses.connectAll(t)
+		wait := barrier(ctx, sessions[0], session.BarrierAdmitted)
+		awaitKey(t, ses.raw(t, 1), session.BarrierKey(session.BarrierAdmitted, ses.spec.Members[0].ID))
+		require.NoError(t, h.srv.FailUncommitted(ctx, ses.spec.UID, session.ReasonCancelled))
+		require.ErrorIs(t, <-wait, &session.AbortError{Reason: session.ReasonCancelled})
+		for _, s := range sessions {
+			awaitDone(t, s)
+			require.ErrorIs(t, s.Err(), &session.AbortError{Reason: session.ReasonCancelled})
+		}
+		assert.Equal(t, "failed "+session.ReasonCancelled, ses.awaitOutcome(t))
+	})
+
+	t.Run("once it has completed, the session stays open", func(t *testing.T) {
+		ses := h.session(t, 2)
+		sessions := ses.connectAll(t)
+		waits := []<-chan error{
+			barrier(ctx, sessions[0], session.BarrierAdmitted), barrier(ctx, sessions[1], session.BarrierAdmitted),
+		}
+		for _, wait := range waits {
+			require.NoError(t, <-wait)
+		}
+		require.NoError(t, h.srv.FailUncommitted(ctx, ses.spec.UID, "PodIPChanged"))
+		requireOpen(t, sessions[0], "a committed session must stay open")
+		for _, s := range sessions {
+			require.NoError(t, s.Leave(ctx))
+		}
+		assert.Equal(t, "closed", ses.awaitOutcome(t))
+	})
+}
+
 // TestShutdown covers shutting down: every open session fails with
 // CoordinatorLost, one that ended keeps its end, and the coordinator refuses
 // everything afterwards.
