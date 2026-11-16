@@ -81,5 +81,11 @@ knowledge_base:
       - files: ".ai/**/*.md"
         applyTo: "**/*"
 
+issue_enrichment:
+  auto_enrich:
+    enabled: true
+  planning:
+    enabled: false
+
 chat:
   auto_reply: true
