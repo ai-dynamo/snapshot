@@ -217,7 +217,7 @@ coordinator:
   # The memory, in bytes, that every session's data shares. A group's writes
   # fail once it is full. Keep resources.limits.memory at about twice this. The
   # coordinator refuses to start with less than a group of 256 members needs,
-  # about 4 MiB. It also bounds the control buckets' file store in the
+  # about 8 MiB. It also bounds the control buckets' file store in the
   # coordinator's /tmp, an emptyDir on node disk sized to this plus 64 MiB.
   maxMemoryBytes: 1073741824
   # The largest value, in bytes, an agent may write to a session.
