@@ -18,8 +18,12 @@ import (
 // every destination, once per pass after the workers return. The workers
 // restore in parallel, so a write from each would drop the others' entries.
 // The agent never reads the annotation back; the Pod's value only spares a
-// write that changes nothing.
+// write that changes nothing. A restore without retries keeps no record, so
+// its pass reads none.
 func (w *NodeController) publishRetryStatus(ctx context.Context, pod *corev1.Pod, plan *restorePlan, results []restoreResult) {
+	if limit, err := w.retryLimit(pod); err != nil || limit == 0 {
+		return
+	}
 	log := w.log.WithValues("pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
 	nodeUID, ok := w.restorePodNodeUID(ctx, pod, results)
 	if !ok {

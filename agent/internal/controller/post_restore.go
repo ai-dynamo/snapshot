@@ -21,9 +21,9 @@ import (
 )
 
 // errRestoreInterrupted is a restore that the agent stopped before it
-// finished. The restore stays in progress, so the next agent picks it up from
-// the attempt record, or resumes the post-restore action from
-// restore-complete; it is not an outcome.
+// finished. The restore stays in progress, so the next agent repeats the
+// attempt, or resumes the post-restore action from restore-complete; it is
+// not an outcome.
 var errRestoreInterrupted = errors.New("the agent stopped before the restore finished")
 
 // postRestoreHandler is one kind of lifecycle.postRestore action. The

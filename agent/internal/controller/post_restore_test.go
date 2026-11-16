@@ -214,9 +214,7 @@ func recoveringPod(h *postRestoreHarness) {
 		Status: corev1.ConditionFalse,
 		Reason: podcontract.RestoreReasonInProgress,
 	})
-	h.w.podControlSentinelExistsFn = func(_, _, name string) (bool, error) {
-		return name == podcontract.RestoreCompleteFile, nil
-	}
+	h.w.controlSentinelExistsFn = func(int, string) (bool, error) { return true, nil }
 }
 
 func TestPostRestoreAction(t *testing.T) {
