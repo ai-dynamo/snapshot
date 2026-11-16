@@ -10,14 +10,38 @@ import (
 	"testing"
 
 	"github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/coordinator/coordinatortest"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
+
+// TestReconcileFailsWhatItEnsures covers an attempt whose member failed before
+// its session opened: the reconcile that ensures the session also fails it.
+func TestReconcileFailsWhatItEnsures(t *testing.T) {
+	const node = "node-0"
+	g := newSnapshot("snapshot-uid", "a", "b")
+	g.CreationTimestamp = metav1.Now()
+	g.Status.Members = []v1alpha1.PodGroupSnapshotMemberStatus{
+		{ID: "a", NodeName: node, PodSnapshot: &v1alpha1.ObjectIdentity{Name: "group-a", UID: "podsnapshot-a"}},
+		{ID: "b", Rank: 1, NodeName: node, Phase: v1alpha1.CheckpointPhaseFailed,
+			Reason: v1alpha1.ReasonPodSnapshotDeleted},
+	}
+	coord := coordinatortest.Start(t)
+	r := &reconciler{attempts: fakeAttempts(t, g), server: coord.Server, node: node, clock: clock.RealClock{}}
+	result, err := r.Reconcile(context.Background(), requestFor(snapshotKind, g))
+	require.NoError(t, err)
+	assert.Zero(t, result.RequeueAfter, "nothing is left to look at again")
+	ended, held := coord.Ended(g.UID)
+	assert.True(t, held, "the session must be ensured")
+	assert.True(t, ended, "the session must fail in the same reconcile")
+}
 
 // TestSnapshotRequests covers what a PodGroupSnapshot's events reconcile: the
 // snapshot, and each PodGroupRestore of that snapshot, by UID.

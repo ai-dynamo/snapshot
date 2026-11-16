@@ -81,7 +81,7 @@ func TestDecide(t *testing.T) {
 
 		{"a member failed, its session open", served(failed), open, now, fail, 0},
 		{"a member failed, its session ended", served(failed), ended, now, none, 0},
-		{"a member failed, no session, served here, member work", served(failed), notHeld, now, ensure, recheck},
+		{"a member failed, no session, served here, member work", served(failed), notHeld, now, ensure, 0},
 		{"a member failed, no session, served by another node",
 			served(both(failed, func(a *attempt) { a.sessionNode = "node-1" })), notHeld, now, none, 0},
 		{"a member failed and final, its session open", served(both(failed, final)), open, now, fail, recheck},

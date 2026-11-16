@@ -44,8 +44,7 @@ type held struct {
 // session ends, so the reconciler looks for it: a capture's session closes
 // once every member has left, soon after the attempt is final, while a
 // restore's stays open past release for as long as the members' libraries
-// rendezvous through it. It is also the wait after ensuring the session of an
-// attempt with a Failed member, which the next pass then fails.
+// rendezvous through it.
 const recheck = 5 * time.Second
 
 // decide returns what to do to the session of attempt a, on the coordinator of
@@ -69,10 +68,9 @@ const recheck = 5 * time.Second
 // admitted barrier, since members may then have started.
 //
 // A final attempt whose session is still open is looked at again after
-// recheck, or at its deadline if that is sooner. So is an attempt ensured
-// after a member has failed, whose session fail then ends. Ensure never
-// revives a removed session: a resource is final or being deleted, or gone,
-// before its session is removed, and stays so, since a UID names one attempt.
+// recheck, or at its deadline if that is sooner. Ensure never revives a
+// removed session: a resource is final or being deleted, or gone, before its
+// session is removed, and stays so, since a UID names one attempt.
 func decide(a *attempt, node string, h held, now time.Time) (action, time.Duration) {
 	if a == nil {
 		if h.session {
@@ -96,9 +94,6 @@ func decide(a *attempt, node string, h held, now time.Time) (action, time.Durati
 	case !a.ensurable:
 		return none, again
 	case a.sessionNode == node && a.memberWork && !a.final && !a.deleting && !h.session:
-		if a.failure != "" {
-			return ensure, recheck
-		}
 		return ensure, 0
 	}
 	return none, again
