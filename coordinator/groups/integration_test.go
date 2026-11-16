@@ -10,6 +10,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -29,6 +31,8 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	natsserver "github.com/nats-io/nats-server/v2/server"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -223,10 +227,9 @@ func readySnapshot(t *testing.T, ids []string) *v1alpha1.PodGroupSnapshot {
 }
 
 // createRestore creates a PodGroupRestore of snapshot whose targets, listed in
-// the order of members, are pinned to their nodes. With finalizer, deleting it
-// leaves it until the test removes the in-use finalizer.
+// the order of members, are pinned to their nodes, as each of opts changes it.
 func createRestore(t *testing.T, snapshot *v1alpha1.PodGroupSnapshot, members []member,
-	finalizer bool) *v1alpha1.PodGroupRestore {
+	opts ...func(*v1alpha1.PodGroupRestore)) *v1alpha1.PodGroupRestore {
 	t.Helper()
 	ctx := within(t)
 	r := &v1alpha1.PodGroupRestore{
@@ -236,12 +239,12 @@ func createRestore(t *testing.T, snapshot *v1alpha1.PodGroupSnapshot, members []
 			DeadlineSeconds: 600,
 		},
 	}
-	if finalizer {
-		r.Finalizers = []string{v1alpha1.PodGroupInUseFinalizer}
-	}
 	for _, m := range members {
 		r.Spec.Targets = append(r.Spec.Targets, v1alpha1.PodGroupRestoreTarget{ID: m.id,
 			PodRef: v1alpha1.TargetPodReference{Name: "restore-pod-" + m.id}})
+	}
+	for _, opt := range opts {
+		opt(r)
 	}
 	require.NoError(t, k8s.Create(ctx, r))
 	for _, m := range members {
@@ -251,6 +254,12 @@ func createRestore(t *testing.T, snapshot *v1alpha1.PodGroupSnapshot, members []
 	}
 	require.NoError(t, k8s.Status().Update(ctx, r))
 	return r
+}
+
+// withFinalizer gives a restore that createRestore creates the in-use
+// finalizer, so deleting it leaves it until the test removes the finalizer.
+func withFinalizer(r *v1alpha1.PodGroupRestore) {
+	r.Finalizers = []string{v1alpha1.PodGroupInUseFinalizer}
 }
 
 // release removes the in-use finalizer from obj, so a deleted resource goes.
@@ -304,6 +313,32 @@ func (h *host) connect(t *testing.T, uid types.UID, id string) coordinator.Sessi
 	return s
 }
 
+// awaitArrival waits until member of the attempt uid has arrived at the
+// admitted barrier, as another member, peer, reads it over a plain NATS
+// connection made the way package session defines. The connection closes when
+// the test ends.
+func (h *host) awaitArrival(t *testing.T, uid types.UID, member, peer string) {
+	t.Helper()
+	ctx := within(t)
+	nc, err := nats.Connect("tls://"+h.coord.Addr().String(),
+		nats.Secure(&tls.Config{RootCAs: h.coord.RootCAs, ServerName: "localhost", MinVersion: tls.VersionTLS12}),
+		nats.TLSHandshakeFirst(),
+		nats.UserInfo(session.UserName(string(uid), peer), ""),
+		nats.Token(coordinatortest.Token),
+		nats.CustomInboxPrefix(session.InboxPrefix(string(uid), peer)),
+		nats.NoReconnect())
+	require.NoError(t, err)
+	t.Cleanup(nc.Close)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+	control, err := js.KeyValue(ctx, session.ControlBucket(string(uid)))
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		_, err := control.Get(ctx, session.BarrierKey(session.BarrierAdmitted, member))
+		return err == nil
+	}, timeout, 10*time.Millisecond, "member %s arriving at the admitted barrier", member)
+}
+
 // awaitEnd waits until s's session has ended, and returns how.
 func awaitEnd(t *testing.T, s coordinator.Session) error {
 	t.Helper()
@@ -340,8 +375,7 @@ func TestSessionNode(t *testing.T) {
 	})
 
 	t.Run("a restore", func(t *testing.T) {
-		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"b", names[1]}, {"a", names[0]}},
-			false)
+		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"b", names[1]}, {"a", names[0]}})
 		hosts[0].awaitHeld(t, r.UID, true)
 		hosts[1].awaitSeen(t, r.UID, func(a *attempt) bool { return a.memberWork })
 		hosts[1].requireNotHeld(t, r.UID)
@@ -367,7 +401,9 @@ func TestSessionNode(t *testing.T) {
 
 // TestHostOrder builds a host in the order the package doc gives, with the
 // real agentauth.Authorizer reading the attempts as its Placement: an agent's
-// Pod-bound token admits it for a member on its node, and only for one.
+// Pod-bound token admits it for a member on its node, and only for one. Once
+// the group is gone and its session removed, the member that reconnects with
+// its epoch is admitted all the same, and learns that its session was lost.
 func TestHostOrder(t *testing.T) {
 	ctx := within(t)
 	names := nodes(t, 2)
@@ -426,8 +462,9 @@ func TestHostOrder(t *testing.T) {
 		_, holds := srv.Ended(g.UID)
 		return holds && srv.Ready()
 	}, timeout, 10*time.Millisecond)
+	link := newRelay(t, srv.Addr().String())
 	cfg := coordinator.Config{
-		URLs:       []string{"tls://" + srv.Addr().String()},
+		URLs:       []string{"tls://" + link.addr()},
 		RootCAs:    func() (*x509.CertPool, error) { return roots, nil },
 		ServerName: "localhost",
 		Attempt:    string(g.UID),
@@ -444,6 +481,93 @@ func TestHostOrder(t *testing.T) {
 	defer cancelRefused()
 	_, err = coordinator.Connect(refused, cfg)
 	require.ErrorIs(t, err, session.ErrForbidden, "the agent's token must not admit it for a member on another node")
+
+	link.hold()
+	require.NoError(t, k8s.Delete(ctx, g))
+	require.Eventually(t, func() bool {
+		_, holds := srv.Ended(g.UID)
+		return !holds
+	}, timeout, 10*time.Millisecond, "the session of a deleted group must be removed")
+	link.release()
+	require.ErrorIs(t, awaitEnd(t, s), session.ErrCoordinatorLost)
+}
+
+// relay forwards TCP connections to a coordinator, so a test can cut a
+// member's connection and refuse its reconnects for a while, as a network
+// fault would.
+type relay struct {
+	ln net.Listener
+
+	mu    sync.Mutex
+	held  bool
+	conns []net.Conn
+}
+
+// newRelay starts a relay to target, which stops when the test ends.
+func newRelay(t *testing.T, target string) *relay {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	r := &relay{ln: ln}
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for {
+			in, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			out, err := net.Dial("tcp", target)
+			if err != nil {
+				_ = in.Close()
+				continue
+			}
+			if !r.add(in, out) {
+				_, _ = in.Close(), out.Close()
+				continue
+			}
+			wg.Go(func() { _, _ = io.Copy(out, in); _ = out.Close() })
+			wg.Go(func() { _, _ = io.Copy(in, out); _ = in.Close() })
+		}
+	})
+	t.Cleanup(func() {
+		_ = ln.Close()
+		r.hold()
+		wg.Wait()
+	})
+	return r
+}
+
+// addr returns the address the relay listens on.
+func (r *relay) addr() string { return r.ln.Addr().String() }
+
+// add records a forwarded connection's two ends, unless the relay is held.
+func (r *relay) add(in, out net.Conn) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.held {
+		return false
+	}
+	r.conns = append(r.conns, in, out)
+	return true
+}
+
+// hold closes every connection the relay forwards, and refuses new ones until
+// release.
+func (r *relay) hold() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.held = true
+	for _, c := range r.conns {
+		_ = c.Close()
+	}
+	r.conns = nil
+}
+
+// release forwards new connections again.
+func (r *relay) release() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.held = false
 }
 
 // visibleLabel is the label a host that hideSnapshots configures waits for
@@ -478,14 +602,14 @@ func TestRestoreAndSnapshotOrder(t *testing.T) {
 
 	t.Run("the snapshot shows first", func(t *testing.T) {
 		h := startHost(t, names[0], coordinatortest.Start(t))
-		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), members(names[0]), false)
+		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), members(names[0]))
 		h.awaitHeld(t, r.UID, true)
 	})
 
 	t.Run("the restore shows first", func(t *testing.T) {
 		h := startHost(t, names[1], coordinatortest.Start(t), hideSnapshots)
 		snapshot := readySnapshot(t, []string{"a", "b"})
-		r := createRestore(t, snapshot, members(names[1]), false)
+		r := createRestore(t, snapshot, members(names[1]))
 		require.Eventually(t, func() bool {
 			var cached v1alpha1.PodGroupRestore
 			err := h.cache.Get(context.Background(), client.ObjectKeyFromObject(r), &cached)
@@ -547,7 +671,7 @@ func TestDeletion(t *testing.T) {
 
 	t.Run("a restore, before the admitted barrier completes", func(t *testing.T) {
 		ctx := within(t)
-		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"a", names[0]}, {"b", names[0]}}, true)
+		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"a", names[0]}, {"b", names[0]}}, withFinalizer)
 		h.awaitHeld(t, r.UID, true)
 		a, b := h.connect(t, r.UID, "a"), h.connect(t, r.UID, "b")
 		arrived := make(chan error, 1)
@@ -566,17 +690,19 @@ func TestDeletion(t *testing.T) {
 
 // TestMemberFailed covers a group resource of either kind whose status shows
 // a Failed member: before every member has arrived at the admitted barrier,
-// its session fails with the member's reason, so the peers waiting there
+// its session fails with session.ReasonRefused, so the peers waiting there
 // learn it at once instead of at the deadline; afterwards, it stays open.
 func TestMemberFailed(t *testing.T) {
 	names := nodes(t, 1)
 	h := startHost(t, names[0], coordinatortest.Start(t))
 	pair := []member{{"a", names[0]}, {"b", names[0]}}
-	// admit makes member a of the attempt uid wait at the admitted barrier.
+	// admit makes member a of the attempt uid wait at the admitted barrier,
+	// and returns once its arrival is recorded.
 	admit := func(t *testing.T, uid types.UID) <-chan error {
 		a := h.connect(t, uid, "a")
 		arrived := make(chan error, 1)
 		go func() { arrived <- a.Barrier(within(t), session.BarrierAdmitted) }()
+		h.awaitArrival(t, uid, "a", "b")
 		return arrived
 	}
 
@@ -587,17 +713,17 @@ func TestMemberFailed(t *testing.T) {
 		g.Status.Members[1].Phase = v1alpha1.CheckpointPhaseFailed
 		g.Status.Members[1].Reason = v1alpha1.ReasonPodSnapshotDeleted
 		require.NoError(t, k8s.Status().Update(within(t), g))
-		require.ErrorIs(t, <-arrived, &session.AbortError{Reason: v1alpha1.ReasonPodSnapshotDeleted})
+		require.ErrorIs(t, <-arrived, &session.AbortError{Reason: session.ReasonRefused})
 	})
 
 	t.Run("a restore, before the admitted barrier completes", func(t *testing.T) {
-		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), pair, false)
+		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), pair)
 		h.awaitHeld(t, r.UID, true)
 		arrived := admit(t, r.UID)
 		r.Status.Members[1].Phase = v1alpha1.RestorePhaseFailed
 		r.Status.Members[1].Reason = v1alpha1.PodGroupReasonTargetPodDeleted
 		require.NoError(t, k8s.Status().Update(within(t), r))
-		require.ErrorIs(t, <-arrived, &session.AbortError{Reason: v1alpha1.PodGroupReasonTargetPodDeleted})
+		require.ErrorIs(t, <-arrived, &session.AbortError{Reason: session.ReasonRefused})
 	})
 
 	t.Run("a member that failed before its session opened", func(t *testing.T) {
@@ -611,8 +737,7 @@ func TestMemberFailed(t *testing.T) {
 		g.Status.Members[1].Reason = v1alpha1.ReasonPodSnapshotDeleted
 		require.NoError(t, k8s.Status().Update(within(t), g), "member work and the failure in one change")
 		h.awaitHeld(t, g.UID, true)
-		require.ErrorIs(t, awaitEnd(t, h.connect(t, g.UID, "a")),
-			&session.AbortError{Reason: v1alpha1.ReasonPodSnapshotDeleted})
+		require.ErrorIs(t, awaitEnd(t, h.connect(t, g.UID, "a")), &session.AbortError{Reason: session.ReasonRefused})
 	})
 
 	t.Run("once it has completed, the session stays open", func(t *testing.T) {
@@ -624,7 +749,12 @@ func TestMemberFailed(t *testing.T) {
 		g.Status.Members[1].Phase = v1alpha1.CheckpointPhaseFailed
 		g.Status.Members[1].Reason = v1alpha1.ReasonPodSnapshotDeleted
 		require.NoError(t, k8s.Status().Update(within(t), g))
-		h.awaitSeen(t, g.UID, func(a *attempt) bool { return a.failure != "" })
+		h.awaitSeen(t, g.UID, func(a *attempt) bool { return a.failed })
+		// A reconcile that reads the failure, as the host's own does, leaves
+		// the committed session open.
+		r := &reconciler{attempts: h.attempts, server: h.coord.Server, node: h.node, clock: h.clock}
+		_, err := r.Reconcile(within(t), requestFor(snapshotKind, g))
+		require.NoError(t, err)
 		h.requireNotEnded(t, g.UID)
 	})
 }
@@ -697,7 +827,7 @@ func TestFinal(t *testing.T) {
 
 	t.Run("a restore, once its session has ended", func(t *testing.T) {
 		ctx := within(t)
-		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"a", names[0]}, {"b", names[0]}}, false)
+		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"a", names[0]}, {"b", names[0]}})
 		h.awaitHeld(t, r.UID, true)
 		members := []coordinator.Session{h.connect(t, r.UID, "a"), h.connect(t, r.UID, "b")}
 		for i := range r.Status.Members {
@@ -722,7 +852,7 @@ func TestSnapshotDeletedUnderRestore(t *testing.T) {
 	h := startHost(t, names[0], coordinatortest.Start(t))
 	ctx := within(t)
 	snapshot := readySnapshot(t, []string{"a", "b"})
-	r := createRestore(t, snapshot, []member{{"a", names[0]}, {"b", names[0]}}, false)
+	r := createRestore(t, snapshot, []member{{"a", names[0]}, {"b", names[0]}})
 	h.awaitHeld(t, r.UID, true)
 	a, b := h.connect(t, r.UID, "a"), h.connect(t, r.UID, "b")
 	for i := range r.Status.Members {
@@ -765,7 +895,7 @@ func TestRestart(t *testing.T) {
 	here := names[0]
 	served := []types.UID{
 		createCapture(t, []member{{"a", here}, {"b", names[1]}}, true, false).UID,
-		createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"b", names[1]}, {"a", here}}, false).UID,
+		createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"b", names[1]}, {"a", here}}).UID,
 	}
 	final := createCapture(t, []member{{"a", here}}, true, false)
 	checkpointed(t, final)

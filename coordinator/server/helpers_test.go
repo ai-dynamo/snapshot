@@ -67,6 +67,7 @@ func startHarness(t *testing.T, modify ...func(*Config)) *harness {
 		logs:  &logLines{},
 		ca:    ca,
 	}
+	t.Cleanup(func() { h.logs.dumpIfFailed(t) })
 	h.cfg = Config{
 		Host:       "127.0.0.1",
 		Port:       natsserver.RANDOM_PORT,
@@ -138,8 +139,11 @@ type member struct {
 	id                         string
 	nc                         *nats.Conn
 	control, snapshot, library jetstream.KeyValue
-	meta                       session.Meta
-	done                       chan struct{}
+	// buckets holds the same buckets by name.
+	buckets map[string]jetstream.KeyValue
+	meta    session.Meta
+	uid     types.UID
+	done    chan struct{}
 	// err is how the session ended, set before done is closed.
 	err error
 }
@@ -148,19 +152,21 @@ type member struct {
 func (h *harness) connect(spec Spec, i int) *member {
 	h.t.Helper()
 	ctx := within(h.t)
-	m := &member{id: spec.Members[i].ID, done: make(chan struct{})}
+	m := &member{id: spec.Members[i].ID, uid: spec.UID, buckets: make(map[string]jetstream.KeyValue),
+		done: make(chan struct{})}
 	var err error
 	m.nc, err = h.dial(spec, m.id, agentToken, 0)
 	require.NoError(h.t, err)
 	h.t.Cleanup(m.nc.Close)
 	js, err := jetstream.New(m.nc)
 	require.NoError(h.t, err)
-	m.control, err = js.KeyValue(ctx, session.ControlBucket(string(spec.UID)))
-	require.NoError(h.t, err)
-	m.snapshot, err = js.KeyValue(ctx, session.SnapshotBucket(string(spec.UID)))
-	require.NoError(h.t, err)
-	m.library, err = js.KeyValue(ctx, session.LibraryBucket(string(spec.UID)))
-	require.NoError(h.t, err)
+	for _, bucket := range session.Buckets(string(spec.UID)) {
+		m.buckets[bucket], err = js.KeyValue(ctx, bucket)
+		require.NoError(h.t, err)
+	}
+	m.control = m.buckets[session.ControlBucket(string(spec.UID))]
+	m.snapshot = m.buckets[session.SnapshotBucket(string(spec.UID))]
+	m.library = m.buckets[session.LibraryBucket(string(spec.UID))]
 	entry, err := m.control.Get(ctx, session.KeyMeta)
 	require.NoError(h.t, err)
 	require.NoError(h.t, json.Unmarshal(entry.Value(), &m.meta))
@@ -210,12 +216,13 @@ func (m *member) Err() error {
 	}
 }
 
-// bucket returns the bucket that holds a namespace.
+// bucket returns the bucket that holds a namespace, one of package session's.
 func (m *member) bucket(ns session.Namespace) jetstream.KeyValue {
-	if ns == session.NamespaceLibrary {
-		return m.library
+	bucket, err := ns.Bucket(string(m.uid))
+	if err != nil {
+		panic(err)
 	}
-	return m.snapshot
+	return m.buckets[bucket]
 }
 
 // insert creates key in a namespace.
@@ -418,4 +425,15 @@ func (l *logLines) all() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return append([]string(nil), l.lines...)
+}
+
+// dumpIfFailed logs every line to t if t has failed, so a failure shows what
+// the coordinator did before it.
+func (l *logLines) dumpIfFailed(t *testing.T) {
+	if !t.Failed() {
+		return
+	}
+	for _, line := range l.all() {
+		t.Logf("coordinator: %s", line)
+	}
 }

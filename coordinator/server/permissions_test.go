@@ -31,6 +31,7 @@ func TestPermissionsRefuse(t *testing.T) {
 	spec, other := h.ensure(2), h.ensure(1)
 	nc, violations := h.raw(spec, 0)
 	control, own := session.ControlBucket(string(spec.UID)), session.SnapshotBucket(string(spec.UID))
+	library := session.LibraryBucket(string(spec.UID))
 	theirs := session.SnapshotBucket(string(other.UID))
 	theirLibrary := session.LibraryBucket(string(other.UID))
 
@@ -39,6 +40,9 @@ func TestPermissionsRefuse(t *testing.T) {
 		"another member's arrival":               "$KV." + control + ".barrier.admitted.member-1",
 		"another member's departure":             "$KV." + control + ".left.member-1",
 		"a key outside every namespace":          "$KV." + own + ".unscoped",
+		"a key outside the library namespace":    "$KV." + library + ".unscoped",
+		"an agent's key in the library bucket":   "$KV." + library + ".snapshot.k",
+		"a library key in the Snapshot bucket":   "$KV." + own + ".library.k",
 		"a key outside the control keys":         "$KV." + control + ".unscoped",
 		"an agent's key in the control bucket":   "$KV." + control + ".snapshot.k",
 		"a control key in the Snapshot bucket":   "$KV." + own + ".ended",

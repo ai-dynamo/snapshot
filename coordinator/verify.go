@@ -9,6 +9,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/coordinator/internal/backoff"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -63,17 +64,20 @@ func (s *client) verifier() {
 // member that presents another epoch, which the client does whenever it
 // reconnects.
 func (s *client) check() {
+	waits := backoff.New()
 	for {
 		s.mu.Lock()
 		target := s.target()
 		s.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), attemptTimeout)
-		_, err := s.control.Status(ctx)
+		_, err := s.control.kv.Status(ctx)
+		cancel()
 		var meta session.Meta
 		if err == nil {
-			meta, err = readMeta(ctx, s.control)
+			// Once, as any read, and outside retry, which would wait for
+			// this very verification when it finds the bucket missing.
+			err = s.readOnce(context.Background(), controlRead(len(s.meta.Members)), s.readMeta(&meta))
 		}
-		cancel()
 		switch {
 		case err == nil && meta.Epoch == s.meta.Epoch:
 			s.settled(target)
@@ -84,7 +88,7 @@ func (s *client) check() {
 			return
 		}
 		select {
-		case <-time.After(retryWait):
+		case <-time.After(waits.Step()):
 		case <-s.closing:
 			return
 		case <-s.done:
