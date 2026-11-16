@@ -168,10 +168,6 @@ func (h *attemptHarness) events(reason string) []string {
 	return messages
 }
 
-func retryLimit(limit string) map[string]string {
-	return map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a", podcontract.RestoreRetryLimitAnnotation: limit}
-}
-
 func TestRunRestoreRetriesInPlaceOnceEachRetryIsDue(t *testing.T) {
 	h, run := newAttemptHarness(t, retryLimit("2"), nil)
 	h.w.config.Restore.TimeoutSeconds = 600

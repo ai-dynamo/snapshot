@@ -1191,7 +1191,9 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		if errors.As(err, &incompatible) {
 			// The placeholder is left running: killing it restarts the container
 			// straight back into the same refusal.
-			op.forgetAttempts(ctx)
+			if record.Limit > 0 {
+				op.forgetAttempts(ctx)
+			}
 			return incompatible
 		}
 
