@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -166,14 +167,16 @@ func within(t *testing.T) context.Context {
 // executor.Checkpoint plays it: admission, the admitted barrier, the commit
 // callback, then the first irreversible step and the net-freeze barrier. A
 // member that fails ends the attempt, as the executor does. refuse makes a
-// member refuse at admission.
+// member refuse at admission, panicsBeforeStart makes it panic before it
+// starts, and panics makes it panic once it started.
 type memberCheckpoint struct {
-	t        *testing.T
-	w        func() *NodeController
-	refuse   map[string]bool
-	panics   map[string]bool
-	mu       sync.Mutex
-	timeline []string
+	t                 *testing.T
+	w                 func() *NodeController
+	refuse            map[string]bool
+	panicsBeforeStart map[string]bool
+	panics            map[string]bool
+	mu                sync.Mutex
+	timeline          []string
 }
 
 func (m *memberCheckpoint) record(step string) {
@@ -201,6 +204,9 @@ func (m *memberCheckpoint) fn(ctx context.Context, params CheckpointParams) (_ *
 	id := g.ID()
 	if m.refuse[id] {
 		return nil, errors.New("the source is not safe to checkpoint")
+	}
+	if m.panicsBeforeStart[id] {
+		panic("the capture panicked before the member started")
 	}
 	if err := g.Admit(ctx, group.Admission{PodIP: netip.MustParseAddr(params.Pod.Status.PodIP)}); err != nil {
 		return nil, err
@@ -357,6 +363,71 @@ func TestGroupCheckpointThatPanicsAfterItStartedFailsTheMember(t *testing.T) {
 		terminated = 2
 	}
 	assert.Equal(t, slices.Repeat([]int{7}, terminated), k.list())
+}
+
+func TestGroupCheckpointThatPanicsBeforeItStartedLeavesEveryPodAsFound(t *testing.T) {
+	g := newCaptureGroup()
+	srv := ensureSession(t, captureGroupUID, captureMemberIDs)
+	var w *NodeController
+	executor := &memberCheckpoint{t: t, w: func() *NodeController { return w }, panicsBeforeStart: map[string]bool{"leader": true}}
+	w, k := groupCaptureController(t, srv, g, executor.fn, nil)
+
+	captureBoth(t, w, g)
+
+	leader := getContent(t, w, "content-leader")
+	assert.Equal(t, reasonAgentPanic, condition(leader, snapshotv1alpha1.PodSnapshotConditionFailed).Reason)
+	assert.Equal(t, session.ReasonRefused,
+		condition(getContent(t, w, "content-worker"), snapshotv1alpha1.PodSnapshotConditionFailed).Reason,
+		"the panic fails the attempt before it commits")
+	for i, content := range g.contents {
+		assert.Nil(t, condition(getContent(t, w, content.Name), snapshotv1alpha1.PodSnapshotConditionStarted))
+		assert.NotContains(t, getPod(t, w, "inference", g.pods[i].Name).Labels, snapshotv1alpha1.CaptureEligibleLabel)
+	}
+	assert.Empty(t, k.list(), "a member that never started has its source left as found")
+}
+
+func TestGroupCheckpointThatPanicsAfterItConcludedKeepsItsOutcome(t *testing.T) {
+	g := newCaptureGroup()
+	srv := ensureSession(t, captureGroupUID, captureMemberIDs)
+	var w *NodeController
+	executor := &memberCheckpoint{t: t, w: func() *NodeController { return w }}
+	var panicking atomic.Bool
+	panicking.Store(true)
+	funcs := &interceptor.Funcs{SubResourcePatch: func(ctx context.Context, c client.Client, subResource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+		if content, ok := obj.(*snapshotv1alpha1.PodSnapshotContent); ok && content.Name == "content-leader" &&
+			isContentReady(content) && panicking.Load() {
+			panic("recording Ready panicked")
+		}
+		return c.SubResource(subResource).Patch(ctx, obj, patch, opts...)
+	}}
+	w, k := groupCaptureController(t, srv, g, executor.fn, funcs)
+
+	errs := make([]error, len(g.contents))
+	var wg sync.WaitGroup
+	for i, content := range g.contents {
+		wg.Go(func() { errs[i] = w.reconcileCapture(within(t), content.Name) })
+	}
+	wg.Wait()
+	waitForLeaving(t, w)
+
+	require.ErrorContains(t, errs[0], "panic", "the outcome that could not be recorded is tried again")
+	require.NoError(t, errs[1])
+	leader := getContent(t, w, "content-leader")
+	assert.Nil(t, condition(leader, snapshotv1alpha1.PodSnapshotConditionFailed), "a capture that concluded is not failed")
+	assert.Empty(t, k.list(), "no source is terminated")
+
+	panicking.Store(false)
+	require.NoError(t, w.reconcileCapture(within(t), "content-leader"))
+	ready := condition(getContent(t, w, "content-leader"), snapshotv1alpha1.PodSnapshotConditionReady)
+	require.NotNil(t, ready, "the outcome held is recorded")
+	assert.Equal(t, metav1.ConditionTrue, ready.Status)
+	dumps := 0
+	for _, step := range executor.steps() {
+		if step == "leader dumped" {
+			dumps++
+		}
+	}
+	assert.Equal(t, 1, dumps, "the member is checkpointed once")
 }
 
 func TestGroupCheckpointRefusedBeforeItCommitsLeavesEveryPodAsFound(t *testing.T) {
