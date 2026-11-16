@@ -145,7 +145,9 @@ func getJSON(ctx context.Context, client *http.Client, url string, v any) error 
 // than alg, kid and typ. The API server sets only alg and kid. Any other, such
 // as jwk, x5c or crit, only gives the JOSE parser more work, on a path any
 // client reaches without credentials. checkHeader reads the header with the
-// standard library, so that such a token never reaches the JOSE parser.
+// standard library, so that such a token never reaches the JOSE parser. A
+// token in JWS JSON serialization, which the JOSE parser also accepts, has no
+// base64url header and is refused too.
 func checkHeader(token string) error {
 	encoded, _, _ := strings.Cut(token, ".")
 	raw, err := base64.RawURLEncoding.DecodeString(encoded)
