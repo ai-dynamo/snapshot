@@ -233,10 +233,9 @@ func readySnapshot(t *testing.T, ids []string) *v1alpha1.PodGroupSnapshot {
 }
 
 // createRestore creates a PodGroupRestore of snapshot whose targets, listed in
-// the order of members, are pinned to their nodes. With finalizer, deleting it
-// leaves it until the test removes the in-use finalizer.
+// the order of members, are pinned to their nodes, as each of opts changes it.
 func createRestore(t *testing.T, snapshot *v1alpha1.PodGroupSnapshot, members []member,
-	finalizer bool) *v1alpha1.PodGroupRestore {
+	opts ...func(*v1alpha1.PodGroupRestore)) *v1alpha1.PodGroupRestore {
 	t.Helper()
 	ctx := within(t)
 	r := &v1alpha1.PodGroupRestore{
@@ -246,12 +245,12 @@ func createRestore(t *testing.T, snapshot *v1alpha1.PodGroupSnapshot, members []
 			DeadlineSeconds: 600,
 		},
 	}
-	if finalizer {
-		r.Finalizers = []string{v1alpha1.PodGroupInUseFinalizer}
-	}
 	for _, m := range members {
 		r.Spec.Targets = append(r.Spec.Targets, v1alpha1.PodGroupRestoreTarget{ID: m.id,
 			PodRef: v1alpha1.TargetPodReference{Name: "restore-pod-" + m.id}})
+	}
+	for _, opt := range opts {
+		opt(r)
 	}
 	require.NoError(t, k8s.Create(ctx, r))
 	for _, m := range members {
@@ -261,6 +260,12 @@ func createRestore(t *testing.T, snapshot *v1alpha1.PodGroupSnapshot, members []
 	}
 	require.NoError(t, k8s.Status().Update(ctx, r))
 	return r
+}
+
+// withFinalizer gives a restore that createRestore creates the in-use
+// finalizer, so deleting it leaves it until the test removes the finalizer.
+func withFinalizer(r *v1alpha1.PodGroupRestore) {
+	r.Finalizers = []string{v1alpha1.PodGroupInUseFinalizer}
 }
 
 // release removes the in-use finalizer from obj, so a deleted resource goes.
@@ -415,8 +420,7 @@ func TestSessionNode(t *testing.T) {
 	})
 
 	t.Run("a restore", func(t *testing.T) {
-		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"b", names[1]}, {"a", names[0]}},
-			false)
+		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"b", names[1]}, {"a", names[0]}})
 		hosts[0].awaitHeld(t, r.UID, true)
 		hosts[1].awaitSeen(t, r.UID, func(a *attempt) bool { return a.memberWork })
 		hosts[1].requireNotHeld(t, r.UID)
@@ -643,14 +647,14 @@ func TestRestoreAndSnapshotOrder(t *testing.T) {
 
 	t.Run("the snapshot shows first", func(t *testing.T) {
 		h := startHost(t, names[0], coordinatortest.Start(t))
-		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), members(names[0]), false)
+		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), members(names[0]))
 		h.awaitHeld(t, r.UID, true)
 	})
 
 	t.Run("the restore shows first", func(t *testing.T) {
 		h := startHost(t, names[1], coordinatortest.Start(t), hideSnapshots)
 		snapshot := readySnapshot(t, []string{"a", "b"})
-		r := createRestore(t, snapshot, members(names[1]), false)
+		r := createRestore(t, snapshot, members(names[1]))
 		require.Eventually(t, func() bool {
 			var cached v1alpha1.PodGroupRestore
 			err := h.cache.Get(context.Background(), client.ObjectKeyFromObject(r), &cached)
@@ -712,7 +716,7 @@ func TestDeletion(t *testing.T) {
 
 	t.Run("a restore, before the admitted barrier completes", func(t *testing.T) {
 		ctx := within(t)
-		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"a", names[0]}, {"b", names[0]}}, true)
+		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"a", names[0]}, {"b", names[0]}}, withFinalizer)
 		h.awaitHeld(t, r.UID, true)
 		a, b := h.connect(t, r.UID, "a"), h.connect(t, r.UID, "b")
 		arrived := make(chan error, 1)
@@ -758,7 +762,7 @@ func TestMemberFailed(t *testing.T) {
 	})
 
 	t.Run("a restore, before the admitted barrier completes", func(t *testing.T) {
-		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), pair, false)
+		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), pair)
 		h.awaitHeld(t, r.UID, true)
 		arrived := admit(t, r.UID)
 		r.Status.Members[1].Phase = v1alpha1.RestorePhaseFailed
@@ -864,7 +868,7 @@ func TestFinal(t *testing.T) {
 
 	t.Run("a restore, once its session has ended", func(t *testing.T) {
 		ctx := within(t)
-		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"a", names[0]}, {"b", names[0]}}, false)
+		r := createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"a", names[0]}, {"b", names[0]}})
 		h.awaitHeld(t, r.UID, true)
 		members := []coordinator.Session{h.connect(t, r.UID, "a"), h.connect(t, r.UID, "b")}
 		for i := range r.Status.Members {
@@ -889,7 +893,7 @@ func TestSnapshotDeletedUnderRestore(t *testing.T) {
 	h := startHost(t, names[0], coordinatortest.Start(t))
 	ctx := within(t)
 	snapshot := readySnapshot(t, []string{"a", "b"})
-	r := createRestore(t, snapshot, []member{{"a", names[0]}, {"b", names[0]}}, false)
+	r := createRestore(t, snapshot, []member{{"a", names[0]}, {"b", names[0]}})
 	h.awaitHeld(t, r.UID, true)
 	a, b := h.connect(t, r.UID, "a"), h.connect(t, r.UID, "b")
 	for i := range r.Status.Members {
@@ -932,7 +936,7 @@ func TestRestart(t *testing.T) {
 	here := names[0]
 	served := []types.UID{
 		createCapture(t, []member{{"a", here}, {"b", names[1]}}, true, false).UID,
-		createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"b", names[1]}, {"a", here}}, false).UID,
+		createRestore(t, readySnapshot(t, []string{"a", "b"}), []member{{"b", names[1]}, {"a", here}}).UID,
 	}
 	final := createCapture(t, []member{{"a", here}}, true, false)
 	checkpointed(t, final)
