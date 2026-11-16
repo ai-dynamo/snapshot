@@ -239,8 +239,7 @@ func TestRestoreRecordsTheCommitBeforeTheFirstIrreversibleStep(t *testing.T) {
 			require.NoError(t, os.MkdirAll(directory, 0o700))
 			manifest := agenttypes.NewCheckpointManifest("content", "main", agenttypes.CRIUDumpManifest{},
 				agenttypes.SourcePodManifest{}, agenttypes.OverlayManifest{}, agenttypes.HostManifest{})
-			manifest.Group = &agenttypes.GroupManifest{CaptureID: "capture-1", Member: "member-0", Rank: 0,
-				PodIPs: []netip.Addr{netip.MustParseAddr("10.1.0.1"), netip.MustParseAddr("10.1.0.2")}}
+			manifest.PodGroup = capturedAs("member-0", "member-0", "member-1")
 			require.NoError(t, agenttypes.WriteManifest(directory, manifest))
 
 			var seen steps
