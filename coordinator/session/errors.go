@@ -81,7 +81,8 @@ const (
 	ReasonDeadlineExceeded = "DeadlineExceeded"
 
 	// ReasonMemberFailed is the reason the coordinator fails a session with
-	// when a member's connection stays closed past the grace period.
+	// when a member's connection stays closed past the grace period, and the
+	// one the host fails it with for a member that failed with no reason.
 	ReasonMemberFailed = "MemberFailed"
 
 	// ReasonCoordinatorLost is the reason a session fails with when the

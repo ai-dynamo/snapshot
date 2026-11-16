@@ -138,10 +138,14 @@ func TestCaptureAttempt(t *testing.T) {
 			{ID: "c", Phase: v1alpha1.CheckpointPhaseFailed, Reason: "Refused"},
 			{ID: "b", Phase: v1alpha1.CheckpointPhaseFailed, Reason: "PodSnapshotDeleted"},
 		}, "PodSnapshotDeleted"},
-		{"a failed member that records no reason", []v1alpha1.PodGroupSnapshotMemberStatus{
+		{"the first failed member records no reason", []v1alpha1.PodGroupSnapshotMemberStatus{
 			{ID: "a", Phase: v1alpha1.CheckpointPhaseFailed},
 			{ID: "c", Phase: v1alpha1.CheckpointPhaseFailed, Reason: "Refused"},
-		}, "Refused"},
+		}, session.ReasonMemberFailed},
+		{"the only failed member records no reason", []v1alpha1.PodGroupSnapshotMemberStatus{
+			{ID: "a", Phase: v1alpha1.CheckpointPhaseCheckpointing},
+			{ID: "b", Phase: v1alpha1.CheckpointPhaseFailed},
+		}, session.ReasonMemberFailed},
 	} {
 		t.Run("failure: "+tt.name, func(t *testing.T) {
 			g := newSnapshot("snapshot-uid", "a", "b", "c")
@@ -277,5 +281,16 @@ func TestRestoreAttempt(t *testing.T) {
 		a, ok := restoreAttempt(r, snapshot)
 		require.True(t, ok)
 		assert.Equal(t, "TargetPodDeleted", a.failure, "a ranks before c, which comes first in spec.targets")
+	})
+
+	t.Run("failure: a failed member that records no reason", func(t *testing.T) {
+		r := newRestore(snapshot, "a", "b", "c")
+		r.Status.Members = []v1alpha1.PodGroupRestoreMemberStatus{
+			{ID: "a", Phase: v1alpha1.RestorePhaseRestoring},
+			{ID: "c", Phase: v1alpha1.RestorePhaseFailed},
+		}
+		a, ok := restoreAttempt(r, snapshot)
+		require.True(t, ok)
+		assert.Equal(t, session.ReasonMemberFailed, a.failure)
 	})
 }

@@ -4,6 +4,7 @@
 package groups
 
 import (
+	"cmp"
 	"time"
 
 	"github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -48,8 +49,9 @@ type attempt struct {
 	// True, or every member is in a final phase.
 	final bool
 
-	// failure is the reason of the first Failed member that records one, in
-	// rank order where the ranks are known, or "" while none does.
+	// failure is the reason of the first Failed member, in rank order where
+	// the ranks are known, or session.ReasonMemberFailed if that member
+	// records none. It is "" while no member has failed.
 	failure string
 
 	// deleting reports whether the resource's deletion has started.
@@ -73,7 +75,7 @@ func captureAttempt(group *v1alpha1.PodGroupSnapshot) attempt {
 		everyFinal = everyFinal &&
 			(status.Phase == v1alpha1.CheckpointPhaseCheckpointed || status.Phase == v1alpha1.CheckpointPhaseFailed)
 		if status.Phase == v1alpha1.CheckpointPhaseFailed && a.failure == "" {
-			a.failure = status.Reason
+			a.failure = cmp.Or(status.Reason, session.ReasonMemberFailed)
 		}
 	}
 	a.final = a.final || everyFinal
@@ -122,7 +124,7 @@ func restoreAttempt(restore *v1alpha1.PodGroupRestore, snapshot *v1alpha1.PodGro
 		everyFinal = everyFinal &&
 			(status.Phase == v1alpha1.RestorePhaseReleased || status.Phase == v1alpha1.RestorePhaseFailed)
 		if status.Phase == v1alpha1.RestorePhaseFailed && a.failure == "" {
-			a.failure = status.Reason
+			a.failure = cmp.Or(status.Reason, session.ReasonMemberFailed)
 		}
 	}
 	a.final = a.final || everyFinal
