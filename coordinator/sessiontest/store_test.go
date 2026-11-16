@@ -275,10 +275,8 @@ func insert(ns session.Namespace, value string) func(*testing.T, []coordinator.S
 	}
 }
 
-// TestDelete covers Delete: an absent key is no error, and an Insert after a
-// Delete starts afresh. The library bucket limits its keys, so Delete reads
-// first there, and writes nothing for an absent key; in the Snapshot bucket it
-// deletes in one round trip, which leaves a delete marker.
+// TestDelete covers Delete: deleting an absent key is no error and writes no
+// delete marker in any bucket, and an Insert after a Delete starts afresh.
 func TestDelete(t *testing.T) {
 	h := newHarness(t)
 	ctx := within(t)
@@ -293,11 +291,7 @@ func TestDelete(t *testing.T) {
 		store := in(s, ns)
 		before := messages(ns)
 		require.NoError(t, store.Delete(ctx, "never-inserted"), "deleting an absent key")
-		markers := uint64(1)
-		if ns == session.NamespaceLibrary {
-			markers = 0
-		}
-		assert.Equal(t, before+markers, messages(ns), "namespace %s: delete markers for an absent key", ns)
+		assert.Equal(t, before, messages(ns), "namespace %s: delete markers for an absent key", ns)
 		require.NoError(t, store.Insert(ctx, "k", []byte("first")))
 		require.NoError(t, store.Delete(ctx, "k"))
 		require.NoError(t, store.Delete(ctx, "k"), "deleting twice")

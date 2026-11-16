@@ -13,7 +13,8 @@ import (
 
 // bucket is one of the attempt's buckets, bound twice: kv writes and watches
 // its keys, and stream reads a key's latest record, which tells a value from a
-// delete marker and carries the revision a write over the marker expects.
+// delete marker and carries the revision that a write over the marker, or the
+// deletion of the value, expects.
 type bucket struct {
 	kv     jetstream.KeyValue
 	stream jetstream.Stream
