@@ -27,7 +27,8 @@ import (
 	"k8s.io/utils/clock"
 )
 
-// DefaultMaxBytes is the default memory cap, which every session shares.
+// DefaultMaxBytes is the default memory cap, which every session shares, and
+// the default bound on the control buckets of every session together.
 const DefaultMaxBytes = 1 << 30
 
 // DefaultGrace is how long a member whose connection closed has to connect
@@ -73,10 +74,6 @@ const (
 
 // The embedded server's limits beyond those Config sets.
 const (
-	// payloadHeadroom is what a message may carry beyond its value: the key in
-	// its subject does not count, but the headers of a write do.
-	payloadHeadroom = 64 << 10
-
 	// valueHeadroom is what a bucket's maximum message size adds to its
 	// maximum value, for the headers a write carries. Meta carries the exact
 	// value limits, which clients enforce themselves.
@@ -113,17 +110,29 @@ type Config struct {
 	// configuration returns at that moment, so a GetCertificate that follows a
 	// rotated certificate, such as controller-runtime's certwatcher, rotates
 	// it without restarting anything.
+	// A client must begin with the TLS handshake, as the session client does:
+	// the server sends nothing, its INFO line included, before it.
 	TLS *tls.Config
 
 	// Authorizer decides who may act for which member. There is no allow-all
 	// default, so a server never runs unauthenticated by omission.
 	Authorizer Authorizer
 
-	// MaxBytes is the only byte limit: it caps the memory of every session's
-	// buckets together. Sessions share this memory and none reserves any, so
-	// a session that fills it makes other sessions' writes fail with
-	// session.ErrTooMany until it is removed. It defaults to DefaultMaxBytes,
-	// and should be about half the container's memory limit.
+	// MaxBytes caps the memory of every session's Snapshot and library buckets
+	// together. Sessions share this memory and none reserves any, so a session
+	// that fills it makes other sessions' data writes fail with
+	// session.ErrTooMany until it is removed. It never stops a session from
+	// ending: the control keys are in file storage, which MaxBytes also bounds,
+	// for the control buckets of every session together. It defaults to
+	// DefaultMaxBytes, and must hold the control bucket of a session of
+	// session.MaxMembers, so that every group's session can open.
+	//
+	// MaxBytes is not the coordinator's whole memory. The process also holds,
+	// for each connection, up to session.MaxPending(MaxValue) bytes of what
+	// the connection is sent and has not yet taken, about twice MaxValue; and,
+	// for each bucket, an ingest queue of up to 128 MiB, which nats-server
+	// fills with the writes it has not stored yet. Size the container's memory
+	// limit for MaxBytes plus those.
 	MaxBytes int64
 
 	// MaxValue and MaxLibraryValue are the largest values of the Snapshot and
@@ -139,11 +148,16 @@ type Config struct {
 	// again. It defaults to DefaultGrace.
 	Grace time.Duration
 
+	// StoreDir is the directory of the file store that holds the sessions'
+	// control keys. The server owns it: New empties it, creating it if it
+	// does not exist, and Shutdown removes it, so it must not be a mount
+	// point. It defaults to a new directory under the temporary directory,
+	// which a process that crashes leaves behind, so a host that restarts
+	// names a fixed one.
+	StoreDir string
+
 	// Clock times deadlines and grace periods. It defaults to the real clock.
 	Clock clock.WithDelayedExecution
-
-	// Observer receives what sessions do. It defaults to reporting nothing.
-	Observer Observer
 
 	// Log receives the server's life, sessions opening and ending, members
 	// refused, disconnected, and failed, and the embedded server's own log. It
@@ -172,12 +186,12 @@ func (cfg Config) withDefaults() (Config, error) {
 	case cfg.MaxValue > 1<<30, cfg.MaxLibraryValue > cfg.MaxValue:
 		return cfg, fmt.Errorf("the largest values must not exceed 1 GiB, nor the library's the Snapshot's: %w",
 			session.ErrInvalid)
+	case cfg.MaxBytes < session.ControlBytes(session.MaxMembers):
+		return cfg, fmt.Errorf("MaxBytes must be at least %d bytes, the control bucket of a session of %d members: %w",
+			session.ControlBytes(session.MaxMembers), session.MaxMembers, session.ErrInvalid)
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = clock.RealClock{}
-	}
-	if cfg.Observer == nil {
-		cfg.Observer = nopObserver{}
 	}
 	return cfg, nil
 }
@@ -191,11 +205,13 @@ func setDefault[T comparable](v *T, def T) {
 }
 
 // Server is the Snapshot coordinator: a NATS server with JetStream embedded in
-// the process, which holds each attempt's session in two in-memory key-value
-// buckets, authenticates every client, and enforces what a store lacks: the
+// the process, which holds each attempt's session in three key-value buckets,
+// authenticates every client, and enforces what a store lacks: the
 // membership, the deadline, the grace period, and closing once every member
-// has left. Package session, which it shares with the client, defines the
-// layout, the limits, and the permissions a member's connection gets.
+// has left. Sessions live in memory except their control keys, which use a small
+// file store that does not outlive the process. Package session, which it
+// shares with the client, defines the layout, the limits, and the permissions a
+// member's connection gets.
 //
 // The server starts refusing every client, and admits them only once the host
 // calls MarkReady, which it does once it has ensured the session of every
@@ -208,9 +224,10 @@ func setDefault[T comparable](v *T, def T) {
 //
 // A Server is safe for concurrent use.
 type Server struct {
-	cfg      Config
-	log      logr.Logger
-	ns       *natsserver.Server
+	cfg Config
+	log logr.Logger
+	ns  *natsserver.Server
+	// storeDir is the directory of the embedded server's file store.
 	storeDir string
 	// token authenticates the coordinator's in-process connections. It is
 	// drawn at random at startup and never leaves the process's memory.
@@ -246,11 +263,10 @@ func New(cfg Config) (*Server, error) {
 	if _, err := rand.Read(token); err != nil {
 		return nil, fmt.Errorf("draw the coordinator's token: %w", err)
 	}
-	// JetStream checks that it can write here, although the buckets live in
-	// memory only.
-	storeDir, err := os.MkdirTemp("", "snapshot-coordinator-")
+	// The control buckets live here, and nothing outlives the process.
+	storeDir, err := newStoreDir(cfg.StoreDir)
 	if err != nil {
-		return nil, fmt.Errorf("create the JetStream directory: %w", err)
+		return nil, err
 	}
 	s := &Server{
 		cfg:        cfg,
@@ -270,7 +286,6 @@ func New(cfg Config) (*Server, error) {
 
 // start starts the embedded server and the coordinator's own connections.
 func (s *Server) start() error {
-	maxPayload := int32(s.cfg.MaxValue + payloadHeadroom)
 	opts := &natsserver.Options{
 		ServerName: "snapshot-coordinator",
 		Host:       s.cfg.Host,
@@ -278,18 +293,22 @@ func (s *Server) start() error {
 		// The process owns its signals.
 		NoSigs: true,
 		// Logs go through SetLoggerV2 below, never to standard error.
-		NoLog:         true,
-		TLSConfig:     s.cfg.TLS,
-		MaxPayload:    maxPayload,
-		MaxPending:    2 * int64(maxPayload),
-		WriteDeadline: writeDeadline,
-		PingInterval:  serverPingInterval,
-		MaxPingsOut:   serverMaxPingsOut,
-		JetStream:     true,
-		// Buckets live in memory only: a store of one byte refuses every
-		// file-backed stream.
+		NoLog:     true,
+		TLSConfig: s.cfg.TLS,
+		// The client speaks first, with its TLS handshake, so the server's INFO
+		// line, which names it, never goes out in plaintext.
+		TLSHandshakeFirst: true,
+		MaxPayload:        int32(s.cfg.MaxValue + session.PayloadHeadroom),
+		MaxPending:        session.MaxPending(s.cfg.MaxValue),
+		WriteDeadline:     writeDeadline,
+		PingInterval:      serverPingInterval,
+		MaxPingsOut:       serverMaxPingsOut,
+		JetStream:         true,
+		// Memory holds the data buckets and file storage the control buckets,
+		// and each has its own limit: a full memory cap leaves file storage
+		// writable.
 		JetStreamMaxMemory:     s.cfg.MaxBytes,
-		JetStreamMaxStore:      1,
+		JetStreamMaxStore:      s.cfg.MaxBytes,
 		StoreDir:               s.storeDir,
 		DisableJetStreamBanner: true,
 		Accounts: []*natsserver.Account{
@@ -422,7 +441,7 @@ func (s *Server) awaitMembers(ctx context.Context) {
 }
 
 // stop closes the coordinator's connections, shuts the embedded server down,
-// and waits for everything the server started.
+// waits for everything the server started, and removes the store directory.
 func (s *Server) stop() {
 	if s.events != nil {
 		s.events.Close()
@@ -435,5 +454,7 @@ func (s *Server) stop() {
 		s.ns.WaitForShutdown()
 	}
 	s.wg.Wait()
-	_ = os.RemoveAll(s.storeDir)
+	if err := os.RemoveAll(s.storeDir); err != nil {
+		s.log.Error(err, "Removing the store directory failed", "directory", s.storeDir)
+	}
 }

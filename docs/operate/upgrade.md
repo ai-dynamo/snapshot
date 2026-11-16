@@ -48,6 +48,22 @@ If you use a private node agent image, set its pull secret in the same
 `helm upgrade`. Otherwise the new chart defaults remove the image access the
 agent needs.
 
+### Pod Groups
+
+With `podGroups.enabled`, the pod group coordinator runs in the agent pod, and
+rolls out with it:
+
+- A coordinator that never becomes ready stalls the agent DaemonSet's rollout
+  after one node, since the agent pod is ready only once the coordinator is.
+  Then `helm upgrade --wait` or `--atomic` fails or rolls back. For the usual
+  causes, see
+  [An Agent Pod Stays Unready with Pod Groups Enabled](../troubleshooting/agent.md#an-agent-pod-stays-unready-with-pod-groups-enabled).
+- A pod that already holds `coordinator.port` or `coordinator.healthPort` on a
+  node keeps the whole agent pod off that node, single-pod snapshots included.
+- Changing any `coordinator.*` value restarts the agent pod on every node,
+  which interrupts single-pod work in flight. Change those values in a quiet
+  window.
+
 ## Supported Upgrades
 
 <!--

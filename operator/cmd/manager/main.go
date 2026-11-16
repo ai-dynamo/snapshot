@@ -140,12 +140,8 @@ func main() {
 			ctrl.Log.Error(err, "unable to construct client for PageBroker S3 configuration")
 			os.Exit(1)
 		}
-		labels := map[string]string{"app.kubernetes.io/part-of": "snapshot", "app.kubernetes.io/managed-by": "snapshot-operator"}
-		if *releaseName != "" {
-			labels["app.kubernetes.io/instance"] = *releaseName
-		}
 		if err := ensurePageBrokerS3Config(context.Background(), directClient,
-			*pageBrokerS3ConfigNamespace, *pageBrokerS3ConfigName, labels, *storageCfg.S3, storeID, pageBrokerS3); err != nil {
+			*pageBrokerS3ConfigNamespace, *pageBrokerS3ConfigName, *releaseName, *storageCfg.S3, storeID, pageBrokerS3); err != nil {
 			ctrl.Log.Error(err, "unable to write PageBroker S3 configuration")
 			os.Exit(1)
 		}

@@ -7,6 +7,9 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
+	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -150,7 +153,7 @@ func TestLimits(t *testing.T) {
 	})
 
 	t.Run("the memory cap every session shares", func(t *testing.T) {
-		h := newHarness(t, func(cfg *Config) { cfg.MaxBytes, cfg.MaxValue = 2<<20, 64<<10 })
+		h := newHarness(t, func(cfg *Config) { cfg.MaxBytes, cfg.MaxValue = 8<<20, 64<<10 })
 		ctx := within(t)
 		first, second := h.ensure(1), h.ensure(1)
 		a, b := h.connect(first, 0), h.connect(second, 0)
@@ -162,25 +165,22 @@ func TestLimits(t *testing.T) {
 			"removing a session frees its memory")
 	})
 
-	t.Run("a session that cannot open within the cap leaves no bucket behind", func(t *testing.T) {
-		h := newHarness(t, func(cfg *Config) { cfg.MaxBytes, cfg.MaxValue = 2<<20, 64<<10 })
+	t.Run("the control buckets of every session share the file storage bound", func(t *testing.T) {
+		// Room for one session of the largest membership, which reserves its
+		// control bucket.
+		h := newHarness(t, func(cfg *Config) { cfg.MaxBytes = session.ControlBytes(session.MaxMembers) })
 		ctx := within(t)
-		filler := h.ensure(1)
-		requireCode(t, fill(ctx, h.connect(filler, 0), session.NamespaceSnapshot, 60<<10),
-			codeInsufficientResources)
+		first := h.ensure(session.MaxMembers)
 
-		// Both buckets are created, since neither reserves memory; writing
-		// meta is what fails.
 		spec := h.spec(1)
-		require.Error(t, h.srv.Ensure(ctx, spec))
+		require.Error(t, h.srv.Ensure(ctx, spec), "the bound must refuse a second control bucket")
 		require.Nil(t, h.srv.lookup(spec.UID))
-		for _, bucket := range []string{session.SnapshotBucket(string(spec.UID)),
-			session.LibraryBucket(string(spec.UID))} {
+		for _, bucket := range session.Buckets(string(spec.UID)) {
 			_, err := h.srv.js.KeyValue(ctx, bucket)
 			require.ErrorIs(t, err, jetstream.ErrBucketNotFound, "bucket %s", bucket)
 		}
-		require.NoError(t, h.srv.Remove(ctx, filler.UID))
-		require.NoError(t, h.srv.Ensure(ctx, spec), "a retried Ensure starts afresh")
+		require.NoError(t, h.srv.Remove(ctx, first.UID))
+		require.NoError(t, h.srv.Ensure(ctx, spec), "removing a session frees its reservation")
 	})
 }
 
@@ -206,15 +206,15 @@ func TestLogsHoldNoSecrets(t *testing.T) {
 	for _, m := range members {
 		require.NoError(t, m.arrive(ctx, "secret-barrier"))
 	}
-	watchUntil(t, members[1].snapshot, session.BarrierKey("secret-barrier", "*"),
+	watchUntil(t, members[1].control, session.BarrierKey("secret-barrier", "*"),
 		func(present map[string]bool) bool { return len(present) == len(members) })
 	nc, violations := h.raw(spec, 0)
-	_, _ = nc.Request("$KV."+session.SnapshotBucket(string(spec.UID))+".barrier.secret-barrier.member-1", nil,
+	_, _ = nc.Request("$KV."+session.ControlBucket(string(spec.UID))+".barrier.secret-barrier.member-1", nil,
 		200*time.Millisecond)
 	requireViolation(t, violations, "secret-barrier")
 	h.kick(spec, 1)
-	require.NoError(t, members[0].fail(ctx, "Refused"))
-	require.ErrorIs(t, awaitEnd(t, members[0]), &session.AbortError{Reason: "Refused"})
+	require.NoError(t, members[0].fail(ctx, session.ReasonRefused))
+	require.ErrorIs(t, awaitEnd(t, members[0]), &session.AbortError{Reason: session.ReasonRefused})
 
 	lines := h.logs.all()
 	require.True(t, slicesContain(lines, "Publish Violation"), "the refused publish must be logged")
@@ -250,6 +250,9 @@ func TestConfig(t *testing.T) {
 		{"no Authorizer", func(c *Config) { c.Authorizer = nil }},
 		{"a negative limit", func(c *Config) { c.MaxLibraryKeys = -1 }},
 		{"a library value over the Snapshot's", func(c *Config) { c.MaxValue, c.MaxLibraryValue = 1<<10, 2<<10 }},
+		{"no room for the largest session's control bucket", func(c *Config) {
+			c.MaxBytes = session.ControlBytes(session.MaxMembers) - 1
+		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := valid
@@ -259,4 +262,45 @@ func TestConfig(t *testing.T) {
 		})
 	}
 
+}
+
+// TestTLSHandshakeFirst checks that the coordinator sends nothing before the
+// client's TLS handshake, so its INFO line never goes out in plaintext, and
+// refuses a client that begins in plaintext.
+func TestTLSHandshakeFirst(t *testing.T) {
+	h := newHarness(t)
+
+	t.Run("sends nothing to a client that has not begun", func(t *testing.T) {
+		conn, err := net.Dial("tcp", h.srv.Addr().String())
+		require.NoError(t, err)
+		defer conn.Close()
+		require.NoError(t, conn.SetReadDeadline(time.Now().Add(pending)))
+		n, err := conn.Read(make([]byte, 64))
+		require.ErrorIs(t, err, os.ErrDeadlineExceeded, "the coordinator must wait for the client")
+		assert.Zero(t, n)
+	})
+
+	t.Run("refuses a client that begins in plaintext", func(t *testing.T) {
+		conn, err := net.Dial("tcp", h.srv.Addr().String())
+		require.NoError(t, err)
+		defer conn.Close()
+		_, err = conn.Write([]byte("CONNECT {}\r\nPING\r\n"))
+		require.NoError(t, err)
+		require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+		reply, err := io.ReadAll(conn)
+		assert.NotContains(t, string(reply), "INFO", "no INFO line may reach a client that is not on TLS")
+		assert.NotContains(t, string(reply), "PONG")
+		if err != nil {
+			assert.NotErrorIs(t, err, os.ErrDeadlineExceeded, "the coordinator must close the connection")
+		}
+	})
+
+	t.Run("refuses a client that waits for the INFO line first", func(t *testing.T) {
+		spec := h.ensure(1)
+		_, err := nats.Connect("tls://"+h.srv.Addr().String(),
+			nats.Secure(&tls.Config{RootCAs: h.ca, ServerName: "localhost", MinVersion: tls.VersionTLS12}),
+			nats.UserInfo(session.UserName(string(spec.UID), spec.Members[0].ID), ""), nats.Token(agentToken),
+			nats.NoReconnect(), nats.Timeout(time.Second))
+		require.Error(t, err)
+	})
 }

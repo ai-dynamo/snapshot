@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# The coordinator runs as the agents' ServiceAccount. It follows the groups,
-# whose sessions it holds, and reviews the tokens agents present. It reads the
-# API server's ServiceAccount issuer and keys through Kubernetes's default
-# system:service-account-issuer-discovery binding.
+# The coordinator runs as the agents' ServiceAccount, so it also holds the
+# agent's rights. It follows the groups, whose sessions it holds, and reviews
+# the tokens agents present. It reads the API server's ServiceAccount issuer
+# and keys through Kubernetes's default system:service-account-issuer-discovery
+# binding.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

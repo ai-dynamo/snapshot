@@ -14,10 +14,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/coordinator/internal/backoff"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/go-logr/logr"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"golang.org/x/sync/semaphore"
 	"k8s.io/utils/clock"
 )
 
@@ -102,10 +104,11 @@ type client struct {
 
 	// Set by join, and read-only afterwards. joined is set last, as the
 	// verifier starts.
-	snapshot, library jetstream.KeyValue
-	meta              session.Meta
-	ranks             map[string]int
-	joined            bool
+	control bucket
+	stores  map[session.Namespace]*store
+	meta    session.Meta
+	ranks   map[string]int
+	joined  bool
 
 	// epoch is the epoch the client presents when it connects, zero until it
 	// has read Meta.
@@ -117,8 +120,19 @@ type client struct {
 	connect   sync.Once
 	// verify holds a pending request to verify the session, so requests made
 	// while one is pending coalesce.
-	verify  chan struct{}
+	verify chan struct{}
+	// budget holds, in bytes, what the coordinator buffers for the connection:
+	// each value being read takes the largest its bucket holds, so no more are
+	// in flight than the coordinator holds. slots holds
+	// session.MaxConcurrentGets slots, which each read of the Snapshot bucket
+	// takes first: see readCost. Set by join.
+	budget  *semaphore.Weighted
+	slots   *semaphore.Weighted
 	closing chan struct{}
+	// life ends once the session has ended or is closed, as done or closing
+	// does, to end a wait that takes a context.
+	life    context.Context
+	endLife context.CancelFunc
 	// connClosed is closed once the connection is, by Close or as the session
 	// ends; nats.go then delivers nothing more to any watch.
 	connClosed chan struct{}
@@ -146,7 +160,7 @@ type client struct {
 func (s *client) followEnd() {
 	defer s.wg.Done()
 	for {
-		err := s.await(context.Background(), s.snapshot, nil, func(string, []byte, bool) bool { return false })
+		err := s.await(context.Background(), s.control.kv, nil, func(string, []byte, bool) bool { return false })
 		var abort *session.AbortError
 		switch {
 		case errors.As(err, &abort), errors.Is(err, session.ErrClosed):
@@ -172,6 +186,7 @@ func (s *client) finish(err error) {
 	s.end.Do(func() {
 		s.err = err
 		close(s.done)
+		s.endLife()
 		s.nc.Close()
 	})
 }
@@ -213,6 +228,7 @@ func (s *client) Close() error {
 	s.mu.Unlock()
 	if first {
 		close(s.closing)
+		s.endLife()
 		s.nc.Close()
 	}
 	s.wg.Wait()
@@ -242,14 +258,14 @@ func (s *client) Barrier(ctx context.Context, name string) error {
 	}
 	arrival := session.BarrierKey(name, s.member)
 	if err := s.do(ctx, func(ctx context.Context) error {
-		_, err := s.snapshot.Put(ctx, arrival, nil)
+		_, err := s.control.kv.Put(ctx, arrival, nil)
 		return err
 	}); err != nil {
 		return err
 	}
 	prefix := session.BarrierKey(name, "")
 	arrived := make(map[string]bool, len(s.ranks))
-	if err := s.await(ctx, s.snapshot, []string{session.BarrierKey(name, "*")}, func(key string, _ []byte,
+	if err := s.await(ctx, s.control.kv, []string{session.BarrierKey(name, "*")}, func(key string, _ []byte,
 		present bool) bool {
 		member := strings.TrimPrefix(key, prefix)
 		if _, ok := s.ranks[member]; ok && present {
@@ -268,7 +284,7 @@ func (s *client) Barrier(ctx context.Context, name string) error {
 func (s *client) Leave(ctx context.Context) error {
 	left := session.LeftKey(s.member)
 	err := s.do(ctx, func(ctx context.Context) error {
-		_, err := s.snapshot.Put(ctx, left, nil)
+		_, err := s.control.kv.Put(ctx, left, nil)
 		return err
 	})
 	if errors.Is(err, session.ErrClosed) {
@@ -282,20 +298,13 @@ func (s *client) Fail(ctx context.Context, reason string) error {
 	if err := session.ValidateReason(reason); err != nil {
 		return err
 	}
-	err := s.do(ctx, func(ctx context.Context) error {
-		_, err := s.snapshot.Create(ctx, session.KeyEnded, []byte(reason))
-		if !errors.Is(err, jetstream.ErrKeyExists) {
-			return err
-		}
-		entry, err := s.snapshot.Get(ctx, session.KeyEnded)
-		if err != nil {
-			return err
-		}
-		return session.EndedError(entry.Value())
-	})
-	if err == nil {
+	created, held, err := s.create(ctx, s.control, session.KeyEnded, []byte(reason), controlRead(len(s.meta.Members)))
+	if created {
 		s.finish(&session.AbortError{Reason: reason})
 		return nil
+	}
+	if err == nil {
+		err = session.EndedError(held)
 	}
 	if errors.Is(err, &session.AbortError{Reason: reason}) {
 		return nil
@@ -304,9 +313,16 @@ func (s *client) Fail(ctx context.Context, reason string) error {
 }
 
 // do runs op, sending it again while it fails transiently, until it succeeds,
-// fails for good, the session ends or is closed, or ctx is done. It never sends
-// op once ctx is done.
+// fails for good, the session ends or is closed, or ctx is done, waiting longer
+// before each try, as backoff.New spaces them. It never sends op once ctx is
+// done. Each try is bounded by attemptTimeout and by a disconnect.
 func (s *client) do(ctx context.Context, op func(context.Context) error) error {
+	return s.retry(ctx, func(ctx context.Context) error { return s.try(ctx, op) })
+}
+
+// retry sends an operation through send, which tries it once, as do describes.
+func (s *client) retry(ctx context.Context, send func(context.Context) error) error {
+	waits := backoff.New()
 	for {
 		if err := s.alive(); err != nil {
 			return err
@@ -314,7 +330,7 @@ func (s *client) do(ctx context.Context, op func(context.Context) error) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		err := s.try(ctx, op)
+		err := send(ctx)
 		if err == nil {
 			return nil
 		}
@@ -338,7 +354,7 @@ func (s *client) do(ctx context.Context, op func(context.Context) error) error {
 			return mapError(err)
 		}
 		select {
-		case <-time.After(retryWait):
+		case <-time.After(waits.Step()):
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-s.done:
@@ -353,7 +369,7 @@ func (s *client) do(ctx context.Context, op func(context.Context) error) error {
 func (s *client) try(ctx context.Context, op func(context.Context) error) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
-	defer s.inflight.add(cancel)()
+	defer s.inflight.add(s.connection(), cancel)()
 	attempt, cancelAttempt := context.WithTimeout(ctx, attemptTimeout)
 	defer cancelAttempt()
 	err := op(attempt)
@@ -363,6 +379,119 @@ func (s *client) try(ctx context.Context, op func(context.Context) error) error 
 	return err
 }
 
+// readCost is what one read takes while it is in flight.
+type readCost struct {
+	// bytes is what it takes of the connection's budget: the most its reply
+	// holds.
+	bytes int64
+
+	// slot is set for a read of the Snapshot bucket, whose values are the
+	// largest: it takes one of the connection's slots before its bytes. The
+	// budget serves its waiters in turn, so a read of the largest values that
+	// waited there would hold up every smaller read behind it while the budget
+	// had room for them; past MaxConcurrentGets, one waits for a slot instead.
+	slot bool
+}
+
+// read runs op, which reads one value, the way do runs an operation, with two
+// differences. Each try first takes what cost says of the connection's budget,
+// and keeps it until the reply has arrived or the connection has broken, even
+// once ctx is done: until then, the reply may sit in what the coordinator
+// buffers for the connection. And a try is bounded by ctx and by a disconnect
+// only, never by attemptTimeout: a large value can take longer than a round
+// trip to arrive, and a read sent again while its first reply is still
+// buffered could take the connection past what the coordinator holds for it.
+// So a read is sent again only once its connection has broken, as
+// disconnected tells.
+func (s *client) read(ctx context.Context, cost readCost, op func(context.Context) error) error {
+	return s.retry(ctx, func(ctx context.Context) error { return s.readOnce(ctx, cost, op) })
+}
+
+// readOnce tries a read once, as read describes. op runs on its own, bounded by
+// a disconnect only, and holds what it takes of the budget until it returns,
+// while readOnce returns op's error, or ctx's error or how the session ended if
+// either comes first.
+func (s *client) readOnce(ctx context.Context, cost readCost, op func(context.Context) error) error {
+	if err := s.reserve(ctx, cost); err != nil {
+		return err
+	}
+	life, cancel := context.WithCancelCause(context.Background())
+	untrack := s.inflight.add(s.connection(), cancel)
+	release := func() {
+		cancel(nil)
+		untrack()
+		s.unreserve(cost)
+	}
+	result := make(chan error, 1)
+	if !s.spawn(func() {
+		err := op(life)
+		if err != nil && errors.Is(context.Cause(life), errRetry) {
+			err = errRetry
+		}
+		release()
+		result <- err
+	}) {
+		release()
+		return net.ErrClosed
+	}
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.done:
+		return s.Err()
+	case <-s.closing:
+		return net.ErrClosed
+	}
+}
+
+// reserve takes what cost says of the connection's budget, its slot first,
+// once the reads in flight leave room for it. It returns how the session
+// ended, or ctx's error, if either comes first, and then takes nothing.
+func (s *client) reserve(ctx context.Context, cost readCost) error {
+	if cost.slot {
+		if err := s.acquire(ctx, s.slots, 1); err != nil {
+			return err
+		}
+	}
+	if err := s.acquire(ctx, s.budget, cost.bytes); err != nil {
+		if cost.slot {
+			s.slots.Release(1)
+		}
+		return err
+	}
+	return nil
+}
+
+// unreserve gives back what reserve took for cost.
+func (s *client) unreserve(cost readCost) {
+	s.budget.Release(cost.bytes)
+	if cost.slot {
+		s.slots.Release(1)
+	}
+}
+
+// acquire takes n of sem, as reserve describes.
+func (s *client) acquire(ctx context.Context, sem *semaphore.Weighted, n int64) error {
+	bounded, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer context.AfterFunc(s.life, cancel)()
+	err := sem.Acquire(bounded, n)
+	if err == nil && bounded.Err() != nil {
+		// Acquire may succeed although its context is done.
+		sem.Release(n)
+		err = bounded.Err()
+	}
+	if err != nil {
+		if ended := s.alive(); ended != nil {
+			return ended
+		}
+		return ctx.Err()
+	}
+	return nil
+}
+
 // watcher is a watch, and the cancellation that ends it: a watch lives as long
 // as the context it was started with.
 type watcher struct {
@@ -370,15 +499,16 @@ type watcher struct {
 	cancel context.CancelFunc
 }
 
-// watch starts watching keys of kv. Its creation is bounded like any operation,
-// while the watch itself lives until stop.
-func (s *client) watch(ctx context.Context, kv jetstream.KeyValue, keys []string) (watcher, error) {
+// watch starts watching keys of kv, with opts. Its creation is bounded like any
+// operation, while the watch itself lives until stop.
+func (s *client) watch(ctx context.Context, kv jetstream.KeyValue, keys []string,
+	opts ...jetstream.WatchOpt) (watcher, error) {
 	var w watcher
 	err := s.do(ctx, func(attempt context.Context) error {
 		life, cancel := context.WithCancel(context.Background())
 		bounded := context.AfterFunc(attempt, cancel)
 		// WatchFiltered rewrites the slice it is given.
-		kw, err := kv.WatchFiltered(life, slices.Clone(keys))
+		kw, err := kv.WatchFiltered(life, slices.Clone(keys), opts...)
 		if !bounded() {
 			// The attempt ended first, which cancelled the watch.
 			err = context.Cause(attempt)
@@ -397,19 +527,20 @@ func (s *client) watch(ctx context.Context, kv jetstream.KeyValue, keys []string
 	return w, err
 }
 
-// await watches keys of kv, and the ended key whenever kv is the Snapshot
+// await watches keys of kv, and the ended key whenever kv is the control
 // bucket, and passes visit every entry of keys, each key's current entry first
 // and then every change, until visit reports true. present is false for a
 // deleted key. Watching ended in the same watch orders the session's end among
 // the entries, so an end recorded after the last entry visit needed does not
-// hide it. Watching the library bucket relies on Done instead.
+// hide it. Watching another bucket relies on Done instead. opts are the
+// watch's, such as jetstream.MetaOnly, which delivers entries with no values.
 func (s *client) await(ctx context.Context, kv jetstream.KeyValue, keys []string,
-	visit func(key string, value []byte, present bool) bool) error {
-	watchesEnd := kv == s.snapshot
+	visit func(key string, value []byte, present bool) bool, opts ...jetstream.WatchOpt) error {
+	watchesEnd := kv == s.control.kv
 	if watchesEnd {
 		keys = append(slices.Clone(keys), session.KeyEnded)
 	}
-	w, err := s.watch(ctx, kv, keys)
+	w, err := s.watch(ctx, kv, keys, opts...)
 	if err != nil {
 		return err
 	}
@@ -425,7 +556,7 @@ func (s *client) await(ctx context.Context, kv jetstream.KeyValue, keys []string
 				if err := s.confirm(ctx); err != nil {
 					return err
 				}
-				again, err := s.watch(ctx, kv, keys)
+				again, err := s.watch(ctx, kv, keys, opts...)
 				if err != nil {
 					return err
 				}
@@ -455,20 +586,25 @@ func (s *client) await(ctx context.Context, kv jetstream.KeyValue, keys []string
 // time the connection has closed.
 func (s *client) stop(w watcher) {
 	w.cancel()
-	s.mu.Lock()
-	closed := s.closed
-	if !closed {
-		s.wg.Add(1)
-	}
-	s.mu.Unlock()
-	if closed {
+	if !s.spawn(func() { s.drain(w) }) {
 		s.drain(w)
-		return
 	}
+}
+
+// spawn runs f in a goroutine that Close waits for, and reports false, running
+// nothing, once Close has begun.
+func (s *client) spawn(f func()) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		s.drain(w)
+		f()
 	}()
+	return true
 }
 
 // drain consumes a cancelled watch until its channel closes, which happens once

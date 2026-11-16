@@ -4,12 +4,13 @@
 package sessiontest
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
-	"github.com/ai-dynamo/snapshot/coordinator/server"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -17,7 +18,7 @@ import (
 // TestReconnect breaks a member's connection while it waits: the client
 // reconnects on its own, and the wait completes.
 func TestReconnect(t *testing.T) {
-	h := newHarness(t)
+	h := newHarness(t, withTestMaxValue)
 
 	t.Run("a waiting Get completes after reconnecting", func(t *testing.T) {
 		ctx := within(t)
@@ -65,7 +66,7 @@ func TestReconnect(t *testing.T) {
 		assert.Equal(t, "10.0.0.1", string(got))
 	})
 
-	t.Run("a large write sent while the coordinator refuses the member completes once it is admitted",
+	t.Run("the largest write sent while the coordinator refuses the member completes once it is admitted",
 		func(t *testing.T) {
 			ctx := within(t)
 			ses := h.session(t, 2)
@@ -73,7 +74,7 @@ func TestReconnect(t *testing.T) {
 			h.auth.Unavailable.Store(true)
 			defer h.auth.Unavailable.Store(false)
 			ses.cut(0)
-			value := make([]byte, 20<<20)
+			value := make([]byte, testMaxValue)
 			inserted := make(chan error, 1)
 			go func() { inserted <- sessions[0].Snapshot().Insert(ctx, "big", value) }()
 			// Longer than the round trip the client gives an operation before
@@ -122,9 +123,10 @@ func TestReconnect(t *testing.T) {
 				}()
 				return out
 			}
-			// What session.MaxConsumersPerMember allows besides the end the
-			// client always watches: three waits on the Snapshot bucket, and
-			// one on the library bucket.
+			// What session.MaxConsumersPerMember is sized for on the control
+			// and Snapshot buckets: a Barrier beside the end the client always
+			// watches, and a Get by the agent and one by its relay; and a Get
+			// on the library bucket.
 			waits := []<-chan error{
 				barrier(ctx, sessions[0], "admitted"),
 				get(session.NamespaceSnapshot, "ip.1"),
@@ -196,9 +198,9 @@ func TestCoordinatorLost(t *testing.T) {
 		h := newHarness(t)
 		ctx := within(t)
 		s := h.session(t, 1).connect(t, 0)
-		require.NoError(t, s.Fail(ctx, "Refused"))
+		require.NoError(t, s.Fail(ctx, session.ReasonRefused))
 		h.restart()
-		require.ErrorIs(t, s.Err(), &session.AbortError{Reason: "Refused"})
+		require.ErrorIs(t, s.Err(), &session.AbortError{Reason: session.ReasonRefused})
 	})
 }
 
@@ -239,32 +241,35 @@ func TestRemoved(t *testing.T) {
 	t.Run("a session that ended keeps its outcome", func(t *testing.T) {
 		h := newHarness(t)
 		ses := h.session(t, 1)
-		require.NoError(t, ses.connect(t, 0).Fail(within(t), "Refused"))
+		require.NoError(t, ses.connect(t, 0).Fail(within(t), session.ReasonRefused))
 		require.NoError(t, h.srv.Remove(within(t), ses.spec.UID))
-		assert.Equal(t, []string{"opened", "failed Refused"}, h.observer.of(ses.spec.UID))
+		assert.Equal(t, []string{"opened", "failed Refused"}, h.events(ses.spec))
 	})
 
-	t.Run("with no room left to record its end", func(t *testing.T) {
-		h := newHarness(t, func(cfg *server.Config) { cfg.MaxBytes, cfg.MaxValue = 1<<20, 64<<10 })
+	t.Run("with no room left in its control bucket to record its end", func(t *testing.T) {
+		h := newHarness(t)
 		ctx := within(t)
 		ses := h.session(t, 2)
 		sessions := ses.connectAll(t)
-		// Large values, then empty ones, until neither fits: the ended key is
-		// no smaller than an empty value under a longer key.
-		store := sessions[0].Snapshot()
-		for i, size := 0, 60<<10; size >= 0; size -= 60 << 10 {
-			for ; ; i++ {
-				err := store.Insert(ctx, fmt.Sprintf("fill-%d", i), make([]byte, size))
-				if err != nil {
-					require.ErrorIs(t, err, session.ErrTooMany)
-					break
-				}
+		// Arrivals, which only a member writes, until the bucket refuses one:
+		// the ended key is no smaller.
+		control := ses.raw(t, 0)
+		for i := 0; ; i++ {
+			_, err := control.Put(ctx, session.BarrierKey(fmt.Sprintf("fill-%d", i), ses.spec.Members[0].ID), nil)
+			if err == nil {
+				continue
 			}
+			apiErr, ok := errors.AsType[*jetstream.APIError](err)
+			require.True(t, ok, "the bucket must refuse with an API error: %v", err)
+			require.EqualValues(t, 10077, apiErr.ErrorCode, "the bucket must refuse because it is full")
+			break
 		}
+		// The members of the full session get an answer, not a hang.
+		require.ErrorIs(t, sessions[1].Fail(ctx, session.ReasonRefused), session.ErrTooMany)
 
 		start := time.Now()
 		require.NoError(t, h.srv.Remove(ctx, ses.spec.UID))
-		assert.Equal(t, []string{"opened"}, h.observer.of(ses.spec.UID), "the end must not have been recorded")
+		assert.Equal(t, []string{"opened"}, h.events(ses.spec), "the end must not have been recorded")
 		for _, s := range sessions {
 			awaitDone(t, s)
 			require.ErrorIs(t, s.Err(), session.ErrCoordinatorLost)

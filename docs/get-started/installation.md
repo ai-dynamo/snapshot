@@ -16,10 +16,10 @@ Review the [Prerequisites](prerequisites.md) before installing.
 - The snapshot volume claim, `snapshot-pvc`, or the wiring to an existing claim.
 - Cluster-scoped RBAC for the agent and the operator.
 - The seccomp profile that CRIU needs.
-- With `podGroups.enabled` (alpha), the pod group coordinator: an unprivileged
-  container in each agent pod that listens on the node's IP, on ports `4224`
-  and `4225` by default, and its RBAC. By default, the operator also issues the
-  coordinator's TLS certificate. See
+- With `podGroups.enabled` (alpha), the pod group coordinator: a container in
+  each agent pod, non-root with no capabilities, that listens on the node's IP,
+  on ports `4224` and `4225` by default, and its RBAC. By default, the operator
+  also issues the coordinator's TLS certificate. See
   [Security Boundaries](../overview/architecture-overview.md#security-boundaries).
 
 ## Allow the Privileged Node Agent
@@ -190,4 +190,21 @@ stored snapshots, delete the claim yourself:
 
 ```bash
 kubectl delete pvc <pvc-name> --namespace snapshot
+```
+
+The operator writes some resources itself, in the release namespace, where it
+runs:
+
+- With S3 storage, the ConfigMap that holds PageBroker's S3 configuration.
+- When the operator issues the pod group coordinator's TLS certificate, three
+  resources: the CA Secret, which holds the CA's private key; the serving
+  Secret; and the trust bundle ConfigMap.
+
+`helm uninstall` leaves them. Each carries the label
+`app.kubernetes.io/managed-by=snapshot-operator`. Once the operator's pod is
+gone, delete them:
+
+```bash
+kubectl delete secrets,configmaps --namespace snapshot \
+  --selector app.kubernetes.io/managed-by=snapshot-operator
 ```

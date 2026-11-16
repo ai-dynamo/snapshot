@@ -58,7 +58,8 @@ func TestTransient(t *testing.T) {
 	for _, err := range []error{nats.ErrTimeout, nats.ErrReconnectBufExceeded, context.DeadlineExceeded,
 		&net.OpError{Op: "write", Net: "tcp", Err: os.NewSyscallError("write", syscall.EPIPE)},
 		&net.OpError{Op: "write", Net: "tcp", Err: net.ErrClosed},
-		&nats.APIError{ErrorCode: jsMaximumConsumers}, &jetstream.APIError{ErrorCode: jsMaximumConsumers}} {
+		&nats.APIError{ErrorCode: jsMaximumConsumers}, &jetstream.APIError{ErrorCode: jsMaximumConsumers},
+		&nats.APIError{ErrorCode: jsTooManyRequests}, &jetstream.APIError{ErrorCode: jsTooManyRequests}} {
 		assert.True(t, transient(err), "%v", err)
 	}
 	for _, err := range []error{&jetstream.APIError{ErrorCode: jsStoreFailed}, nats.ErrBadSubject} {

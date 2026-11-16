@@ -26,6 +26,21 @@ tests:
       - notExists:
           path: spec.template.spec.volumes[?(@.name == "coordinator-tmp")]
 
+  # /tmp holds the control buckets' file store, which maxMemoryBytes bounds, so
+  # the volume follows it, with a 64 MiB margin for JetStream's own files.
+  - it: sizes /tmp from maxMemoryBytes
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.maxMemoryBytes: 8388608
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[?(@.name == "coordinator-tmp")].emptyDir.sizeLimit
+          value: "75497472"
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --max-memory-bytes=8388608
+
   - it: gives the operator no issuer flags by default
     template: templates/operator-deployment.yaml
     asserts:
@@ -100,6 +115,9 @@ tests:
             - --port=4224
             - --health-port=4225
             - --max-memory-bytes=1073741824
+            - --max-value-bytes=33554432
+            - --max-library-value-bytes=4096
+            - --max-library-keys=4096
       - equal:
           path: spec.template.spec.containers[2].env
           value:
@@ -119,6 +137,10 @@ tests:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
       # The agent stays the default container, and the Pod on the host's network.
       - equal:
           path: spec.template.metadata.annotations["kubectl.kubernetes.io/default-container"]
@@ -144,7 +166,7 @@ tests:
               hostPort: 4225
               protocol: TCP
 
-  - it: runs the coordinator unprivileged
+  - it: runs the coordinator as non-root with no capabilities
     template: templates/daemonset.yaml
     set:
       podGroups.enabled: true
@@ -192,7 +214,27 @@ tests:
             limits:
               memory: 2Gi
 
-  - it: mounts tls.crt and tls.key from the optional issued Secret, and a small /tmp
+  # The heap holds the sessions' data. With the container's memory limit as a
+  # soft limit, the Go runtime collects garbage as the heap nears it.
+  - it: gives the Go runtime the container's memory limit
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].env
+          content:
+            name: GOMEMLIMIT
+            valueFrom:
+              resourceFieldRef:
+                resource: limits.memory
+      # Only the coordinator's.
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "agent")].env[?(@.name == "GOMEMLIMIT")]
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].env[?(@.name == "GOMEMLIMIT")]
+
+  - it: mounts tls.crt and tls.key from the optional issued Secret, and /tmp
     template: templates/daemonset.yaml
     set:
       podGroups.enabled: true
@@ -222,7 +264,8 @@ tests:
           content:
             name: coordinator-tmp
             emptyDir:
-              sizeLimit: 16Mi
+              # maxMemoryBytes, 1 GiB, plus 64 MiB.
+              sizeLimit: "1140850688"
       # Only the coordinator mounts them.
       - notContains:
           path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
@@ -273,6 +316,41 @@ tests:
               memory: 256Mi
             limits:
               memory: 8Gi
+
+  # The session limits default to the coordinator's own, which checks them
+  # when it starts.
+  - it: passes the coordinator's own session limits by default
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --max-value-bytes=33554432
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --max-library-value-bytes=4096
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --max-library-keys=4096
+
+  - it: takes the session limits from the values
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.maxValueBytes: 67108864
+      coordinator.maxLibraryValueBytes: 8192
+      coordinator.maxLibraryKeys: 8192
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --max-value-bytes=67108864
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --max-library-value-bytes=8192
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].args
+          content: --max-library-keys=8192
 
   - it: names the token audience after the release
     template: templates/daemonset.yaml
@@ -750,6 +828,30 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "coordinator.maxMemoryBytes: Must be greater than or equal to 1"
+
+  - it: refuses no largest value
+    template: templates/daemonset.yaml
+    set:
+      coordinator.maxValueBytes: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: "coordinator.maxValueBytes: Must be greater than or equal to 1"
+
+  - it: refuses no largest library value
+    template: templates/daemonset.yaml
+    set:
+      coordinator.maxLibraryValueBytes: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: "coordinator.maxLibraryValueBytes: Must be greater than or equal to 1"
+
+  - it: refuses no library keys
+    template: templates/daemonset.yaml
+    set:
+      coordinator.maxLibraryKeys: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: "coordinator.maxLibraryKeys: Must be greater than or equal to 1"
 
   - it: refuses an empty trust key
     template: templates/daemonset.yaml

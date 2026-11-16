@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"golang.org/x/sync/semaphore"
 	"k8s.io/utils/clock"
 )
 
@@ -88,11 +90,14 @@ const (
 	reconnectJitter = 100 * time.Millisecond
 
 	// attemptTimeout bounds one round trip of an operation before the session
-	// sends it again. Only metadata crosses a session, so it is generous.
+	// sends it again: of every operation but a read, which only its caller's
+	// context and a disconnect bound.
 	attemptTimeout = 3 * time.Second
 
-	// retryWait spaces the resends of an operation that failed transiently.
-	retryWait = 100 * time.Millisecond
+	// noTimeout is how long nats.go lets a JetStream request run when the
+	// request carries no deadline, as only a read does: without end, where
+	// nats.go would stop it after 5 s.
+	noTimeout = time.Duration(math.MaxInt64)
 )
 
 // Connect connects to the coordinator as cfg.Member of the attempt cfg.Attempt,
@@ -127,6 +132,7 @@ func Connect(ctx context.Context, cfg Config) (Session, error) {
 		done:       make(chan struct{}),
 		wake:       make(chan struct{}),
 	}
+	s.life, s.endLife = context.WithCancel(context.Background())
 	nc, err := nats.Connect(strings.Join(cfg.URLs, ","), s.options(cfg)...)
 	if err != nil {
 		return nil, fmt.Errorf("connect to the coordinator: %w", mapError(err))
@@ -146,6 +152,8 @@ func (s *client) options(cfg Config) []nats.Option {
 	return []nats.Option{
 		// Both ends are ours, so neither needs anything older than TLS 1.3.
 		nats.Secure(&tls.Config{ServerName: cfg.ServerName, MinVersion: tls.VersionTLS13}),
+		// The coordinator expects the handshake before it sends anything.
+		nats.TLSHandshakeFirst(),
 		// nats.go retries a handshake that fails here without reporting why, so
 		// the client logs it. A nil pool would trust the host's CAs instead.
 		nats.ClientTLSConfig(nil, func() (*x509.CertPool, error) {
@@ -191,8 +199,8 @@ func (s *client) options(cfg Config) []nats.Option {
 			s.log.Info("Reconnected to the coordinator")
 			s.wakeVerifier()
 		}),
-		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
-			s.inflight.interrupt()
+		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
+			s.disconnected(nc)
 			if err != nil {
 				s.log.Info("Lost the connection to the coordinator; reconnecting", "error", err.Error())
 			}
@@ -210,9 +218,28 @@ func (s *client) options(cfg Config) []nats.Option {
 	}
 }
 
-// join waits until the coordinator admits the connection, binds both buckets,
-// reads Meta, and starts verifying the session when asked, following its end,
-// and timing its deadline.
+// connection numbers the connection the client sends over now. nats.go counts
+// every attempt to reconnect before the connection it makes is up, so a later
+// connection has a higher number.
+func (s *client) connection() uint64 { return s.nc.Stats().Reconnects }
+
+// disconnected makes every operation sent over a connection that broke send
+// its request again. nats.go reports a disconnect on a goroutine of its own,
+// which may run once it has connected again: an operation sent over the new
+// connection is then not lost, and is left alone. An operation is numbered
+// just before it is sent, so one that a whole reconnect overtook in between
+// is sent again all the same.
+func (s *client) disconnected(nc *nats.Conn) {
+	before := uint64(math.MaxUint64)
+	if nc.IsConnected() {
+		before = nc.Stats().Reconnects
+	}
+	s.inflight.interrupt(before)
+}
+
+// join waits until the coordinator admits the connection, binds the buckets,
+// reads Meta, makes the Store of each namespace, and starts verifying the
+// session when asked, following its end, and timing its deadline.
 func (s *client) join(ctx context.Context) error {
 	select {
 	case <-s.connected:
@@ -222,31 +249,45 @@ func (s *client) join(ctx context.Context) error {
 		}
 		return fmt.Errorf("connect to the coordinator: %w", ctx.Err())
 	}
-	js, err := jetstream.New(s.nc)
+	js, err := jetstream.New(s.nc, jetstream.WithDefaultTimeout(noTimeout))
 	if err != nil {
 		return mapError(err)
 	}
-	if s.snapshot, err = s.bind(ctx, js, session.SnapshotBucket(s.attempt)); err != nil {
-		return err
+	buckets := make(map[string]bucket)
+	for _, name := range session.Buckets(s.attempt) {
+		if buckets[name], err = s.bind(ctx, js, name); err != nil {
+			return err
+		}
 	}
-	if s.library, err = s.bind(ctx, js, session.LibraryBucket(s.attempt)); err != nil {
-		return err
-	}
+	s.control = buckets[session.ControlBucket(s.attempt)]
+	// What the coordinator buffers for the connection, session.MaxPending, is
+	// MaxConcurrentGets of the largest messages it takes, which it announced
+	// as the connection began: the budget holds as much before Meta is read.
+	s.budget = semaphore.NewWeighted(session.MaxConcurrentGets * s.nc.MaxPayload())
+	s.slots = semaphore.NewWeighted(session.MaxConcurrentGets)
 	s.mu.Lock()
 	target := s.target()
 	s.mu.Unlock()
-	if err := s.do(ctx, func(ctx context.Context) error {
-		s.meta, err = readMeta(ctx, s.snapshot)
-		return err
-	}); err != nil {
+	// The membership, which bounds Meta, is Meta's to tell.
+	var meta session.Meta
+	if err := s.read(ctx, controlRead(session.MaxMembers), s.readMeta(&meta)); err != nil {
 		return err
 	}
+	s.meta = meta
 	s.ranks = make(map[string]int, len(s.meta.Members))
 	for _, m := range s.meta.Members {
 		s.ranks[m.ID] = m.Rank
 	}
 	if _, ok := s.ranks[s.member]; !ok {
 		return fmt.Errorf("the session has no member %q: %w", s.member, session.ErrForbidden)
+	}
+	s.stores = make(map[session.Namespace]*store)
+	for _, ns := range session.Namespaces() {
+		name, err := ns.Bucket(s.attempt)
+		if err != nil {
+			return err
+		}
+		s.stores[ns] = s.newStore(ns, name, buckets[name])
 	}
 	s.epoch.Store(s.meta.Epoch)
 	// Reading Meta verified every reconnect before it.
@@ -260,31 +301,49 @@ func (s *client) join(ctx context.Context) error {
 	return nil
 }
 
-// bind binds one of the attempt's buckets.
-func (s *client) bind(ctx context.Context, js jetstream.JetStream, bucket string) (jetstream.KeyValue, error) {
-	var kv jetstream.KeyValue
+// bind binds one of the attempt's buckets, as a key-value bucket and as the
+// stream that holds it.
+func (s *client) bind(ctx context.Context, js jetstream.JetStream, name string) (bucket, error) {
+	var b bucket
 	err := s.do(ctx, func(ctx context.Context) error {
-		var err error
-		kv, err = js.KeyValue(ctx, bucket)
-		return err
+		kv, err := js.KeyValue(ctx, name)
+		if err != nil {
+			return err
+		}
+		stream, err := js.Stream(ctx, "KV_"+name)
+		if err != nil {
+			return err
+		}
+		b = bucket{kv: kv, stream: stream}
+		return nil
 	})
-	return kv, err
+	return b, err
 }
 
-// readMeta reads and decodes the meta key.
-func readMeta(ctx context.Context, kv jetstream.KeyValue) (session.Meta, error) {
-	entry, err := kv.Get(ctx, session.KeyMeta)
-	if errors.Is(err, jetstream.ErrKeyNotFound) {
-		return session.Meta{}, fmt.Errorf("the session has no meta: %w", session.ErrNotFound)
+// readMeta returns an operation that reads and decodes the meta key into meta,
+// which a read of the control bucket runs.
+func (s *client) readMeta(meta *session.Meta) func(context.Context) error {
+	var r record
+	read := latest(s.control, session.KeyMeta, &r)
+	return func(ctx context.Context) error {
+		err := read(ctx)
+		if errors.Is(err, session.ErrNotFound) || err == nil && r.deleted {
+			return fmt.Errorf("the session has no meta: %w", session.ErrNotFound)
+		}
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(r.value, meta); err != nil {
+			return fmt.Errorf("decode the session's meta: %w", err)
+		}
+		return nil
 	}
-	if err != nil {
-		return session.Meta{}, err
-	}
-	var meta session.Meta
-	if err := json.Unmarshal(entry.Value(), &meta); err != nil {
-		return session.Meta{}, fmt.Errorf("decode the session's meta: %w", err)
-	}
-	return meta, nil
+}
+
+// controlRead is what a read of the control bucket of a session of members
+// members takes of the connection's budget: the most its reply holds.
+func controlRead(members int) readCost {
+	return readCost{bytes: int64(session.ControlValueBytes(members)) + session.ReplyHeadroom}
 }
 
 // Rank implements Session.

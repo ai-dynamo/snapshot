@@ -305,10 +305,12 @@ spec:
               readOnly: true
             {{- end }}
         {{- if .Values.podGroups.enabled }}
-        # The coordinator of pod groups. Unprivileged: it needs only the API
-        # server, its serving certificate and its two ports, which are on the
-        # node's IP. Its readiness is the Pod's, so a node whose coordinator
-        # does not admit agents gets no new groups.
+        # The coordinator of pod groups. It runs as non-root with no
+        # capabilities: it needs only the API server, its serving certificate,
+        # its two ports, which are on the node's IP, and /tmp. It still shares the
+        # Pod's ServiceAccount and the host's network, PID and IPC namespaces,
+        # so it holds the agent's API rights. Its readiness is the Pod's, so a
+        # node whose coordinator does not admit agents gets no new groups.
         - name: coordinator
           image: {{ include "snapshot.agentImage" . | quote }}
           imagePullPolicy: {{ .Values.image.agent.pullPolicy }}
@@ -324,6 +326,9 @@ spec:
             - {{ printf "--port=%d" (int64 .Values.coordinator.port) | quote }}
             - {{ printf "--health-port=%d" (int64 .Values.coordinator.healthPort) | quote }}
             - {{ printf "--max-memory-bytes=%d" (int64 .Values.coordinator.maxMemoryBytes) | quote }}
+            - {{ printf "--max-value-bytes=%d" (int64 .Values.coordinator.maxValueBytes) | quote }}
+            - {{ printf "--max-library-value-bytes=%d" (int64 .Values.coordinator.maxLibraryValueBytes) | quote }}
+            - {{ printf "--max-library-keys=%d" (int64 .Values.coordinator.maxLibraryKeys) | quote }}
           env:
             - name: NODE_NAME
               valueFrom:
@@ -342,6 +347,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            # A soft limit: the Go runtime collects garbage as the heap, which
+            # holds the sessions' data, nears the container's memory limit,
+            # rather than letting it grow past the limit to twice the live data.
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
           # Host ports, the Pod being on the host's network, so the scheduler
           # keeps a second Pod that wants them off the node.
           ports:
@@ -383,8 +395,8 @@ spec:
             - name: coordinator-tls
               mountPath: {{ include "snapshot.coordinatorTLSDir" . }}
               readOnly: true
-            # JetStream checks that it can write here, although every session
-            # lives in memory.
+            # /tmp holds the control buckets' file store, a few hundred KB per
+            # session for honest use.
             - name: coordinator-tmp
               mountPath: /tmp
         {{- end }}
@@ -509,8 +521,8 @@ spec:
         {{- if .Values.podGroups.enabled }}
         # The coordinator's serving certificate. Optional, so the agent and
         # PageBroker start before the operator has issued it; the kubelet fills
-        # the volume once the Secret exists, and the coordinator restarts until
-        # then.
+        # the volume once the Secret exists, and the coordinator waits for it,
+        # unready, until then.
         - name: coordinator-tls
           secret:
             secretName: {{ include "snapshot.coordinatorServingSecretName" . | quote }}
@@ -520,9 +532,11 @@ spec:
                 path: tls.crt
               - key: tls.key
                 path: tls.key
+        # The coordinator's /tmp, on node disk, sized so that the coordinator
+        # refuses a write before the kubelet would evict the Pod.
         - name: coordinator-tmp
           emptyDir:
-            sizeLimit: 16Mi
+            sizeLimit: {{ include "snapshot.coordinatorTmpSizeLimit" . | quote }}
         # The trust bundle agents verify the coordinators with, as ca.crt:
         # the operator's ConfigMap, or coordinator.tls.trust's ConfigMap or
         # Secret. Optional, like the serving certificate: until it exists the

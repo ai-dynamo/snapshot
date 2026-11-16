@@ -14,19 +14,24 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-// The JetStream API error codes a session maps onto package session's errors.
+// The JetStream API error codes a session maps onto package session's errors,
+// or waits out.
 const (
 	// jsMessageTooLarge: a message over the stream's maximum message size,
 	// which is a bucket's maximum value size.
 	jsMessageTooLarge = 10054
-	// jsStoreFailed: the store refused a message. A session's only store
-	// limit is the library bucket's number of keys, so this is a full bucket.
+	// jsStoreFailed: the store refused a message, because the library bucket
+	// holds its most keys or the control bucket its most bytes: a full bucket.
 	jsStoreFailed = 10077
 	// jsInsufficientResources: the coordinator's memory cap is reached.
 	jsInsufficientResources = 10023
 	// jsMaximumConsumers: a watch would take its bucket past its most
 	// consumers, which the client waits out.
 	jsMaximumConsumers = 10026
+	// jsTooManyRequests: a stream's ingest queue is full, so the server
+	// dropped the message. Nothing was written, so the client sends it again
+	// until it is stored, and never reports it.
+	jsTooManyRequests = 10167
 )
 
 // mapError turns an error from nats.go into one of package session's, so no
@@ -82,12 +87,12 @@ func ours(err error) bool {
 // transient reports whether an operation that failed with err may succeed if
 // sent again: the connection broke, including under a write in progress, which
 // fails with a *net.OpError, or is reconnecting, which refuses every publish
-// since the client buffers none, the server did not answer in time, or a watch
-// found its bucket at its most consumers, which free up as other waits end. An
-// operation is sent again only while the session is alive, so a
-// *net.OpError that wraps net.ErrClosed never reports a closed session.
+// since the client buffers none, the server did not answer in time, or the
+// coordinator is too busy for it: see throttled. An operation is sent again
+// only while the session is alive, so a *net.OpError that wraps net.ErrClosed
+// never reports a closed session.
 func transient(err error) bool {
-	if code, _ := apiError(err); code == jsMaximumConsumers {
+	if throttled(err) {
 		return true
 	}
 	if _, ok := errors.AsType[*net.OpError](err); ok {
@@ -101,6 +106,16 @@ func transient(err error) bool {
 		errors.Is(err, nats.ErrDisconnected)
 }
 
+// throttled reports whether err says the coordinator is too busy for the
+// operation now: a write dropped for a full ingest queue, or a watch refused at
+// its bucket's consumer limit. It is sent again after a wait that grows while
+// the coordinator stays busy, with jitter, so many clients do not press it
+// together.
+func throttled(err error) bool {
+	code, _ := apiError(err)
+	return code == jsMaximumConsumers || code == jsTooManyRequests
+}
+
 // missing reports whether an operation that failed with err may have found
 // its bucket gone: no stream answered a write or a read, or the stream does not
 // exist.
@@ -112,6 +127,6 @@ func missing(err error) bool {
 		errors.Is(err, nats.ErrStreamNotFound)
 }
 
-// errRetry asks for an operation to be sent again at once, such as an Insert
-// whose key was deleted between its Create and its Get.
+// errRetry asks for an operation to be sent again: the connection broke while
+// it waited for the coordinator's answer.
 var errRetry = errors.New("retry")

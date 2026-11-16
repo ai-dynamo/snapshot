@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package types defines private runtime configuration shared by the operator.
+// Package types defines what the operator's packages share: the operator's
+// configuration, and the labels of the Secrets and ConfigMaps it writes
+// outside Helm.
 package types
 
 import (

@@ -30,6 +30,7 @@ import (
 	"github.com/ai-dynamo/snapshot/coordinator/coordinatortest"
 	"github.com/ai-dynamo/snapshot/coordinator/internal/testcert"
 	"github.com/ai-dynamo/snapshot/coordinator/internal/testclock"
+	"github.com/ai-dynamo/snapshot/coordinator/internal/testlog"
 	"github.com/ai-dynamo/snapshot/coordinator/server"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/go-logr/logr"
@@ -55,9 +56,9 @@ type harness struct {
 	clock *testclock.Clock
 	// logs records what every member's client logs.
 	logs *logLines
-	// observer records what the current coordinator sees of sessions.
-	observer *recorder
-	proxies  []*proxy
+	// serverLogs records what the current coordinator logs.
+	serverLogs *logLines
+	proxies    []*proxy
 }
 
 // newHarness starts a ready coordinator, configured by modify, and checks
@@ -72,6 +73,7 @@ func newHarness(t *testing.T, modify ...func(*server.Config)) *harness {
 		clock: testclock.New(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)),
 		logs:  &logLines{},
 	}
+	t.Cleanup(func() { h.logs.dumpIfFailed(t, "client") })
 	// Every subject a client sends must be one its permissions allow. The check
 	// is best-effort: a refusal that races a closing connection can go unseen.
 	// The deterministic tests of the subjects whose refusal changes nothing a
@@ -97,12 +99,24 @@ func newHarness(t *testing.T, modify ...func(*server.Config)) *harness {
 	return h
 }
 
-// start starts a coordinator, not ready yet, with an Observer of its own, and
+// testMaxValue is the largest value of the coordinator of a test that moves
+// the largest values: 1 MiB. What the client reads at once, and what the
+// coordinator buffers for a connection, scale with it, so such a test checks
+// what it would at the default, with less for a loaded machine to carry.
+const testMaxValue = 1 << 20
+
+// withTestMaxValue configures a coordinator whose largest value is
+// testMaxValue.
+func withTestMaxValue(cfg *server.Config) { cfg.MaxValue = testMaxValue }
+
+// start starts a coordinator, not ready yet, with a log of its own, and
 // shuts it down when the test ends.
 func (h *harness) start() {
 	h.t.Helper()
-	h.observer = &recorder{}
-	h.cfg.Observer = h.observer
+	logs := &logLines{}
+	h.t.Cleanup(func() { logs.dumpIfFailed(h.t, "coordinator") })
+	h.serverLogs = logs
+	h.cfg.Log = logs.logger()
 	srv, err := server.New(h.cfg)
 	require.NoError(h.t, err)
 	h.t.Cleanup(func() { require.NoError(h.t, srv.Shutdown(context.Background())) })
@@ -148,12 +162,19 @@ func (h *harness) session(t *testing.T, n int) *testSession {
 // sessionUntil ensures a session with n members and deadline for the test t.
 func (h *harness) sessionUntil(t *testing.T, n int, deadline time.Time) *testSession {
 	t.Helper()
-	ses := &testSession{h: h, spec: server.Spec{
-		UID:      types.UID(fmt.Sprintf("attempt-%d", time.Now().UnixNano())),
-		Deadline: deadline,
-	}}
+	spec := server.Spec{UID: types.UID(fmt.Sprintf("attempt-%d", time.Now().UnixNano())), Deadline: deadline}
 	for i := range n {
-		ses.spec.Members = append(ses.spec.Members, session.Member{ID: fmt.Sprintf("member-%d", i), Rank: i})
+		spec.Members = append(spec.Members, session.Member{ID: fmt.Sprintf("member-%d", i), Rank: i})
+	}
+	return h.open(t, spec)
+}
+
+// open ensures the session of spec for the test t, with a proxy for each
+// member, which stops when t ends.
+func (h *harness) open(t *testing.T, spec server.Spec) *testSession {
+	t.Helper()
+	ses := &testSession{h: h, spec: spec}
+	for range spec.Members {
 		p := newProxy(t, h.srv.Addr().String())
 		h.proxies = append(h.proxies, p)
 		ses.proxies = append(ses.proxies, p)
@@ -257,46 +278,55 @@ func in(s coordinator.Session, ns session.Namespace) coordinator.Store {
 // client reconnects.
 func (ses *testSession) cut(member int) { ses.proxies[member].cut() }
 
-// raw returns the session's Snapshot bucket over a plain NATS connection of
+// raw returns the session's control bucket over a plain NATS connection of
 // member, made the way package session defines, which reaches the keys the
 // client keeps to itself. The connection closes when the test ends.
 func (ses *testSession) raw(t *testing.T, member int) jetstream.KeyValue {
 	t.Helper()
-	return ses.rawBucket(t, member, session.SnapshotBucket(string(ses.spec.UID)))
+	return ses.rawBucket(t, member, session.ControlBucket(string(ses.spec.UID)))
 }
 
 // rawBucket returns one of the session's buckets over a plain NATS connection
 // of member, as raw does.
 func (ses *testSession) rawBucket(t *testing.T, member int, bucket string) jetstream.KeyValue {
 	t.Helper()
-	uid, id := string(ses.spec.UID), ses.spec.Members[member].ID
-	nc, err := nats.Connect("tls://"+ses.h.srv.Addr().String(),
-		nats.Secure(&tls.Config{RootCAs: ses.h.ca, ServerName: "localhost", MinVersion: tls.VersionTLS12}),
-		nats.UserInfo(session.UserName(uid, id), ""),
-		nats.Token(coordinatortest.Token),
-		nats.CustomInboxPrefix(session.InboxPrefix(uid, id)),
-		nats.NoReconnect())
-	require.NoError(t, err)
-	t.Cleanup(nc.Close)
-	js, err := jetstream.New(nc)
+	js, err := jetstream.New(ses.rawConn(t, member))
 	require.NoError(t, err)
 	kv, err := js.KeyValue(within(t), bucket)
 	require.NoError(t, err)
 	return kv
 }
 
+// rawConn returns a plain NATS connection of member, made the way package
+// session defines, which closes when the test ends.
+func (ses *testSession) rawConn(t *testing.T, member int) *nats.Conn {
+	t.Helper()
+	uid, id := string(ses.spec.UID), ses.spec.Members[member].ID
+	nc, err := nats.Connect("tls://"+ses.h.srv.Addr().String(),
+		nats.Secure(&tls.Config{RootCAs: ses.h.ca, ServerName: "localhost", MinVersion: tls.VersionTLS12}),
+		nats.TLSHandshakeFirst(),
+		nats.UserInfo(session.UserName(uid, id), ""),
+		nats.Token(coordinatortest.Token),
+		nats.CustomInboxPrefix(session.InboxPrefix(uid, id)),
+		nats.NoReconnect())
+	require.NoError(t, err)
+	t.Cleanup(nc.Close)
+	return nc
+}
+
 // awaitWait waits until a wait of one member in namespace ns watches its keys:
-// until the namespace's bucket holds one consumer more than at rest, when the
-// coordinator watches the departures and each member, every one connected,
-// the session's end.
+// until the namespace's bucket holds a consumer, since nothing else watches it.
 func (ses *testSession) awaitWait(t *testing.T, ns session.Namespace) {
 	t.Helper()
-	uid := string(ses.spec.UID)
-	bucket, rest := session.SnapshotBucket(uid), len(ses.spec.Members)+1
-	if ns == session.NamespaceLibrary {
-		bucket, rest = session.LibraryBucket(uid), 0
-	}
-	ses.awaitConsumers(t, bucket, rest+1)
+	ses.awaitConsumers(t, ses.bucket(t, ns), 1)
+}
+
+// bucket names the session's bucket that holds a namespace.
+func (ses *testSession) bucket(t *testing.T, ns session.Namespace) string {
+	t.Helper()
+	bucket, err := ns.Bucket(string(ses.spec.UID))
+	require.NoError(t, err)
+	return bucket
 }
 
 // awaitMostConsumers waits until the session's Snapshot bucket holds its most
@@ -369,7 +399,7 @@ func (ses *testSession) awaitOutcome(t *testing.T) string {
 	t.Helper()
 	var events []string
 	require.Eventually(t, func() bool {
-		events = ses.h.observer.of(ses.spec.UID)
+		events = ses.h.events(ses.spec)
 		return len(events) > 1
 	}, 10*time.Second, 5*time.Millisecond)
 	return events[1]
@@ -413,48 +443,39 @@ func (l *logLines) all() []string {
 	return slices.Clone(l.lines)
 }
 
-// recorder is an Observer that records what it sees of each attempt.
-type recorder struct {
-	mu     sync.Mutex
-	events map[types.UID][]string
-}
-
-func (r *recorder) record(uid types.UID, event string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.events == nil {
-		r.events = make(map[types.UID][]string)
+// dumpIfFailed logs every line to t, each marked with whose it is, if t has
+// failed, so a failure shows what led to it.
+func (l *logLines) dumpIfFailed(t *testing.T, whose string) {
+	if !t.Failed() {
+		return
 	}
-	r.events[uid] = append(r.events[uid], event)
+	for _, line := range l.all() {
+		t.Logf("%s: %s", whose, line)
+	}
 }
 
-// SessionOpened implements server.Observer.
-func (r *recorder) SessionOpened(uid types.UID) { r.record(uid, "opened") }
-
-// SessionClosed implements server.Observer.
-func (r *recorder) SessionClosed(uid types.UID) { r.record(uid, "closed") }
-
-// SessionFailed implements server.Observer.
-func (r *recorder) SessionFailed(uid types.UID, reason string) { r.record(uid, "failed "+reason) }
-
-// of returns what the recorder saw of one attempt.
-func (r *recorder) of(uid types.UID) []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return slices.Clone(r.events[uid])
+// events returns what the current coordinator logged of the life of the
+// session: "opened", then "closed" or "failed" and the reason.
+func (h *harness) events(spec server.Spec) []string {
+	return testlog.SessionEvents(h.serverLogs.all(), spec.UID)
 }
 
 // proxy forwards TCP connections to the coordinator, so a test can break them
-// as a network would, and move them to another coordinator. TLS passes through
-// it untouched.
+// as a network would, and move them to another coordinator, and counts what
+// the coordinator sends through it. TLS passes through it untouched.
 type proxy struct {
 	ln       net.Listener
 	accepted chan struct{}
 	wg       sync.WaitGroup
+	// sent counts the bytes the coordinator has sent through the proxy.
+	sent atomic.Int64
 
 	mu     sync.Mutex
 	target string
 	conns  map[net.Conn]struct{}
+	// held is open while what the coordinator sends is held, and nil
+	// otherwise.
+	held chan struct{}
 }
 
 // newProxy starts a proxy to target, and stops it when the test ends.
@@ -506,9 +527,33 @@ func (p *proxy) forward(in net.Conn, target string) {
 		_, _ = io.Copy(out, in)
 		_ = out.Close()
 	}()
-	_, _ = io.Copy(in, out)
+	p.toClient(in, out)
 	_ = in.Close()
 	<-done
+}
+
+// toClient carries what the coordinator sends from out to in, counting it,
+// until either side closes.
+func (p *proxy) toClient(in, out net.Conn) {
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := out.Read(buf)
+		if n > 0 {
+			p.sent.Add(int64(n))
+			p.mu.Lock()
+			held := p.held
+			p.mu.Unlock()
+			if held != nil {
+				<-held
+			}
+			if _, err := in.Write(buf[:n]); err != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 // drop closes a connection and forgets it.
@@ -529,6 +574,26 @@ func (p *proxy) cut() {
 	}
 }
 
+// hold keeps what the coordinator sends from reaching the member, as a
+// network that stalls would, until release. The member's own sends go on.
+func (p *proxy) hold() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.held == nil {
+		p.held = make(chan struct{})
+	}
+}
+
+// release delivers what hold kept, and what follows.
+func (p *proxy) release() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.held != nil {
+		close(p.held)
+		p.held = nil
+	}
+}
+
 // retarget sends the connections the proxy accepts from now on to target.
 func (p *proxy) retarget(target string) {
 	p.mu.Lock()
@@ -539,6 +604,7 @@ func (p *proxy) retarget(target string) {
 // stop closes the proxy and every connection it carries, and waits until they
 // have all ended.
 func (p *proxy) stop() {
+	p.release()
 	_ = p.ln.Close()
 	<-p.accepted
 	p.cut()

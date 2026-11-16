@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/coordinator/internal/backoff"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go/jetstream"
@@ -31,9 +32,9 @@ type Spec struct {
 	// PodGroupRestore's, which identifies the attempt.
 	UID types.UID
 
-	// Members is the whole membership. It must name at least one member, with
-	// distinct IDs that session.ValidateName accepts and ranks covering 0 to
-	// len(Members)-1, in any order.
+	// Members is the whole membership. It must name at least one member and at
+	// most session.MaxMembers, with distinct IDs that session.ValidateName
+	// accepts and ranks covering 0 to len(Members)-1, in any order.
 	Members []session.Member
 
 	// Deadline bounds the whole attempt, counted from the resource's creation.
@@ -47,6 +48,10 @@ func (s Spec) validate() error {
 	}
 	if len(s.Members) == 0 {
 		return fmt.Errorf("no members: %w", session.ErrInvalid)
+	}
+	if len(s.Members) > session.MaxMembers {
+		return fmt.Errorf("%d members, over the %d a session is sized for: %w", len(s.Members), session.MaxMembers,
+			session.ErrInvalid)
 	}
 	if s.Deadline.IsZero() {
 		return fmt.Errorf("no deadline: %w", session.ErrInvalid)
@@ -84,10 +89,11 @@ func (s Spec) byRank() []session.Member {
 
 // attempt is the session of one attempt.
 type attempt struct {
-	spec     Spec
-	members  []session.Member
-	epoch    uint64
-	snapshot jetstream.KeyValue
+	spec    Spec
+	members []session.Member
+	epoch   uint64
+	// control is the bucket of the session's own keys.
+	control jetstream.KeyValue
 	// life lasts until the session is removed or the coordinator shuts down,
 	// which call cancel, or until follow has seen the session end. It bounds
 	// following the session's keys and retrying its end, and no watch ends it.
@@ -104,6 +110,9 @@ type attempt struct {
 	// ending is set once recordEnd has started recording the session's end.
 	ending bool
 	ended  bool
+	// committed is set once FailUncommitted has seen every member arrive at
+	// session.BarrierAdmitted, and never cleared.
+	committed bool
 }
 
 // has reports whether member is a member of the attempt.
@@ -112,14 +121,14 @@ func (a *attempt) has(member string) bool {
 }
 
 // Ensure creates the session of the attempt spec describes, unless it exists:
-// both buckets, with their largest values and the library's key limit, and
-// meta, with a new random epoch. It arms the deadline, and starts following the
-// members' departures and the session's end. Ensuring an attempt again with the same
-// spec, whatever order it lists the members in, does nothing; a spec that
-// differs reports session.ErrInvalid, since an attempt's membership and deadline never
-// change. A session whose deadline has already passed is created already
-// failed with session.ReasonDeadlineExceeded, so a member that connects learns
-// why at once.
+// its three buckets, with their largest values, the library's key limit and the
+// control bucket's size, and meta, with a new random epoch. It arms the
+// deadline, and starts following the members' departures and the session's
+// end. Ensuring an attempt again with the same spec, whatever order it lists
+// the members in, does nothing; a spec that differs reports session.ErrInvalid,
+// since an attempt's membership and deadline never change. A session whose
+// deadline has already passed is created already failed with
+// session.ReasonDeadlineExceeded, so a member that connects learns why at once.
 //
 // The host ensures an attempt only while its group resource is unfinished.
 // It never ensures one whose resource is final, which would open a session for
@@ -148,7 +157,6 @@ func (s *Server) Ensure(ctx context.Context, spec Spec) error {
 	s.mu.Lock()
 	s.attempts[spec.UID] = a
 	s.mu.Unlock()
-	s.cfg.Observer.SessionOpened(spec.UID)
 	s.log.Info("Session opened", "attempt", spec.UID, "members", len(a.members))
 
 	remaining := spec.Deadline.Sub(s.cfg.Clock.Now())
@@ -200,26 +208,23 @@ func (s *Server) create(ctx context.Context, spec Spec) (a *attempt, err error) 
 	if err != nil {
 		return nil, fmt.Errorf("encode meta: %w", err)
 	}
-	uid := string(spec.UID)
 	defer func() {
 		if err == nil {
 			return
 		}
 		cancel()
-		if err := s.deleteBuckets(context.WithoutCancel(ctx), spec.UID); err != nil {
-			s.log.Error(err, "Deleting the buckets of a session that failed to open failed", "attempt", uid)
+		if err := s.deleteBuckets(context.WithoutCancel(ctx), spec); err != nil {
+			s.log.Error(err, "Deleting the buckets of a session that failed to open failed", "attempt", spec.UID)
 		}
 	}()
-	members := len(spec.Members)
-	if a.snapshot, err = s.createBucket(ctx, session.SnapshotBucket(uid), 0, s.cfg.MaxValue,
-		members*session.MaxConsumersPerMember+coordinatorConsumers); err != nil {
-		return nil, err
+	created := make(map[string]jetstream.KeyValue)
+	for _, b := range s.bucketSpecs(spec) {
+		if created[b.name], err = s.createBucket(ctx, b); err != nil {
+			return nil, err
+		}
 	}
-	if _, err = s.createBucket(ctx, session.LibraryBucket(uid), s.cfg.MaxLibraryKeys, s.cfg.MaxLibraryValue,
-		members*session.MaxConsumersPerMember); err != nil {
-		return nil, err
-	}
-	if _, err = a.snapshot.Put(ctx, session.KeyMeta, meta); err != nil {
+	a.control = created[session.ControlBucket(string(spec.UID))]
+	if _, err = a.control.Put(ctx, session.KeyMeta, meta); err != nil {
 		return nil, fmt.Errorf("write meta: %w", err)
 	}
 	if err = s.follow(ctx, a); err != nil {
@@ -229,7 +234,7 @@ func (s *Server) create(ctx context.Context, spec Spec) (a *attempt, err error) 
 }
 
 // coordinatorConsumers is how many consumers the coordinator holds on each
-// Snapshot bucket: the watch of the departures and the end that follow starts.
+// control bucket: the watch of the departures and the end that follow starts.
 // Its connection is in-process and never reconnects.
 const coordinatorConsumers = 1
 
@@ -242,49 +247,91 @@ const coordinatorConsumers = 1
 // ask for none and take the bucket's, keep the threshold they would have.
 const consumerInactiveThreshold = natsserver.JsDeleteWaitTimeDefault
 
-// createBucket creates one in-memory bucket, bounded by its largest value, by
-// how many consumers it may have and how long an unused one lasts, and, unless
-// maxKeys is zero, by its number of keys, none of which reserves memory, and
-// refusing rollups and purges. JetStream's key-value configuration has none of
-// these but the largest value, so the rest are set on the bucket's stream,
-// before any member can reach the bucket.
-func (s *Server) createBucket(ctx context.Context, bucket string, maxKeys, maxValue, maxConsumers int) (
-	jetstream.KeyValue, error) {
+// bucketSpec describes one bucket of a session.
+type bucketSpec struct {
+	name    string
+	storage jetstream.StorageType
+	// maxBytes bounds the bucket's size, and reserves it in its storage. A
+	// memory bucket has none: every session shares the memory cap instead.
+	maxBytes int64
+	// maxKeys bounds the number of keys, deleted ones included, unless zero.
+	maxKeys      int
+	maxValue     int
+	maxConsumers int
+}
+
+// bucketSpecs returns the specs of the buckets of spec's attempt, the ones
+// session.Buckets names: the control bucket, in file storage and sized for the
+// membership, whose largest value fits the largest Meta; and the Snapshot and
+// library buckets, in memory, with the largest values the Config sets, and
+// the library's most keys. create creates them, and deleteBuckets deletes
+// them.
+func (s *Server) bucketSpecs(spec Spec) []bucketSpec {
+	uid, members := string(spec.UID), len(spec.Members)
+	consumers := members * session.MaxConsumersPerMember
+	return []bucketSpec{{
+		name:         session.ControlBucket(uid),
+		storage:      jetstream.FileStorage,
+		maxBytes:     session.ControlBytes(members),
+		maxValue:     session.ControlValueBytes(members),
+		maxConsumers: consumers + coordinatorConsumers,
+	}, {
+		name:         session.SnapshotBucket(uid),
+		storage:      jetstream.MemoryStorage,
+		maxValue:     s.cfg.MaxValue,
+		maxConsumers: consumers,
+	}, {
+		name:         session.LibraryBucket(uid),
+		storage:      jetstream.MemoryStorage,
+		maxKeys:      s.cfg.MaxLibraryKeys,
+		maxValue:     s.cfg.MaxLibraryValue,
+		maxConsumers: consumers,
+	}}
+}
+
+// createBucket creates one bucket, bounded by its largest value, by how many
+// consumers it may have and how long an unused one lasts, and, as b says, by
+// its size and its number of keys, and refusing rollups and purges. JetStream's
+// key-value configuration has none of these but the largest value and the
+// size, so the rest are set on the bucket's stream, before any member can reach
+// the bucket.
+func (s *Server) createBucket(ctx context.Context, b bucketSpec) (jetstream.KeyValue, error) {
 	kv, err := s.js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
-		Bucket:       bucket,
-		Storage:      jetstream.MemoryStorage,
-		MaxValueSize: int32(maxValue + valueHeadroom),
+		Bucket:       b.name,
+		Storage:      b.storage,
+		MaxBytes:     b.maxBytes,
+		MaxValueSize: int32(b.maxValue + valueHeadroom),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create bucket %s: %w", bucket, err)
+		return nil, fmt.Errorf("create bucket %s: %w", b.name, err)
 	}
-	stream, err := s.js.Stream(ctx, "KV_"+bucket)
+	stream, err := s.js.Stream(ctx, "KV_"+b.name)
 	if err != nil {
-		return nil, fmt.Errorf("bound bucket %s: %w", bucket, err)
+		return nil, fmt.Errorf("bound bucket %s: %w", b.name, err)
 	}
 	cfg := stream.CachedInfo().Config
-	cfg.MaxConsumers = maxConsumers
+	cfg.MaxConsumers = b.maxConsumers
 	cfg.ConsumerLimits.InactiveThreshold = consumerInactiveThreshold
 	// A publish that rolls a bucket up purges it, meta and ended included.
 	// The session never purges, so a bucket refuses both.
 	cfg.AllowRollup, cfg.DenyPurge = false, true
-	if maxKeys != 0 {
-		cfg.MaxMsgs = int64(maxKeys)
+	if b.maxKeys != 0 {
+		cfg.MaxMsgs = int64(b.maxKeys)
 	}
 	if _, err := s.js.UpdateStream(ctx, cfg); err != nil {
-		return nil, fmt.Errorf("bound bucket %s: %w", bucket, err)
+		return nil, fmt.Errorf("bound bucket %s: %w", b.name, err)
 	}
 	return kv, nil
 }
 
-// deleteBuckets deletes both of an attempt's buckets, whether or not they
-// exist.
-func (s *Server) deleteBuckets(ctx context.Context, uid types.UID) error {
+// deleteBuckets deletes all of the buckets of spec's attempt, whether or not
+// they exist.
+func (s *Server) deleteBuckets(ctx context.Context, spec Spec) error {
 	var errs []error
-	for _, bucket := range []string{session.SnapshotBucket(string(uid)), session.LibraryBucket(string(uid))} {
-		if err := s.js.DeleteKeyValue(ctx, bucket); err != nil && !errors.Is(err, jetstream.ErrBucketNotFound) &&
+	for _, b := range s.bucketSpecs(spec) {
+		if err := s.js.DeleteKeyValue(ctx, b.name); err != nil && !errors.Is(err, jetstream.ErrBucketNotFound) &&
 			!errors.Is(err, jetstream.ErrStreamNotFound) {
-			errs = append(errs, fmt.Errorf("delete bucket %s: %w", bucket, err))
+			errs = append(errs, fmt.Errorf("delete bucket %s: %w", b.name, err))
 		}
 	}
 	return errors.Join(errs...)
@@ -350,7 +397,7 @@ func (s *Server) track(a *attempt, w jetstream.KeyWatcher, left map[string]bool)
 func (s *Server) watch(ctx context.Context, a *attempt) (jetstream.KeyWatcher, func(), error) {
 	life, cancel := context.WithCancel(a.life)
 	bounded := context.AfterFunc(ctx, cancel)
-	w, err := a.snapshot.WatchFiltered(life, []string{session.LeftKey("*"), session.KeyEnded})
+	w, err := a.control.WatchFiltered(life, []string{session.LeftKey("*"), session.KeyEnded})
 	if !bounded() {
 		err = ctx.Err()
 	}
@@ -378,8 +425,8 @@ func (s *Server) watch(ctx context.Context, a *attempt) (jetstream.KeyWatcher, f
 	}, nil
 }
 
-// rewatch watches a session again once its watch has stopped, waiting from
-// firstEndRetry up to maxEndRetry before each try, until a watch starts. It
+// rewatch watches a session again once its watch has stopped, waiting longer
+// before each try, as backoff.New spaces them, until a watch starts. It
 // returns a nil watch once the session's life has ended, or the coordinator's
 // connection has closed, which a coordinator that stops without shutting down
 // does, and which leaves nothing to watch with.
@@ -392,9 +439,10 @@ func (s *Server) rewatch(a *attempt) (jetstream.KeyWatcher, func()) {
 	default:
 	}
 	s.log.Info("The session's watch stopped; watching again", "attempt", a.spec.UID)
-	for wait := firstEndRetry; ; wait = min(2*wait, maxEndRetry) {
+	waits := backoff.New()
+	for try := 1; ; try++ {
 		select {
-		case <-time.After(wait):
+		case <-time.After(waits.Step()):
 		case <-a.life.Done():
 			return nil, nil
 		case <-s.connClosed:
@@ -408,7 +456,7 @@ func (s *Server) rewatch(a *attempt) (jetstream.KeyWatcher, func()) {
 			return w, stop
 		case a.life.Err() != nil:
 			return nil, nil
-		case wait == firstEndRetry:
+		case try == 1:
 			s.log.Error(err, "Watching the session again failed; retrying", "attempt", a.spec.UID)
 		}
 	}
@@ -443,26 +491,26 @@ func (s *Server) drain(w jetstream.KeyWatcher) {
 	}
 }
 
-// Remove discards the session of an attempt the host is done with: it
-// fails the session first with session.ReasonCancelled if it is still open,
-// recording the end when the memory cap allows, then deletes both buckets and
-// forgets the session. A member that has not received the end by then learns
-// from finding its session gone, with session.ErrCoordinatorLost. The rule is
-// to remove a session once its group resource is deleted, or once the resource
-// is final and the session has ended or its deadline has passed.
+// Remove discards the session of an attempt the host is done with: it fails
+// the session first with session.ReasonCancelled if it is still open, then
+// deletes its buckets and forgets the session. A member that has not received
+// the end by then learns from finding its session gone, with
+// session.ErrCoordinatorLost. The rule is to remove a session once its group
+// resource is deleted, or once the resource is final and the session has
+// ended or its deadline has passed.
 //
 // A final state alone is not enough. A PodGroupRestore is final once every
 // member is released, yet its session stays open until the members leave,
 // because NCCL may still be rebuilding its communicators through it, and
 // removing it then would abort that. The rule never leaves a session behind,
-// even one whose end cannot be recorded: a session whose own keys fill the
-// memory cap leaves no room for its ended key, and is removed once its
+// even one whose end cannot be recorded: a session whose members fill its
+// control bucket leaves no room for its ended key, and is removed once its
 // deadline has passed.
 //
-// A session that cannot be failed first, such as when the memory cap leaves no
-// room for the ended key, is removed all the same, since removing it frees what
-// the cap needs. A session whose buckets cannot be deleted is kept, so a retry
-// finds it again. Removing an attempt with no session does nothing.
+// A session that cannot be failed first, such as when its control bucket has no
+// room for the ended key, is removed all the same. A session whose buckets
+// cannot be deleted is kept, so a retry finds it again. Removing an attempt
+// with no session does nothing.
 func (s *Server) Remove(ctx context.Context, uid types.UID) error {
 	s.control.Lock()
 	defer s.control.Unlock()
@@ -477,7 +525,7 @@ func (s *Server) Remove(ctx context.Context, uid types.UID) error {
 		s.log.Error(err, "Cancelling a session before removing it failed", "attempt", uid)
 	}
 	a.cancel()
-	if err := s.deleteBuckets(ctx, uid); err != nil {
+	if err := s.deleteBuckets(ctx, a.spec); err != nil {
 		return fmt.Errorf("remove attempt %s: %w", uid, err)
 	}
 	s.discard(a)
@@ -488,12 +536,19 @@ func (s *Server) Remove(ctx context.Context, uid types.UID) error {
 	return nil
 }
 
-// Fail fails the session of an attempt on the coordinator's own authority,
-// with no member asking, as a member's Fail does: the reason must be a valid
-// condition reason, the first reason wins, and Fail returns nil if the session
-// failed with this reason, and how it ended otherwise. It reports session.ErrNotFound
-// for an attempt with no session.
-func (s *Server) Fail(ctx context.Context, uid types.UID, reason string) error {
+// FailUncommitted fails the session of an attempt with reason, which must be a
+// valid condition reason, unless every member has arrived at
+// session.BarrierAdmitted, which commits the attempt. The host fails a session
+// this way before the commit: with session.ReasonCancelled once its group
+// resource's deletion has started, and with session.ReasonRefused once one of
+// its members has failed. It is best effort: members decide on their own that
+// the barrier is complete, so a member that saw it complete just before
+// FailUncommitted read the arrivals can still start. The commit is final: once
+// FailUncommitted has seen it, it leaves the session open from then on, even if
+// an arrival is deleted. FailUncommitted returns nil once the session has
+// ended, however it ended, and when it leaves a committed session open. It
+// reports session.ErrNotFound for an attempt with no session.
+func (s *Server) FailUncommitted(ctx context.Context, uid types.UID, reason string) error {
 	if err := session.ValidateReason(reason); err != nil {
 		return err
 	}
@@ -501,30 +556,10 @@ func (s *Server) Fail(ctx context.Context, uid types.UID, reason string) error {
 	if a == nil {
 		return fmt.Errorf("attempt %s: %w", uid, session.ErrNotFound)
 	}
-	err := s.endWith(ctx, a, []byte(reason))
-	if errors.Is(err, &session.AbortError{Reason: reason}) {
-		return nil
-	}
-	return err
-}
-
-// Cancel fails the session of an attempt with session.ReasonCancelled, unless
-// every member has arrived at session.BarrierAdmitted, which commits the
-// attempt. The host cancels a session once its group resource's deletion has
-// started. It is best effort: members decide on their own that the barrier is
-// complete, so a member that saw it complete just before Cancel read the
-// arrivals can still start. Cancel returns nil once the session has ended,
-// however it ended, and when it leaves a committed session open. It reports
-// session.ErrNotFound for an attempt with no session.
-func (s *Server) Cancel(ctx context.Context, uid types.UID) error {
-	a := s.lookup(uid)
-	if a == nil {
-		return fmt.Errorf("attempt %s: %w", uid, session.ErrNotFound)
-	}
 	if committed, err := s.committed(ctx, a); err != nil || committed {
 		return err
 	}
-	if err := s.endWith(ctx, a, []byte(session.ReasonCancelled)); err != nil && !ended(err) {
+	if err := s.endWith(ctx, a, []byte(reason)); err != nil && !ended(err) {
 		return err
 	}
 	return nil
@@ -532,10 +567,17 @@ func (s *Server) Cancel(ctx context.Context, uid types.UID) error {
 
 // committed reports whether every member of a session has arrived at
 // session.BarrierAdmitted. It reads the arrivals one by one, as direct reads,
-// so it takes none of the consumers the bucket's members share.
+// so it takes none of the consumers the bucket's members share. It records the
+// commit the first time it sees it, and reads no arrivals from then on.
 func (s *Server) committed(ctx context.Context, a *attempt) (bool, error) {
+	s.mu.Lock()
+	seen := a.committed
+	s.mu.Unlock()
+	if seen {
+		return true, nil
+	}
 	for _, m := range a.members {
-		_, err := a.snapshot.Get(ctx, session.BarrierKey(session.BarrierAdmitted, m.ID))
+		_, err := a.control.Get(ctx, session.BarrierKey(session.BarrierAdmitted, m.ID))
 		switch {
 		case errors.Is(err, jetstream.ErrKeyNotFound):
 			return false, nil
@@ -543,6 +585,9 @@ func (s *Server) committed(ctx context.Context, a *attempt) (bool, error) {
 			return false, fmt.Errorf("read the arrivals of attempt %s: %w", a.spec.UID, err)
 		}
 	}
+	s.mu.Lock()
+	a.committed = true
+	s.mu.Unlock()
 	return true, nil
 }
 
@@ -561,13 +606,6 @@ func (s *Server) Ended(uid types.UID) (ended, held bool) {
 // a session again.
 const tryTimeout = 5 * time.Second
 
-// The wait between tries to record a session's end, or to watch a session
-// again: it starts at firstEndRetry and doubles up to maxEndRetry.
-const (
-	firstEndRetry = 100 * time.Millisecond
-	maxEndRetry   = time.Second
-)
-
 // always arms recordEnd whatever calls it: closing a session every member has
 // left.
 func always() bool { return true }
@@ -580,15 +618,15 @@ func always() bool { return true }
 // session that has ended is left alone, and so is every session once Shutdown
 // has begun, which records its own end and waits for an end being recorded.
 //
-// Recording the end can fail, such as at the memory cap, which no write is
-// exempt from and nothing reserves room under. A session that has to end must
-// not stay open once memory frees, so recordEnd keeps trying in the
-// background, waiting from firstEndRetry up to maxEndRetry, until the end is
-// recorded, by recordEnd or anything else, or the session's life ends because
-// it is removed or the coordinator shuts down. It never holds Server.control.
-// The timer that fired stays armed meanwhile, so a member that reconnects
-// after its grace period ran out does not keep the session, and one that
-// disconnects again starts no second grace period. One end at a time is
+// Recording the end can fail, such as when the write times out, or when the
+// session's members have filled its control bucket. A session that has to end
+// must not stay open once the write can succeed, so recordEnd keeps trying in
+// the background, waiting longer before each try, as backoff.New spaces them,
+// until the end is recorded, by recordEnd or anything else, or the session's
+// life ends because it is removed or the coordinator shuts down. It never holds
+// Server.control. The timer that fired stays armed meanwhile, so a member that
+// reconnects after its grace period ran out does not keep the session, and one
+// that disconnects again starts no second grace period. One end at a time is
 // recorded, the first one asked for: the first one recorded wins anyway.
 func (s *Server) recordEnd(a *attempt, value []byte, armed func() bool) {
 	s.mu.Lock()
@@ -607,19 +645,20 @@ func (s *Server) recordEnd(a *attempt, value []byte, armed func() bool) {
 	}
 	go func() {
 		defer s.wg.Done()
-		for wait := firstEndRetry; ; wait = min(2*wait, maxEndRetry) {
+		waits := backoff.New()
+		for try := 1; ; try++ {
 			ctx, cancel := context.WithTimeout(a.life, tryTimeout)
 			err := s.endWith(ctx, a, value)
 			cancel()
 			if err == nil || ended(err) || a.life.Err() != nil {
 				return
 			}
-			if wait == firstEndRetry {
+			if try == 1 {
 				s.log.Error(err, "Ending a session failed; retrying until its end is recorded", "attempt", a.spec.UID,
 					"outcome", outcome)
 			}
 			select {
-			case <-time.After(wait):
+			case <-time.After(waits.Step()):
 			case <-a.life.Done():
 				return
 			}
@@ -631,7 +670,7 @@ func (s *Server) recordEnd(a *attempt, value []byte, armed func() bool) {
 // to close it. It returns nil if it ended the session, and how the session
 // ended if something else ended it first.
 func (s *Server) endWith(ctx context.Context, a *attempt, value []byte) error {
-	_, err := a.snapshot.Create(ctx, session.KeyEnded, value)
+	_, err := a.control.Create(ctx, session.KeyEnded, value)
 	if err == nil {
 		s.end(a, value)
 		return nil
@@ -639,7 +678,7 @@ func (s *Server) endWith(ctx context.Context, a *attempt, value []byte) error {
 	if !errors.Is(err, jetstream.ErrKeyExists) {
 		return err
 	}
-	entry, err := a.snapshot.Get(ctx, session.KeyEnded)
+	entry, err := a.control.Get(ctx, session.KeyEnded)
 	if err != nil {
 		return err
 	}
@@ -654,7 +693,7 @@ func ended(err error) bool {
 }
 
 // end records once how a session ended, from the value of its ended key: it
-// stops the session's deadline and grace timers, and reports the outcome. A
+// stops the session's deadline and grace timers, and logs the outcome. A
 // value that is no condition reason is reported as session.ReasonInvalid, and
 // logged only by its size.
 func (s *Server) end(a *attempt, value []byte) {
@@ -668,11 +707,9 @@ func (s *Server) end(a *attempt, value []byte) {
 	s.mu.Unlock()
 	var abort *session.AbortError
 	if !errors.As(session.EndedError(value), &abort) {
-		s.cfg.Observer.SessionClosed(a.spec.UID)
 		s.log.Info("Session closed", "attempt", a.spec.UID)
 		return
 	}
-	s.cfg.Observer.SessionFailed(a.spec.UID, abort.Reason)
 	log := s.log.WithValues("attempt", a.spec.UID, "reason", abort.Reason)
 	if abort.Reason == session.ReasonInvalid {
 		log = log.WithValues("bytes", len(value))

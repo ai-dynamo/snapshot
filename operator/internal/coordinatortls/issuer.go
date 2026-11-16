@@ -13,9 +13,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 )
 
 // resyncPeriod is how often the Issuer checks the three resources, which also
@@ -169,9 +172,11 @@ func (i *Issuer) ensure(ctx context.Context) error {
 	})
 }
 
-// write creates obj when ensure found it absent, and otherwise updates it on
-// the resourceVersion ensure read, so that a concurrent write makes it fail.
+// write labels obj as the operator's, keeping its other labels. Then it
+// creates obj when ensure found it absent, and otherwise updates it on the
+// resourceVersion ensure read, so that a concurrent write makes it fail.
 func (i *Issuer) write(ctx context.Context, obj client.Object) error {
+	obj.SetLabels(labels.Merge(obj.GetLabels(), operatortypes.Labels()))
 	if obj.GetResourceVersion() == "" {
 		return i.writer.Create(ctx, obj)
 	}

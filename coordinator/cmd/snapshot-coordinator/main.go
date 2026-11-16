@@ -12,6 +12,7 @@ import (
 	"github.com/ai-dynamo/snapshot/coordinator/host"
 	"github.com/ai-dynamo/snapshot/coordinator/server"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
+	"github.com/go-logr/logr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
@@ -24,9 +25,9 @@ const (
 )
 
 func main() {
-	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
-	cfg := bindFlags(flag.CommandLine)
+	cfg, logOpts := bindFlags(flag.CommandLine)
 	flag.Parse()
+	ctrl.SetLogger(newLogger(logOpts))
 
 	restConfig, err := ctrl.GetConfig()
 	if err != nil {
@@ -41,10 +42,16 @@ func main() {
 	}
 }
 
-// bindFlags defines the coordinator's flags on fs, and returns the Config they
-// set once fs has parsed them. The API server's configuration and the logger
-// come from controller-runtime.
-func bindFlags(fs *flag.FlagSet) *host.Config {
+// newLogger returns the logger that the logging options configure.
+func newLogger(opts *zap.Options) logr.Logger { return zap.New(zap.UseFlagOptions(opts)) }
+
+// bindFlags defines the coordinator's flags on fs, controller-runtime's zap
+// flags included, and returns the Config and the logging options they set once
+// fs has parsed them. The API server's configuration comes from
+// controller-runtime. The logging options default to zap's production mode,
+// which logs a malformed logging call instead of panicking, and logs no V(1)
+// line.
+func bindFlags(fs *flag.FlagSet) (*host.Config, *zap.Options) {
 	cfg := &host.Config{}
 	fs.StringVar(&cfg.Node, "node-name", "",
 		"The name of the node the coordinator runs on, the agent Pod's spec.nodeName. Required.")
@@ -70,5 +77,7 @@ func bindFlags(fs *flag.FlagSet) *host.Config {
 		"The largest value a communication library may write to a session.")
 	fs.IntVar(&cfg.MaxLibraryKeys, "max-library-keys", session.MaxLibraryKeys,
 		"How many keys communication libraries may write to each session, deleted ones included.")
-	return cfg
+	logOpts := &zap.Options{}
+	logOpts.BindFlags(fs)
+	return cfg, logOpts
 }

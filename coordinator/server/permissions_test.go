@@ -30,14 +30,22 @@ func TestPermissionsRefuse(t *testing.T) {
 	h := newHarness(t)
 	spec, other := h.ensure(2), h.ensure(1)
 	nc, violations := h.raw(spec, 0)
-	own, theirs := session.SnapshotBucket(string(spec.UID)), session.SnapshotBucket(string(other.UID))
+	control, own := session.ControlBucket(string(spec.UID)), session.SnapshotBucket(string(spec.UID))
+	library := session.LibraryBucket(string(spec.UID))
+	theirs := session.SnapshotBucket(string(other.UID))
 	theirLibrary := session.LibraryBucket(string(other.UID))
 
 	publishes := map[string]string{
-		"writing meta":                           "$KV." + own + ".meta",
-		"another member's arrival":               "$KV." + own + ".barrier.admitted.member-1",
-		"another member's departure":             "$KV." + own + ".left.member-1",
+		"writing meta":                           "$KV." + control + ".meta",
+		"another member's arrival":               "$KV." + control + ".barrier.admitted.member-1",
+		"another member's departure":             "$KV." + control + ".left.member-1",
 		"a key outside every namespace":          "$KV." + own + ".unscoped",
+		"a key outside the library namespace":    "$KV." + library + ".unscoped",
+		"an agent's key in the library bucket":   "$KV." + library + ".snapshot.k",
+		"a library key in the Snapshot bucket":   "$KV." + own + ".library.k",
+		"a key outside the control keys":         "$KV." + control + ".unscoped",
+		"an agent's key in the control bucket":   "$KV." + control + ".snapshot.k",
+		"a control key in the Snapshot bucket":   "$KV." + own + ".ended",
 		"writing another attempt's bucket":       "$KV." + theirs + ".snapshot.k",
 		"writing another attempt's library":      "$KV." + theirLibrary + ".library.k",
 		"reading another attempt's bucket":       "$JS.API.DIRECT.GET.KV_" + theirs + ".$KV." + theirs + ".meta",
@@ -64,16 +72,21 @@ func TestPermissionsRefuse(t *testing.T) {
 		})
 	}
 
-	t.Run("a rollup of its own bucket", func(t *testing.T) {
-		js, err := jetstream.New(nc)
-		require.NoError(t, err)
-		rollup := nats.NewMsg("$KV." + own + ".snapshot.x")
-		rollup.Header.Set(jetstream.MsgRollup, jetstream.MsgRollupAll)
-		_, err = js.PublishMsg(within(t), rollup)
-		requireCode(t, err, codeRollupFailed)
-		_, err = h.srv.lookup(spec.UID).snapshot.Get(within(t), session.KeyMeta)
-		require.NoError(t, err, "meta must stay")
-	})
+	for name, subject := range map[string]string{
+		"a rollup of its own control bucket":  "$KV." + control + "." + session.KeyEnded,
+		"a rollup of its own Snapshot bucket": "$KV." + own + ".snapshot.x",
+	} {
+		t.Run(name, func(t *testing.T) {
+			js, err := jetstream.New(nc)
+			require.NoError(t, err)
+			rollup := nats.NewMsg(subject)
+			rollup.Header.Set(jetstream.MsgRollup, jetstream.MsgRollupAll)
+			_, err = js.PublishMsg(within(t), rollup)
+			requireCode(t, err, codeRollupFailed)
+			_, err = h.srv.lookup(spec.UID).control.Get(within(t), session.KeyMeta)
+			require.NoError(t, err, "meta must stay")
+		})
+	}
 
 	subscriptions := map[string]string{
 		"another member's inbox":    "_INBOX." + string(spec.UID) + ".member-1.>",
@@ -138,7 +151,8 @@ func TestPermissionsConfineAllowedRequests(t *testing.T) {
 	own, theirs := session.SnapshotBucket(string(spec.UID)), session.SnapshotBucket(string(other.UID))
 
 	t.Run("a direct get through its own stream finds nothing of another attempt's", func(t *testing.T) {
-		msg, err := nc.Request("$JS.API.DIRECT.GET.KV_"+own+".$KV."+theirs+".meta", nil, 2*time.Second)
+		msg, err := nc.Request("$JS.API.DIRECT.GET.KV_"+own+".$KV."+session.ControlBucket(string(other.UID))+".meta",
+			nil, 2*time.Second)
 		require.NoError(t, err)
 		assert.Equal(t, "404", msg.Header.Get("Status"))
 		assert.Empty(t, msg.Data)
@@ -153,25 +167,29 @@ func TestPermissionsConfineAllowedRequests(t *testing.T) {
 			[]byte(`{"stream_name":"KV_`+own+`","config":{"name":"c","deliver_subject":"`+deliver+
 				`","ack_policy":"none","filter_subject":"$KV.`+theirs+`.>"}}`), 2*time.Second)
 		require.NoError(t, err)
-		_, err = h.srv.lookup(other.UID).snapshot.Create(within(t), "snapshot.secret", []byte("v"))
+		kv, err := h.srv.js.KeyValue(within(t), theirs)
+		require.NoError(t, err)
+		_, err = kv.Create(within(t), "snapshot.secret", []byte("v"))
 		require.NoError(t, err)
 		_, err = sub.NextMsg(pending)
 		require.ErrorIs(t, err, nats.ErrTimeout, "another attempt's key must not reach this member")
 	})
 }
 
-// TestDeliveriesCannotChangeAnotherAttemptsKeys guards another attempt's keys
-// against a member. JetStream does not bound a push consumer's deliveries by
-// its creator's publish permissions (nats-server#8274), so a member may
-// deliver its own writes to another attempt's subjects. A delivery keeps its
-// original subject, under the member's own bucket, so it can never change
-// another attempt's keys; the test fails if that ever changes.
+// TestDeliveriesCannotChangeAnotherAttemptsKeys checks that a push consumer's
+// deliveries never change another attempt's keys. JetStream does not bound
+// them by their creator's publish permissions (nats-server#8274), so a member
+// may deliver its own writes to another attempt's subjects. A delivery keeps
+// its original subject, under the member's own bucket, so no bucket stores it;
+// the test fails if that ever changes. It covers deliveries only: the
+// permissions guard against an agent's mistakes, not a compromised agent, which
+// could write any key through a request's reply subject.
 func TestDeliveriesCannotChangeAnotherAttemptsKeys(t *testing.T) {
 	h := newHarness(t)
 	ctx := within(t)
 	spec, other := h.ensure(1), h.ensure(1)
-	own, theirs := session.SnapshotBucket(string(spec.UID)), session.SnapshotBucket(string(other.UID))
-	b := h.srv.lookup(other.UID).snapshot
+	own, theirs := session.SnapshotBucket(string(spec.UID)), session.ControlBucket(string(other.UID))
+	b := h.srv.lookup(other.UID).control
 	meta, err := b.Get(ctx, session.KeyMeta)
 	require.NoError(t, err)
 	m := h.connect(spec, 0)
@@ -200,7 +218,7 @@ func TestDeliveriesCannotChangeAnotherAttemptsKeys(t *testing.T) {
 
 	// Had a delivery changed the other attempt's keys, its bucket would have
 	// stored it before this write.
-	_, err = b.Put(ctx, "snapshot.probe", nil)
+	_, err = b.Put(ctx, session.BarrierKey("probe", "member-0"), nil)
 	require.NoError(t, err)
 	_, ok := h.ended(other)
 	assert.False(t, ok, "another attempt's ended key must stay absent")
@@ -210,8 +228,9 @@ func TestDeliveriesCannotChangeAnotherAttemptsKeys(t *testing.T) {
 	assert.Equal(t, meta.Value(), after.Value(), "another attempt's meta must stay unchanged")
 }
 
-// TestDeliveriesCannotReachTheJetStreamAPI guards another attempt's buckets
-// against a member that delivers its own writes to the JetStream API. Members
+// TestDeliveriesCannotReachTheJetStreamAPI checks that a member that delivers
+// its own writes to the JetStream API never acts on another attempt's buckets
+// through them. Members
 // share one account, which imports $JS.API.>, and JetStream does not bound a
 // push consumer's deliveries by its creator's publish permissions
 // (nats-server#8274; its fix, nats-server#8279, was closed, since a client
@@ -219,7 +238,7 @@ func TestDeliveriesCannotChangeAnotherAttemptsKeys(t *testing.T) {
 // the API through the import, but it keeps its original subject, under the
 // member's own bucket, which names no API endpoint, so the API drops it without
 // acting or answering. The test tries purging, deleting, deleting a message
-// of, and updating both of another attempt's streams, and deleting one of their
+// of, and updating each of another attempt's streams, and deleting one of their
 // consumers, with deliveries that carry a reply subject and with ones that do
 // not. It fails if the API ever audits such a delivery, or if the other
 // attempt's streams, meta, consumers, or member change.
@@ -229,13 +248,17 @@ func TestDeliveriesCannotReachTheJetStreamAPI(t *testing.T) {
 	spec, other := h.ensure(1), h.ensure(1)
 	own := session.SnapshotBucket(string(spec.UID))
 	m, theirs := h.connect(spec, 0), h.connect(other, 0)
-	// The library bucket gets a first message, for MSG.DELETE to name, and a
-	// watch, for CONSUMER.DELETE to name.
-	_, err := theirs.library.Put(ctx, "library.k", []byte("v"))
-	require.NoError(t, err)
-	watch, err := theirs.library.Watch(context.Background(), "library.>")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = watch.Stop() })
+	// The Snapshot and library buckets get a first message, for MSG.DELETE to
+	// name, and a watch, for CONSUMER.DELETE to name.
+	for ns, kv := range map[session.Namespace]jetstream.KeyValue{
+		session.NamespaceSnapshot: theirs.snapshot, session.NamespaceLibrary: theirs.library,
+	} {
+		_, err := kv.Put(ctx, string(ns)+".k", []byte("v"))
+		require.NoError(t, err)
+		watch, err := kv.Watch(context.Background(), string(ns)+".>")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = watch.Stop() })
+	}
 
 	// The API audits every request it handles, such as a member's own.
 	audits, err := h.srv.conn.SubscribeSync(natsserver.JSAuditAdvisory)
@@ -248,6 +271,7 @@ func TestDeliveriesCannotReachTheJetStreamAPI(t *testing.T) {
 
 	var probe int
 	buckets := []struct{ label, bucket string }{
+		{"control", session.ControlBucket(string(other.UID))},
 		{"snapshot", session.SnapshotBucket(string(other.UID))},
 		{"library", session.LibraryBucket(string(other.UID))},
 	}
@@ -309,12 +333,12 @@ type streamState struct {
 	Consumers []string
 }
 
-// state returns the state of an attempt, which must have both of its streams.
+// state returns the state of an attempt, which must have its three streams.
 func (h *harness) state(t *testing.T, spec Spec) attemptState {
 	t.Helper()
 	ctx := within(t)
 	state := attemptState{Streams: make(map[string]streamState)}
-	for _, bucket := range []string{session.SnapshotBucket(string(spec.UID)), session.LibraryBucket(string(spec.UID))} {
+	for _, bucket := range session.Buckets(string(spec.UID)) {
 		stream, err := h.srv.js.Stream(ctx, "KV_"+bucket)
 		require.NoError(t, err, "the attempt's stream must exist")
 		info, err := stream.Info(ctx)
@@ -328,7 +352,7 @@ func (h *harness) state(t *testing.T, spec Spec) attemptState {
 		slices.Sort(consumers)
 		state.Streams["KV_"+bucket] = streamState{Config: info.Config, Messages: info.State.Msgs, Consumers: consumers}
 	}
-	meta, err := h.srv.lookup(spec.UID).snapshot.Get(ctx, session.KeyMeta)
+	meta, err := h.srv.lookup(spec.UID).control.Get(ctx, session.KeyMeta)
 	require.NoError(t, err)
 	state.Meta = meta.Revision()
 	return state

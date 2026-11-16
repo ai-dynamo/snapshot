@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"io"
 	"testing"
@@ -11,19 +12,21 @@ import (
 	"github.com/ai-dynamo/snapshot/coordinator/host"
 	"github.com/ai-dynamo/snapshot/coordinator/server"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
 // parse parses args with the coordinator's flags.
-func parse(t *testing.T, args ...string) (host.Config, error) {
+func parse(t *testing.T, args ...string) (host.Config, zap.Options, error) {
 	t.Helper()
 	fs := flag.NewFlagSet("snapshot-coordinator", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	cfg := bindFlags(fs)
+	cfg, logOpts := bindFlags(fs)
 	err := fs.Parse(args)
-	return *cfg, err
+	return *cfg, *logOpts, err
 }
 
 // required are the flags without a default, which the chart sets from the
@@ -47,7 +50,7 @@ func TestFlags(t *testing.T) {
 	}
 
 	t.Run("the defaults", func(t *testing.T) {
-		cfg, err := parse(t, required...)
+		cfg, _, err := parse(t, required...)
 		require.NoError(t, err)
 		want := want
 		want.Port, want.HealthPort = 4224, 4225
@@ -58,7 +61,7 @@ func TestFlags(t *testing.T) {
 	})
 
 	t.Run("every flag", func(t *testing.T) {
-		cfg, err := parse(t, append(required,
+		cfg, _, err := parse(t, append(required,
 			"--port=5001",
 			"--health-port=5002",
 			"--max-memory-bytes=2147483648",
@@ -76,7 +79,44 @@ func TestFlags(t *testing.T) {
 	})
 
 	t.Run("no metrics flag", func(t *testing.T) {
-		_, err := parse(t, "--metrics-bind-address=:8080")
+		_, _, err := parse(t, "--metrics-bind-address=:8080")
 		require.Error(t, err)
+	})
+}
+
+// TestLogging covers the logger the logging flags configure: production mode
+// by default, and zap's flags to change it.
+func TestLogging(t *testing.T) {
+	// logger parses args, and returns the logger they configure and what it
+	// writes.
+	logger := func(t *testing.T, args ...string) (logr.Logger, *bytes.Buffer) {
+		t.Helper()
+		_, logOpts, err := parse(t, append(required, args...)...)
+		require.NoError(t, err)
+		out := &bytes.Buffer{}
+		logOpts.DestWriter = out
+		return newLogger(&logOpts), out
+	}
+
+	t.Run("production mode by default", func(t *testing.T) {
+		log, out := logger(t)
+		log.Info("an Info line")
+		log.V(1).Info("a V(1) line")
+		require.NotPanics(t, func() { log.Info("a malformed line", "a key without a value") })
+		assert.Contains(t, out.String(), `"msg":"an Info line"`, "JSON")
+		assert.NotContains(t, out.String(), "a V(1) line")
+		assert.Contains(t, out.String(), `"msg":"a malformed line"`)
+	})
+
+	t.Run("development mode", func(t *testing.T) {
+		log, out := logger(t, "--zap-devel")
+		log.V(1).Info("a V(1) line")
+		assert.Contains(t, out.String(), "a V(1) line")
+	})
+
+	t.Run("a log level", func(t *testing.T) {
+		log, out := logger(t, "--zap-log-level=debug")
+		log.V(1).Info("a V(1) line")
+		assert.Contains(t, out.String(), `"msg":"a V(1) line"`, "JSON")
 	})
 }

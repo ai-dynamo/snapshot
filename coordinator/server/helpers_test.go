@@ -18,6 +18,7 @@ import (
 
 	"github.com/ai-dynamo/snapshot/coordinator/internal/testcert"
 	"github.com/ai-dynamo/snapshot/coordinator/internal/testclock"
+	"github.com/ai-dynamo/snapshot/coordinator/internal/testlog"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
@@ -33,16 +34,15 @@ import (
 const agentToken = "agent-token"
 
 // harness is a coordinator under test, with a fake clock, an Authorizer the
-// test controls, and an Observer that records what it sees.
+// test controls, and the log of what it does.
 type harness struct {
-	t        *testing.T
-	srv      *Server
-	clock    *testclock.Clock
-	auth     *testAuthorizer
-	observer *recorder
-	logs     *logLines
-	ca       *x509.CertPool
-	cfg      Config
+	t     *testing.T
+	srv   *Server
+	clock *testclock.Clock
+	auth  *testAuthorizer
+	logs  *logLines
+	ca    *x509.CertPool
+	cfg   Config
 }
 
 // newHarness starts a coordinator, marks it ready, and checks that the test
@@ -61,20 +61,19 @@ func startHarness(t *testing.T, modify ...func(*Config)) *harness {
 	t.Helper()
 	ca, cert := testcert.New(t)
 	h := &harness{
-		t:        t,
-		clock:    testclock.New(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)),
-		auth:     &testAuthorizer{},
-		observer: &recorder{},
-		logs:     &logLines{},
-		ca:       ca,
+		t:     t,
+		clock: testclock.New(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)),
+		auth:  &testAuthorizer{},
+		logs:  &logLines{},
+		ca:    ca,
 	}
+	t.Cleanup(func() { h.logs.dumpIfFailed(t) })
 	h.cfg = Config{
 		Host:       "127.0.0.1",
 		Port:       natsserver.RANDOM_PORT,
 		TLS:        &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 		Authorizer: h.auth,
 		Clock:      h.clock,
-		Observer:   h.observer,
 		Log:        h.logs.logger(),
 	}
 	for _, m := range modify {
@@ -124,6 +123,7 @@ func (h *harness) dial(spec Spec, member, token string, epoch uint64, opts ...na
 	uid := string(spec.UID)
 	return nats.Connect("tls://"+h.srv.Addr().String(), append([]nats.Option{
 		nats.Secure(&tls.Config{RootCAs: h.ca, ServerName: "localhost", MinVersion: tls.VersionTLS12}),
+		nats.TLSHandshakeFirst(),
 		nats.UserInfo(session.UserName(uid, member), password),
 		nats.Token(token),
 		nats.CustomInboxPrefix(session.InboxPrefix(uid, member)),
@@ -132,15 +132,18 @@ func (h *harness) dial(spec Spec, member, token string, epoch uint64, opts ...na
 }
 
 // member is one member's connection, which the tests drive in place of the
-// session client: it has bound both of the attempt's buckets and read Meta,
+// session client: it has bound the attempt's buckets and read Meta,
 // and, like the client, it follows the ended key and closes its connection
 // once the session has ended.
 type member struct {
-	id                string
-	nc                *nats.Conn
-	snapshot, library jetstream.KeyValue
-	meta              session.Meta
-	done              chan struct{}
+	id                         string
+	nc                         *nats.Conn
+	control, snapshot, library jetstream.KeyValue
+	// buckets holds the same buckets by name.
+	buckets map[string]jetstream.KeyValue
+	meta    session.Meta
+	uid     types.UID
+	done    chan struct{}
 	// err is how the session ended, set before done is closed.
 	err error
 }
@@ -149,25 +152,29 @@ type member struct {
 func (h *harness) connect(spec Spec, i int) *member {
 	h.t.Helper()
 	ctx := within(h.t)
-	m := &member{id: spec.Members[i].ID, done: make(chan struct{})}
+	m := &member{id: spec.Members[i].ID, uid: spec.UID, buckets: make(map[string]jetstream.KeyValue),
+		done: make(chan struct{})}
 	var err error
 	m.nc, err = h.dial(spec, m.id, agentToken, 0)
 	require.NoError(h.t, err)
 	h.t.Cleanup(m.nc.Close)
 	js, err := jetstream.New(m.nc)
 	require.NoError(h.t, err)
-	m.snapshot, err = js.KeyValue(ctx, session.SnapshotBucket(string(spec.UID)))
-	require.NoError(h.t, err)
-	m.library, err = js.KeyValue(ctx, session.LibraryBucket(string(spec.UID)))
-	require.NoError(h.t, err)
-	entry, err := m.snapshot.Get(ctx, session.KeyMeta)
+	for _, bucket := range session.Buckets(string(spec.UID)) {
+		m.buckets[bucket], err = js.KeyValue(ctx, bucket)
+		require.NoError(h.t, err)
+	}
+	m.control = m.buckets[session.ControlBucket(string(spec.UID))]
+	m.snapshot = m.buckets[session.SnapshotBucket(string(spec.UID))]
+	m.library = m.buckets[session.LibraryBucket(string(spec.UID))]
+	entry, err := m.control.Get(ctx, session.KeyMeta)
 	require.NoError(h.t, err)
 	require.NoError(h.t, json.Unmarshal(entry.Value(), &m.meta))
 
 	// The watch lives until cancel; its channel closes once its subscription
 	// has, which closing the connection does too.
 	life, cancel := context.WithCancel(context.Background())
-	w, err := m.snapshot.Watch(life, session.KeyEnded)
+	w, err := m.control.Watch(life, session.KeyEnded)
 	if err != nil {
 		cancel()
 		require.NoError(h.t, err)
@@ -209,12 +216,13 @@ func (m *member) Err() error {
 	}
 }
 
-// bucket returns the bucket that holds a namespace.
+// bucket returns the bucket that holds a namespace, one of package session's.
 func (m *member) bucket(ns session.Namespace) jetstream.KeyValue {
-	if ns == session.NamespaceLibrary {
-		return m.library
+	bucket, err := ns.Bucket(string(m.uid))
+	if err != nil {
+		panic(err)
 	}
-	return m.snapshot
+	return m.buckets[bucket]
 }
 
 // insert creates key in a namespace.
@@ -225,7 +233,7 @@ func (m *member) insert(ctx context.Context, ns session.Namespace, key string, v
 
 // arrive records the member's arrival at a barrier.
 func (m *member) arrive(ctx context.Context, barrier string) error {
-	_, err := m.snapshot.Put(ctx, session.BarrierKey(barrier, m.id), nil)
+	_, err := m.control.Put(ctx, session.BarrierKey(barrier, m.id), nil)
 	return err
 }
 
@@ -234,7 +242,7 @@ func (m *member) arrive(ctx context.Context, barrier string) error {
 // watch may see that, and close the connection, before the write's reply
 // arrives.
 func (m *member) leave(ctx context.Context) error {
-	_, err := m.snapshot.Put(ctx, session.LeftKey(m.id), nil)
+	_, err := m.control.Put(ctx, session.LeftKey(m.id), nil)
 	if err != nil && errors.Is(m.Err(), session.ErrClosed) {
 		return nil
 	}
@@ -246,7 +254,7 @@ func (m *member) leave(ctx context.Context) error {
 // may see the ended key, and close the connection, before the write's reply
 // arrives.
 func (m *member) fail(ctx context.Context, reason string) error {
-	_, err := m.snapshot.Create(ctx, session.KeyEnded, []byte(reason))
+	_, err := m.control.Create(ctx, session.KeyEnded, []byte(reason))
 	if err != nil && errors.Is(m.Err(), &session.AbortError{Reason: reason}) {
 		return nil
 	}
@@ -289,7 +297,7 @@ func (h *harness) ended(spec Spec) (string, bool) {
 	h.t.Helper()
 	a := h.srv.lookup(spec.UID)
 	require.NotNil(h.t, a)
-	entry, err := a.snapshot.Get(within(h.t), session.KeyEnded)
+	entry, err := a.control.Get(within(h.t), session.KeyEnded)
 	if err != nil {
 		return "", false
 	}
@@ -349,16 +357,23 @@ func within(t *testing.T) context.Context {
 }
 
 // testAuthorizer admits agentToken, and returns err for any other, or for
-// every token while err is set.
+// every token while err is set. Like an Authorizer that checks a member's
+// placement, it refuses an attempt's member with session.ErrNotFound while
+// the attempt is unplaced, unless the coordinator does not hold the attempt.
 type testAuthorizer struct {
-	mu    sync.Mutex
-	err   error
-	calls atomic.Int64
+	mu       sync.Mutex
+	err      error
+	unplaced bool
+	calls    atomic.Int64
+	// held is what the last call was told of whether the coordinator holds the
+	// attempt.
+	held atomic.Bool
 }
 
 // Authorize implements Authorizer.
-func (a *testAuthorizer) Authorize(_ context.Context, _ types.UID, _, token string) error {
+func (a *testAuthorizer) Authorize(_ context.Context, _ types.UID, _, token string, held bool) error {
 	a.calls.Add(1)
+	a.held.Store(held)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	switch {
@@ -366,8 +381,19 @@ func (a *testAuthorizer) Authorize(_ context.Context, _ types.UID, _, token stri
 		return a.err
 	case token != agentToken:
 		return ErrUnauthenticated
+	case held && a.unplaced:
+		return session.ErrNotFound
 	}
 	return nil
+}
+
+// unplace makes the Authorizer refuse the members of every attempt the
+// coordinator holds with session.ErrNotFound, as one that checks their
+// placement does once their group resource is gone, or admit them again.
+func (a *testAuthorizer) unplace(unplaced bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.unplaced = unplaced
 }
 
 // fail makes the Authorizer return err for every token, or admit agentToken
@@ -378,43 +404,8 @@ func (a *testAuthorizer) fail(err error) {
 	a.err = err
 }
 
-// recorder is an Observer that records what it sees.
-type recorder struct {
-	mu     sync.Mutex
-	events []string
-}
-
-func (r *recorder) record(event string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.events = append(r.events, event)
-}
-
-// SessionOpened implements Observer.
-func (r *recorder) SessionOpened(uid types.UID) { r.record("opened " + string(uid)) }
-
-// SessionClosed implements Observer.
-func (r *recorder) SessionClosed(uid types.UID) { r.record("closed " + string(uid)) }
-
-// SessionFailed implements Observer.
-func (r *recorder) SessionFailed(uid types.UID, reason string) {
-	r.record("failed " + string(uid) + " " + reason)
-}
-
-// of returns what the recorder saw of one attempt.
-func (r *recorder) of(uid types.UID) []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	var events []string
-	for _, e := range r.events {
-		var kind, id string
-		_, _ = fmt.Sscanf(e, "%s %s", &kind, &id)
-		if id == string(uid) {
-			events = append(events, e)
-		}
-	}
-	return events
-}
+// events returns what the coordinator logged of the life of spec's session.
+func (h *harness) events(spec Spec) []string { return testlog.SessionEvents(h.logs.all(), spec.UID) }
 
 // logLines records every log line.
 type logLines struct {
@@ -434,4 +425,15 @@ func (l *logLines) all() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return append([]string(nil), l.lines...)
+}
+
+// dumpIfFailed logs every line to t if t has failed, so a failure shows what
+// the coordinator did before it.
+func (l *logLines) dumpIfFailed(t *testing.T) {
+	if !t.Failed() {
+		return
+	}
+	for _, line := range l.all() {
+		t.Logf("coordinator: %s", line)
+	}
 }

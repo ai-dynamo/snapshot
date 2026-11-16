@@ -35,8 +35,7 @@ type Options struct {
 	// EnableStartupGate replaces each destination container's startup probe
 	// with a restore-completion gate. It applies to standalone restores, whose
 	// workload owners opt in when Kubernetes must withhold readiness and
-	// liveness until restore completes. A group target always carries the
-	// gate: BuildGroupTarget adds it whatever this field says.
+	// liveness until restore completes.
 	EnableStartupGate bool
 }
 
@@ -57,7 +56,8 @@ func Build(pod *corev1.Pod, request Request, options Options) (*corev1.Pod, erro
 	if err := ensureRestoreAnnotations(result, request); err != nil {
 		return nil, err
 	}
-	if err := ensureRestorePodSpec(&result.Spec, destinationsOf(request.Mappings), options); err != nil {
+	if err := ensureRestorePodSpec(&result.Spec, destinationsOf(request.Mappings), options,
+		restoreStartupFailureThreshold); err != nil {
 		return nil, err
 	}
 	if err := validateCanonicalRestorePod(result, request, options); err != nil {
@@ -92,7 +92,8 @@ func validateCanonicalRestorePod(pod *corev1.Pod, request Request, options Optio
 	if err := validateMinimumRestorePod(pod, request); err != nil {
 		return err
 	}
-	return validateCanonicalDestinations(&pod.Spec, destinationsOf(request.Mappings), options)
+	return validateCanonicalDestinations(&pod.Spec, destinationsOf(request.Mappings), options,
+		restoreStartupFailureThreshold)
 }
 
 // destinationsOf returns the destination containers of a restore's mappings.
@@ -130,12 +131,14 @@ func validateRestoreDestinations(spec *corev1.PodSpec, destinations []string) er
 
 // validateCanonicalDestinations checks the producer policy that options ask
 // for on each destination container, which validateRestoreDestinations has
-// already found.
-func validateCanonicalDestinations(spec *corev1.PodSpec, destinations []string, options Options) error {
+// already found. The startup gate must allow startupFailureThreshold failures.
+func validateCanonicalDestinations(
+	spec *corev1.PodSpec, destinations []string, options Options, startupFailureThreshold int32,
+) error {
 	for _, name := range destinations {
 		container := findContainer(spec, name)
 		if options.EnableStartupGate {
-			if err := validateCanonicalRestoreStartupProbe(container); err != nil {
+			if err := validateCanonicalRestoreStartupProbe(container, startupFailureThreshold); err != nil {
 				return err
 			}
 		}
@@ -261,8 +264,11 @@ func sameContainerMappings(left, right []ContainerMapping) bool {
 
 // ensureRestorePodSpec shapes the Pod's side of a restore: the control volume,
 // and on each destination container the seccomp profile, the control mount and
-// environment, and the startup gate when options ask for them.
-func ensureRestorePodSpec(spec *corev1.PodSpec, destinations []string, options Options) error {
+// environment, and the startup gate when options ask for them. The startup gate
+// allows startupFailureThreshold failures.
+func ensureRestorePodSpec(
+	spec *corev1.PodSpec, destinations []string, options Options, startupFailureThreshold int32,
+) error {
 	if err := ensureControlVolume(spec); err != nil {
 		return err
 	}
@@ -281,7 +287,7 @@ func ensureRestorePodSpec(spec *corev1.PodSpec, destinations []string, options O
 			return err
 		}
 		if options.EnableStartupGate {
-			ensureRestoreStartupProbe(container)
+			ensureRestoreStartupProbe(container, startupFailureThreshold)
 		}
 	}
 	return nil
@@ -463,24 +469,26 @@ func hasValidControlEnv(container *corev1.Container, name string) (bool, error) 
 	return found, nil
 }
 
-func ensureRestoreStartupProbe(container *corev1.Container) {
-	container.StartupProbe = canonicalRestoreStartupProbe()
+func ensureRestoreStartupProbe(container *corev1.Container, failureThreshold int32) {
+	container.StartupProbe = canonicalRestoreStartupProbe(failureThreshold)
 }
 
-func canonicalRestoreStartupProbe() *corev1.Probe {
+// canonicalRestoreStartupProbe returns the restore-completion gate: one check
+// a second, failing the container after failureThreshold misses.
+func canonicalRestoreStartupProbe(failureThreshold int32) *corev1.Probe {
 	return &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{
 			Command: []string{"cat", path.Join(SnapshotControlMountPath, RestoreCompleteFile)},
 		}},
 		TimeoutSeconds:   1,
 		PeriodSeconds:    1,
-		FailureThreshold: restoreStartupFailureThreshold,
+		FailureThreshold: failureThreshold,
 		SuccessThreshold: 1,
 	}
 }
 
-func validateCanonicalRestoreStartupProbe(container *corev1.Container) error {
-	if !reflect.DeepEqual(container.StartupProbe, canonicalRestoreStartupProbe()) {
+func validateCanonicalRestoreStartupProbe(container *corev1.Container, failureThreshold int32) error {
+	if !reflect.DeepEqual(container.StartupProbe, canonicalRestoreStartupProbe(failureThreshold)) {
 		return fmt.Errorf("container %q has a conflicting restore startup gate", container.Name)
 	}
 	return nil
