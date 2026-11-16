@@ -359,6 +359,17 @@ true
 {{/* Where the coordinator reads tls.crt and tls.key. */}}
 {{- define "snapshot.coordinatorTLSDir" -}}/etc/snapshot-coordinator/tls{{- end -}}
 
+{{/* The sizeLimit of the coordinator's /tmp, in bytes. /tmp holds the control
+     buckets' file store, which coordinator.maxMemoryBytes bounds, and
+     JetStream's own files, which the margin covers. So the coordinator refuses
+     a write before the kubelet would evict the Pod. Only an agent that
+     misbehaves on purpose can write consumer files outside that bound, and
+     eviction stays the backstop. */}}
+{{- define "snapshot.coordinatorTmpSizeLimit" -}}
+{{- $jetStreamMargin := include "snapshot.quantityBytes" "64Mi" | int64 -}}
+{{- add (int64 .Values.coordinator.maxMemoryBytes) $jetStreamMargin -}}
+{{- end -}}
+
 {{/* Fails the render on a coordinator setting that is mixed or ambiguous.
      Called once from daemonset.yaml, with podGroups.enabled. */}}
 {{- define "snapshot.validateCoordinator" -}}

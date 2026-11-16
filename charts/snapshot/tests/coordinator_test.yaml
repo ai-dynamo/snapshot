@@ -36,7 +36,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.volumes[?(@.name == "coordinator-tmp")].emptyDir.sizeLimit
-          value: 75497472
+          value: "75497472"
       - contains:
           path: spec.template.spec.containers[?(@.name == "coordinator")].args
           content: --max-memory-bytes=8388608
@@ -268,7 +268,7 @@ tests:
             name: coordinator-tmp
             emptyDir:
               # maxMemoryBytes, 1 GiB, plus 64 MiB.
-              sizeLimit: 1140850688
+              sizeLimit: "1140850688"
       # Only the coordinator mounts them.
       - notContains:
           path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
