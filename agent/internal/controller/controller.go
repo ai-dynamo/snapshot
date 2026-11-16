@@ -1205,16 +1205,15 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		if errors.As(err, &incompatible) {
 			// The placeholder is left running: killing it restarts the container
 			// straight back into the same refusal.
-			op.forgetAttempts(ctx)
+			if record.Limit > 0 {
+				op.forgetAttempts(ctx)
+			}
 			return incompatible
 		}
 
 		var cleanupErr *executor.RestoreCleanupError
 		if !errors.As(err, &cleanupErr) {
-			if stopped {
-				err = stoppedDuringAttempt(err)
-			}
-			return op.attemptFailed(ctx, restoreCtx, record, err)
+			return op.attemptFailed(ctx, restoreCtx, record, err, stopped)
 		}
 		logWithStep(op.log, err).Error(cleanupErr, "Restore completed with cleanup errors")
 		emitPodEvent(ctx, w.clientset, op.log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreCleanupFailed", cleanupErr.Error())

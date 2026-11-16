@@ -26,12 +26,10 @@ func TestRunRestoreEndsAnAttemptWhoseContainerStopped(t *testing.T) {
 	h.w.restoreFn = func(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req executor.RestoreRequest, mounter executor.RestoreMounter) (executor.RestoreResult, error) {
 		_, _ = restore(ctx, rt, log, req, mounter)
 		h.w.RestoreContainerStopped(h.pod.UID, "main", "ctr-abc")
-		select {
-		case <-ctx.Done():
-			return executor.RestoreResult{}, untouched(ctx.Err())
-		case <-time.After(5 * time.Second):
+		if ctx.Err() == nil {
 			return executor.RestoreResult{}, untouched(errors.New("the attempt was not ended"))
 		}
+		return executor.RestoreResult{}, untouched(ctx.Err())
 	}
 
 	err := run()
@@ -130,7 +128,9 @@ func TestRunRestoreEndsOnlyTheAttemptInTheStoppedContainer(t *testing.T) {
 
 func TestRunRestoreDoesNotTakeTheDeadlineForAStop(t *testing.T) {
 	h, run := newAttemptHarness(t, retryLimit("2"), nil)
-	h.volume.put(t, "host-uid", "main", restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(50 * time.Millisecond), ContainerID: "ctr-abc"})
+	// The attempt starts by the agent's clock, and its context has already ended by the real one.
+	h.now = h.now.Add(-time.Minute)
+	h.volume.put(t, "host-uid", "main", restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(time.Second), ContainerID: "ctr-abc"})
 	h.w.restoreFn = func(ctx context.Context, _ snapshotruntime.Runtime, _ logr.Logger, _ executor.RestoreRequest, _ executor.RestoreMounter) (executor.RestoreResult, error) {
 		<-ctx.Done()
 		return executor.RestoreResult{}, untouched(ctx.Err())
@@ -157,7 +157,7 @@ func TestStoppedDuringAttempt(t *testing.T) {
 	notFound := pagebroker.NewFailureError(pagebroker.Failure_ARTIFACT_NOT_FOUND, "no such artifact")
 	original := untouched(notFound)
 
-	got := restoreFailureOf(stoppedDuringAttempt(original))
+	got := stoppedDuringAttempt(original)
 
 	assert.Equal(t, executor.StepPrepareRestore, got.Step)
 	assert.True(t, got.ContainerChanged)

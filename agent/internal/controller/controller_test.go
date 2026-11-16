@@ -1984,10 +1984,7 @@ func TestRunRestoreFailureMarksUnresolvedContainerThroughHostPath(t *testing.T) 
 			err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{}, false)
 
 			require.Error(t, err)
-			assert.Equal(t, []string{
-				tc.want + "/main/" + podcontract.RestoreAttemptsFile,
-				tc.want + "/main/" + podcontract.RestoreFailedFile,
-			}, written)
+			assert.Equal(t, []string{tc.want + "/main/" + podcontract.RestoreFailedFile}, written)
 		})
 	}
 }
@@ -2020,7 +2017,6 @@ func TestRunRestoreFailureMarksAStoppedContainerThroughHostPath(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Equal(t, []string{
-		"write host-uid/main/" + podcontract.RestoreAttemptsFile,
 		"write 4242 " + podcontract.RestoreFailedFile,
 		"write host-uid/main/" + podcontract.RestoreFailedFile,
 		"kill",

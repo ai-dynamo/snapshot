@@ -135,17 +135,19 @@ func restoreFailureOf(err error) *executor.RestoreFailure {
 
 // attemptFailed chooses what follows a failed attempt. A retry in the same
 // container is saved in the record for a later pass to start; anything else
-// ends the restore, including a failure that changed the container. An agent
-// that is stopping chooses nothing: it may stop halfway through, and the next
-// agent finds the attempt unfinished instead.
-func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, record *restoreAttempts, err error) error {
+// ends the restore, including a failure that changed the container. A stop
+// changed it, whether it was reported during the attempt, as stopped says, or
+// the runtime shows it now. An agent that is stopping chooses nothing: it may
+// stop halfway through, and the next agent finds the attempt unfinished
+// instead.
+func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, record *restoreAttempts, err error, stopped bool) error {
 	if ctx.Err() != nil {
 		op.log.Info("Agent stopping; leaving the restore attempt to the next agent", "error", err.Error())
 		return errRestoreInterrupted
 	}
 	failure := restoreFailureOf(err)
-	if !failure.ContainerChanged && record.Limit > 0 && op.containerStopped(ctx) {
-		failure = restoreFailureOf(stoppedDuringAttempt(failure))
+	if stopped || (!failure.ContainerChanged && record.Limit > 0 && !op.containerRunning(ctx)) {
+		failure = stoppedDuringAttempt(failure)
 		err = failure
 	}
 	now := op.controller.nowFn()
@@ -183,15 +185,15 @@ func whyNotRetried(f *executor.RestoreFailure, ctxErr error) string {
 	}
 }
 
-// containerStopped reports whether the attempt's container no longer runs,
-// which the attempt's own error may not show.
-func (op *restoreOperation) containerStopped(ctx context.Context) bool {
+// containerRunning reports whether the attempt's container still runs, which
+// the attempt's own error may not show.
+func (op *restoreOperation) containerRunning(ctx context.Context) bool {
 	running, err := op.controller.runtime.ContainerRunning(ctx, op.containerID)
 	if err != nil {
 		op.log.V(1).Info("Cannot read the container's state; taking it as running", "error", err.Error())
-		return false
+		return true
 	}
-	return !running
+	return running
 }
 
 // watchContainer returns the attempt's context, which RestoreContainerStopped
@@ -214,9 +216,9 @@ func (op *restoreOperation) watchContainer(ctx context.Context, record *restoreA
 
 // stoppedDuringAttempt names the stop as the failure's cause, since the
 // attempt itself saw only its context end.
-func stoppedDuringAttempt(err error) error {
-	stopped := *restoreFailureOf(err)
-	stopped.Cause = fmt.Errorf("%w: %w", errContainerStopped, stopped.Cause)
+func stoppedDuringAttempt(f *executor.RestoreFailure) *executor.RestoreFailure {
+	stopped := *f
+	stopped.Cause = fmt.Errorf("%w: %w", errContainerStopped, f.Cause)
 	stopped.ContainerChanged = true
 	return &stopped
 }
