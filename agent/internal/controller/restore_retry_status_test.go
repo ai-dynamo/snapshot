@@ -85,10 +85,6 @@ func TestRunRestoreRecordsTheLastFailure(t *testing.T) {
 			limit: "2", failure: untouched(pagebroker.NewFailureError(pagebroker.Failure_ARTIFACT_NOT_FOUND, "gone")),
 			want: podcontract.FailureSummary{Step: "preparing PageBroker restore", Cause: "PageBroker ARTIFACT_NOT_FOUND: gone", SnapshotUnusable: true},
 		},
-		"ended without retries": {
-			limit: "0", failure: untouched(storeUnreachable),
-			want: podcontract.FailureSummary{Step: "preparing PageBroker restore", Cause: "PageBroker STORAGE_UNAVAILABLE: store unreachable"},
-		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h, run := newAttemptHarness(t, retryLimit(tc.limit), nil)
@@ -121,7 +117,6 @@ func TestRunRestoreSavesTheEndingFailureAfterRestoreFailed(t *testing.T) {
 		"no retries left": {limit: "1", failure: untouched(storeUnreachable), record: func(h *attemptHarness) restoreAttempts {
 			return restoreAttempts{Limit: 1, Attempt: 1, Deadline: h.now.Add(10 * time.Minute), ContainerID: "ctr-abc", RetryAt: h.now.Add(-time.Second)}
 		}},
-		"without retries": {limit: "0", failure: untouched(storeUnreachable)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h, run := newAttemptHarness(t, retryLimit(tc.limit), nil)
@@ -212,6 +207,7 @@ type retryStatusHarness struct {
 func newRetryStatusHarness(t *testing.T) *retryStatusHarness {
 	t.Helper()
 	pod := multiRestorePod()
+	pod.Annotations[podcontract.RestoreRetryLimitAnnotation] = "2"
 	w := makeTestController(t, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 4242, podUID: "host-uid"}
 	return &retryStatusHarness{
@@ -360,6 +356,17 @@ func TestPublishRetryStatusWritesNothing(t *testing.T) {
 			assert.Empty(t, h.applies())
 		})
 	}
+}
+
+// A restore without retries keeps no record, so the pass reads none.
+func TestPublishRetryStatusReadsNothingWithoutRetries(t *testing.T) {
+	h := newRetryStatusHarness(t)
+	h.pod.Annotations[podcontract.RestoreRetryLimitAnnotation] = "0"
+
+	h.publish()
+
+	assert.Empty(t, h.volume.reads)
+	assert.Empty(t, h.applies())
 }
 
 func TestPublishRetryStatusReadsUnderThePodsNodeUID(t *testing.T) {

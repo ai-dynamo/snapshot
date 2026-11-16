@@ -168,10 +168,6 @@ func (h *attemptHarness) events(reason string) []string {
 	return messages
 }
 
-func retryLimit(limit string) map[string]string {
-	return map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a", podcontract.RestoreRetryLimitAnnotation: limit}
-}
-
 func TestRunRestoreRetriesInPlaceOnceEachRetryIsDue(t *testing.T) {
 	h, run := newAttemptHarness(t, retryLimit("2"), nil)
 	h.w.config.Restore.TimeoutSeconds = 600
@@ -256,7 +252,9 @@ func TestRunRestoreEndsWithoutRetryingWhatNoAttemptChanges(t *testing.T) {
 
 func TestRunRestoreEndsWhenTheAttemptTimedOut(t *testing.T) {
 	h, run := newAttemptHarness(t, retryLimit("2"), nil)
-	h.volume.put(t, "host-uid", "main", restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(50 * time.Millisecond), ContainerID: "ctr-abc"})
+	// The attempt starts by the agent's clock, and its context has already ended by the real one.
+	h.now = h.now.Add(-time.Minute)
+	h.volume.put(t, "host-uid", "main", restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(time.Second), ContainerID: "ctr-abc"})
 	restore := h.w.restoreFn
 	h.w.restoreFn = func(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req executor.RestoreRequest, mounter executor.RestoreMounter) (executor.RestoreResult, error) {
 		_, _ = restore(ctx, rt, log, req, mounter)
@@ -324,6 +322,8 @@ func TestRunRestoreWithoutRetriesFailsAsBefore(t *testing.T) {
 
 	assert.Same(t, failure, err)
 	assert.Equal(t, []string{"write " + podcontract.RestoreFailedFile, "kill"}, h.calls)
+	assert.Empty(t, h.volume.reads)
+	assert.Empty(t, h.volume.writes)
 	assert.Equal(t, []string{"Restore requested from PodSnapshot snapshot-a for destination main"}, h.events(restoreRequestedReason))
 	assert.Empty(t, h.events(restoreAttemptFailedReason))
 	assert.Empty(t, h.events(restoreRetriesExhaustedReason))
