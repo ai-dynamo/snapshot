@@ -107,8 +107,8 @@ func transient(err error) bool {
 // throttled reports whether err says the coordinator is too busy for the
 // operation now: a write dropped for a full ingest queue, or a watch refused at
 // its bucket's consumer limit. It is sent again after a wait that grows while
-// the coordinator stays busy, so many clients do not press it at the pace they
-// retry.
+// the coordinator stays busy, with jitter, so many clients do not press it
+// together.
 func throttled(err error) bool {
 	code, _ := apiError(err)
 	return code == jsMaximumConsumers || code == jsTooManyRequests

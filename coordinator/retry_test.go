@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/coordinator/internal/backoff"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -27,29 +28,15 @@ func testClient(t *testing.T) *client {
 	return s
 }
 
-// TestBackoff covers the waits between the resends of an operation the
-// coordinator is too busy for: they double up to a cap, and start again after
-// reset.
-func TestBackoff(t *testing.T) {
-	var b backoff
-	var waits []time.Duration
-	for range 6 {
-		waits = append(waits, b.next())
-	}
-	assert.Equal(t, []time.Duration{retryWait, 2 * retryWait, 4 * retryWait, 8 * retryWait, maxRetryWait,
-		maxRetryWait}, waits)
-	b.reset()
-	assert.Equal(t, retryWait, b.next())
-}
-
-// TestDoRetriesWhenTheCoordinatorIsBusy covers a write that the server drops
-// because the stream's ingest queue is full, and a watch refused at its
-// bucket's consumer limit: do sends the operation again, each time after a
-// longer wait, until it succeeds.
-func TestDoRetriesWhenTheCoordinatorIsBusy(t *testing.T) {
-	for name, code := range map[string]int{
-		"a full ingest queue":   jsTooManyRequests,
-		"a bucket at its limit": jsMaximumConsumers,
+// TestDoWaitsLongerEachTry covers an operation that fails transiently: a write
+// the server drops because the stream's ingest queue is full, a watch refused
+// at its bucket's consumer limit, and an answer the broken connection lost. do
+// sends it again, each time after a longer wait, until it succeeds.
+func TestDoWaitsLongerEachTry(t *testing.T) {
+	for name, fail := range map[string]error{
+		"a full ingest queue":   &jetstream.APIError{ErrorCode: jsTooManyRequests},
+		"a bucket at its limit": &nats.APIError{ErrorCode: jsMaximumConsumers},
+		"a broken connection":   errRetry,
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := testClient(t)
@@ -57,13 +44,14 @@ func TestDoRetriesWhenTheCoordinatorIsBusy(t *testing.T) {
 			err := s.do(context.Background(), func(context.Context) error {
 				tries = append(tries, time.Now())
 				if len(tries) <= 3 {
-					return &nats.APIError{ErrorCode: nats.ErrorCode(code)}
+					return fail
 				}
 				return nil
 			})
 			require.NoError(t, err)
 			require.Len(t, tries, 4)
-			for i, want := range []time.Duration{retryWait, 2 * retryWait, 4 * retryWait} {
+			first := backoff.New().Duration
+			for i, want := range []time.Duration{first, 2 * first, 4 * first} {
 				assert.GreaterOrEqual(t, tries[i+1].Sub(tries[i]), want, "the wait before try %d", i+2)
 			}
 		})

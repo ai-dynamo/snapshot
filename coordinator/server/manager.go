@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/coordinator/internal/backoff"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go/jetstream"
@@ -421,8 +422,8 @@ func (s *Server) watch(ctx context.Context, a *attempt) (jetstream.KeyWatcher, f
 	}, nil
 }
 
-// rewatch watches a session again once its watch has stopped, waiting from
-// firstEndRetry up to maxEndRetry before each try, until a watch starts. It
+// rewatch watches a session again once its watch has stopped, waiting longer
+// before each try, as backoff.New spaces them, until a watch starts. It
 // returns a nil watch once the session's life has ended, or the coordinator's
 // connection has closed, which a coordinator that stops without shutting down
 // does, and which leaves nothing to watch with.
@@ -435,9 +436,10 @@ func (s *Server) rewatch(a *attempt) (jetstream.KeyWatcher, func()) {
 	default:
 	}
 	s.log.Info("The session's watch stopped; watching again", "attempt", a.spec.UID)
-	for wait := firstEndRetry; ; wait = min(2*wait, maxEndRetry) {
+	waits := backoff.New()
+	for try := 1; ; try++ {
 		select {
-		case <-time.After(wait):
+		case <-time.After(waits.Step()):
 		case <-a.life.Done():
 			return nil, nil
 		case <-s.connClosed:
@@ -451,7 +453,7 @@ func (s *Server) rewatch(a *attempt) (jetstream.KeyWatcher, func()) {
 			return w, stop
 		case a.life.Err() != nil:
 			return nil, nil
-		case wait == firstEndRetry:
+		case try == 1:
 			s.log.Error(err, "Watching the session again failed; retrying", "attempt", a.spec.UID)
 		}
 	}
@@ -534,13 +536,6 @@ func (s *Server) Remove(ctx context.Context, uid types.UID) error {
 // a session again.
 const tryTimeout = 5 * time.Second
 
-// The wait between tries to record a session's end, or to watch a session
-// again: it starts at firstEndRetry and doubles up to maxEndRetry.
-const (
-	firstEndRetry = 100 * time.Millisecond
-	maxEndRetry   = time.Second
-)
-
 // always arms recordEnd whatever calls it: closing a session every member has
 // left.
 func always() bool { return true }
@@ -555,13 +550,13 @@ func always() bool { return true }
 //
 // Recording the end can fail, such as when the write times out, or when the
 // session's members have filled its control bucket. A session that has to end
-// must not stay open once the write can succeed, so recordEnd keeps trying in the
-// background, waiting from firstEndRetry up to maxEndRetry, until the end is
-// recorded, by recordEnd or anything else, or the session's life ends because
-// it is removed or the coordinator shuts down. It never holds Server.control.
-// The timer that fired stays armed meanwhile, so a member that reconnects
-// after its grace period ran out does not keep the session, and one that
-// disconnects again starts no second grace period. One end at a time is
+// must not stay open once the write can succeed, so recordEnd keeps trying in
+// the background, waiting longer before each try, as backoff.New spaces them,
+// until the end is recorded, by recordEnd or anything else, or the session's
+// life ends because it is removed or the coordinator shuts down. It never holds
+// Server.control. The timer that fired stays armed meanwhile, so a member that
+// reconnects after its grace period ran out does not keep the session, and one
+// that disconnects again starts no second grace period. One end at a time is
 // recorded, the first one asked for: the first one recorded wins anyway.
 func (s *Server) recordEnd(a *attempt, value []byte, armed func() bool) {
 	s.mu.Lock()
@@ -580,19 +575,20 @@ func (s *Server) recordEnd(a *attempt, value []byte, armed func() bool) {
 	}
 	go func() {
 		defer s.wg.Done()
-		for wait := firstEndRetry; ; wait = min(2*wait, maxEndRetry) {
+		waits := backoff.New()
+		for try := 1; ; try++ {
 			ctx, cancel := context.WithTimeout(a.life, tryTimeout)
 			err := s.endWith(ctx, a, value)
 			cancel()
 			if err == nil || ended(err) || a.life.Err() != nil {
 				return
 			}
-			if wait == firstEndRetry {
+			if try == 1 {
 				s.log.Error(err, "Ending a session failed; retrying until its end is recorded", "attempt", a.spec.UID,
 					"outcome", outcome)
 			}
 			select {
-			case <-time.After(wait):
+			case <-time.After(waits.Step()):
 			case <-a.life.Done():
 				return
 			}

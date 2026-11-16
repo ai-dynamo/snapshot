@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/coordinator/internal/backoff"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/go-logr/logr"
 	"github.com/nats-io/nats.go"
@@ -317,7 +318,7 @@ func (s *client) Fail(ctx context.Context, reason string) error {
 
 // do runs op, sending it again while it fails transiently, until it succeeds,
 // fails for good, the session ends or is closed, or ctx is done, waiting longer
-// each time the coordinator says it is too busy. It never sends op once ctx is
+// before each try, as backoff.New spaces them. It never sends op once ctx is
 // done. Each try is bounded by attemptTimeout and by a disconnect.
 func (s *client) do(ctx context.Context, op func(context.Context) error) error {
 	return s.retry(ctx, func(ctx context.Context) error { return s.try(ctx, op) })
@@ -325,7 +326,7 @@ func (s *client) do(ctx context.Context, op func(context.Context) error) error {
 
 // retry sends an operation through send, which tries it once, as do describes.
 func (s *client) retry(ctx context.Context, send func(context.Context) error) error {
-	var busy backoff
+	waits := backoff.New()
 	for {
 		if err := s.alive(); err != nil {
 			return err
@@ -356,14 +357,8 @@ func (s *client) retry(ctx context.Context, send func(context.Context) error) er
 		case !transient(err):
 			return mapError(err)
 		}
-		wait := retryWait
-		if throttled(err) {
-			wait = busy.next()
-		} else {
-			busy.reset()
-		}
 		select {
-		case <-time.After(wait):
+		case <-time.After(waits.Step()):
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-s.done:
@@ -373,21 +368,6 @@ func (s *client) retry(ctx context.Context, send func(context.Context) error) er
 		}
 	}
 }
-
-// backoff spaces the resends of an operation that fails because the
-// coordinator is too busy for it: retryWait first, then twice as long each
-// time, up to maxRetryWait. Its zero value is ready.
-type backoff struct{ wait time.Duration }
-
-// next returns how long to wait before the next resend.
-func (b *backoff) next() time.Duration {
-	wait := max(b.wait, retryWait)
-	b.wait = min(2*wait, maxRetryWait)
-	return wait
-}
-
-// reset starts the waits again from retryWait.
-func (b *backoff) reset() { b.wait = 0 }
 
 // try runs op once, bounded by attemptTimeout and by a disconnect.
 func (s *client) try(ctx context.Context, op func(context.Context) error) error {

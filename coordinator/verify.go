@@ -9,6 +9,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/coordinator/internal/backoff"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -63,6 +64,7 @@ func (s *client) verifier() {
 // member that presents another epoch, which the client does whenever it
 // reconnects.
 func (s *client) check() {
+	waits := backoff.New()
 	for {
 		s.mu.Lock()
 		target := s.target()
@@ -84,7 +86,7 @@ func (s *client) check() {
 			return
 		}
 		select {
-		case <-time.After(retryWait):
+		case <-time.After(waits.Step()):
 		case <-s.closing:
 			return
 		case <-s.done:

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/coordinator/internal/backoff"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
@@ -348,11 +349,12 @@ func TestWatchStopsOnItsOwn(t *testing.T) {
 // longest wait between tries to record the end.
 func endsSoon(t *testing.T, m *member, want error) {
 	t.Helper()
+	soon := 2 * backoff.New().Cap
 	select {
 	case <-m.done:
 		require.ErrorIs(t, m.err, want)
-	case <-time.After(2 * maxEndRetry):
-		t.Fatalf("the session did not end with %v within %v", want, 2*maxEndRetry)
+	case <-time.After(soon):
+		t.Fatalf("the session did not end with %v within %v", want, soon)
 	}
 }
 
