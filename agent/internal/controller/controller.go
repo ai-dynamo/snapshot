@@ -1209,10 +1209,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 
 		var cleanupErr *executor.RestoreCleanupError
 		if !errors.As(err, &cleanupErr) {
-			if stopped {
-				err = stoppedDuringAttempt(err)
-			}
-			return op.attemptFailed(ctx, restoreCtx, record, err)
+			return op.attemptFailed(ctx, restoreCtx, record, err, stopped)
 		}
 		logWithStep(op.log, err).Error(cleanupErr, "Restore completed with cleanup errors")
 		emitPodEvent(ctx, w.clientset, op.log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreCleanupFailed", cleanupErr.Error())

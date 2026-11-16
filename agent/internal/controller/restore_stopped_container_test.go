@@ -157,7 +157,7 @@ func TestStoppedDuringAttempt(t *testing.T) {
 	notFound := pagebroker.NewFailureError(pagebroker.Failure_ARTIFACT_NOT_FOUND, "no such artifact")
 	original := untouched(notFound)
 
-	got := restoreFailureOf(stoppedDuringAttempt(original))
+	got := stoppedDuringAttempt(original)
 
 	assert.Equal(t, executor.StepPrepareRestore, got.Step)
 	assert.True(t, got.ContainerChanged)

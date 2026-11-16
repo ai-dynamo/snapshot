@@ -131,11 +131,13 @@ func restoreFailureOf(err error) *executor.RestoreFailure {
 
 // attemptFailed chooses what follows a failed attempt. A retry in the same
 // container is saved in the record for a later pass to start; anything else
-// ends the restore, including a failure that changed the container.
-func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, record *restoreAttempts, err error) error {
+// ends the restore, including a failure that changed the container. A stop
+// changed it, whether it was reported during the attempt, as stopped says, or
+// the runtime shows it now.
+func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, record *restoreAttempts, err error, stopped bool) error {
 	failure := restoreFailureOf(err)
-	if !failure.ContainerChanged && record.Limit > 0 && !op.containerRunning(ctx) {
-		failure = restoreFailureOf(stoppedDuringAttempt(failure))
+	if stopped || (!failure.ContainerChanged && record.Limit > 0 && !op.containerRunning(ctx)) {
+		failure = stoppedDuringAttempt(failure)
 		err = failure
 	}
 	now := op.controller.nowFn()
@@ -204,9 +206,9 @@ func (op *restoreOperation) watchContainer(ctx context.Context, record *restoreA
 
 // stoppedDuringAttempt names the stop as the failure's cause, since the
 // attempt itself saw only its context end.
-func stoppedDuringAttempt(err error) error {
-	stopped := *restoreFailureOf(err)
-	stopped.Cause = fmt.Errorf("%w: %w", errContainerStopped, stopped.Cause)
+func stoppedDuringAttempt(f *executor.RestoreFailure) *executor.RestoreFailure {
+	stopped := *f
+	stopped.Cause = fmt.Errorf("%w: %w", errContainerStopped, f.Cause)
 	stopped.ContainerChanged = true
 	return &stopped
 }
