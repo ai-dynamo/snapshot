@@ -224,7 +224,8 @@ coordinator:
   maxValueBytes: 33554432
   # The largest value, in bytes, a communication library may write to a session.
   maxLibraryValueBytes: 4096
-  # How many keys libraries may write to a session, deleted ones included.
+  # How many keys communication libraries may write to a session, deleted ones
+  # included.
   maxLibraryKeys: 4096
   # The Go runtime takes limits.memory as its soft memory limit, GOMEMLIMIT, so
   # it collects garbage as the heap nears it. At about twice maxMemoryBytes, the
