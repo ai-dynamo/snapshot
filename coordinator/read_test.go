@@ -139,7 +139,7 @@ func TestReadIsSentAgainOnceItsConnectionBreaks(t *testing.T) {
 		})
 	}()
 	<-started
-	s.inflight.interrupt()
+	s.disconnected(s.nc)
 	require.NoError(t, <-done)
 	assert.EqualValues(t, 2, tries.Load())
 }

@@ -18,10 +18,10 @@ import (
 )
 
 // testClient returns a client that has joined a session of the default
-// limits, with no connection, which retries an operation that fails as the
-// test makes it.
+// limits, over a connection never made, which retries an operation that fails
+// as the test makes it.
 func testClient(t *testing.T) *client {
-	s := &client{closing: make(chan struct{}), done: make(chan struct{}), joined: true,
+	s := &client{nc: &nats.Conn{}, closing: make(chan struct{}), done: make(chan struct{}), joined: true,
 		budget: semaphore.NewWeighted(session.MaxPending(session.MaxValue)),
 		slots:  semaphore.NewWeighted(session.MaxConcurrentGets)}
 	s.life, s.endLife = context.WithCancel(context.Background())

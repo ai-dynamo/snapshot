@@ -376,7 +376,7 @@ func (s *client) retry(ctx context.Context, send func(context.Context) error) er
 func (s *client) try(ctx context.Context, op func(context.Context) error) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
-	defer s.inflight.add(cancel)()
+	defer s.inflight.add(s.connection(), cancel)()
 	attempt, cancelAttempt := context.WithTimeout(ctx, attemptTimeout)
 	defer cancelAttempt()
 	err := op(attempt)
@@ -422,7 +422,7 @@ func (s *client) readOnce(ctx context.Context, cost readCost, op func(context.Co
 		return err
 	}
 	life, cancel := context.WithCancelCause(context.Background())
-	untrack := s.inflight.add(cancel)
+	untrack := s.inflight.add(s.connection(), cancel)
 	release := func() {
 		cancel(nil)
 		untrack()

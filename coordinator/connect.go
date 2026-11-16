@@ -199,8 +199,8 @@ func (s *client) options(cfg Config) []nats.Option {
 			s.log.Info("Reconnected to the coordinator")
 			s.wakeVerifier()
 		}),
-		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
-			s.inflight.interrupt()
+		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
+			s.disconnected(nc)
 			if err != nil {
 				s.log.Info("Lost the connection to the coordinator; reconnecting", "error", err.Error())
 			}
@@ -216,6 +216,23 @@ func (s *client) options(cfg Config) []nats.Option {
 			s.log.Info("The coordinator reported an error", "error", err.Error())
 		}),
 	}
+}
+
+// connection numbers the connection the client sends over now. nats.go counts
+// every attempt to reconnect before the connection it makes is up, so a later
+// connection has a higher number.
+func (s *client) connection() uint64 { return s.nc.Stats().Reconnects }
+
+// disconnected makes every operation sent over a connection that broke send
+// its request again. nats.go reports a disconnect on a goroutine of its own,
+// which may run once it has connected again: an operation sent over the new
+// connection is then not lost, and is left alone.
+func (s *client) disconnected(nc *nats.Conn) {
+	before := uint64(math.MaxUint64)
+	if nc.IsConnected() {
+		before = nc.Stats().Reconnects
+	}
+	s.inflight.interrupt(before)
 }
 
 // join waits until the coordinator admits the connection, binds the buckets,
