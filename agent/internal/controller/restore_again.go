@@ -17,12 +17,8 @@ const restoreRepeatedReason = "RestoreRepeated"
 
 // restoreRepeatable reports whether a destination container that starts again
 // after the Pod's restore succeeded gets a new restore, which a retry limit
-// above 0 turns on. Without the restore proxy a container that starts again
-// runs its own command, so there is nothing to restore into.
+// above 0 turns on.
 func (w *NodeController) restoreRepeatable(pod *corev1.Pod) bool {
-	if w.withoutProxy {
-		return false
-	}
 	limit, err := w.restoreRetryLimit(pod)
 	return err == nil && limit > 0
 }
@@ -53,7 +49,9 @@ type restoreRestart struct {
 // after the Pod's restore succeeded. A container counts when kubelet started
 // it no earlier than the Restored condition last changed, in the second-wide
 // time the status keeps, and its control directory holds no outcome, since
-// the NRI plugin removed the restore-complete that the restore left. Anything
+// the NRI plugin removed the restore-complete that the restore left. Without
+// the plugin that restore-complete stays, so it counts as the earlier
+// container's when the attempt record names another container. Anything
 // short of that is no restart, so a pass never restores over a running
 // workload. retry asks for another look when the evidence cannot be read yet.
 func (w *NodeController) restartedDestinations(ctx context.Context, pod *corev1.Pod) (restart *restoreRestart, retry bool) {
@@ -100,6 +98,14 @@ func (w *NodeController) restartedDestinations(ctx context.Context, pod *corev1.
 			log.Error(err, "Cannot check the outcome of a destination", "destination", destination)
 			return nil, true
 		}
+		if complete && !failed && w.withoutProxy && started[destination] != "" {
+			record, found, err := w.readRestoreAttempts(restart.nodeUID, destination)
+			if err != nil {
+				log.Error(err, "Cannot read the attempt record of a destination", "destination", destination)
+				return nil, true
+			}
+			complete = !found || record.ContainerID == started[destination]
+		}
 		switch {
 		case complete && !failed:
 			restart.done = append(restart.done, restoreResult{
@@ -121,13 +127,17 @@ func (w *NodeController) restartedDestinations(ctx context.Context, pod *corev1.
 	return restart, false
 }
 
-// startRestoreOver removes each restarted destination's attempt record, so its
-// restore starts at the first attempt with a new deadline, and has the pass
+// startRestoreOver removes each restarted destination's restore-complete, which
+// stays on a node without the NRI plugin, and then its attempt record, so its
+// restore starts at the first attempt with a new deadline. It has the pass
 // report the other destinations as succeeded without restoring them. The
 // evidence lasts until the pass sets the condition back in progress, so an
 // agent that stops in between starts the restore over again.
 func (w *NodeController) startRestoreOver(ctx context.Context, pod *corev1.Pod, restart *restoreRestart) error {
 	for _, destination := range restart.restarted {
+		if err := w.removePodControlFileFn(restart.nodeUID, destination, podcontract.RestoreCompleteFile); err != nil {
+			return fmt.Errorf("remove the restore-complete of destination %s: %w", destination, err)
+		}
 		if err := w.removePodControlFileFn(restart.nodeUID, destination, podcontract.RestoreAttemptsFile); err != nil {
 			return fmt.Errorf("remove the attempt record of destination %s: %w", destination, err)
 		}

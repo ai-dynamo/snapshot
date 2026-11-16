@@ -120,9 +120,10 @@ annotation. Its fields are in the [API Reference](../../reference/api.md#restore
 
 ## Restoring Again After a Restart
 
-With a limit above 0 and the restore proxy, a destination container that
-kubelet starts again after the Pod's restore succeeded gets a new restore. Two
-parts of the agent take part.
+With a limit above 0, a destination container that kubelet starts again after
+the Pod's restore succeeded gets a new restore. The agent's NRI plugin and its
+next restore pass take part. On a node without the plugin, the pass works
+alone.
 
 The NRI plugin runs when kubelet creates the container. When the Pod's restore
 succeeded, it removes the destination's `restore-complete`, unless
@@ -134,12 +135,15 @@ never fails for it.
 The next pass then looks for destinations that started again. A destination
 counts when its container started no earlier than the `nvidia.com/Restored`
 condition last changed, and its directory holds no outcome. Container status
-keeps whole seconds, so a start in the same second as the success counts. Any
-other outcome, such as a `restore-failed`, leaves the Pod alone, so a pass
-never restores over a running workload.
+keeps whole seconds, so a start in the same second as the success counts.
+Without the plugin, the earlier `restore-complete` stays. There a destination
+also counts when its attempt record names a container other than the one
+running. Any other outcome, such as a `restore-failed`, leaves the Pod alone,
+so a pass never restores over a running workload.
 
-For each destination that started again, the pass removes the attempt record,
-so the restore starts at attempt 1 with a new deadline. It emits
+For each destination that started again, the pass removes `restore-complete`
+and then the attempt record, so the restore starts at attempt 1 with a new
+deadline. It emits
 `RestoreRepeated` and restores only those destinations. The others keep their
 success. The retry status annotation is removed once no destination has a
 failed attempt, since the agent owns that annotation.

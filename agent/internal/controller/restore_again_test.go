@@ -50,6 +50,10 @@ func restoredPod(limit string, restoredAt time.Time, reason string, started map[
 	return pod
 }
 
+func restoredRecord(containerID string) restoreAttempts {
+	return restoreAttempts{Limit: 2, Attempt: 1, ContainerID: containerID}
+}
+
 func TestRestartedDestinations(t *testing.T) {
 	restoredAt := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
 	before, after := restoredAt.Add(-time.Minute), restoredAt.Add(30*time.Second)
@@ -59,6 +63,7 @@ func TestRestartedDestinations(t *testing.T) {
 		reason        string
 		started       map[string]time.Time
 		outcomes      map[string][]string
+		records       map[string]any
 		setup         func(*NodeController, *corev1.Pod)
 		wantRestarted []string
 		wantDone      []string
@@ -99,11 +104,35 @@ func TestRestartedDestinations(t *testing.T) {
 			started:  map[string]time.Time{"engine-0": before, "engine-1": after},
 			outcomes: map[string][]string{"engine-0": {complete}},
 		},
-		"without the restore proxy": {
+		"without the NRI plugin, a container that started again": {
+			limit:         "2",
+			started:       map[string]time.Time{"engine-0": before, "engine-1": after},
+			outcomes:      map[string][]string{"engine-0": {complete}, "engine-1": {complete}},
+			records:       map[string]any{"engine-0": restoredRecord("engine-0-id"), "engine-1": restoredRecord("earlier-engine-1-id")},
+			setup:         func(w *NodeController, _ *corev1.Pod) { w.withoutProxy = true },
+			wantRestarted: []string{"engine-1"},
+			wantDone:      []string{"engine-0"},
+		},
+		"without the NRI plugin, the restored container": {
+			limit:    "2",
+			started:  map[string]time.Time{"engine-0": before, "engine-1": restoredAt},
+			outcomes: map[string][]string{"engine-0": {complete}, "engine-1": {complete}},
+			records:  map[string]any{"engine-0": restoredRecord("engine-0-id"), "engine-1": restoredRecord("engine-1-id")},
+			setup:    func(w *NodeController, _ *corev1.Pod) { w.withoutProxy = true },
+		},
+		"without the NRI plugin, no attempt record": {
 			limit:    "2",
 			started:  map[string]time.Time{"engine-0": before, "engine-1": after},
-			outcomes: map[string][]string{"engine-0": {complete}},
+			outcomes: map[string][]string{"engine-0": {complete}, "engine-1": {complete}},
 			setup:    func(w *NodeController, _ *corev1.Pod) { w.withoutProxy = true },
+		},
+		"without the NRI plugin, an attempt record that cannot be read": {
+			limit:     "2",
+			started:   map[string]time.Time{"engine-0": before, "engine-1": after},
+			outcomes:  map[string][]string{"engine-0": {complete}, "engine-1": {complete}},
+			records:   map[string]any{"engine-1": []byte("attempt=1")},
+			setup:     func(w *NodeController, _ *corev1.Pod) { w.withoutProxy = true },
+			wantRetry: true,
 		},
 		"a restore that partly succeeded": {
 			limit:    "2",
@@ -191,6 +220,9 @@ func TestRestartedDestinations(t *testing.T) {
 					volume.putSentinel("host-uid", destination, file)
 				}
 			}
+			for destination, record := range tc.records {
+				volume.put(t, "host-uid", destination, record)
+			}
 			if tc.setup != nil {
 				tc.setup(w, pod)
 			}
@@ -270,6 +302,34 @@ func TestStartRestoreOverRestoresOnlyTheContainerThatStartedAgain(t *testing.T) 
 	assert.Contains(t, string(lastPodStatusApply(t, w).GetPatch()), podcontract.RestoreReasonSucceeded)
 }
 
+// Without the NRI plugin, the container that started again still holds the
+// earlier restore-complete. It goes before the record, so an agent that stops
+// in between still finds the restart.
+func TestStartRestoreOverRemovesTheEarlierRestoreCompleteWithoutThePlugin(t *testing.T) {
+	restoredAt := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	pod := restoredPod("2", restoredAt, podcontract.RestoreReasonSucceeded,
+		map[string]time.Time{"engine-0": restoredAt.Add(-time.Minute), "engine-1": restoredAt.Add(time.Minute)})
+	w := makeTestController(t, pod)
+	w.withoutProxy = true
+	w.runtime = &fakeRuntime{podUID: "host-uid"}
+	volume := newFakeControlVolume(w)
+	for destination, containerID := range map[string]string{"engine-0": "engine-0-id", "engine-1": "earlier-engine-1-id"} {
+		volume.putSentinel("host-uid", destination, podcontract.RestoreCompleteFile)
+		volume.put(t, "host-uid", destination, restoredRecord(containerID))
+	}
+
+	restart, retry := w.restartedDestinations(context.Background(), pod)
+	require.False(t, retry)
+	require.NotNil(t, restart)
+	require.NoError(t, w.startRestoreOver(context.Background(), pod, restart))
+
+	assert.Equal(t, []string{
+		"host-uid/engine-1/" + podcontract.RestoreCompleteFile,
+		"host-uid/engine-1/" + podcontract.RestoreAttemptsFile,
+	}, volume.removes)
+	assert.Len(t, eventsForReason(w.clientset.(*fake.Clientset), restoreRepeatedReason), 1)
+}
+
 // A Pod whose container started again goes through preflight as a new restore
 // instead of reporting its earlier success.
 func TestProcessRestoreQueueItemReopensARestoreWhoseContainerStartedAgain(t *testing.T) {
@@ -311,15 +371,13 @@ func TestRestoreAgain(t *testing.T) {
 		return restoredPod(limit, time.Now(), podcontract.RestoreReasonSucceeded, nil)
 	}
 	for name, tc := range map[string]struct {
-		cached       *corev1.Pod
-		withoutProxy bool
-		asked        func(*corev1.Pod) *corev1.Pod
-		want         bool
+		cached *corev1.Pod
+		asked  func(*corev1.Pod) *corev1.Pod
+		want   bool
 	}{
-		"a restore that succeeded":  {cached: succeeded("1"), want: true},
-		"a retry limit of 0":        {cached: succeeded("0")},
-		"no retry limit":            {cached: succeeded("")},
-		"without the restore proxy": {cached: succeeded("1"), withoutProxy: true},
+		"a restore that succeeded": {cached: succeeded("1"), want: true},
+		"a retry limit of 0":       {cached: succeeded("0")},
+		"no retry limit":           {cached: succeeded("")},
 		"a restore that failed": {cached: func() *corev1.Pod {
 			return restoredPod("1", time.Now(), podcontract.RestoreReasonFailed, nil)
 		}()},
@@ -337,7 +395,6 @@ func TestRestoreAgain(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			w := makeTestController(t, nil)
-			w.withoutProxy = tc.withoutProxy
 			indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 			asked := succeeded("1")
 			if tc.cached != nil {

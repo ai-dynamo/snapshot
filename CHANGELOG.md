@@ -82,9 +82,9 @@ commit-level history for each release is on its
   last failure. Only a failure that left the container untouched is retried,
   in the same container. See
   [Restore Retry](docs/design/restore-retry/README.md).
-- Restore again: with a retry limit above 0, on a node with the restore proxy,
-  a destination container that starts again after its restore succeeded is
-  restored again from the same `PodSnapshot`, with a `RestoreRepeated` event.
+- Restore again: with a retry limit above 0, a destination container that
+  starts again after its restore succeeded is restored again from the same
+  `PodSnapshot`, with a `RestoreRepeated` event.
   See
   [Restore Retry](docs/design/restore-retry/README.md#restoring-again-after-a-restart).
 

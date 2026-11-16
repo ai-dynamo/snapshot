@@ -193,12 +193,11 @@ the signal that ended it.
 Which failed attempts the agent retries, and how many times, is in
 [Restore Retry](../design/restore-retry/README.md).
 
-With a retry limit above 0, on a node with the restore proxy, a destination
-container that starts again after its restore succeeded is restored again
-from the same `PodSnapshot`. Its proxy waits for the new restore instead of
-exiting with code 112, and the Pod gets a `RestoreRepeated` event. The new
-restore has its own attempts and deadline. The other destination containers
-keep their restore.
+With a retry limit above 0, a destination container that starts again after
+its restore succeeded is restored again from the same `PodSnapshot`, and the
+Pod gets a `RestoreRepeated` event. With the restore proxy, its proxy waits for
+the new restore instead of exiting with code 112. The new restore has its own
+attempts and deadline. The other destination containers keep their restore.
 
 ## Nodes Without the Restore Proxy
 
