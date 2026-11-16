@@ -14,7 +14,8 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-// The JetStream API error codes a session maps onto package session's errors.
+// The JetStream API error codes a session maps onto package session's errors,
+// or waits out.
 const (
 	// jsMessageTooLarge: a message over the stream's maximum message size,
 	// which is a bucket's maximum value size.
@@ -28,7 +29,8 @@ const (
 	// consumers, which the client waits out.
 	jsMaximumConsumers = 10026
 	// jsTooManyRequests: a stream's ingest queue is full, so the server
-	// dropped the message. Nothing was written, so sending it again is safe.
+	// dropped the message. Nothing was written, so the client sends it again
+	// until it is stored, and never reports it.
 	jsTooManyRequests = 10167
 )
 
@@ -48,7 +50,7 @@ func mapError(err error) error {
 	switch code, description := apiError(err); code {
 	case jsMessageTooLarge:
 		return fmt.Errorf("the value is over its bucket's maximum: %w", session.ErrTooLarge)
-	case jsStoreFailed, jsInsufficientResources, jsTooManyRequests:
+	case jsStoreFailed, jsInsufficientResources:
 		return fmt.Errorf("%s: %w", description, session.ErrTooMany)
 	}
 	return errors.New("coordinator: " + err.Error())
