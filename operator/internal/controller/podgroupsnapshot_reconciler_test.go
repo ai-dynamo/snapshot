@@ -721,7 +721,7 @@ func TestPodGroupSnapshotReconciler_Lifecycle(t *testing.T) {
 	got := getGroup(t, r)
 	assert.Equal(t, snapshotv1alpha1.CheckpointPhaseCheckpointing, got.Status.Members[0].Phase)
 	assert.Equal(t, pgStartedAt.Unix(), got.Status.Members[0].StartedAt.Unix())
-	assert.Equal(t, []string{"Normal Committed every member passed admission, and the checkpoint has started"},
+	assert.Equal(t, []string{"Normal Committed the agents passed their admitted barrier, and the checkpoint has started"},
 		drainEvents(recorder))
 	restartChecks("committed")
 
@@ -781,7 +781,7 @@ func TestPodGroupSnapshotReconciler_MemberFailure(t *testing.T) {
 		assert.Equal(t, snapshotv1alpha1.PodGroupReasonMemberFailed, cond.Reason)
 		assert.Equal(t, `member "b" (rank 1) failed with SourcePodGone: SourcePodGone message`, cond.Message)
 		assert.Equal(t, []string{
-			"Normal Committed every member passed admission, and the checkpoint has started",
+			"Normal Committed the agents passed their admitted barrier, and the checkpoint has started",
 			"Warning MemberFailed " + cond.Message,
 		}, drainEvents(recorder))
 	})
@@ -1165,7 +1165,7 @@ func TestPodGroupSnapshotReconciler_ConfirmsADeletion(t *testing.T) {
 		assert.Equal(t, snapshotv1alpha1.CheckpointPhaseCheckpointing, got.Status.Members[0].Phase)
 		assert.NotNil(t, got.Status.Members[0].StartedAt)
 		assert.Positive(t, res.RequeueAfter, "the deadline still applies")
-		assert.Equal(t, []string{"Normal Committed every member passed admission, and the checkpoint has started"},
+		assert.Equal(t, []string{"Normal Committed the agents passed their admitted barrier, and the checkpoint has started"},
 			drainEvents(recorder))
 	})
 

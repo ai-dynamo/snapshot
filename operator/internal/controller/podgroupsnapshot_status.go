@@ -68,8 +68,8 @@ var podGroupSnapshotKind = podGroupKind{
 	deadlineMemberMessage:  podGroupDeadlineMemberMessage,
 	cancelledMemberMessage: podGroupCancelledMemberMessage,
 	cancelledMessage:       podGroupCancelledMessage,
-	committedMessage:       "every member passed admission, and the checkpoint has started",
-	admittingMessage:       "member PodSnapshots are created; waiting for every member to pass admission",
+	committedMessage:       "the agents passed their admitted barrier, and the checkpoint has started",
+	admittingMessage:       "member PodSnapshots are created; waiting for the agents to pass their admitted barrier",
 }
 
 // derivePodGroupSnapshotStatus computes a PodGroupSnapshot's status from its
