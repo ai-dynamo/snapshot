@@ -173,9 +173,9 @@ func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, recor
 }
 
 // recordLastFailure saves the failure that ended the restore for the retry
-// status. It follows restore-failed: a record saved first would make a crash
-// between the two look like an unfinished attempt, which a pass runs again.
-// A restore without retries keeps no record.
+// status. It follows restore-failed and the kill, which end the restore
+// whether or not the record is saved. A restore without retries keeps no
+// record.
 func (op *restoreOperation) recordLastFailure(record *restoreAttempts, f *executor.RestoreFailure) {
 	if record.Limit == 0 {
 		return
