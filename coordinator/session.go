@@ -401,7 +401,8 @@ type readCost struct {
 // only, never by attemptTimeout: a large value can take longer than a round
 // trip to arrive, and a read sent again while its first reply is still
 // buffered could take the connection past what the coordinator holds for it.
-// So a read is never sent again on the same connection.
+// So a read is sent again only once its connection has broken, as
+// disconnected tells.
 func (s *client) read(ctx context.Context, cost readCost, op func(context.Context) error) error {
 	return s.retry(ctx, func(ctx context.Context) error { return s.readOnce(ctx, cost, op) })
 }

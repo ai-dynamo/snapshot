@@ -226,7 +226,9 @@ func (s *client) connection() uint64 { return s.nc.Stats().Reconnects }
 // disconnected makes every operation sent over a connection that broke send
 // its request again. nats.go reports a disconnect on a goroutine of its own,
 // which may run once it has connected again: an operation sent over the new
-// connection is then not lost, and is left alone.
+// connection is then not lost, and is left alone. An operation is numbered
+// just before it is sent, so one that a whole reconnect overtook in between
+// is sent again all the same.
 func (s *client) disconnected(nc *nats.Conn) {
 	before := uint64(math.MaxUint64)
 	if nc.IsConnected() {
