@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"sync"
 	"syscall"
 	"testing"
@@ -170,6 +171,7 @@ type memberCheckpoint struct {
 	t        *testing.T
 	w        func() *NodeController
 	refuse   map[string]bool
+	panics   map[string]bool
 	mu       sync.Mutex
 	timeline []string
 }
@@ -211,6 +213,9 @@ func (m *memberCheckpoint) fn(ctx context.Context, params CheckpointParams) (_ *
 		return nil, err
 	}
 	m.record(fmt.Sprintf("%s committed, started recorded: %t", id, m.started(params.ContentUID)))
+	if m.panics[id] {
+		panic("the capture panicked after the member started")
+	}
 	if err := g.Barrier(ctx, group.NetFreeze); err != nil {
 		return nil, fmt.Errorf("barrier: %w", err)
 	}
@@ -323,6 +328,35 @@ func TestGroupCheckpointThatCannotRecordItsStartFailsTheAttempt(t *testing.T) {
 		assert.NotContains(t, getPod(t, w, "inference", "worker-0").Labels, snapshotv1alpha1.CaptureEligibleLabel,
 			"a leader that never started is left as found")
 	}
+}
+
+func TestGroupCheckpointThatPanicsAfterItStartedFailsTheMember(t *testing.T) {
+	g := newCaptureGroup()
+	srv := ensureSession(t, captureGroupUID, captureMemberIDs)
+	var w *NodeController
+	executor := &memberCheckpoint{t: t, w: func() *NodeController { return w }, panics: map[string]bool{"leader": true}}
+	w, k := groupCaptureController(t, srv, g, executor.fn, nil)
+
+	captureBoth(t, w, g)
+
+	leader := getContent(t, w, "content-leader")
+	failed := condition(leader, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, reasonAgentPanic, failed.Reason)
+	assert.Contains(t, failed.Message, "panic")
+	assert.NotNil(t, condition(leader, snapshotv1alpha1.PodSnapshotConditionStarted))
+
+	worker := getContent(t, w, "content-worker")
+	assert.Equal(t, session.ReasonMemberFailed, condition(worker, snapshotv1alpha1.PodSnapshotConditionFailed).Reason,
+		"the attempt fails for the peer")
+	// The fake runtime gives both sources PID 7. The worker may learn that
+	// the attempt failed before its admitted barrier returns, and then never
+	// start; each member that started has its source terminated.
+	terminated := 1
+	if condition(worker, snapshotv1alpha1.PodSnapshotConditionStarted) != nil {
+		terminated = 2
+	}
+	assert.Equal(t, slices.Repeat([]int{7}, terminated), k.list())
 }
 
 func TestGroupCheckpointRefusedBeforeItCommitsLeavesEveryPodAsFound(t *testing.T) {
