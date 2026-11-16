@@ -21,9 +21,9 @@ import (
 const restoreAttemptsMaxBytes = 8192
 
 // restoreAttempts is a destination container's record of its restore
-// attempts, kept in its directory of the Pod's snapshot-control volume. The
-// volume outlives container restarts and goes with the Pod, so a new Pod
-// starts a new restore.
+// attempts. A restore that allows retries keeps it in the container's
+// directory of the Pod's snapshot-control volume. The volume outlives
+// container restarts and goes with the Pod, so a new Pod starts a new restore.
 type restoreAttempts struct {
 	// Limit is the retry limit, resolved at the first attempt.
 	Limit int `json:"limit"`
@@ -93,30 +93,47 @@ func (op *restoreOperation) writeRestoreAttempts(nodeUID string, record *restore
 	return nil
 }
 
-// startAttempt picks the restore up from the destination's record and saves
-// the attempt about to start. It returns errRetryScheduled while an in-place
-// retry is not due. The first attempt resolves the retry limit and the
-// deadline.
+// startAttempt resolves the attempt about to start. A restore that allows
+// retries picks it up from the destination's record and saves it there first,
+// and gets errRetryScheduled while an in-place retry is not due. A limit of 0
+// keeps no record, so the restore reads and writes nothing through the node's
+// path, and a restarted agent starts it over with a full timeout, as before
+// retries.
+func (op *restoreOperation) startAttempt(ctx context.Context) (*restoreAttempts, error) {
+	now := op.controller.nowFn()
+	limit, err := op.retryLimit()
+	if err != nil {
+		return nil, err
+	}
+	record := &restoreAttempts{Limit: limit, Attempt: 1, ContainerID: op.containerID}
+	if timeout := op.controller.config.Restore.RestoreTimeout(); timeout > 0 {
+		record.Deadline = now.Add(timeout)
+	}
+	if limit > 0 {
+		if record, err = op.saveAttempt(ctx, record, now); err != nil {
+			return nil, err
+		}
+	}
+	op.log = op.log.WithValues("attempt", record.Attempt, "retry_limit", record.Limit)
+	return record, nil
+}
+
+// saveAttempt picks the restore up from the destination's record and saves
+// the attempt about to start. With no record yet it saves first, which holds
+// the limit and deadline resolved now.
 //
 // A record with no retry saved holds an attempt that no agent saw finish,
 // since one agent never runs two passes of a Pod at once. The attempt runs
 // again within the same deadline and keeps its number, as an agent restart
 // always repeated it.
-func (op *restoreOperation) startAttempt(ctx context.Context) (*restoreAttempts, error) {
-	now := op.controller.nowFn()
+func (op *restoreOperation) saveAttempt(ctx context.Context, first *restoreAttempts, now time.Time) (*restoreAttempts, error) {
+	op.nodeUID = op.nodePodUID(ctx)
 	record, found, err := op.readRestoreAttempts(op.nodeUID)
 	if err != nil {
 		return nil, err
 	}
 	if !found {
-		limit, err := op.retryLimit()
-		if err != nil {
-			return nil, err
-		}
-		record = &restoreAttempts{Limit: limit, Attempt: 1}
-		if timeout := op.controller.config.Restore.RestoreTimeout(); timeout > 0 {
-			record.Deadline = now.Add(timeout)
-		}
+		record = first
 	} else {
 		if now.Before(record.RetryAt) {
 			op.log.V(1).Info("Restore retry is not due yet", "retry_at", record.RetryAt.UTC().Format(time.RFC3339))
@@ -140,7 +157,6 @@ func (op *restoreOperation) startAttempt(ctx context.Context) (*restoreAttempts,
 	if err := op.writeRestoreAttempts(op.nodeUID, record); err != nil {
 		return nil, err
 	}
-	op.log = op.log.WithValues("attempt", record.Attempt, "retry_limit", record.Limit)
 	return record, nil
 }
 
