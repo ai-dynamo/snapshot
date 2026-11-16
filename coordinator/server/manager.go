@@ -31,9 +31,9 @@ type Spec struct {
 	// PodGroupRestore's, which identifies the attempt.
 	UID types.UID
 
-	// Members is the whole membership. It must name at least one member, with
-	// distinct IDs that session.ValidateName accepts and ranks covering 0 to
-	// len(Members)-1, in any order.
+	// Members is the whole membership. It must name at least one member and at
+	// most session.MaxMembers, with distinct IDs that session.ValidateName
+	// accepts and ranks covering 0 to len(Members)-1, in any order.
 	Members []session.Member
 
 	// Deadline bounds the whole attempt, counted from the resource's creation.
@@ -47,6 +47,10 @@ func (s Spec) validate() error {
 	}
 	if len(s.Members) == 0 {
 		return fmt.Errorf("no members: %w", session.ErrInvalid)
+	}
+	if len(s.Members) > session.MaxMembers {
+		return fmt.Errorf("%d members, over the %d a session is sized for: %w", len(s.Members), session.MaxMembers,
+			session.ErrInvalid)
 	}
 	if s.Deadline.IsZero() {
 		return fmt.Errorf("no deadline: %w", session.ErrInvalid)

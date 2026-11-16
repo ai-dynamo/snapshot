@@ -37,6 +37,8 @@ func TestSpecValidation(t *testing.T) {
 		{"a UID too long for its buckets", Spec{UID: types.UID(strings.Repeat("u", session.MaxAttemptLength+1)),
 			Members: members("a"), Deadline: deadline}},
 		{"no members", Spec{UID: "u", Deadline: deadline}},
+		{"more members than a session is sized for", Spec{UID: "u", Members: members(memberIDs(session.MaxMembers + 1)...),
+			Deadline: deadline}},
 		{"no deadline", Spec{UID: "u", Members: members("a")}},
 		{"a member ID with a dot", Spec{UID: "u", Members: members("pod.a"), Deadline: deadline}},
 		{"a member named twice", Spec{UID: "u", Members: members("a", "a"), Deadline: deadline}},
@@ -54,6 +56,17 @@ func TestSpecValidation(t *testing.T) {
 	}
 	require.NoError(t, Spec{UID: "u", Members: []session.Member{{ID: "b", Rank: 1}, {ID: "a", Rank: 0}},
 		Deadline: deadline}.validate(), "members may come in any order")
+	require.NoError(t, Spec{UID: "u", Members: members(memberIDs(session.MaxMembers)...), Deadline: deadline}.validate(),
+		"the most members a session is sized for")
+}
+
+// memberIDs returns n distinct member IDs.
+func memberIDs(n int) []string {
+	ids := make([]string, n)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("member-%d", i)
+	}
+	return ids
 }
 
 // TestEnsure covers creating a session, and ensuring it again.
