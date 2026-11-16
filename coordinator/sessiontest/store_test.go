@@ -154,7 +154,7 @@ func TestKeys(t *testing.T) {
 // value once inserted or ErrNotYet with one, and how the session ended or the
 // context's error when either comes first.
 func TestGet(t *testing.T) {
-	h := newHarness(t)
+	h := newHarness(t, withTestMaxValue)
 	tests := []struct {
 		name string
 		ns   session.Namespace
@@ -180,13 +180,11 @@ func TestGet(t *testing.T) {
 			wantErr: session.ErrNotYet},
 		{name: "a key inserted during the wait", ns: session.NamespaceSnapshot, wait: time.Minute,
 			during: insert(session.NamespaceSnapshot, "late"), want: "late"},
-		// The one case that delivers megabytes through a wait's watch. The
-		// server asks the watch for flow control, but whether the reply goes
-		// through changes nothing here: package server's TestFlowControlReplies
-		// tests that.
-		{name: "a large value inserted during the wait", ns: session.NamespaceSnapshot,
-			wait: time.Minute, during: insert(session.NamespaceSnapshot, strings.Repeat("v", 4<<20)),
-			want: strings.Repeat("v", 4<<20)},
+		// The wait watches the key's metadata only, and the read that follows
+		// takes the value.
+		{name: "the largest value inserted during the wait", ns: session.NamespaceSnapshot,
+			wait: time.Minute, during: insert(session.NamespaceSnapshot, strings.Repeat("v", testMaxValue)),
+			want: strings.Repeat("v", testMaxValue)},
 		{name: "a library key inserted during the wait", ns: session.NamespaceLibrary, wait: time.Minute,
 			during: insert(session.NamespaceLibrary, "late"), want: "late"},
 		{name: "a key deleted before the wait, then inserted again during it", ns: session.NamespaceCuInterpose,
@@ -306,8 +304,8 @@ func TestStoreLimits(t *testing.T) {
 		repeat  bool
 		wantErr error
 	}{
-		{name: "a value of the Snapshot bucket's largest", limits: defaults, ns: session.NamespaceSnapshot,
-			value: session.MaxValue},
+		{name: "a value of the Snapshot bucket's largest", limits: withTestMaxValue, ns: session.NamespaceSnapshot,
+			value: testMaxValue},
 		{name: "a value of the library bucket's largest", limits: defaults, ns: session.NamespaceLibrary,
 			value: session.MaxLibraryValue},
 		{name: "a value over Meta's limit", limits: small, ns: session.NamespaceSnapshot, value: 4<<10 + 1,
@@ -352,11 +350,11 @@ func TestStoreLimits(t *testing.T) {
 // session.MaxPending, so the client reads within it, in bytes: every Get
 // returns its value, and the connection is never dropped.
 func TestConcurrentLargeGets(t *testing.T) {
-	h := newHarness(t)
+	h := newHarness(t, withTestMaxValue)
 	ctx := within(t)
 	ses := h.session(t, 2)
 	sessions := ses.connectAll(t)
-	value := bytes.Repeat([]byte{'v'}, session.MaxValue-1<<20)
+	value := bytes.Repeat([]byte{'v'}, testMaxValue)
 	small := bytes.Repeat([]byte{'l'}, session.MaxLibraryValue)
 	const keys = 4
 	for i := range keys {
@@ -384,15 +382,15 @@ func TestConcurrentLargeGets(t *testing.T) {
 	}
 }
 
-// TestGetWaitsHoldNoReadSlot checks that a Get that waits for an absent key
-// holds none of the connection's read slots, so reads of other keys go on, and
-// that it reads its value, once inserted, within them.
-func TestGetWaitsHoldNoReadSlot(t *testing.T) {
-	h := newHarness(t)
+// TestGetWaitsHoldNoReadBudget checks that a Get that waits for an absent key
+// holds none of the connection's read budget, so reads of other keys go on,
+// and that it reads its value, once inserted, within it.
+func TestGetWaitsHoldNoReadBudget(t *testing.T) {
+	h := newHarness(t, withTestMaxValue)
 	ctx := within(t)
 	ses := h.session(t, 2)
 	sessions := ses.connectAll(t)
-	value := bytes.Repeat([]byte{'v'}, session.MaxValue-1<<20)
+	value := bytes.Repeat([]byte{'v'}, testMaxValue)
 	got := make(chan error, session.MaxConcurrentGets+1)
 	for i := range session.MaxConcurrentGets + 1 {
 		go func() {
@@ -407,7 +405,7 @@ func TestGetWaitsHoldNoReadSlot(t *testing.T) {
 
 	require.NoError(t, sessions[1].Snapshot().Insert(ctx, "present", []byte("v")))
 	read, err := sessions[0].Snapshot().Get(ctx, "present", 0)
-	require.NoError(t, err, "waits must not hold the slots a read needs")
+	require.NoError(t, err, "waits must not hold the budget a read needs")
 	assert.Equal(t, []byte("v"), read)
 
 	for i := range session.MaxConcurrentGets + 1 {

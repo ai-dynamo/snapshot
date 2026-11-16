@@ -18,7 +18,7 @@ import (
 // TestReconnect breaks a member's connection while it waits: the client
 // reconnects on its own, and the wait completes.
 func TestReconnect(t *testing.T) {
-	h := newHarness(t)
+	h := newHarness(t, withTestMaxValue)
 
 	t.Run("a waiting Get completes after reconnecting", func(t *testing.T) {
 		ctx := within(t)
@@ -66,7 +66,7 @@ func TestReconnect(t *testing.T) {
 		assert.Equal(t, "10.0.0.1", string(got))
 	})
 
-	t.Run("a large write sent while the coordinator refuses the member completes once it is admitted",
+	t.Run("the largest write sent while the coordinator refuses the member completes once it is admitted",
 		func(t *testing.T) {
 			ctx := within(t)
 			ses := h.session(t, 2)
@@ -74,7 +74,7 @@ func TestReconnect(t *testing.T) {
 			h.auth.Unavailable.Store(true)
 			defer h.auth.Unavailable.Store(false)
 			ses.cut(0)
-			value := make([]byte, 20<<20)
+			value := make([]byte, testMaxValue)
 			inserted := make(chan error, 1)
 			go func() { inserted <- sessions[0].Snapshot().Insert(ctx, "big", value) }()
 			// Longer than the round trip the client gives an operation before

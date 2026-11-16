@@ -98,6 +98,16 @@ func newHarness(t *testing.T, modify ...func(*server.Config)) *harness {
 	return h
 }
 
+// testMaxValue is the largest value of the coordinator of a test that moves
+// the largest values: 1 MiB. What the client reads at once, and what the
+// coordinator buffers for a connection, scale with it, so such a test checks
+// what it would at the default, with less for a loaded machine to carry.
+const testMaxValue = 1 << 20
+
+// withTestMaxValue configures a coordinator whose largest value is
+// testMaxValue.
+func withTestMaxValue(cfg *server.Config) { cfg.MaxValue = testMaxValue }
+
 // start starts a coordinator, not ready yet, with a log of its own, and
 // shuts it down when the test ends.
 func (h *harness) start() {
