@@ -123,8 +123,11 @@ type client struct {
 	verify chan struct{}
 	// budget holds, in bytes, what the coordinator buffers for the connection:
 	// each value being read takes the largest its bucket holds, so no more are
-	// in flight than the coordinator holds. Set by join.
+	// in flight than the coordinator holds. slots holds
+	// session.MaxConcurrentGets slots, which each read of the Snapshot bucket
+	// takes first: see readCost. Set by join.
 	budget  *semaphore.Weighted
+	slots   *semaphore.Weighted
 	closing chan struct{}
 	// life ends once the session has ended or is closed, as done or closing
 	// does, to end a wait that takes a context.
@@ -383,25 +386,39 @@ func (s *client) try(ctx context.Context, op func(context.Context) error) error 
 	return err
 }
 
+// readCost is what one read takes while it is in flight.
+type readCost struct {
+	// bytes is what it takes of the connection's budget: the most its reply
+	// holds.
+	bytes int64
+
+	// slot is set for a read of the Snapshot bucket, whose values are the
+	// largest: it takes one of the connection's slots before its bytes. The
+	// budget serves its waiters in turn, so a read of the largest values that
+	// waited there would hold up every smaller read behind it while the budget
+	// had room for them; past MaxConcurrentGets, one waits for a slot instead.
+	slot bool
+}
+
 // read runs op, which reads one value, the way do runs an operation, with two
-// differences. Each try first takes size bytes of the connection's budget, the
-// most its reply holds, and keeps them until the reply has arrived or the
-// connection has broken, even once ctx is done: until then, the reply may sit
-// in what the coordinator buffers for the connection. And a try is bounded by
-// ctx and by a disconnect only, never by attemptTimeout: a large value can take
-// longer than a round trip to arrive, and a read sent again while its first
-// reply is still buffered could take the connection past what the coordinator
-// holds for it. So a read is never sent again on the same connection.
-func (s *client) read(ctx context.Context, size int64, op func(context.Context) error) error {
-	return s.retry(ctx, func(ctx context.Context) error { return s.readOnce(ctx, size, op) })
+// differences. Each try first takes what cost says of the connection's budget,
+// and keeps it until the reply has arrived or the connection has broken, even
+// once ctx is done: until then, the reply may sit in what the coordinator
+// buffers for the connection. And a try is bounded by ctx and by a disconnect
+// only, never by attemptTimeout: a large value can take longer than a round
+// trip to arrive, and a read sent again while its first reply is still
+// buffered could take the connection past what the coordinator holds for it.
+// So a read is never sent again on the same connection.
+func (s *client) read(ctx context.Context, cost readCost, op func(context.Context) error) error {
+	return s.retry(ctx, func(ctx context.Context) error { return s.readOnce(ctx, cost, op) })
 }
 
 // readOnce tries a read once, as read describes. op runs on its own, bounded by
-// a disconnect only, and holds its bytes until it returns, while readOnce
-// returns op's error, or ctx's error or how the session ended if either comes
-// first.
-func (s *client) readOnce(ctx context.Context, size int64, op func(context.Context) error) error {
-	if err := s.reserve(ctx, size); err != nil {
+// a disconnect only, and holds what it takes of the budget until it returns,
+// while readOnce returns op's error, or ctx's error or how the session ended if
+// either comes first.
+func (s *client) readOnce(ctx context.Context, cost readCost, op func(context.Context) error) error {
+	if err := s.reserve(ctx, cost); err != nil {
 		return err
 	}
 	life, cancel := context.WithCancelCause(context.Background())
@@ -409,7 +426,7 @@ func (s *client) readOnce(ctx context.Context, size int64, op func(context.Conte
 	release := func() {
 		cancel(nil)
 		untrack()
-		s.budget.Release(size)
+		s.unreserve(cost)
 	}
 	result := make(chan error, 1)
 	if !s.spawn(func() {
@@ -435,17 +452,41 @@ func (s *client) readOnce(ctx context.Context, size int64, op func(context.Conte
 	}
 }
 
-// reserve takes size bytes of the connection's budget, once the reads in
-// flight leave room for them. It returns how the session ended, or ctx's
-// error, if either comes first, and then takes nothing.
-func (s *client) reserve(ctx context.Context, size int64) error {
+// reserve takes what cost says of the connection's budget, its slot first,
+// once the reads in flight leave room for it. It returns how the session
+// ended, or ctx's error, if either comes first, and then takes nothing.
+func (s *client) reserve(ctx context.Context, cost readCost) error {
+	if cost.slot {
+		if err := s.acquire(ctx, s.slots, 1); err != nil {
+			return err
+		}
+	}
+	if err := s.acquire(ctx, s.budget, cost.bytes); err != nil {
+		if cost.slot {
+			s.slots.Release(1)
+		}
+		return err
+	}
+	return nil
+}
+
+// unreserve gives back what reserve took for cost.
+func (s *client) unreserve(cost readCost) {
+	s.budget.Release(cost.bytes)
+	if cost.slot {
+		s.slots.Release(1)
+	}
+}
+
+// acquire takes n of sem, as reserve describes.
+func (s *client) acquire(ctx context.Context, sem *semaphore.Weighted, n int64) error {
 	bounded, cancel := context.WithCancel(ctx)
 	defer cancel()
 	defer context.AfterFunc(s.life, cancel)()
-	err := s.budget.Acquire(bounded, size)
+	err := sem.Acquire(bounded, n)
 	if err == nil && bounded.Err() != nil {
 		// Acquire may succeed although its context is done.
-		s.budget.Release(size)
+		sem.Release(n)
 		err = bounded.Err()
 	}
 	if err != nil {

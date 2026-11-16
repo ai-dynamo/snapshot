@@ -55,11 +55,12 @@ func latest(b bucket, key string, r *record) func(context.Context) error {
 
 // create writes value under key in b unless key holds a value, and reports
 // whether it did, or returns the value key holds. It reads a value only
-// within the connection's budget, taking size bytes of it: a write that finds
+// within the connection's budget, taking what cost says of it: a write that finds
 // key taken fails without reading it, where nats.go's Create would read it
 // outside the budget, and create then reads key's latest record once. A
 // delete marker, which leaves key absent, it writes over.
-func (s *client) create(ctx context.Context, b bucket, key string, value []byte, size int64) (bool, []byte, error) {
+func (s *client) create(ctx context.Context, b bucket, key string, value []byte,
+	cost readCost) (bool, []byte, error) {
 	var revision uint64
 	for {
 		err := s.do(ctx, func(ctx context.Context) error {
@@ -73,7 +74,7 @@ func (s *client) create(ctx context.Context, b bucket, key string, value []byte,
 			return err == nil, nil, err
 		}
 		var r record
-		err = s.read(ctx, size, latest(b, key, &r))
+		err = s.read(ctx, cost, latest(b, key, &r))
 		switch {
 		case errors.Is(err, session.ErrNotFound):
 			// Purged since: create it again.

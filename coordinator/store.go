@@ -66,7 +66,7 @@ func (s *client) newStore(ns session.Namespace, name string, b bucket) *store {
 	if name == session.LibraryBucket(s.attempt) {
 		st.maxValue, st.limitsKeys = s.meta.MaxLibraryValue, true
 	}
-	st.readSize = readSize(st.maxValue)
+	st.cost = readCost{bytes: readSize(st.maxValue), slot: name == session.SnapshotBucket(s.attempt)}
 	return st
 }
 
@@ -80,8 +80,8 @@ type store struct {
 	b        bucket
 	ns       session.Namespace
 	maxValue int
-	// readSize is what each read takes of the connection's budget.
-	readSize int64
+	// cost is what each read takes of the connection's budget.
+	cost readCost
 	// limitsKeys is set for a bucket that limits its number of keys, deleted
 	// ones included, which a delete marker for an absent key would take one of.
 	limitsKeys bool
@@ -134,7 +134,7 @@ func (st *store) Insert(ctx context.Context, key string, value []byte) error {
 		return fmt.Errorf("a value of %d bytes is over the %d-byte limit: %w", len(value), st.maxValue,
 			session.ErrTooLarge)
 	}
-	created, held, err := st.s.create(ctx, st.b, k, value, st.readSize)
+	created, held, err := st.s.create(ctx, st.b, k, value, st.cost)
 	switch {
 	case err != nil:
 		return err
@@ -169,7 +169,7 @@ func (st *store) Get(ctx context.Context, key string, wait time.Duration) ([]byt
 // connection's budget. Every value a store reads goes through it.
 func (st *store) read(ctx context.Context, k string) ([]byte, error) {
 	var r record
-	if err := st.s.read(ctx, st.readSize, latest(st.b, k, &r)); err != nil {
+	if err := st.s.read(ctx, st.cost, latest(st.b, k, &r)); err != nil {
 		return nil, err
 	}
 	if r.deleted {

@@ -258,6 +258,7 @@ func (s *client) join(ctx context.Context) error {
 		return fmt.Errorf("the session has no member %q: %w", s.member, session.ErrForbidden)
 	}
 	s.budget = semaphore.NewWeighted(session.MaxPending(s.meta.MaxValue))
+	s.slots = semaphore.NewWeighted(session.MaxConcurrentGets)
 	s.stores = make(map[session.Namespace]*store)
 	for _, ns := range session.Namespaces() {
 		name, err := ns.Bucket(s.attempt)

@@ -22,7 +22,8 @@ import (
 // test makes it.
 func testClient(t *testing.T) *client {
 	s := &client{closing: make(chan struct{}), done: make(chan struct{}), joined: true,
-		budget: semaphore.NewWeighted(session.MaxPending(session.MaxValue))}
+		budget: semaphore.NewWeighted(session.MaxPending(session.MaxValue)),
+		slots:  semaphore.NewWeighted(session.MaxConcurrentGets)}
 	s.life, s.endLife = context.WithCancel(context.Background())
 	t.Cleanup(s.endLife)
 	return s
