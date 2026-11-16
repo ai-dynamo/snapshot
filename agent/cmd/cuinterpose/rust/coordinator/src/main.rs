@@ -1,10 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Validate participants, coordinate CUDA lifecycle phases, and publish state.
+//! Validate participants, coordinate CUDA lifecycle phases, and publish state, for one Pod
+//! alone or as the relay of one Pod in a group that shares CUDA memory across Pods.
 
+#[cfg(test)]
+mod fake_agent;
 mod group;
 mod relay;
+mod session;
 mod state;
 #[cfg(test)]
 mod test_records;
@@ -18,10 +22,11 @@ use cuinterpose_protocol::{
 };
 use group::Rank;
 use relay::{Command, Mode, Outcome};
+use session::Session;
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 #[derive(Parser)]
 struct Arguments {
@@ -38,6 +43,37 @@ struct Arguments {
     #[arg(long = "process", required = true, action = clap::ArgAction::Append,
           value_parser = clap::value_parser!(u32).range(1..))]
     processes: Vec<NamespacePid>,
+    /// The agent's end of the attempt's session, inherited from the agent. Without it, the
+    /// Pod runs alone.
+    #[arg(long, requires_all = ["rank", "relay_ranks", "deadline"])]
+    session_fd: Option<i32>,
+    /// This Pod's rank in the group.
+    #[arg(long, requires = "session_fd")]
+    rank: Option<group::Rank>,
+    /// Every rank that runs a relay. The lowest leads the group.
+    #[arg(long, requires = "session_fd", value_delimiter = ',')]
+    relay_ranks: Vec<group::Rank>,
+    /// The attempt's deadline in seconds since the Unix epoch.
+    #[arg(long, requires = "session_fd")]
+    deadline: Option<u64>,
+}
+
+impl Arguments {
+    /// The group that `--session-fd` and its companions describe, if any.
+    fn group(&self) -> Result<Option<(i32, relay::Group)>> {
+        let Some(fd) = self.session_fd else {
+            return Ok(None);
+        };
+        let required = "--session-fd requires its group arguments";
+        let mut group = relay::Group {
+            rank: self.rank.context(required)?,
+            relays: self.relay_ranks.clone(),
+            deadline: SystemTime::UNIX_EPOCH
+                + Duration::from_secs(self.deadline.context(required)?),
+        };
+        group.check()?;
+        Ok(Some((fd, group)))
+    }
 }
 
 struct Peer {
@@ -268,6 +304,7 @@ fn run() -> Result<()> {
         args.socket_dir.starts_with('/'),
         "--socket-dir must be an absolute path"
     );
+    let membership = args.group()?;
     let socket_dir = Path::new(&args.socket_dir);
     let mut seen = BTreeSet::new();
     let mut peers = Vec::with_capacity(args.processes.len());
@@ -310,7 +347,11 @@ fn run() -> Result<()> {
             (Mode::Restore, None, Some(saved))
         }
     };
-    relay::run(mode, &mut LocalPod::new(&peers, state, saved))
+    let member = match membership {
+        Some((fd, group)) => Some((Session::inherit(fd)?, group)),
+        None => None,
+    };
+    relay::run(member, mode, &mut LocalPod::new(&peers, state, saved))
 }
 
 fn main() -> std::process::ExitCode {
