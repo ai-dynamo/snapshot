@@ -42,6 +42,10 @@ type Store interface {
 	// which limits its number of keys, deleted ones included, it writes
 	// nothing if key is absent, so deleting a key that was never inserted
 	// succeeds even in a full bucket. A later Insert of key starts afresh.
+	// Otherwise it writes a delete marker, which takes memory, so at the
+	// coordinator's memory cap it reports session.ErrTooMany, like any write:
+	// a session cannot free memory by deleting its keys once the cap is
+	// reached, and frees it only when the host removes it.
 	Delete(ctx context.Context, key string) error
 }
 
