@@ -70,16 +70,30 @@ func TestPodGroupAttemptPassesRestoreReasons(t *testing.T) {
 }
 
 func TestPodGroupAttemptCancelsOnlyMembersWithoutWork(t *testing.T) {
-	// A restore-shaped view: a member whose Pod is pinned has work.
-	pinned := podGroupMemberView{id: "a", rank: 0, hasWork: true}
-	unpinned := podGroupMemberView{id: "b", rank: 1}
-	attempt := newPodGroupAttempt(&podGroupSnapshotKind, 600, podGroupAdmission{}, true, false,
-		[]podGroupMemberView{pinned, unpinned})
+	cancelled := &podGroupCause{snapshotv1alpha1.PodGroupReasonCancelled, podGroupSnapshotKind.cancelledMemberMessage}
+	for _, tc := range []struct {
+		name                         string
+		deleting, committed, hasWork bool
+		want                         *podGroupCause
+	}{
+		{name: "deleted before the commit, no work", deleting: true, want: cancelled},
+		{name: "deleted before the commit, with work", deleting: true, hasWork: true},
+		{name: "deleted after the commit, no work", deleting: true, committed: true},
+		{name: "deleted after the commit, with work", deleting: true, committed: true, hasWork: true},
+		{name: "not deleted, no work"},
+		{name: "not deleted, with work", hasWork: true},
+		{name: "not deleted, committed, no work", committed: true},
+		{name: "not deleted, committed, with work", committed: true, hasWork: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The attempt commits when member a has startedAt.
+			a := podGroupMemberView{id: "a", hasWork: true, started: tc.committed}
+			attempt := newPodGroupAttempt(&podGroupSnapshotKind, 600, podGroupAdmission{}, tc.deleting, false,
+				[]podGroupMemberView{a})
 
-	assert.Nil(t, attempt.memberCause(&pinned))
-	cause := attempt.memberCause(&unpinned)
-	require.NotNil(t, cause)
-	assert.Equal(t, snapshotv1alpha1.PodGroupReasonCancelled, cause.reason)
+			assert.Equal(t, tc.want, attempt.memberCause(tc.hasWork))
+		})
+	}
 }
 
 func TestPodGroupAttemptAdmittedTakesTheFailure(t *testing.T) {

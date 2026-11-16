@@ -220,20 +220,21 @@ func newPodGroupAttempt(
 	}
 }
 
-// memberCause is the cause that fails the unfinished member m: the three ways
-// the operator itself ends an attempt. A group deleted before the commit
-// cancels only the members with no work; a member with work reports its own end,
-// so its work is never cut from under its agent. The cause does not depend on
-// the group's Failed reason, so a group that failed because of one member still
-// fails the others at its deadline. Its message is the member's fixed one,
-// since every member gets it; failure explains the group's.
-func (a *podGroupAttempt) memberCause(m *podGroupMemberView) *podGroupCause {
+// memberCause is the cause that fails an unfinished member, whose work exists
+// when hasWork: the three ways the operator itself ends an attempt. A group
+// deleted before the commit cancels only the members with no work; a member
+// with work reports its own end, so its work is never cut from under its
+// agent. The cause does not depend on the group's Failed reason, so a group
+// that failed because of one member still fails the others at its deadline.
+// Its message is the member's fixed one, since every member gets it; failure
+// explains the group's.
+func (a *podGroupAttempt) memberCause(hasWork bool) *podGroupCause {
 	switch {
 	case a.admission.state == podGroupAdmissionRefused:
 		return &podGroupCause{a.admission.reason, a.kind.refusedMemberMessage}
 	case a.pastDeadline:
 		return &podGroupCause{snapshotv1alpha1.PodGroupReasonDeadlineExceeded, a.kind.deadlineMemberMessage}
-	case a.deleting && !a.outcomes.committed && !m.hasWork:
+	case a.deleting && !a.outcomes.committed && !hasWork:
 		return &podGroupCause{snapshotv1alpha1.PodGroupReasonCancelled, a.kind.cancelledMemberMessage}
 	}
 	return nil

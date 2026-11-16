@@ -130,12 +130,11 @@ func derivePodGroupSnapshotStatus(
 		next.Members[rank] = status
 	}
 
-	views := podGroupSnapshotMemberViews(next.Members)
 	attempt := newPodGroupAttempt(&podGroupSnapshotKind, spec.DeadlineSeconds, observed.admission,
-		observed.deleting, !now.Before(observed.deadline), views)
+		observed.deleting, !now.Before(observed.deadline), podGroupSnapshotMemberViews(next.Members))
 	for i := range next.Members {
 		if m := &next.Members[i]; !isCheckpointPhaseFinal(m.Phase) {
-			if cause := attempt.memberCause(&views[i]); cause != nil {
+			if cause := attempt.memberCause(m.PodSnapshot != nil); cause != nil {
 				m.Phase, m.Reason, m.Message = snapshotv1alpha1.CheckpointPhaseFailed, cause.reason, cause.message
 			}
 		}
