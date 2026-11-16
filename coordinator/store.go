@@ -42,31 +42,46 @@ type Store interface {
 	// which limits its number of keys, deleted ones included, it writes
 	// nothing if key is absent, so deleting a key that was never inserted
 	// succeeds even in a full bucket. A later Insert of key starts afresh.
+	// Otherwise it writes a delete marker, which takes memory, so at the
+	// coordinator's memory cap it reports session.ErrTooMany, like any write:
+	// a session cannot free memory by deleting its keys once the cap is
+	// reached, and frees it only when the host removes it.
 	Delete(ctx context.Context, key string) error
 }
 
 // Snapshot implements Session.
-func (s *client) Snapshot() Store {
-	return &store{s: s, kv: s.snapshot, ns: session.NamespaceSnapshot, maxValue: s.meta.MaxValue}
-}
+func (s *client) Snapshot() Store { return s.stores[session.NamespaceSnapshot] }
 
 // CuInterpose implements Session.
-func (s *client) CuInterpose() Store {
-	return &store{s: s, kv: s.snapshot, ns: session.NamespaceCuInterpose, maxValue: s.meta.MaxValue}
-}
+func (s *client) CuInterpose() Store { return s.stores[session.NamespaceCuInterpose] }
 
 // Library implements Session.
-func (s *client) Library() Store {
-	return &store{s: s, kv: s.library, ns: session.NamespaceLibrary, maxValue: s.meta.MaxLibraryValue,
-		limitsKeys: true}
+func (s *client) Library() Store { return s.stores[session.NamespaceLibrary] }
+
+// newStore returns the Store of a namespace, whose keys the bucket name holds,
+// bound as b. Meta carries the library bucket's largest value apart from the
+// Snapshot bucket's, and the library bucket limits its number of keys.
+func (s *client) newStore(ns session.Namespace, name string, b bucket) *store {
+	st := &store{s: s, b: b, ns: ns, maxValue: s.meta.MaxValue}
+	if name == session.LibraryBucket(s.attempt) {
+		st.maxValue, st.limitsKeys = s.meta.MaxLibraryValue, true
+	}
+	st.cost = readCost{bytes: readSize(st.maxValue), slot: name == session.SnapshotBucket(s.attempt)}
+	return st
 }
+
+// readSize is what a read of a bucket whose largest value is maxValue takes of
+// the connection's budget: the most its reply holds.
+func readSize(maxValue int) int64 { return int64(maxValue) + session.ReplyHeadroom }
 
 // store is one namespace of a session.
 type store struct {
 	s        *client
-	kv       jetstream.KeyValue
+	b        bucket
 	ns       session.Namespace
 	maxValue int
+	// cost is what each read takes of the connection's budget.
+	cost readCost
 	// limitsKeys is set for a bucket that limits its number of keys, deleted
 	// ones included, which a delete marker for an absent key would take one of.
 	limitsKeys bool
@@ -119,24 +134,16 @@ func (st *store) Insert(ctx context.Context, key string, value []byte) error {
 		return fmt.Errorf("a value of %d bytes is over the %d-byte limit: %w", len(value), st.maxValue,
 			session.ErrTooLarge)
 	}
-	return st.s.do(ctx, func(ctx context.Context) error {
-		_, err := st.kv.Create(ctx, k, value)
-		if !errors.Is(err, jetstream.ErrKeyExists) {
-			return err
-		}
-		entry, err := st.kv.Get(ctx, k)
-		switch {
-		case errors.Is(err, jetstream.ErrKeyNotFound):
-			// Deleted since: create it again.
-			return errRetry
-		case err != nil:
-			return err
-		case bytes.Equal(entry.Value(), value):
-			return nil
-		default:
-			return session.ErrExists
-		}
-	})
+	created, held, err := st.s.create(ctx, st.b, k, value, st.cost)
+	switch {
+	case err != nil:
+		return err
+	case created, bytes.Equal(held, value):
+		// Inserting the value a key holds succeeds, such as when this
+		// Insert's first write landed before its connection broke.
+		return nil
+	}
+	return session.ErrExists
 }
 
 // Get implements Store.
@@ -158,21 +165,17 @@ func (st *store) Get(ctx context.Context, key string, wait time.Duration) ([]byt
 	return value, nil
 }
 
-// read reads the value of k, or reports session.ErrNotFound. The connection
-// reads at most session.MaxConcurrentGets values at once.
+// read reads the value of k, or reports session.ErrNotFound, within the
+// connection's budget. Every value a store reads goes through it.
 func (st *store) read(ctx context.Context, k string) ([]byte, error) {
-	var value []byte
-	err := st.s.read(ctx, func(ctx context.Context) error {
-		entry, err := st.kv.Get(ctx, k)
-		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return session.ErrNotFound
-		}
-		if err == nil {
-			value = entry.Value()
-		}
-		return err
-	})
-	return value, err
+	var r record
+	if err := st.s.read(ctx, st.cost, latest(st.b, k, &r)); err != nil {
+		return nil, err
+	}
+	if r.deleted {
+		return nil, session.ErrNotFound
+	}
+	return r.value, nil
 }
 
 // readWhenPresent waits up to wait for k to be present, then reads it, or
@@ -183,7 +186,7 @@ func (st *store) readWhenPresent(ctx context.Context, k string, wait time.Durati
 	waitCtx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	for {
-		err := st.s.await(waitCtx, st.kv, []string{k}, func(_ string, _ []byte, present bool) bool { return present },
+		err := st.s.await(waitCtx, st.b.kv, []string{k}, func(_ string, _ []byte, present bool) bool { return present },
 			jetstream.MetaOnly())
 		if err == nil {
 			// Read within the caller's context: the key is there, whatever
@@ -207,16 +210,14 @@ func (st *store) Delete(ctx context.Context, key string) error {
 	if err != nil {
 		return err
 	}
-	return st.s.do(ctx, func(ctx context.Context) error {
-		if st.limitsKeys {
-			_, err := st.kv.Get(ctx, k)
-			if errors.Is(err, jetstream.ErrKeyNotFound) {
-				return nil
-			}
-			if err != nil {
-				return err
-			}
+	if st.limitsKeys {
+		_, err := st.read(ctx, k)
+		if errors.Is(err, session.ErrNotFound) {
+			return nil
 		}
-		return st.kv.Delete(ctx, k)
-	})
+		if err != nil {
+			return err
+		}
+	}
+	return st.s.do(ctx, func(ctx context.Context) error { return st.b.kv.Delete(ctx, k) })
 }

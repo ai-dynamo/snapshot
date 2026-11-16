@@ -250,6 +250,35 @@ func TestAuthorizeRefusesUnexpectedHeaders(t *testing.T) {
 	})
 }
 
+// go-jose also parses a JWS in JSON serialization, whose header parameters
+// need not be in a protected header. The header check refuses it, even signed
+// by the issuer, before go-jose sees it.
+func TestAuthorizeRefusesAJWSInJSONSerialization(t *testing.T) {
+	for name, serialize := range map[string]func(protected, payload, signature string) any{
+		"flattened": func(protected, payload, signature string) any {
+			return map[string]string{"protected": protected, "payload": payload, "signature": signature}
+		},
+		"general": func(protected, payload, signature string) any {
+			return map[string]any{
+				"payload":    payload,
+				"signatures": []map[string]string{{"protected": protected, "signature": signature}},
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			parts := strings.Split(h.token(), ".")
+			require.Len(t, parts, 3)
+			token, err := json.Marshal(serialize(parts[0], parts[1], parts[2]))
+			require.NoError(t, err)
+			err = h.authorize(member, string(token))
+			require.ErrorIs(t, err, server.ErrUnauthenticated)
+			assert.ErrorContains(t, err, "the token's header is not base64url")
+			assert.Zero(t, h.placement.asked.Load(), "asked where the members run")
+		})
+	}
+}
+
 // GHSA-mgcc-cww5-fp2q: go-jose up to v4.1.5 spent seconds validating an
 // RSA key with a huge prime, which a token's jwk header can carry, before any
 // other check. Both the header check and go-jose itself refuse it at once.

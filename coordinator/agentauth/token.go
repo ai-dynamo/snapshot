@@ -141,15 +141,13 @@ func getJSON(ctx context.Context, client *http.Client, url string, v any) error 
 	return nil
 }
 
-// allowedHeader holds the JWS header parameters a token may carry. The API
-// server sets only alg and kid. Any other, such as jwk, x5c or crit, only
-// gives the JOSE parser more work, on a path any client reaches without
-// credentials.
-var allowedHeader = map[string]bool{"alg": true, "kid": true, "typ": true}
-
-// checkHeader refuses a token whose protected header holds a parameter
-// allowedHeader does not. It reads the header with the standard library, so
-// that such a token never reaches the JOSE parser.
+// checkHeader refuses a token whose protected header holds a parameter other
+// than alg, kid and typ. The API server sets only alg and kid. Any other, such
+// as jwk, x5c or crit, only gives the JOSE parser more work, on a path any
+// client reaches without credentials. checkHeader reads the header with the
+// standard library, so that such a token never reaches the JOSE parser. A
+// token in JWS JSON serialization, which the JOSE parser also accepts, has no
+// base64url header and is refused too.
 func checkHeader(token string) error {
 	encoded, _, _ := strings.Cut(token, ".")
 	raw, err := base64.RawURLEncoding.DecodeString(encoded)
@@ -161,7 +159,9 @@ func checkHeader(token string) error {
 		return errors.New("the token's header is not a JSON object")
 	}
 	for name := range header {
-		if !allowedHeader[name] {
+		switch name {
+		case "alg", "kid", "typ":
+		default:
 			return errors.New("the token's header holds a parameter other than alg, kid and typ")
 		}
 	}

@@ -37,6 +37,10 @@ func Buckets(attempt string) []string {
 	return []string{ControlBucket(attempt), SnapshotBucket(attempt), LibraryBucket(attempt)}
 }
 
+// Subject is the subject a write of key in bucket publishes to, and its
+// record in the bucket's stream has.
+func Subject(bucket, key string) string { return "$KV." + bucket + "." + key }
+
 // The keys of the control bucket, ControlBucket(attempt), which the session
 // itself uses:
 //
@@ -51,8 +55,8 @@ func Buckets(attempt string) []string {
 //	cuinterpose.<key>        the cuInterpose relays' keys
 //
 // The library bucket, LibraryBucket(attempt), holds library.<key> keys, which
-// any workload library writes through the agent's library endpoint. Namespace
-// maps each namespace to its bucket.
+// any workload library writes through the agent's library endpoint.
+// Namespace.Bucket maps each namespace to its bucket.
 const (
 	// KeyMeta holds the session's Meta, as JSON. Only the coordinator writes it.
 	KeyMeta = "meta"
@@ -110,14 +114,36 @@ const (
 	NamespaceLibrary Namespace = "library"
 )
 
-// Bucket names the bucket of an attempt that holds the namespace's keys. It is
-// the one place that maps a namespace to a bucket, so the client, the
-// coordinator and the member permissions agree.
-func (n Namespace) Bucket(attempt string) string {
-	if n == NamespaceLibrary {
-		return LibraryBucket(attempt)
+// namespaces maps every namespace to the bucket that holds its keys. It is
+// the one place that does, so the client, the coordinator and the member
+// permissions agree.
+var namespaces = []struct {
+	ns     Namespace
+	bucket func(attempt string) string
+}{
+	{NamespaceSnapshot, SnapshotBucket},
+	{NamespaceCuInterpose, SnapshotBucket},
+	{NamespaceLibrary, LibraryBucket},
+}
+
+// Namespaces lists every namespace.
+func Namespaces() []Namespace {
+	all := make([]Namespace, len(namespaces))
+	for i, n := range namespaces {
+		all[i] = n.ns
 	}
-	return SnapshotBucket(attempt)
+	return all
+}
+
+// Bucket names the bucket of an attempt that holds the namespace's keys. It
+// reports ErrInvalid for a namespace that Namespaces does not list.
+func (n Namespace) Bucket(attempt string) (string, error) {
+	for _, m := range namespaces {
+		if m.ns == n {
+			return m.bucket(attempt), nil
+		}
+	}
+	return "", fmt.Errorf("no namespace %q: %w", n, ErrInvalid)
 }
 
 // nameRE matches one key token that is safe in a user name and an inbox
@@ -179,11 +205,11 @@ type Permissions struct {
 // attempt's buckets and nothing else, never another attempt's buckets, the
 // system account, or the API that creates and deletes buckets. In the control
 // bucket it may write the ended key, its own arrivals and its own departure,
-// never meta or another member's barrier or left key; in the Snapshot bucket
-// the snapshot and cuinterpose namespaces; in the library bucket anything. Its
-// JetStream API requests are limited to what a client needs to bind a bucket,
-// Get a key, and Watch keys, and the only subscriptions it may make are on its
-// own inbox, where replies and watched entries arrive.
+// never meta or another member's barrier or left key; it may write each
+// namespace's keys in the bucket Namespace.Bucket names. Its JetStream API
+// requests are limited to what a client needs to bind a bucket, Get a key,
+// and Watch keys, and the only subscriptions it may make are on its own inbox,
+// where replies and watched entries arrive.
 //
 // The permissions guard against an agent's mistakes, not a compromised agent:
 // every agent is equally trusted, as package server states. They do not bound
@@ -193,32 +219,36 @@ type Permissions struct {
 // attempt's buckets under its own subjects, which count against that attempt's
 // limits. Such a delivery keeps its own subject, so it never changes a key.
 func MemberPermissions(attempt, member string) Permissions {
-	publish := make([]string, 0, 16)
-	for _, bucket := range Buckets(attempt) {
-		stream := "KV_" + bucket
-		publish = append(publish,
-			"$JS.API.STREAM.INFO."+stream,          // binding the bucket
-			"$JS.API.DIRECT.GET."+stream+".>",      // Get
-			"$JS.API.CONSUMER.CREATE."+stream+".>", // Watch, through an ordered consumer
-			"$JS.API.CONSUMER.DELETE."+stream+".*", // stopping a watch
-			// A watch's flow control replies, which nats.go sends whenever the
-			// server asks, once a value past its threshold has been delivered.
-			// Refusing one logs a violation on both sides, and stalls a watch
-			// that then receives a second large value.
-			"$JS.FC."+stream+".>",
-		)
+	buckets := Buckets(attempt)
+	controlKeys := []string{KeyEnded, BarrierKey("*", member), LeftKey(member)}
+	publish := make([]string, 0, len(buckets)*len(bucketAPI)+len(controlKeys)+len(namespaces))
+	for _, bucket := range buckets {
+		for _, api := range bucketAPI {
+			publish = append(publish, api.prefix+"KV_"+bucket+api.suffix)
+		}
 	}
-	control := "$KV." + ControlBucket(attempt) + "."
-	publish = append(publish,
-		control+KeyEnded,
-		control+BarrierKey("*", member),
-		control+LeftKey(member),
-		"$KV."+NamespaceLibrary.Bucket(attempt)+".>",
-	)
-	for _, ns := range []Namespace{NamespaceSnapshot, NamespaceCuInterpose} {
-		publish = append(publish, "$KV."+ns.Bucket(attempt)+"."+string(ns)+".>")
+	for _, key := range controlKeys {
+		publish = append(publish, Subject(ControlBucket(attempt), key))
+	}
+	for _, n := range namespaces {
+		publish = append(publish, Subject(n.bucket(attempt), string(n.ns)+".>"))
 	}
 	return Permissions{Publish: publish, Subscribe: []string{InboxPrefix(attempt, member) + ".>"}}
+}
+
+// bucketAPI lists the JetStream API subjects a member's connection may publish
+// to for each of its attempt's buckets, around the name of the bucket's
+// stream.
+var bucketAPI = []struct{ prefix, suffix string }{
+	{"$JS.API.STREAM.INFO.", ""},       // binding the bucket
+	{"$JS.API.DIRECT.GET.", ".>"},      // Get
+	{"$JS.API.CONSUMER.CREATE.", ".>"}, // Watch, through an ordered consumer
+	{"$JS.API.CONSUMER.DELETE.", ".*"}, // stopping a watch
+	// A watch's flow control replies, which nats.go sends whenever the server
+	// asks, once a value past its threshold has been delivered. Refusing one
+	// logs a violation on both sides, and stalls a watch that then receives a
+	// second large value.
+	{"$JS.FC.", ".>"},
 }
 
 // Member is one member of an attempt.

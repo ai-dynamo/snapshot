@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/coordinator/internal/backoff"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
@@ -37,6 +38,8 @@ func TestSpecValidation(t *testing.T) {
 		{"a UID too long for its buckets", Spec{UID: types.UID(strings.Repeat("u", session.MaxAttemptLength+1)),
 			Members: members("a"), Deadline: deadline}},
 		{"no members", Spec{UID: "u", Deadline: deadline}},
+		{"more members than a session is sized for", Spec{UID: "u", Members: members(memberIDs(session.MaxMembers + 1)...),
+			Deadline: deadline}},
 		{"no deadline", Spec{UID: "u", Members: members("a")}},
 		{"a member ID with a dot", Spec{UID: "u", Members: members("pod.a"), Deadline: deadline}},
 		{"a member named twice", Spec{UID: "u", Members: members("a", "a"), Deadline: deadline}},
@@ -54,22 +57,26 @@ func TestSpecValidation(t *testing.T) {
 	}
 	require.NoError(t, Spec{UID: "u", Members: []session.Member{{ID: "b", Rank: 1}, {ID: "a", Rank: 0}},
 		Deadline: deadline}.validate(), "members may come in any order")
+	require.NoError(t, Spec{UID: "u", Members: members(memberIDs(session.MaxMembers)...), Deadline: deadline}.validate(),
+		"the most members a session is sized for")
+}
+
+// memberIDs returns n distinct member IDs.
+func memberIDs(n int) []string {
+	ids := make([]string, n)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("member-%d", i)
+	}
+	return ids
 }
 
 // TestEnsure covers creating a session, and ensuring it again.
 func TestEnsure(t *testing.T) {
 	h := newHarness(t)
 
-	t.Run("creates both buckets in memory, and reports the session", func(t *testing.T) {
+	t.Run("reports the session", func(t *testing.T) {
 		h := h.sub(t)
 		spec := h.ensure(1)
-		for _, bucket := range []string{session.SnapshotBucket(string(spec.UID)),
-			session.LibraryBucket(string(spec.UID))} {
-			stream, err := h.srv.js.Stream(within(t), "KV_"+bucket)
-			require.NoError(t, err)
-			// Sessions never reach the disk.
-			assert.Equal(t, jetstream.MemoryStorage, stream.CachedInfo().Config.Storage, "bucket %s", bucket)
-		}
 		assert.Equal(t, []string{"opened"}, h.events(spec))
 	})
 
@@ -335,11 +342,12 @@ func TestWatchStopsOnItsOwn(t *testing.T) {
 // longest wait between tries to record the end.
 func endsSoon(t *testing.T, m *member, want error) {
 	t.Helper()
+	soon := 2 * backoff.New().Cap
 	select {
 	case <-m.done:
 		require.ErrorIs(t, m.err, want)
-	case <-time.After(2 * maxEndRetry):
-		t.Fatalf("the session did not end with %v within %v", want, 2*maxEndRetry)
+	case <-time.After(soon):
+		t.Fatalf("the session did not end with %v within %v", want, soon)
 	}
 }
 
@@ -540,11 +548,17 @@ func returns(t *testing.T, what string, call func() error) error {
 	}
 }
 
-// TestBucketStorage checks where a session's buckets live: the control bucket
-// in file storage, bounded by the membership, and the data buckets in memory.
+// TestBucketStorage checks that the coordinator creates the buckets package
+// session names, and where they live: the control bucket in file storage,
+// bounded by the membership, and the data buckets in memory.
 func TestBucketStorage(t *testing.T) {
 	h := newHarness(t)
 	spec := h.ensure(3)
+	var names []string
+	for _, b := range h.srv.bucketSpecs(spec) {
+		names = append(names, b.name)
+	}
+	assert.Equal(t, session.Buckets(string(spec.UID)), names)
 	for bucket, want := range map[string]struct {
 		storage  jetstream.StorageType
 		maxBytes int64
@@ -562,36 +576,77 @@ func TestBucketStorage(t *testing.T) {
 }
 
 // TestControlBucketFitsAnHonestSession writes what the largest honest session
-// puts in its control bucket, which its size must hold: session.MaxMembers
-// members with long names, each with several barrier arrivals and a departure,
-// then the ended key. Meta is written by Ensure.
+// puts in its control bucket, with the longest names, which its size must
+// hold: session.MaxMembers members, each arriving at
+// session.ArrivalsPerMember barriers and leaving, and a member's failure with
+// the longest reason. Meta is written by Ensure.
 func TestControlBucketFitsAnHonestSession(t *testing.T) {
-	const members, barriers = session.MaxMembers, 8
 	h := newHarness(t)
 	ctx := within(t)
-	spec := Spec{UID: "uid-large", Deadline: h.clock.Now().Add(time.Hour)}
-	for i := range members {
-		spec.Members = append(spec.Members,
-			session.Member{ID: fmt.Sprintf("snapshot-workload-pod-%03d-node-%03d", i, i), Rank: i})
-	}
+	spec := h.longestSpec(session.MaxMembers)
 	require.NoError(t, h.srv.Ensure(ctx, spec))
-	kv, err := h.srv.js.KeyValue(ctx, session.ControlBucket(string(spec.UID)))
-	require.NoError(t, err)
+	kv := h.srv.lookup(spec.UID).control
 	for _, m := range spec.Members {
-		for b := range barriers {
-			_, err := kv.Put(ctx, session.BarrierKey(fmt.Sprintf("checkpoint-phase-%d-barrier", b), m.ID), nil)
+		for b := range session.ArrivalsPerMember {
+			_, err := kv.Put(ctx, session.BarrierKey(longest(fmt.Sprintf("barrier-%d-", b), session.MaxNameLength), m.ID),
+				nil)
 			require.NoError(t, err, "member %s barrier %d", m.ID, b)
 		}
-		_, err := kv.Put(ctx, session.LeftKey(m.ID), nil)
-		require.NoError(t, err)
 	}
-	// Every member left, so the session closes by the ended key.
-	require.Eventually(t, func() bool { _, ok := h.ended(spec); return ok }, 10*time.Second, 5*time.Millisecond)
+	_, err := kv.Create(ctx, session.KeyEnded, []byte(strings.Repeat("A", session.MaxControlValue)))
+	require.NoError(t, err)
+	for _, m := range spec.Members {
+		_, err := kv.Put(ctx, session.LeftKey(m.ID), nil)
+		require.NoError(t, err, "member %s", m.ID)
+	}
 	stream, err := h.srv.js.Stream(ctx, "KV_"+session.ControlBucket(string(spec.UID)))
 	require.NoError(t, err)
 	info, err := stream.Info(ctx)
 	require.NoError(t, err)
-	assert.Less(t, int64(info.State.Bytes), session.ControlBytes(members),
-		"the session's keys must fit with room to spare")
-	t.Logf("%d of %d bytes", info.State.Bytes, session.ControlBytes(members))
+	assert.LessOrEqual(t, int64(info.State.Bytes), session.ControlBytes(len(spec.Members)))
+	t.Logf("%d of %d bytes", info.State.Bytes, session.ControlBytes(len(spec.Members)))
 }
+
+// TestControlBucketHoldsItsWorstCase fills a control bucket with the records
+// its size is derived from, each with the longest names and the largest
+// value: every one of them fits beside Meta, and not one more.
+func TestControlBucketHoldsItsWorstCase(t *testing.T) {
+	const members = 2
+	h := newHarness(t)
+	ctx := within(t)
+	spec := h.longestSpec(members)
+	require.NoError(t, h.srv.Ensure(ctx, spec))
+	kv := h.srv.lookup(spec.UID).control
+	value := make([]byte, session.MaxControlValue)
+	arrive := func(i int) error {
+		_, err := kv.Put(ctx, session.BarrierKey(longest(fmt.Sprintf("barrier-%d-", i), session.MaxNameLength),
+			spec.Members[0].ID), value)
+		return err
+	}
+	// Each member's arrivals and departure, and the session's end.
+	records := members*(session.ArrivalsPerMember+1) + 1
+	for i := range records {
+		require.NoError(t, arrive(i), "record %d of %d", i+1, records)
+	}
+	requireCode(t, arrive(records), codeStoreFailed, "a record past the worst case must not fit")
+	// Shutdown could not record the full session's end.
+	require.NoError(t, h.srv.Remove(ctx, spec.UID))
+}
+
+// longestSpec returns the spec of a new attempt with n members, whose UID and
+// member IDs are as long as package session allows, and whose deadline is an
+// hour away.
+func (h *harness) longestSpec(n int) Spec {
+	spec := Spec{
+		UID:      types.UID(longest(fmt.Sprintf("uid-%d-", time.Now().UnixNano()), session.MaxAttemptLength)),
+		Deadline: h.clock.Now().Add(time.Hour),
+	}
+	for i := range n {
+		spec.Members = append(spec.Members,
+			session.Member{ID: longest(fmt.Sprintf("member-%d-", i), session.MaxNameLength), Rank: i})
+	}
+	return spec
+}
+
+// longest pads prefix to n bytes.
+func longest(prefix string, n int) string { return prefix + strings.Repeat("x", n-len(prefix)) }
