@@ -201,6 +201,12 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	}
 	if req.Group != nil {
 		defer func() {
+			// A panic fails the attempt too, or the other members would wait
+			// for this one until the deadline.
+			if r := recover(); r != nil {
+				failGroup(ctx, log, req.Group)
+				panic(r)
+			}
 			// A restore that only failed its cleanup has released its member.
 			if retErr != nil && !errors.As(retErr, new(*RestoreCleanupError)) {
 				failGroup(ctx, log, req.Group)
@@ -308,27 +314,27 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err != nil {
 		return RestoreResult{}, failStep(StepInspectPlaceholder, err)
 	}
-	// groupDuration is the time spent in the pod group's admission and
-	// barriers, mostly waiting for the other members.
-	var groupDuration time.Duration
-	if req.Group != nil {
-		// Every check above only read the placeholder, so a refusal leaves it
-		// as Snapshot found it.
-		admitStart := time.Now()
-		if err := admitRestore(ctx, req.Group, req.TargetPodIP, manifest.Group); err != nil {
-			return RestoreResult{}, failStep(StepAdmitGroup, err)
-		}
-		groupDuration = time.Since(admitStart)
-		if err := recordCommit(ctx, req.Committed); err != nil {
-			return RestoreResult{}, failStep(StepRecordGroupStart, err)
-		}
-	}
 
 	var gpuContext *pagebroker.GpuContext
 	if usePageBrokerGPU {
 		gpuContext, err = pagebroker.NewGPUContext(manifest.CUDA.PIDs, snap.TargetGPUUUIDs, snap.CUDADeviceMap)
 		if err != nil {
 			return RestoreResult{}, failStep(StepBuildGPUContext, err)
+		}
+	}
+	// groupDuration is the time spent in the pod group's admission and
+	// barriers, mostly waiting for the other members.
+	var groupDuration time.Duration
+	if req.Group != nil {
+		// Every check above only read the artifact and the placeholder, so a
+		// refusal leaves the placeholder as Snapshot found it.
+		admitStart := time.Now()
+		if err := admitRestore(ctx, req.Group, req.TargetPodIP, manifest.PodGroup); err != nil {
+			return RestoreResult{}, failStep(StepAdmitGroup, err)
+		}
+		groupDuration = time.Since(admitStart)
+		if err := recordCommit(ctx, req.Committed); err != nil {
+			return RestoreResult{}, failStep(StepRecordGroupStart, err)
 		}
 	}
 
@@ -560,6 +566,12 @@ func validateRestoreManifest(req RestoreRequest, manifest *types.CheckpointManif
 			req.ContentUID,
 			req.ArtifactContainerName,
 		)
+	}
+	// The member's connections to the other members, and the memory it shares
+	// with them, restore only with the group.
+	if manifest.PodGroup != nil && req.Group == nil {
+		return fmt.Errorf("the checkpoint is member %s of pod group capture %s, and restores only with its group",
+			manifest.PodGroup.MemberID, manifest.PodGroup.CaptureUID)
 	}
 	return nil
 }

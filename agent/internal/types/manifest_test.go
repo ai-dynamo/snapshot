@@ -4,6 +4,7 @@
 package types
 
 import (
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -119,6 +120,62 @@ func TestManifestRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(loaded.Host, wantHost) {
 		t.Errorf("Host = %#v, want %#v", loaded.Host, wantHost)
+	}
+	if loaded.PodGroup != nil {
+		t.Errorf("PodGroup = %#v for a Pod captured on its own, want nil", loaded.PodGroup)
+	}
+}
+
+func TestPodGroupManifestRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	original := NewCheckpointManifest("content-uid-123", "main", CRIUDumpManifest{}, SourcePodManifest{},
+		OverlayManifest{}, HostManifest{})
+	original.PodGroup = &PodGroupManifest{
+		Version:    PodGroupManifestVersion,
+		CaptureUID: "capture-uid",
+		MemberID:   "worker",
+		Members: []PodGroupManifestMember{
+			{ID: "leader", PodUID: "pod-uid-0", Containers: []string{"main"}, PodIP: netip.MustParseAddr("10.0.0.1")},
+			{ID: "worker", PodUID: "pod-uid-1", Containers: []string{"engine"}, PodIP: netip.MustParseAddr("10.0.0.2")},
+		},
+	}
+	if err := WriteManifest(dir, original); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(dir, manifestFilename))
+	if err != nil {
+		t.Fatalf("read the manifest: %v", err)
+	}
+	// SNEP-324 names the section and its fields.
+	want := `podGroup:
+    version: 1
+    captureUID: capture-uid
+    memberID: worker
+    members:
+        - id: leader
+          podUID: pod-uid-0
+          containers:
+            - main
+          podIP: 10.0.0.1
+        - id: worker
+          podUID: pod-uid-1
+          containers:
+            - engine
+          podIP: 10.0.0.2
+`
+	if !strings.HasSuffix(string(content), want) {
+		t.Errorf("manifest = %s, want it to end with %s", content, want)
+	}
+	loaded, err := ReadManifest(dir)
+	if err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+	if !reflect.DeepEqual(loaded.PodGroup, original.PodGroup) {
+		t.Errorf("PodGroup = %#v, want %#v", loaded.PodGroup, original.PodGroup)
+	}
+	if rank := loaded.PodGroup.Rank(); rank != 1 {
+		t.Errorf("Rank() = %d, want 1", rank)
 	}
 }
 

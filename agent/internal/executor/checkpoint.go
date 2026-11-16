@@ -136,6 +136,7 @@ type CheckpointRequest struct {
 	NodeName      string
 	PodName       string
 	PodNamespace  string
+	PodUID        string
 	PodIP         string
 	Clientset     kubernetes.Interface
 
@@ -201,6 +202,12 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	log.Info("=== Starting checkpoint operation ===")
 	if req.Group != nil {
 		defer func() {
+			// A panic fails the attempt too, or the other members would wait
+			// for this one until the deadline.
+			if r := recover(); r != nil {
+				failGroup(ctx, log, req.Group)
+				panic(r)
+			}
 			if retErr != nil {
 				failGroup(ctx, log, req.Group)
 			}
@@ -280,19 +287,6 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if err != nil {
 		return nil, failStep(StepInspectCuInterpose, err)
 	}
-	var admitDuration time.Duration
-	if req.Group != nil {
-		// Every check above only read the source, so a refusal leaves it as
-		// Snapshot found it.
-		admitStart := time.Now()
-		if err := admitCapture(ctx, req.Group, req.PodIP); err != nil {
-			return nil, failStep(StepAdmitGroup, err)
-		}
-		admitDuration = time.Since(admitStart)
-		if err := recordCommit(ctx, req.Committed); err != nil {
-			return nil, failStep(StepRecordGroupStart, err)
-		}
-	}
 	cudaJobFile := ""
 	if len(state.CUDAHostPIDs) > 0 && !usePageBrokerGPU {
 		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir)
@@ -307,6 +301,21 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, tmpDir, usePageBrokerGPU)
 	if err != nil {
 		return nil, failStep(StepConfigureCheckpoint, err)
+	}
+	var admitDuration time.Duration
+	if req.Group != nil {
+		// Every step above only read the source or wrote to the capture's own
+		// staging, so a refusal leaves the source as Snapshot found it.
+		admitStart := time.Now()
+		if err := admitCapture(ctx, req.Group, req.PodIP, req.PodUID, req.ContainerName); err != nil {
+			return nil, failStep(StepAdmitGroup, err)
+		}
+		admitDuration = time.Since(admitStart)
+		if err := recordCommit(ctx, req.Committed); err != nil {
+			return nil, failStep(StepRecordGroupStart, err)
+		}
+		// The dump writes the manifest again, now with the group's section.
+		data.PodGroup = groupManifest(req.Group)
 	}
 
 	captureTimings, err := captureCheckpointFunc(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu, req.DumpRetriesRemaining, req.DumpWorthRepeating, req.OnDumpRepeat, req.Group)
@@ -563,9 +572,6 @@ func configureCheckpoint(
 		}
 	}
 	m.CuInterpose = state.CuInterpose
-	if req.Group != nil {
-		m.Group = groupManifest(req.Group)
-	}
 
 	if err := types.WriteManifest(checkpointDir, m); err != nil {
 		return nil, nil, fmt.Errorf("failed to write checkpoint manifest: %w", err)

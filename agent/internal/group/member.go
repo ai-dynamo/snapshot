@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/coordinator"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 )
@@ -46,6 +47,11 @@ const ReasonRefused = "Refused"
 type Admission struct {
 	// PodIP is the member's Pod IP now.
 	PodIP netip.Addr `json:"podIP"`
+	// PodUID and Containers are set at capture: the UID of the member's Pod
+	// and its captured containers, one today, which every member's artifact
+	// records for every member.
+	PodUID     string   `json:"podUID,omitempty"`
+	Containers []string `json:"containers,omitempty"`
 	// CaptureID is set at restore: the UID of the PodGroupSnapshot the
 	// member's artifact was captured in. Every member must restore the same
 	// capture.
@@ -62,7 +68,10 @@ type Member struct {
 	id      string
 	// admissions holds every member's admission, by rank, once Admit returns.
 	admissions []Admission
-	// committed is set once the Admitted barrier has released.
+	// committed is set once the member calls the Admitted barrier, after which
+	// the attempt may have committed: an arrival that was recorded stays
+	// recorded even when the call fails, and the other members may then pass
+	// the barrier.
 	committed atomic.Bool
 }
 
@@ -84,9 +93,23 @@ func (m *Member) ID() string { return m.id }
 // Rank returns the member's rank, its position in the group.
 func (m *Member) Rank() int { return m.session.Rank() }
 
+// MemberIDs returns the ID of every member of the group, by rank.
+func (m *Member) MemberIDs() []string {
+	members := m.session.Meta().Members
+	ids := make([]string, len(members))
+	for rank, member := range members {
+		ids[rank] = member.ID
+	}
+	return ids
+}
+
 // Admit publishes own and returns once every member's admission is known. It
-// refuses an attempt whose members restore different captures.
+// refuses a Pod IP that is not IPv4, since a restore maps IPv4 addresses only,
+// and an attempt whose members restore different captures.
 func (m *Member) Admit(ctx context.Context, own Admission) error {
+	if !own.PodIP.Is4() {
+		return fmt.Errorf("the Pod's IP %s is not an IPv4 address, which a pod group needs", own.PodIP)
+	}
 	value, err := json.Marshal(own)
 	if err != nil {
 		return err
@@ -95,12 +118,19 @@ func (m *Member) Admit(ctx context.Context, own Admission) error {
 		return fmt.Errorf("publish the admission: %w", err)
 	}
 	meta := m.session.Meta()
+	// The session ends at the latest DeadlineSlack past its deadline, so a wait
+	// that long returns with how the session ended, rather than racing the
+	// coordinator's DeadlineExceeded.
+	wait := max(time.Until(meta.Deadline)+coordinator.DeadlineSlack, time.Second)
 	admissions := make([]Admission, len(meta.Members))
 	g, gctx := errgroup.WithContext(ctx)
+	// With the watch of the session's end and a wait of the member's relay, two
+	// waits at once stay within the four watches that a member's share of the
+	// bucket's consumers allows, as session.MaxConsumersPerMember sizes it.
+	g.SetLimit(2)
 	for rank := range admissions {
 		g.Go(func() error {
-			// The session ends at its deadline, which ends this wait too.
-			value, err := m.agent.Get(gctx, admitKey(rank), max(time.Until(meta.Deadline), time.Second))
+			value, err := m.agent.Get(gctx, admitKey(rank), wait)
 			if err != nil {
 				return fmt.Errorf("read the admission of rank %d: %w", rank, err)
 			}
@@ -129,16 +159,16 @@ func (m *Member) Admit(ctx context.Context, own Admission) error {
 func (m *Member) Admissions() []Admission { return m.admissions }
 
 // PeerIPs maps the IP each other member had at capture to its IP now, from
-// captured, the members' Pod IPs at capture by rank, which a restore reads from
-// its artifact, and the admissions.
-func (m *Member) PeerIPs(captured []netip.Addr) (map[netip.Addr]netip.Addr, error) {
+// captured, the member table a restore reads from its artifact, and the
+// admissions.
+func (m *Member) PeerIPs(captured []types.PodGroupManifestMember) (map[netip.Addr]netip.Addr, error) {
 	if len(captured) != len(m.admissions) {
 		return nil, fmt.Errorf("the capture had %d members, the restore has %d", len(captured), len(m.admissions))
 	}
 	peers := make(map[netip.Addr]netip.Addr, len(captured)-1)
 	for rank, a := range m.admissions {
 		if rank != m.Rank() {
-			peers[captured[rank]] = a.PodIP
+			peers[captured[rank].PodIP] = a.PodIP
 		}
 	}
 	return peers, nil
@@ -146,18 +176,19 @@ func (m *Member) PeerIPs(captured []netip.Addr) (map[netip.Addr]netip.Addr, erro
 
 // Barrier returns once every member has arrived at the barrier name.
 func (m *Member) Barrier(ctx context.Context, name string) error {
-	if err := m.session.Barrier(ctx, name); err != nil {
-		return fmt.Errorf("barrier %s: %w", name, err)
-	}
 	if name == Admitted {
 		m.committed.Store(true)
+	}
+	if err := m.session.Barrier(ctx, name); err != nil {
+		return fmt.Errorf("barrier %s: %w", name, err)
 	}
 	return nil
 }
 
 // Fail ends the attempt for every member, unless it has ended already, and
-// closes the connection. The reason is ReasonRefused until the attempt has
-// committed, and session.ReasonMemberFailed after.
+// closes the connection. The reason is ReasonRefused until the member calls
+// the Admitted barrier, and session.ReasonMemberFailed after, since the
+// attempt may then have committed.
 func (m *Member) Fail(ctx context.Context) error {
 	reason := ReasonRefused
 	if m.committed.Load() {
