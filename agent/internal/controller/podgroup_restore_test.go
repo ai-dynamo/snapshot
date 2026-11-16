@@ -435,26 +435,29 @@ func TestGroupRestoreReasons(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			rg := newRestoreGroup(t)
 			tc.modify(rg)
-			srv := ensureSession(t, restoreGroupUID, captureMemberIDs)
 			restoreFn := &memberRestore{}
-			w, _, _ := groupRestoreController(t, srv, rg, restoreFn.fn)
+			w, _, _ := groupRestoreController(t, nil, rg, restoreFn.fn)
+			joins := countJoins(w)
 
 			assert.False(t, serveTarget(t, w, rg.pods[0]))
-			waitForLeaving(t, w)
 
 			assert.Empty(t, restoreFn.steps(), "a member that fails a group check never joins its restore")
 			assert.Equal(t, podcontract.RestoreReasonFailed, podCondition(t, w, "target-0", podcontract.RestoredCondition).Reason)
 			assert.Equal(t, tc.want, podCondition(t, w, "target-0", podcontract.GroupRestoreFailedCondition).Reason)
-
-			// The member refused the attempt, so a peer joining now finds it ended.
-			peer, err := group.Join(within(t), srv.Config(restoreGroupUID, "worker"))
-			if err == nil {
-				err = peer.Barrier(within(t), group.Admitted)
-				_ = peer.Fail(context.Background())
-			}
-			require.ErrorIs(t, err, &session.AbortError{Reason: "Refused"})
+			assert.Zero(t, joins.Load(), "its failure on the Pod is all its peers learn of it; it does not join to refuse")
 		})
 	}
+}
+
+// countJoins counts the attempts that w's targets set out to join.
+func countJoins(w *NodeController) *atomic.Int32 {
+	joins := &atomic.Int32{}
+	config := w.podGroups.configFn
+	w.podGroups.configFn = func(ctx context.Context, attempt, member string, sessionNode group.SessionNode) (coordinator.Config, error) {
+		joins.Add(1)
+		return config(ctx, attempt, member, sessionNode)
+	}
+	return joins
 }
 
 // failReads makes w's reads of one kind fail with the error that fail
@@ -518,44 +521,29 @@ func TestGroupRestoreWaitsOutATransientRead(t *testing.T) {
 }
 
 func TestGroupRestoreFailsWhenItsSnapshotIsGone(t *testing.T) {
-	for kind, tc := range map[string]struct {
-		gone func(client.Object) bool
-		// refused is whether the member can refuse the attempt. Without the
-		// PodGroupSnapshot no one knows the rank-0 member, the coordinator
-		// included, so there is no session to refuse.
-		refused bool
-	}{
-		"PodGroupSnapshot": {gone: func(obj client.Object) bool { _, ok := obj.(*snapshotv1alpha1.PodGroupSnapshot); return ok }},
-		"PodSnapshot":      {gone: func(obj client.Object) bool { _, ok := obj.(*snapshotv1alpha1.PodSnapshot); return ok }, refused: true},
+	for kind, gone := range map[string]func(client.Object) bool{
+		"PodGroupSnapshot": func(obj client.Object) bool { _, ok := obj.(*snapshotv1alpha1.PodGroupSnapshot); return ok },
+		"PodSnapshot":      func(obj client.Object) bool { _, ok := obj.(*snapshotv1alpha1.PodSnapshot); return ok },
 	} {
 		t.Run(kind, func(t *testing.T) {
 			rg := newRestoreGroup(t)
-			srv := ensureSession(t, restoreGroupUID, captureMemberIDs)
 			restoreFn := &memberRestore{}
-			w, _, _ := groupRestoreController(t, srv, rg, restoreFn.fn)
+			w, _, _ := groupRestoreController(t, nil, rg, restoreFn.fn)
+			joins := countJoins(w)
 			failReads(w, func(obj client.Object) error {
-				if tc.gone(obj) {
+				if gone(obj) {
 					return apierrors.NewNotFound(schema.GroupResource{Group: "nvidia.com"}, obj.GetName())
 				}
 				return nil
 			})
 
 			assert.False(t, serveTarget(t, w, rg.pods[0]))
-			waitForLeaving(t, w)
 
 			restored := podCondition(t, w, "target-0", podcontract.RestoredCondition)
 			assert.Equal(t, podcontract.RestoreReasonFailed, restored.Reason)
 			assert.Contains(t, restored.Message, "is gone")
 			assert.Empty(t, restoreFn.steps())
-			if !tc.refused {
-				return
-			}
-			peer, err := group.Join(within(t), srv.Config(restoreGroupUID, "worker"))
-			if err == nil {
-				err = peer.Barrier(within(t), group.Admitted)
-				_ = peer.Fail(context.Background())
-			}
-			require.ErrorIs(t, err, &session.AbortError{Reason: "Refused"}, "a snapshot that is gone refuses the attempt")
+			assert.Zero(t, joins.Load(), "a snapshot that is gone fails the member on its Pod only")
 		})
 	}
 }

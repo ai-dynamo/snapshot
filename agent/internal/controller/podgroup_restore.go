@@ -528,14 +528,15 @@ func (w *NodeController) groupRestoreContent(ctx context.Context, pod *corev1.Po
 
 // handleGroupPreflightError reports a target that cannot restore yet, or at
 // all. A dependency that is not ready leaves it waiting. Anything else fails
-// the member, which refuses the attempt so its peers stop waiting for it.
+// the member on its Pod, as Snapshot found it. The member never joins its
+// attempt: the coordinator ends the attempt with Refused once the group's
+// status shows the member Failed, so its peers stop waiting for it.
 func (w *NodeController) handleGroupPreflightError(ctx context.Context, log logr.Logger, pod *corev1.Pod, m *restoreMember, cause error) bool {
 	var pending *restorePendingError
 	if errors.As(cause, &pending) {
 		w.reportGroupPending(ctx, log, pod, m, pending.message)
 		return true
 	}
-	w.refuseAttempt(ctx, log, m)
 	var incompatible *compat.IncompatibleError
 	if errors.As(cause, &incompatible) {
 		reason := compat.Reasons(incompatible.Mismatches)
@@ -549,25 +550,6 @@ func (w *NodeController) handleGroupPreflightError(ctx context.Context, log logr
 		groupReason = check.reason
 	}
 	return w.finishGroupRestore(ctx, log, pod, failedOutcome(m, pod, groupReason, cause)) != nil
-}
-
-// refuseAttempt fails m's attempt, before it commits, for a member that
-// cannot restore: it joins, and fails the attempt with group.ReasonRefused, so
-// its peers stop waiting at admission. It runs off the queue worker, and only
-// as long as groupFailTimeout allows; the attempt's deadline ends it anyway.
-func (w *NodeController) refuseAttempt(ctx context.Context, log logr.Logger, m *restoreMember) {
-	w.podGroups.leaving.Add(1)
-	go func() {
-		defer w.podGroups.leaving.Done()
-		refuseCtx, cancel := context.WithTimeout(ctx, groupFailTimeout)
-		defer cancel()
-		g, err := w.joinAttempt(refuseCtx, m.attempt(), m.id, w.restoreSessionNode(m))
-		if err != nil {
-			log.Info("Cannot join the pod group's attempt to refuse it; its deadline ends it", "error", err.Error())
-			return
-		}
-		failAttempt(refuseCtx, log, g)
-	}()
 }
 
 // groupRestoreRun is a group target's part in its attempt, for the executor.
