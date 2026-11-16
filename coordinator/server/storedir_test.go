@@ -4,85 +4,62 @@
 package server
 
 import (
+	"crypto/tls"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
-	"github.com/go-logr/logr"
-	"github.com/stretchr/testify/assert"
+	"github.com/ai-dynamo/snapshot/coordinator/internal/testcert"
+	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/stretchr/testify/require"
 )
 
-// TestStoreDir covers the directory of the control buckets: it is removed with
-// the server, a directory a stopped process left behind is removed when the
-// next one starts, and a directory another process holds is not.
+// TestStoreDir covers the directory of the control buckets, which the server
+// owns: a configured one is emptied, or created, when the server starts, and
+// removed when it shuts down, and with none, the server makes a new one under
+// the temporary directory, and removes it.
 func TestStoreDir(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
-	exists := func(path string) bool {
-		_, err := os.Stat(path)
-		return err == nil
-	}
-	leftover := func() string {
-		path, err := os.MkdirTemp("", storeDirPrefix)
-		require.NoError(t, err)
-		require.NoError(t, os.WriteFile(filepath.Join(path, "jetstream"), []byte("x"), 0o600))
-		return path
-	}
-
-	t.Run("a stopped process's directory is removed at startup", func(t *testing.T) {
-		withLock, withoutLock := leftover(), leftover()
-		// A crashed process leaves its lock file behind, with nobody holding it.
-		lock, err := lockDir(withLock)
-		require.NoError(t, err)
-		require.NoError(t, lock.Close())
-		d, err := newStoreDir(logr.Discard())
-		require.NoError(t, err)
-		t.Cleanup(d.remove)
-		assert.False(t, exists(withLock))
-		assert.False(t, exists(withoutLock))
-		assert.True(t, exists(d.path), "the new directory must stay")
+	t.Run("a configured directory is emptied, then removed", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "store")
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "jetstream", "stale"), 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "leftover"), []byte("x"), 0o600))
+		h := newHarness(t, func(cfg *Config) { cfg.StoreDir = dir })
+		h.ensure(1)
+		require.NoFileExists(t, filepath.Join(dir, "leftover"))
+		require.NoDirExists(t, filepath.Join(dir, "jetstream", "stale"))
+		require.DirExists(t, filepath.Join(dir, "jetstream"), "the file store must live there")
+		require.NoError(t, h.srv.Shutdown(within(t)))
+		require.NoDirExists(t, dir)
 	})
 
-	t.Run("a directory another process holds stays", func(t *testing.T) {
-		first, err := newStoreDir(logr.Discard())
-		require.NoError(t, err)
-		t.Cleanup(first.remove)
-		second, err := newStoreDir(logr.Discard())
-		require.NoError(t, err)
-		t.Cleanup(second.remove)
-		assert.NotEqual(t, first.path, second.path)
-		assert.True(t, exists(first.path), "a running coordinator's directory must stay")
+	t.Run("a configured directory that does not exist is created", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "parent", "store")
+		h := newHarness(t, func(cfg *Config) { cfg.StoreDir = dir })
+		h.ensure(1)
+		require.DirExists(t, filepath.Join(dir, "jetstream"))
 	})
 
-	t.Run("anything else under the temporary directory stays", func(t *testing.T) {
-		other := filepath.Join(os.TempDir(), "other")
-		require.NoError(t, os.Mkdir(other, 0o700))
-		file := filepath.Join(os.TempDir(), storeDirPrefix+"file")
+	t.Run("with none, a new temporary directory, then removed", func(t *testing.T) {
+		t.Setenv("TMPDIR", t.TempDir())
+		h := newHarness(t)
+		h.ensure(1)
+		dir := h.srv.storeDir
+		require.True(t, strings.HasPrefix(dir, filepath.Join(os.TempDir(), storeDirPrefix)), dir)
+		require.DirExists(t, filepath.Join(dir, "jetstream"))
+		require.NoError(t, h.srv.Shutdown(within(t)))
+		require.NoDirExists(t, dir)
+	})
+
+	t.Run("a directory that cannot be made fails New", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "file")
 		require.NoError(t, os.WriteFile(file, nil, 0o600))
-		d, err := newStoreDir(logr.Discard())
-		require.NoError(t, err)
-		t.Cleanup(d.remove)
-		assert.True(t, exists(other))
-		assert.True(t, exists(file))
+		_, cert := testcert.New(t)
+		_, err := New(Config{
+			Host: "127.0.0.1", Port: natsserver.RANDOM_PORT, Authorizer: &testAuthorizer{},
+			TLS:      &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+			StoreDir: filepath.Join(file, "store"),
+		})
+		require.Error(t, err)
 	})
-
-	t.Run("removing the directory releases it", func(t *testing.T) {
-		d, err := newStoreDir(logr.Discard())
-		require.NoError(t, err)
-		d.remove()
-		assert.False(t, exists(d.path))
-	})
-}
-
-// TestShutdownRemovesTheStore checks that a server's file store does not
-// outlive it.
-func TestShutdownRemovesTheStore(t *testing.T) {
-	h := newHarness(t)
-	h.ensure(1)
-	path := h.srv.store.path
-	_, err := os.Stat(path)
-	require.NoError(t, err)
-	require.NoError(t, h.srv.Shutdown(within(t)))
-	_, err = os.Stat(path)
-	require.ErrorIs(t, err, os.ErrNotExist)
 }

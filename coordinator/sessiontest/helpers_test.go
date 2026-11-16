@@ -73,6 +73,7 @@ func newHarness(t *testing.T, modify ...func(*server.Config)) *harness {
 		clock: testclock.New(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)),
 		logs:  &logLines{},
 	}
+	t.Cleanup(func() { h.logs.dumpIfFailed(t, "client") })
 	// Every subject a client sends must be one its permissions allow. The check
 	// is best-effort: a refusal that races a closing connection can go unseen.
 	// The deterministic tests of the subjects whose refusal changes nothing a
@@ -98,12 +99,24 @@ func newHarness(t *testing.T, modify ...func(*server.Config)) *harness {
 	return h
 }
 
+// testMaxValue is the largest value of the coordinator of a test that moves
+// the largest values: 1 MiB. What the client reads at once, and what the
+// coordinator buffers for a connection, scale with it, so such a test checks
+// what it would at the default, with less for a loaded machine to carry.
+const testMaxValue = 1 << 20
+
+// withTestMaxValue configures a coordinator whose largest value is
+// testMaxValue.
+func withTestMaxValue(cfg *server.Config) { cfg.MaxValue = testMaxValue }
+
 // start starts a coordinator, not ready yet, with a log of its own, and
 // shuts it down when the test ends.
 func (h *harness) start() {
 	h.t.Helper()
-	h.serverLogs = &logLines{}
-	h.cfg.Log = h.serverLogs.logger()
+	logs := &logLines{}
+	h.t.Cleanup(func() { logs.dumpIfFailed(h.t, "coordinator") })
+	h.serverLogs = logs
+	h.cfg.Log = logs.logger()
 	srv, err := server.New(h.cfg)
 	require.NoError(h.t, err)
 	h.t.Cleanup(func() { require.NoError(h.t, srv.Shutdown(context.Background())) })
@@ -149,12 +162,19 @@ func (h *harness) session(t *testing.T, n int) *testSession {
 // sessionUntil ensures a session with n members and deadline for the test t.
 func (h *harness) sessionUntil(t *testing.T, n int, deadline time.Time) *testSession {
 	t.Helper()
-	ses := &testSession{h: h, spec: server.Spec{
-		UID:      types.UID(fmt.Sprintf("attempt-%d", time.Now().UnixNano())),
-		Deadline: deadline,
-	}}
+	spec := server.Spec{UID: types.UID(fmt.Sprintf("attempt-%d", time.Now().UnixNano())), Deadline: deadline}
 	for i := range n {
-		ses.spec.Members = append(ses.spec.Members, session.Member{ID: fmt.Sprintf("member-%d", i), Rank: i})
+		spec.Members = append(spec.Members, session.Member{ID: fmt.Sprintf("member-%d", i), Rank: i})
+	}
+	return h.open(t, spec)
+}
+
+// open ensures the session of spec for the test t, with a proxy for each
+// member, which stops when t ends.
+func (h *harness) open(t *testing.T, spec server.Spec) *testSession {
+	t.Helper()
+	ses := &testSession{h: h, spec: spec}
+	for range spec.Members {
 		p := newProxy(t, h.srv.Addr().String())
 		h.proxies = append(h.proxies, p)
 		ses.proxies = append(ses.proxies, p)
@@ -270,6 +290,17 @@ func (ses *testSession) raw(t *testing.T, member int) jetstream.KeyValue {
 // of member, as raw does.
 func (ses *testSession) rawBucket(t *testing.T, member int, bucket string) jetstream.KeyValue {
 	t.Helper()
+	js, err := jetstream.New(ses.rawConn(t, member))
+	require.NoError(t, err)
+	kv, err := js.KeyValue(within(t), bucket)
+	require.NoError(t, err)
+	return kv
+}
+
+// rawConn returns a plain NATS connection of member, made the way package
+// session defines, which closes when the test ends.
+func (ses *testSession) rawConn(t *testing.T, member int) *nats.Conn {
+	t.Helper()
 	uid, id := string(ses.spec.UID), ses.spec.Members[member].ID
 	nc, err := nats.Connect("tls://"+ses.h.srv.Addr().String(),
 		nats.Secure(&tls.Config{RootCAs: ses.h.ca, ServerName: "localhost", MinVersion: tls.VersionTLS12}),
@@ -280,18 +311,22 @@ func (ses *testSession) rawBucket(t *testing.T, member int, bucket string) jetst
 		nats.NoReconnect())
 	require.NoError(t, err)
 	t.Cleanup(nc.Close)
-	js, err := jetstream.New(nc)
-	require.NoError(t, err)
-	kv, err := js.KeyValue(within(t), bucket)
-	require.NoError(t, err)
-	return kv
+	return nc
 }
 
 // awaitWait waits until a wait of one member in namespace ns watches its keys:
 // until the namespace's bucket holds a consumer, since nothing else watches it.
 func (ses *testSession) awaitWait(t *testing.T, ns session.Namespace) {
 	t.Helper()
-	ses.awaitConsumers(t, ns.Bucket(string(ses.spec.UID)), 1)
+	ses.awaitConsumers(t, ses.bucket(t, ns), 1)
+}
+
+// bucket names the session's bucket that holds a namespace.
+func (ses *testSession) bucket(t *testing.T, ns session.Namespace) string {
+	t.Helper()
+	bucket, err := ns.Bucket(string(ses.spec.UID))
+	require.NoError(t, err)
+	return bucket
 }
 
 // awaitMostConsumers waits until the session's Snapshot bucket holds its most
@@ -408,6 +443,17 @@ func (l *logLines) all() []string {
 	return slices.Clone(l.lines)
 }
 
+// dumpIfFailed logs every line to t, each marked with whose it is, if t has
+// failed, so a failure shows what led to it.
+func (l *logLines) dumpIfFailed(t *testing.T, whose string) {
+	if !t.Failed() {
+		return
+	}
+	for _, line := range l.all() {
+		t.Logf("%s: %s", whose, line)
+	}
+}
+
 // events returns what the current coordinator logged of the life of the
 // session: "opened", then "closed" or "failed" and the reason.
 func (h *harness) events(spec server.Spec) []string {
@@ -415,16 +461,21 @@ func (h *harness) events(spec server.Spec) []string {
 }
 
 // proxy forwards TCP connections to the coordinator, so a test can break them
-// as a network would, and move them to another coordinator. TLS passes through
-// it untouched.
+// as a network would, and move them to another coordinator, and counts what
+// the coordinator sends through it. TLS passes through it untouched.
 type proxy struct {
 	ln       net.Listener
 	accepted chan struct{}
 	wg       sync.WaitGroup
+	// sent counts the bytes the coordinator has sent through the proxy.
+	sent atomic.Int64
 
 	mu     sync.Mutex
 	target string
 	conns  map[net.Conn]struct{}
+	// held is open while what the coordinator sends is held, and nil
+	// otherwise.
+	held chan struct{}
 }
 
 // newProxy starts a proxy to target, and stops it when the test ends.
@@ -476,9 +527,33 @@ func (p *proxy) forward(in net.Conn, target string) {
 		_, _ = io.Copy(out, in)
 		_ = out.Close()
 	}()
-	_, _ = io.Copy(in, out)
+	p.toClient(in, out)
 	_ = in.Close()
 	<-done
+}
+
+// toClient carries what the coordinator sends from out to in, counting it,
+// until either side closes.
+func (p *proxy) toClient(in, out net.Conn) {
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := out.Read(buf)
+		if n > 0 {
+			p.sent.Add(int64(n))
+			p.mu.Lock()
+			held := p.held
+			p.mu.Unlock()
+			if held != nil {
+				<-held
+			}
+			if _, err := in.Write(buf[:n]); err != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 // drop closes a connection and forgets it.
@@ -499,6 +574,26 @@ func (p *proxy) cut() {
 	}
 }
 
+// hold keeps what the coordinator sends from reaching the member, as a
+// network that stalls would, until release. The member's own sends go on.
+func (p *proxy) hold() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.held == nil {
+		p.held = make(chan struct{})
+	}
+}
+
+// release delivers what hold kept, and what follows.
+func (p *proxy) release() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.held != nil {
+		close(p.held)
+		p.held = nil
+	}
+}
+
 // retarget sends the connections the proxy accepts from now on to target.
 func (p *proxy) retarget(target string) {
 	p.mu.Lock()
@@ -509,6 +604,7 @@ func (p *proxy) retarget(target string) {
 // stop closes the proxy and every connection it carries, and waits until they
 // have all ended.
 func (p *proxy) stop() {
+	p.release()
 	_ = p.ln.Close()
 	<-p.accepted
 	p.cut()

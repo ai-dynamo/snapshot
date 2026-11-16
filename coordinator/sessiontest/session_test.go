@@ -520,10 +520,11 @@ func TestCloseWhileWatching(t *testing.T) {
 }
 
 // TestSessionsEndAtTheMemoryCap covers a session filling the memory cap that
-// every session shares: no other session's Barrier, Leave or Fail fails, every
-// pending wait returns with the reason, the coordinator records the ends it
-// writes itself, and Shutdown reports no error. The control keys are in file
-// storage, which the memory cap does not limit.
+// every session shares, which then cannot delete its keys either: no other
+// session's Barrier, Leave or Fail fails, every pending wait returns with the
+// reason, the coordinator records the ends it writes itself, and Shutdown
+// reports no error. The control keys are in file storage, which the memory cap
+// does not limit.
 func TestSessionsEndAtTheMemoryCap(t *testing.T) {
 	h := newHarness(t, func(cfg *server.Config) { cfg.MaxBytes, cfg.MaxValue = 8<<20, 1<<20 })
 	ctx := within(t)
@@ -546,6 +547,8 @@ func TestSessionsEndAtTheMemoryCap(t *testing.T) {
 		err = store.Insert(ctx, fmt.Sprintf("fill-%d", i), make([]byte, 512<<10))
 	}
 	require.ErrorIs(t, err, session.ErrTooMany)
+	require.ErrorIs(t, store.Insert(ctx, "empty", nil), session.ErrTooMany, "not even an empty value may fit")
+	require.ErrorIs(t, store.Delete(ctx, "fill-0"), session.ErrTooMany, "a delete marker takes memory too")
 
 	// Sessions that begin at the full cap still close once every member has
 	// left, and release a barrier.

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/coordinator/internal/backoff"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go/jetstream"
@@ -31,9 +32,9 @@ type Spec struct {
 	// PodGroupRestore's, which identifies the attempt.
 	UID types.UID
 
-	// Members is the whole membership. It must name at least one member, with
-	// distinct IDs that session.ValidateName accepts and ranks covering 0 to
-	// len(Members)-1, in any order.
+	// Members is the whole membership. It must name at least one member and at
+	// most session.MaxMembers, with distinct IDs that session.ValidateName
+	// accepts and ranks covering 0 to len(Members)-1, in any order.
 	Members []session.Member
 
 	// Deadline bounds the whole attempt, counted from the resource's creation.
@@ -47,6 +48,10 @@ func (s Spec) validate() error {
 	}
 	if len(s.Members) == 0 {
 		return fmt.Errorf("no members: %w", session.ErrInvalid)
+	}
+	if len(s.Members) > session.MaxMembers {
+		return fmt.Errorf("%d members, over the %d a session is sized for: %w", len(s.Members), session.MaxMembers,
+			session.ErrInvalid)
 	}
 	if s.Deadline.IsZero() {
 		return fmt.Errorf("no deadline: %w", session.ErrInvalid)
@@ -200,43 +205,22 @@ func (s *Server) create(ctx context.Context, spec Spec) (a *attempt, err error) 
 	if err != nil {
 		return nil, fmt.Errorf("encode meta: %w", err)
 	}
-	uid := string(spec.UID)
 	defer func() {
 		if err == nil {
 			return
 		}
 		cancel()
-		if err := s.deleteBuckets(context.WithoutCancel(ctx), spec.UID); err != nil {
-			s.log.Error(err, "Deleting the buckets of a session that failed to open failed", "attempt", uid)
+		if err := s.deleteBuckets(context.WithoutCancel(ctx), spec); err != nil {
+			s.log.Error(err, "Deleting the buckets of a session that failed to open failed", "attempt", spec.UID)
 		}
 	}()
-	members := len(spec.Members)
-	if a.control, err = s.createBucket(ctx, bucketSpec{
-		name:         session.ControlBucket(uid),
-		storage:      jetstream.FileStorage,
-		maxBytes:     session.ControlBytes(members),
-		maxValue:     max(session.MaxControlValue, len(meta)),
-		maxConsumers: members*session.MaxConsumersPerMember + coordinatorConsumers,
-	}); err != nil {
-		return nil, err
+	created := make(map[string]jetstream.KeyValue)
+	for _, b := range s.bucketSpecs(spec) {
+		if created[b.name], err = s.createBucket(ctx, b); err != nil {
+			return nil, err
+		}
 	}
-	if _, err = s.createBucket(ctx, bucketSpec{
-		name:         session.SnapshotBucket(uid),
-		storage:      jetstream.MemoryStorage,
-		maxValue:     s.cfg.MaxValue,
-		maxConsumers: members * session.MaxConsumersPerMember,
-	}); err != nil {
-		return nil, err
-	}
-	if _, err = s.createBucket(ctx, bucketSpec{
-		name:         session.LibraryBucket(uid),
-		storage:      jetstream.MemoryStorage,
-		maxKeys:      s.cfg.MaxLibraryKeys,
-		maxValue:     s.cfg.MaxLibraryValue,
-		maxConsumers: members * session.MaxConsumersPerMember,
-	}); err != nil {
-		return nil, err
-	}
+	a.control = created[session.ControlBucket(string(spec.UID))]
 	if _, err = a.control.Put(ctx, session.KeyMeta, meta); err != nil {
 		return nil, fmt.Errorf("write meta: %w", err)
 	}
@@ -271,6 +255,35 @@ type bucketSpec struct {
 	maxKeys      int
 	maxValue     int
 	maxConsumers int
+}
+
+// bucketSpecs returns the specs of the buckets of spec's attempt, the ones
+// session.Buckets names: the control bucket, in file storage and sized for the
+// membership, whose largest value fits the largest Meta; and the Snapshot and
+// library buckets, in memory, with the largest values the Config sets, and
+// the library's most keys. create creates them, and deleteBuckets deletes
+// them.
+func (s *Server) bucketSpecs(spec Spec) []bucketSpec {
+	uid, members := string(spec.UID), len(spec.Members)
+	consumers := members * session.MaxConsumersPerMember
+	return []bucketSpec{{
+		name:         session.ControlBucket(uid),
+		storage:      jetstream.FileStorage,
+		maxBytes:     session.ControlBytes(members),
+		maxValue:     session.ControlValueBytes(members),
+		maxConsumers: consumers + coordinatorConsumers,
+	}, {
+		name:         session.SnapshotBucket(uid),
+		storage:      jetstream.MemoryStorage,
+		maxValue:     s.cfg.MaxValue,
+		maxConsumers: consumers,
+	}, {
+		name:         session.LibraryBucket(uid),
+		storage:      jetstream.MemoryStorage,
+		maxKeys:      s.cfg.MaxLibraryKeys,
+		maxValue:     s.cfg.MaxLibraryValue,
+		maxConsumers: consumers,
+	}}
 }
 
 // createBucket creates one bucket, bounded by its largest value, by how many
@@ -308,14 +321,14 @@ func (s *Server) createBucket(ctx context.Context, b bucketSpec) (jetstream.KeyV
 	return kv, nil
 }
 
-// deleteBuckets deletes all of an attempt's buckets, whether or not they
-// exist.
-func (s *Server) deleteBuckets(ctx context.Context, uid types.UID) error {
+// deleteBuckets deletes all of the buckets of spec's attempt, whether or not
+// they exist.
+func (s *Server) deleteBuckets(ctx context.Context, spec Spec) error {
 	var errs []error
-	for _, bucket := range session.Buckets(string(uid)) {
-		if err := s.js.DeleteKeyValue(ctx, bucket); err != nil && !errors.Is(err, jetstream.ErrBucketNotFound) &&
+	for _, b := range s.bucketSpecs(spec) {
+		if err := s.js.DeleteKeyValue(ctx, b.name); err != nil && !errors.Is(err, jetstream.ErrBucketNotFound) &&
 			!errors.Is(err, jetstream.ErrStreamNotFound) {
-			errs = append(errs, fmt.Errorf("delete bucket %s: %w", bucket, err))
+			errs = append(errs, fmt.Errorf("delete bucket %s: %w", b.name, err))
 		}
 	}
 	return errors.Join(errs...)
@@ -409,8 +422,8 @@ func (s *Server) watch(ctx context.Context, a *attempt) (jetstream.KeyWatcher, f
 	}, nil
 }
 
-// rewatch watches a session again once its watch has stopped, waiting from
-// firstEndRetry up to maxEndRetry before each try, until a watch starts. It
+// rewatch watches a session again once its watch has stopped, waiting longer
+// before each try, as backoff.New spaces them, until a watch starts. It
 // returns a nil watch once the session's life has ended, or the coordinator's
 // connection has closed, which a coordinator that stops without shutting down
 // does, and which leaves nothing to watch with.
@@ -423,9 +436,10 @@ func (s *Server) rewatch(a *attempt) (jetstream.KeyWatcher, func()) {
 	default:
 	}
 	s.log.Info("The session's watch stopped; watching again", "attempt", a.spec.UID)
-	for wait := firstEndRetry; ; wait = min(2*wait, maxEndRetry) {
+	waits := backoff.New()
+	for try := 1; ; try++ {
 		select {
-		case <-time.After(wait):
+		case <-time.After(waits.Step()):
 		case <-a.life.Done():
 			return nil, nil
 		case <-s.connClosed:
@@ -439,7 +453,7 @@ func (s *Server) rewatch(a *attempt) (jetstream.KeyWatcher, func()) {
 			return w, stop
 		case a.life.Err() != nil:
 			return nil, nil
-		case wait == firstEndRetry:
+		case try == 1:
 			s.log.Error(err, "Watching the session again failed; retrying", "attempt", a.spec.UID)
 		}
 	}
@@ -474,12 +488,13 @@ func (s *Server) drain(w jetstream.KeyWatcher) {
 	}
 }
 
-// Remove discards the session of an attempt the host is done with: it
-// fails the session first with session.ReasonCancelled if it is still open,
-// then deletes its buckets and forgets the session. A member that has not received the end by then learns
-// from finding its session gone, with session.ErrCoordinatorLost. The rule is
-// to remove a session once its group resource is deleted, or once the resource
-// is final and the session has ended or its deadline has passed.
+// Remove discards the session of an attempt the host is done with: it fails
+// the session first with session.ReasonCancelled if it is still open, then
+// deletes its buckets and forgets the session. A member that has not received
+// the end by then learns from finding its session gone, with
+// session.ErrCoordinatorLost. The rule is to remove a session once its group
+// resource is deleted, or once the resource is final and the session has
+// ended or its deadline has passed.
 //
 // A final state alone is not enough. A PodGroupRestore is final once every
 // member is released, yet its session stays open until the members leave,
@@ -507,7 +522,7 @@ func (s *Server) Remove(ctx context.Context, uid types.UID) error {
 		s.log.Error(err, "Cancelling a session before removing it failed", "attempt", uid)
 	}
 	a.cancel()
-	if err := s.deleteBuckets(ctx, uid); err != nil {
+	if err := s.deleteBuckets(ctx, a.spec); err != nil {
 		return fmt.Errorf("remove attempt %s: %w", uid, err)
 	}
 	s.discard(a)
@@ -521,13 +536,6 @@ func (s *Server) Remove(ctx context.Context, uid types.UID) error {
 // tryTimeout bounds each try to record a session's end, and each try to watch
 // a session again.
 const tryTimeout = 5 * time.Second
-
-// The wait between tries to record a session's end, or to watch a session
-// again: it starts at firstEndRetry and doubles up to maxEndRetry.
-const (
-	firstEndRetry = 100 * time.Millisecond
-	maxEndRetry   = time.Second
-)
 
 // always arms recordEnd whatever calls it: closing a session every member has
 // left.
@@ -543,13 +551,13 @@ func always() bool { return true }
 //
 // Recording the end can fail, such as when the write times out, or when the
 // session's members have filled its control bucket. A session that has to end
-// must not stay open once the write can succeed, so recordEnd keeps trying in the
-// background, waiting from firstEndRetry up to maxEndRetry, until the end is
-// recorded, by recordEnd or anything else, or the session's life ends because
-// it is removed or the coordinator shuts down. It never holds Server.control.
-// The timer that fired stays armed meanwhile, so a member that reconnects
-// after its grace period ran out does not keep the session, and one that
-// disconnects again starts no second grace period. One end at a time is
+// must not stay open once the write can succeed, so recordEnd keeps trying in
+// the background, waiting longer before each try, as backoff.New spaces them,
+// until the end is recorded, by recordEnd or anything else, or the session's
+// life ends because it is removed or the coordinator shuts down. It never holds
+// Server.control. The timer that fired stays armed meanwhile, so a member that
+// reconnects after its grace period ran out does not keep the session, and one
+// that disconnects again starts no second grace period. One end at a time is
 // recorded, the first one asked for: the first one recorded wins anyway.
 func (s *Server) recordEnd(a *attempt, value []byte, armed func() bool) {
 	s.mu.Lock()
@@ -568,19 +576,20 @@ func (s *Server) recordEnd(a *attempt, value []byte, armed func() bool) {
 	}
 	go func() {
 		defer s.wg.Done()
-		for wait := firstEndRetry; ; wait = min(2*wait, maxEndRetry) {
+		waits := backoff.New()
+		for try := 1; ; try++ {
 			ctx, cancel := context.WithTimeout(a.life, tryTimeout)
 			err := s.endWith(ctx, a, value)
 			cancel()
 			if err == nil || ended(err) || a.life.Err() != nil {
 				return
 			}
-			if wait == firstEndRetry {
+			if try == 1 {
 				s.log.Error(err, "Ending a session failed; retrying until its end is recorded", "attempt", a.spec.UID,
 					"outcome", outcome)
 			}
 			select {
-			case <-time.After(wait):
+			case <-time.After(waits.Step()):
 			case <-a.life.Done():
 				return
 			}
