@@ -117,17 +117,18 @@ func MaxMetaBytes(members int) int {
 // session's members share, so one member may hold more than its share while
 // others hold less. The limit bounds the memory consumers take. A member past
 // it waits for a consumer to free: the client retries a watch the limit
-// refuses until its caller's context or wait ends.
+// refuses, waiting longer each time, until its caller's context or wait ends.
 //
-// Every watch is an ordered consumer, and a reconnect replaces each one with a
-// new consumer while the old one is still being deleted, so each member's
-// share is twice what it watches at once. On the Snapshot bucket, the client
-// watches each Get with a wait of a key that is absent: two watches at once
-// allow a Get by the agent and one by its cuInterpose relay. On the control
-// bucket, it watches the session's end, and also each Barrier in progress: two
-// watches at once. On the library bucket, the agent's library endpoint waits
-// through Get once per key per node, for the keys its Pod's libraries ask for at once, such as NCCL's
-// communicator identifiers.
+// Eight is twice four, the most keys a member is sized to watch at once on one
+// bucket. Every watch is an ordered consumer, and a reconnect replaces each one
+// with a new consumer while the old one is still being deleted, so a member's
+// share is twice what it watches at once. On the control bucket, the client
+// watches the session's end and the Barrier in progress: two. On the Snapshot
+// bucket, it watches each Get with a wait of a key that is absent, such as one
+// by the agent and one by its cuInterpose relay: two. On the library bucket,
+// the agent's library endpoint waits through Get for the keys its Pod's
+// libraries ask for at once, such as NCCL's communicator identifiers: up to
+// four.
 const MaxConsumersPerMember = 8
 
 // What the coordinator buffers for a connection, and how a client reads

@@ -488,12 +488,13 @@ func (s *Server) drain(w jetstream.KeyWatcher) {
 	}
 }
 
-// Remove discards the session of an attempt the host is done with: it
-// fails the session first with session.ReasonCancelled if it is still open,
-// then deletes its buckets and forgets the session. A member that has not received the end by then learns
-// from finding its session gone, with session.ErrCoordinatorLost. The rule is
-// to remove a session once its group resource is deleted, or once the resource
-// is final and the session has ended or its deadline has passed.
+// Remove discards the session of an attempt the host is done with: it fails
+// the session first with session.ReasonCancelled if it is still open, then
+// deletes its buckets and forgets the session. A member that has not received
+// the end by then learns from finding its session gone, with
+// session.ErrCoordinatorLost. The rule is to remove a session once its group
+// resource is deleted, or once the resource is final and the session has
+// ended or its deadline has passed.
 //
 // A final state alone is not enough. A PodGroupRestore is final once every
 // member is released, yet its session stays open until the members leave,
