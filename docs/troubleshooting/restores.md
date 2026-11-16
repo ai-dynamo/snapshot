@@ -70,12 +70,13 @@ Re-take the checkpoint with the agent version that will restore it.
 The artifact's content UID and container name must match what the restore
 annotation asked for, and a GPU checkpoint taken through PageBroker
 CustomStorage can only be restored on a node whose agent has CustomStorage
-available.
+available. A checkpoint of a pod group's member restores only with its group.
 
 **Likely causes:**
 
 - The restore mapping names a container that was not the one checkpointed
 - The restore pod landed on a node without CustomStorage support
+- The checkpoint was captured as a member of a pod group, and the restore pod restores it on its own
 
 Check the container mapping on the restore pod against the `PodSnapshot`, and
 the node's agent configuration.
@@ -128,6 +129,22 @@ gave, such as `Refused` or `MemberFailed`.
 - The members restore different captures
 - Another member refused first
 - The attempt's deadline passed before every member arrived
+
+### recording that the member started
+
+Once every member of a pod group has accepted, the attempt commits, and the
+agent sets the `nvidia.com/RestoreStarted` condition on the restore Pod before
+it restores anything. If it cannot, the member fails the attempt with
+`MemberFailed`. Other members that had already started fail with it.
+
+**Likely causes:**
+
+- The API server was unreachable or refused the status write
+- The restore Pod was deleted or replaced after the operator pinned it
+
+```bash
+kubectl get pod <restore-pod> -n <ns> -o jsonpath='{.status.conditions}'
+```
 
 ### building GPU context
 
