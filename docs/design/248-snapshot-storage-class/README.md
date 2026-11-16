@@ -325,7 +325,9 @@ message PublishedArtifact { StorageBackend storage = 3; }  // Restore and metada
 PageBroker trusts `store_id` and `StorageBackend` as it trusts its startup
 configuration today; the binding check is the agent's. It caches S3 clients by
 `store_id` and a SHA-256 digest of the credentials and CA bundle file contents,
-computed when it builds the client, so rotated credentials get a new client. A missing class or Secret fails the
+computed when it builds the client, so rotated credentials get a new client. An
+entry idle for 15 minutes is dropped, the cache holds at most 64 entries, and a
+client with calls in flight is never dropped. A missing class or Secret fails the
 operation with `StorageClassUnavailable`, and nothing is retried against
 another store. For PVC the agent maps `claimName` to a mount path: the default
 claim at `/checkpoints`, each extra claim at `/snapshot-stores/<claimName>`,
