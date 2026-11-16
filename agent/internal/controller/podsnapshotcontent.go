@@ -177,6 +177,7 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	}
 
 	if handled, err := w.failCheckpointOnContainerExit(ctx, content, pod); handled {
+		w.leaveMemberSourceAsFound(ctx, member, pod)
 		return err
 	}
 	if reason, msg := classifySourcePodLiveness(pod); reason != "" {
@@ -200,6 +201,7 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 
 	gate, err := w.getCheckpointGate(ctx, content, pod, containerName)
 	if gate == nil {
+		w.leaveMemberSourceAsFound(ctx, member, pod)
 		return err
 	}
 	now := w.nowFn()
@@ -217,17 +219,17 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 
 	containerID := containerIDForName(pod, containerName)
 	if containerID == "" {
-		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved",
+		return w.failBeforeJoin(ctx, content, pod, member, "ContainerNotResolved",
 			fmt.Errorf("could not resolve container %q ID", containerName))
 	}
 	containerPID, _, err := w.runtime.ResolveContainer(ctx, containerID)
 	if err != nil {
-		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName, err))
+		return w.failBeforeJoin(ctx, content, pod, member, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName, err))
 	}
 	// Refused before the suspend, so the workload is never disturbed for a
 	// capture the node cannot stage.
 	if err := w.checkStagingCapacity(ctx, containerPID); err != nil {
-		return w.setSnapshotContentFailed(ctx, content, reasonImageTooLarge, err)
+		return w.failBeforeJoin(ctx, content, pod, member, reasonImageTooLarge, err)
 	}
 	if member != nil {
 		return w.runGroupCheckpoint(ctx, content, pod, member, containerName, containerID, containerPID,

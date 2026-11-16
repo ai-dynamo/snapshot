@@ -386,6 +386,71 @@ func TestGroupCheckpointAfterARestart(t *testing.T) {
 	})
 }
 
+func TestGroupCheckpointThatFailsBeforeItJoins(t *testing.T) {
+	for name, tc := range map[string]struct {
+		// modify sets up the failure, before the controller reads the group.
+		modify func(*captureGroup)
+		// fail sets it up on the controller.
+		fail func(*NodeController)
+		want string
+	}{
+		"a container that cannot be resolved": {
+			fail: func(w *NodeController) { w.runtime = &fakeRuntime{} },
+			want: "ContainerNotResolved",
+		},
+		"an image too large for staging": {
+			fail: func(w *NodeController) {
+				w.config.PageBroker.StagingPath = "/staging"
+				w.stagingCapacityFn = func(string) (int64, error) { return 1 << 30, nil }
+				w.minimumImageSizeFn = func(string, []int) (int64, error) { return 4 << 30, nil }
+			},
+			want: reasonImageTooLarge,
+		},
+		"a checkpoint container that failed after an earlier reconcile labeled the source": {
+			modify: func(g *captureGroup) {
+				g.pods[0].Labels[snapshotv1alpha1.CaptureEligibleLabel] = "true"
+				g.pods[0].Status.ContainerStatuses[0].State = corev1.ContainerState{
+					Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}}
+			},
+			want: "CheckpointContainerFailed",
+		},
+		"a panic": {
+			fail: func(w *NodeController) {
+				w.config.PageBroker.StagingPath = "/staging"
+				w.stagingCapacityFn = func(string) (int64, error) { panic("staging could not be measured") }
+			},
+			want: reasonAgentPanic,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newCaptureGroup()
+			if tc.modify != nil {
+				tc.modify(g)
+			}
+			fc := &fakeCheckpointer{}
+			w, k := groupCaptureController(t, nil, g, fc.fn, nil)
+			if tc.fail != nil {
+				tc.fail(w)
+			}
+			joined := false
+			w.podGroups.joinFn = func(context.Context, coordinator.Config) (*group.Member, error) {
+				joined = true
+				return nil, errors.New("the member joined")
+			}
+
+			w.processCaptureQueueItem(within(t), "content-leader")
+
+			assert.Equal(t, tc.want, condition(getContent(t, w, "content-leader"), snapshotv1alpha1.PodSnapshotConditionFailed).Reason,
+				"the member reports its own failure")
+			assert.False(t, joined, "a member that fails before it joins does not join to fail the attempt")
+			assert.False(t, fc.wasCalled())
+			assert.NotContains(t, getPod(t, w, "inference", "worker-0").Labels, snapshotv1alpha1.CaptureEligibleLabel,
+				"the source is left as found")
+			assert.Empty(t, k.list())
+		})
+	}
+}
+
 func TestGroupCheckpointThatCannotJoin(t *testing.T) {
 	for name, tc := range map[string]struct {
 		deadlineSeconds int64

@@ -322,6 +322,48 @@ func (w *NodeController) runGroupCheckpoint(
 	return w.failGroupCheckpoint(ctx, logger, content, pod, reason, err)
 }
 
+// failBeforeJoin fails content before its capture starts. A pod group member
+// that fails here never joins its attempt: its source is left as Snapshot
+// found it, and the coordinator ends the attempt with Refused once the group's
+// status shows the member Failed.
+func (w *NodeController) failBeforeJoin(
+	ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod, member *captureMember, reason string, cause error,
+) error {
+	w.leaveMemberSourceAsFound(ctx, member, pod)
+	return w.setSnapshotContentFailed(ctx, content, reason, cause)
+}
+
+// leaveMemberSourceAsFound leaves the source of a pod group member that never
+// started as Snapshot found it. It does nothing for a content captured on its
+// own.
+func (w *NodeController) leaveMemberSourceAsFound(ctx context.Context, member *captureMember, pod *corev1.Pod) {
+	if member != nil {
+		w.leaveSourceAsFound(ctx, pod)
+	}
+}
+
+// leaveSourceAsFoundAfterPanic leaves the source of a pod group member whose
+// capture panicked before the member started as Snapshot found it. The label
+// may be from an earlier reconcile, so the source is read again.
+func (w *NodeController) leaveSourceAsFoundAfterPanic(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent) {
+	if contentStarted(content) {
+		return
+	}
+	member, err := w.captureMemberOf(ctx, content)
+	if err != nil || member == nil {
+		return
+	}
+	pod := &corev1.Pod{}
+	key := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: content.Spec.Source.PodRef.Name}
+	if err := w.client.Get(ctx, key, pod); err != nil {
+		w.log.Error(err, "Failed to read the source of a pod group member whose capture panicked", "pod", key.String())
+		return
+	}
+	if reason, _ := classifySourcePodIdentity(content, pod); reason == "" {
+		w.removeCaptureEligibleLabel(ctx, pod)
+	}
+}
+
 // leaveSourceAsFound removes the capture-eligible label from the source of a
 // member that never started. reconcileCapture added it before the readiness
 // wait, to the Pod on the API server rather than to pod, so it is removed
