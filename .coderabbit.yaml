@@ -111,6 +111,8 @@ knowledge_base:
         applyTo: "**/*"
 
 issue_enrichment:
+  auto_enrich:
+    enabled: true
   planning:
     enabled: false
   labeling:
