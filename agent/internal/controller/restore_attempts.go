@@ -60,10 +60,6 @@ func parseRestoreAttempts(data []byte) (*restoreAttempts, error) {
 // readRestoreAttempts returns the destination's attempt record, and false when
 // it has none yet. A record that cannot be read or parsed is an error: the
 // restore ends rather than grant attempts it cannot count.
-func (op *restoreOperation) readRestoreAttempts(nodeUID string) (*restoreAttempts, bool, error) {
-	return op.controller.readRestoreAttempts(nodeUID, op.destination)
-}
-
 func (w *NodeController) readRestoreAttempts(nodeUID, destination string) (*restoreAttempts, bool, error) {
 	data, err := w.readPodControlFileFn(nodeUID, destination, podcontract.RestoreAttemptsFile, restoreAttemptsMaxBytes)
 	if errors.Is(err, os.ErrNotExist) {
@@ -128,7 +124,7 @@ func (op *restoreOperation) startAttempt(ctx context.Context) (*restoreAttempts,
 // always repeated it.
 func (op *restoreOperation) saveAttempt(ctx context.Context, first *restoreAttempts, now time.Time) (*restoreAttempts, error) {
 	op.nodeUID = op.nodePodUID(ctx)
-	record, found, err := op.readRestoreAttempts(op.nodeUID)
+	record, found, err := op.controller.readRestoreAttempts(op.nodeUID, op.destination)
 	if err != nil {
 		return nil, err
 	}
