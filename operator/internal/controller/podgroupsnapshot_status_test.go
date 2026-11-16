@@ -511,13 +511,13 @@ func TestDerivePodGroupSnapshotFailureReasons(t *testing.T) {
 			wantMessage: `member "b" (rank 1) failed with SourcePodNotFound: SourcePodNotFound message`,
 		},
 		{
-			name:        "b's own cause is named over a's group reason, before the commit",
+			name:        "b's own cause is named over a's shared reason, before the commit",
 			members:     []podGroupMemberObservation{failedOnly("a", "Refused"), failedOnly("b", "CriuDumpFailed")},
 			wantReason:  snapshotv1alpha1.PodGroupReasonRefused,
 			wantMessage: `member "b" (rank 1) failed with CriuDumpFailed: CriuDumpFailed message`,
 		},
 		{
-			name:        "b's own cause is named over a's group reason, after the commit",
+			name:        "b's own cause is named over a's shared reason, after the commit",
 			members:     []podGroupMemberObservation{started("a", "CoordinatorLost"), started("b", "CriuDumpFailed")},
 			wantReason:  snapshotv1alpha1.PodGroupReasonMemberFailed,
 			wantMessage: `member "b" (rank 1) failed with CriuDumpFailed: CriuDumpFailed message`,
