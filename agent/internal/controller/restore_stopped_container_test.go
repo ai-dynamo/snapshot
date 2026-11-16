@@ -26,12 +26,10 @@ func TestRunRestoreEndsAnAttemptWhoseContainerStopped(t *testing.T) {
 	h.w.restoreFn = func(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req executor.RestoreRequest, mounter executor.RestoreMounter) (executor.RestoreResult, error) {
 		_, _ = restore(ctx, rt, log, req, mounter)
 		h.w.RestoreContainerStopped(h.pod.UID, "main", "ctr-abc")
-		select {
-		case <-ctx.Done():
-			return executor.RestoreResult{}, untouched(ctx.Err())
-		case <-time.After(5 * time.Second):
+		if ctx.Err() == nil {
 			return executor.RestoreResult{}, untouched(errors.New("the attempt was not ended"))
 		}
+		return executor.RestoreResult{}, untouched(ctx.Err())
 	}
 
 	err := run()
