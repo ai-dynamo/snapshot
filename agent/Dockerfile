@@ -3,11 +3,13 @@
 #
 # Dockerfile for the snapshot-agent image.
 #
-# Build targets. Two named build contexts are required for the agent: `api`
-# (the agent module depends on it via `replace => ../api`) and `compliance`
-# (attribution helpers shared with the operator image):
+# Build targets. Three named build contexts are required for the agent: `api`
+# (the agent and coordinator modules depend on it via `replace => ../api`),
+# `coordinator` (snapshot-coordinator's module), and `compliance` (attribution
+# helpers shared with the operator image):
 #   docker build --platform linux/amd64 --target agent \   (or linux/arm64)
-#     --build-context api=../api --build-context compliance=../hack/compliance \
+#     --build-context api=../api --build-context coordinator=../coordinator \
+#     --build-context compliance=../hack/compliance \
 #     -t snapshot-agent:latest .
 #
 # Optional targets for CI:
@@ -112,6 +114,33 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-restore-proxy ./cmd/snapshot-restore-proxy
 
 # Corresponding source for the Go modules compiled into the binaries above.
+RUN mkdir -p /go-src && go mod vendor -o /go-src/vendor
+
+# =============================================================================
+# Stage: Coordinator builder - Build snapshot-coordinator from its own module
+# =============================================================================
+# The coordinator runs in a container of its own in the agent's Pod, from this
+# image. Its module has its own go.mod, and depends on the api module via
+# `replace => ../api`, so the two sit side by side at /coordinator and /api,
+# from their named build contexts. It builds on go-base's toolchain image;
+# go-base, which every agent build runs, checks that GO_VERSION matches
+# GO_IMAGE_DIGEST.
+FROM ${DOCKER_PROXY}library/golang:${GO_VERSION}@${GO_IMAGE_DIGEST} AS coordinator-builder
+
+ARG TARGETOS=linux
+ARG TARGETARCH
+
+WORKDIR /coordinator
+
+COPY --from=api . /api/
+COPY --from=coordinator go.mod go.sum ./
+RUN go mod download
+
+COPY --from=coordinator . ./
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-coordinator ./cmd/snapshot-coordinator
+
+# Corresponding source for the Go modules compiled into the binary above.
 RUN mkdir -p /go-src && go mod vendor -o /go-src/vendor
 
 # =============================================================================
@@ -329,6 +358,7 @@ COPY --from=criu-builder /criu-src.tar.gz /sources/criu/criu-src.tar.gz
 
 # Go module source for the statically linked binaries.
 COPY --from=builder /go-src/vendor /sources/go/vendor
+COPY --from=coordinator-builder /go-src/vendor /sources/go/coordinator/vendor
 
 COPY compliance/README.source.txt /sources/README.txt
 
@@ -359,6 +389,7 @@ RUN chmod +x /usr/local/bin/cuda-checkpoint-helper \
 
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
+COPY --from=coordinator-builder /snapshot-coordinator /usr/local/bin/snapshot-coordinator
 
 # Assemble the injection bundle: bind-mounted read-only into the placeholder's
 # mount namespace at /tmp/snapshot-binaries during restore (internal/nsmount).
@@ -469,6 +500,7 @@ COPY compliance/gen-attribution.sh /tmp/gen-attribution.sh
 COPY --from=compliance go-licenses.sh /tmp/go-licenses.sh
 RUN sh /tmp/gen-attribution.sh /legal/source/dpkg/DELTA.tsv /legal/source/go/vendor \
       /legal/THIRD-PARTY.txt /legal/source/dpkg/SKIPPED.txt /tmp/go-licenses.sh \
+      /legal/cuinterpose/rust/NOTICES.txt /legal/source/go/coordinator/vendor \
     && rm -f /tmp/gen-attribution.sh
 
 # Create directories
