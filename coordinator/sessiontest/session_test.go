@@ -546,6 +546,7 @@ func TestSessionsEndAtTheMemoryCap(t *testing.T) {
 		err = store.Insert(ctx, fmt.Sprintf("fill-%d", i), make([]byte, 512<<10))
 	}
 	require.ErrorIs(t, err, session.ErrTooMany)
+	require.ErrorIs(t, store.Insert(ctx, "empty", nil), session.ErrTooMany, "not even an empty value may fit")
 
 	// Sessions that begin at the full cap still close once every member has
 	// left, and release a barrier.
