@@ -22,10 +22,11 @@
 //     its own content, so anything else written into it is rewritten at the
 //     next check.
 //
-// Each write labels the resource app.kubernetes.io/managed-by:
-// snapshot-operator. The resources have no owner reference, so that deleting
-// the operator's Deployment never deletes the CA, and they outlive the
-// operator: after an uninstall, delete them by that label.
+// Each write labels the resource app.kubernetes.io/part-of: snapshot and
+// app.kubernetes.io/managed-by: snapshot-operator, and keeps its other
+// labels. The resources have no owner reference, so that deleting the
+// operator's Deployment never deletes the CA, and they outlive the operator:
+// after an uninstall, delete them by the managed-by label.
 //
 // The Issuer runs on the leader. It checks the resources when it starts and
 // then every minute, and replaces each one that is missing or not valid, so a

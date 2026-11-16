@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ai-dynamo/snapshot/api/storage"
+	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 )
 
 // pageBrokerS3Config is the JSON shape PageBroker's --storage-config reads
@@ -47,10 +48,10 @@ const DefaultPageBrokerS3ConfigName = "pagebroker-s3-config"
 //
 // This ConfigMap is created outside Helm's own apply step, so it carries no
 // Helm release ownership annotations and is not removed by `helm uninstall`
-// or visible to `helm diff`; chart-identifying labels are the extent of what
-// this function can attach without a Kubernetes ownerReference, which is not
-// wired up here.
-func ensurePageBrokerS3Config(ctx context.Context, c client.Client, namespace, name string, labels map[string]string, s3 storage.S3, storeID string, settings pageBrokerS3Settings) error {
+// or visible to `helm diff`. It has no owner reference. Each write sets its
+// labels to operatortypes.Labels, plus the instance label when releaseName is
+// set.
+func ensurePageBrokerS3Config(ctx context.Context, c client.Client, namespace, name, releaseName string, s3 storage.S3, storeID string, settings pageBrokerS3Settings) error {
 	body, err := json.Marshal(pageBrokerS3Config{
 		StoreID:              storeID,
 		Endpoint:             s3.Endpoint,
@@ -63,6 +64,10 @@ func ensurePageBrokerS3Config(ctx context.Context, c client.Client, namespace, n
 		return fmt.Errorf("encode PageBroker S3 configuration: %w", err)
 	}
 
+	labels := operatortypes.Labels()
+	if releaseName != "" {
+		labels[operatortypes.InstanceLabel] = releaseName
+	}
 	desired := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels},
 		Data:       map[string]string{PageBrokerS3ConfigKey: string(body)},

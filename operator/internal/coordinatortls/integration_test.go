@@ -51,7 +51,7 @@ func TestIssuer(t *testing.T) {
 		assert.Equal(t, []string{bundleKey}, slices.Sorted(maps.Keys(got.bundle.Data)))
 		assert.Empty(t, got.bundle.BinaryData)
 		for _, obj := range got.objects() {
-			assert.Equal(t, managedLabels, obj.GetLabels(), obj.GetName())
+			assert.Equal(t, operatortypes.Labels(), obj.GetLabels(), obj.GetName())
 		}
 
 		assert.Equal(t, serials(got.caCert(t)), serials(got.bundleCerts(t)...))
@@ -86,7 +86,7 @@ func TestIssuer(t *testing.T) {
 		f.clock.SetTime(before.caCert(t).NotAfter.Add(-renewalWindow).Add(time.Second))
 
 		f.requireWrites(f.ensure(), f.cfg.CASecret, f.cfg.CABundle, f.cfg.TLSSecret)
-		want := maps.Clone(managedLabels)
+		want := operatortypes.Labels()
 		want["other"] = "kept"
 		for _, obj := range f.read().objects() {
 			assert.Equal(t, want, obj.GetLabels(), obj.GetName())
@@ -377,9 +377,6 @@ func TestIssuer(t *testing.T) {
 // start is the fake clock's first time, a whole second as certificate times
 // are.
 var start = time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
-
-// managedLabels are the labels each write sets.
-var managedLabels = map[string]string{operatortypes.ManagedByLabel: operatortypes.ManagedByOperator}
 
 // fixture is an Issuer's configuration in a namespace of its own.
 type fixture struct {

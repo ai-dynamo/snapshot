@@ -176,8 +176,7 @@ func (i *Issuer) ensure(ctx context.Context) error {
 // creates obj when ensure found it absent, and otherwise updates it on the
 // resourceVersion ensure read, so that a concurrent write makes it fail.
 func (i *Issuer) write(ctx context.Context, obj client.Object) error {
-	obj.SetLabels(labels.Merge(obj.GetLabels(),
-		labels.Set{operatortypes.ManagedByLabel: operatortypes.ManagedByOperator}))
+	obj.SetLabels(labels.Merge(obj.GetLabels(), operatortypes.Labels()))
 	if obj.GetResourceVersion() == "" {
 		return i.writer.Create(ctx, obj)
 	}
