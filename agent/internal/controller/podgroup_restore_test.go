@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	clientgotesting "k8s.io/client-go/testing"
@@ -829,6 +830,68 @@ func TestCheckGroupPinConfirmsAnIPChange(t *testing.T) {
 			var check *groupCheckError
 			require.ErrorAs(t, err, &check)
 			assert.Equal(t, tc.wantReason, check.reason)
+		})
+	}
+}
+
+func TestRunChecksThatPodGroupRestoresAreReadable(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"a CRD that is not installed": {
+			err:  apierrors.NewNotFound(podGroupRestoreGVR.GroupResource(), ""),
+			want: "pod groups need the podgrouprestores.nvidia.com CRD, which the API server does not serve",
+		},
+		"a permission the agent lacks": {
+			err:  apierrors.NewForbidden(podGroupRestoreGVR.GroupResource(), "", errors.New("RBAC denied the list")),
+			want: "pod groups need permission to list and watch podgrouprestores.nvidia.com in every namespace",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := makeTestController(t, nil)
+			w.podGroups = &podGroups{}
+			dynClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+				map[schema.GroupVersionResource]string{podGroupRestoreGVR: "PodGroupRestoreList"})
+			dynClient.PrependReactor("list", "podgrouprestores", func(clientgotesting.Action) (bool, runtime.Object, error) {
+				return true, nil, tc.err
+			})
+			w.dynClient = dynClient
+
+			err := w.Run(within(t))
+			require.ErrorContains(t, err, tc.want, "the agent exits rather than wait for a cache that never syncs")
+		})
+	}
+}
+
+func TestCheckPodGroupRestoresReadable(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err     error
+		wantErr bool
+	}{
+		"readable":                           {},
+		"a CRD that is not installed":        {err: apierrors.NewNotFound(podGroupRestoreGVR.GroupResource(), ""), wantErr: true},
+		"a permission the agent lacks":       {err: apierrors.NewForbidden(podGroupRestoreGVR.GroupResource(), "", errors.New("denied")), wantErr: true},
+		"credentials the API server refuses": {err: apierrors.NewUnauthorized("expired"), wantErr: true},
+		"an API server briefly unavailable":  {err: apierrors.NewServiceUnavailable("starting")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := makeTestController(t, nil)
+			dynClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+				map[schema.GroupVersionResource]string{podGroupRestoreGVR: "PodGroupRestoreList"})
+			if tc.err != nil {
+				dynClient.PrependReactor("list", "podgrouprestores", func(clientgotesting.Action) (bool, runtime.Object, error) {
+					return true, nil, tc.err
+				})
+			}
+			w.dynClient = dynClient
+
+			err := w.checkPodGroupRestoresReadable(within(t))
+			if tc.wantErr {
+				require.ErrorIs(t, err, tc.err)
+			} else {
+				require.NoError(t, err, "a failure that is neither a missing CRD nor a missing permission is left to the informer")
+			}
 		})
 	}
 }

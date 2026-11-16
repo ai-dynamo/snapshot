@@ -41,6 +41,26 @@ const uidIndex = "byUID"
 // target whose pin arrived while its Pod was not in the cache yet.
 const podGroupRestoreResync = 30 * time.Second
 
+// checkPodGroupRestoresReadable lists one PodGroupRestore, so that an agent
+// with pod groups on fails at once when the API server does not serve the
+// CRD or the agent may not read it, rather than waiting on an informer that
+// never syncs, which would hold up every capture and restore on the node. A
+// failure that is neither is left to the informer, which retries it.
+func (w *NodeController) checkPodGroupRestoresReadable(ctx context.Context) error {
+	resource := podGroupRestoreGVR.GroupResource().String()
+	_, err := w.dynClient.Resource(podGroupRestoreGVR).List(ctx, metav1.ListOptions{Limit: 1})
+	switch {
+	case err == nil:
+		return nil
+	case apierrors.IsNotFound(err):
+		return fmt.Errorf("pod groups need the %s CRD, which the API server does not serve: %w", resource, err)
+	case apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err):
+		return fmt.Errorf("pod groups need permission to list and watch %s in every namespace: %w", resource, err)
+	}
+	w.log.Error(err, "Cannot check that PodGroupRestores are readable; the informer tries again", "resource", resource)
+	return nil
+}
+
 // startPodGroupRestoreInformer watches the PodGroupRestores, cluster-wide, and
 // queues a target on this node whenever its PodGroupRestore changes, which is
 // how a target learns that it was pinned.

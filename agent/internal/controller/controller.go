@@ -324,6 +324,12 @@ func (w *NodeController) Run(ctx context.Context) error {
 
 	w.log.Info("Watching pods cluster-wide (all namespaces)")
 
+	if w.podGroups != nil {
+		if err := w.checkPodGroupRestoresReadable(ctx); err != nil {
+			return err
+		}
+	}
+
 	var syncFuncs []cache.InformerSynced
 
 	restoreFactoryOpts := []informers.SharedInformerOption{
