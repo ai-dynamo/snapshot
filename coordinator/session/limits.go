@@ -3,6 +3,14 @@
 
 package session
 
+import (
+	"encoding/json"
+	"fmt"
+	"math"
+	"strings"
+	"time"
+)
+
 // The limits a session's buckets have unless the coordinator is configured
 // otherwise. The Snapshot and library buckets live in memory: each limits the
 // size of its values, the library bucket also its number of keys, none reserves
@@ -28,33 +36,81 @@ const (
 )
 
 // The control bucket holds only keys the session needs to end, so its size
-// follows the membership. It is bounded so that a member cannot fill the
-// coordinator's file storage, and sized so that a session of honest members
-// never reaches the bound.
+// follows the membership: see ControlBytes. It is bounded so that a member
+// cannot fill the coordinator's file storage, and sized so that a session of
+// honest members never reaches the bound.
 const (
-	// ControlBytesPerMember is what each member adds to its control bucket's
-	// size: its share of Meta, its departure, and its arrivals at about a
-	// hundred barriers.
-	ControlBytesPerMember = 16 << 10
+	// ArrivalsPerMember is how many barrier arrivals the control bucket holds
+	// for each member. An attempt's agents arrive at a handful of barriers;
+	// sixteen leaves room for more.
+	ArrivalsPerMember = 16
 
-	// ControlBytesBase is what every control bucket has beyond its members: the
-	// ended key, and a margin.
-	ControlBytesBase = 64 << 10
-
-	// MaxControlValue is the largest value the control bucket holds, apart from
-	// Meta, which is as large as its membership needs. A reason takes at most
-	// 1 KiB; arrivals and departures hold nothing.
-	MaxControlValue = 4 << 10
+	// MaxControlValue is the largest value a control key holds, apart from
+	// Meta: the longest reason, which the ended key holds. Arrivals and
+	// departures hold nothing.
+	MaxControlValue = maxReasonLength
 )
+
+// recordFraming is what the coordinator's file store adds to each record
+// beyond its subject, headers and value, in bytes: the record's length,
+// sequence, timestamp, subject length, header length, and checksum.
+const recordFraming = 4 + 8 + 8 + 2 + 4 + 8
 
 // MaxMembers is the largest membership a session is sized for: the most
 // members a PodGroupSnapshot or PodGroupRestore holds.
 const MaxMembers = 256
 
 // ControlBytes is the size of the control bucket of a session of members
-// members, in bytes. The coordinator's file storage holds the control buckets
-// of every session, so it bounds them in total by their sum.
-func ControlBytes(members int) int64 { return ControlBytesBase + int64(members)*ControlBytesPerMember }
+// members, in bytes: the worst case of what the session writes there, which
+// is each member's arrivals and departure, the session's end, and Meta. The
+// coordinator's file storage holds the control buckets of every session, so
+// it bounds them in total by their sum.
+func ControlBytes(members int) int64 {
+	records := int64(members)*(ArrivalsPerMember+1) + 1
+	return records*int64(maxControlRecord()) + int64(metaRecord(members))
+}
+
+// maxControlRecord is the most a record of the control bucket takes, apart
+// from Meta's: its framing, the longest subject, which an arrival with the
+// longest attempt UID, barrier name and member ID has, and the largest value.
+// The ended key's creation is the one write that carries headers, and its
+// subject is shorter than an arrival's by more than they take.
+func maxControlRecord() int {
+	name := strings.Repeat("n", MaxNameLength)
+	return recordFraming + len(subject(ControlBucket(longestAttempt()), BarrierKey(name, name))) + MaxControlValue
+}
+
+// metaRecord is the most Meta's record takes in the control bucket of a
+// session of members members.
+func metaRecord(members int) int {
+	return recordFraming + len(subject(ControlBucket(longestAttempt()), KeyMeta)) + maxMetaBytes(members)
+}
+
+// longestAttempt returns the longest attempt UID ValidateAttempt accepts.
+func longestAttempt() string { return strings.Repeat("u", MaxAttemptLength) }
+
+// maxMetaBytes is the size of the largest Meta of a session of members
+// members, encoded: every member with the longest ID and the widest rank, and
+// the widest deadline, epoch and limits.
+func maxMetaBytes(members int) int {
+	meta := Meta{
+		Members: make([]Member, members),
+		// The latest time JSON holds, at the widest UTC offset.
+		Deadline:        time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.FixedZone("", -(23*60*60+59*60))),
+		Epoch:           math.MaxUint64,
+		MaxValue:        math.MaxInt,
+		MaxLibraryValue: math.MaxInt,
+	}
+	id := strings.Repeat("m", MaxNameLength)
+	for i := range meta.Members {
+		meta.Members[i] = Member{ID: id, Rank: members - 1}
+	}
+	encoded, err := json.Marshal(meta)
+	if err != nil {
+		panic(fmt.Sprintf("encode the largest Meta: %v", err))
+	}
+	return len(encoded)
+}
 
 // MaxConsumersPerMember sizes how many consumers each of a session's buckets
 // holds: one limit per bucket, of this many for each member, which the

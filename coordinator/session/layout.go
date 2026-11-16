@@ -37,6 +37,10 @@ func Buckets(attempt string) []string {
 	return []string{ControlBucket(attempt), SnapshotBucket(attempt), LibraryBucket(attempt)}
 }
 
+// subject is the subject a write of key in bucket publishes to, and its
+// record in the bucket's stream has.
+func subject(bucket, key string) string { return "$KV." + bucket + "." + key }
+
 // The keys of the control bucket, ControlBucket(attempt), which the session
 // itself uses:
 //
