@@ -304,10 +304,12 @@ and `coordinator.healthPort` for probes:
 
 The coordinator runs in the agent pod, so it shares the agent's ServiceAccount
 and the host's network, PID, and IPC namespaces. It therefore holds the agent's
-API rights, which include patching any pod. A flaw that let a client run code
-in the coordinator would expose those rights. The coordinator is the only
-process of the agent pod that listens on the network, and the host firewall
-advice above applies to it.
+API rights, which include changing any pod's image. Code running in the
+coordinator, for example through a flaw a client exploits, could use them to
+take over the privileged agent on every node. The host's network also exposes
+the node's local services, and any cloud metadata endpoint, to that code. The
+coordinator is the only process of the agent pod that listens on the network,
+and the host firewall advice above applies to it.
 
 The operator replaces its CA near expiry, or when the CA Secret is lost or
 damaged. After a replacement near expiry, the trust bundle keeps the replaced
