@@ -63,7 +63,9 @@ type PodGroupRestoreReconciler struct {
 // admission passes; record it; then act: for a restore being deleted, release
 // its finalizer once it has finished, and send the claims that admission
 // prepared. Recording comes first, so a Cancelled restore is recorded before
-// it disappears.
+// it disappears. The claims follow the recorded status, and recording an
+// unchanged status checks no resourceVersion, so the claims are sent only
+// while the API server still holds that restore (isCurrent).
 //
 // Every irreversible decision is made from the API server, by the rule both
 // kinds share. The reconciler observes through the cache first. When the
@@ -107,11 +109,18 @@ func (r *PodGroupRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if deleting && podGroupRestoreFinished(&restore.Status) {
 		return ctrl.Result{}, removePodGroupFinalizer(ctx, r.Client, restore)
 	}
+	if len(observed.claims) > 0 {
+		current, err := r.isCurrent(ctx, restore)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !current {
+			// The restore's own update event also wakes the reconcile.
+			return ctrl.Result{RequeueAfter: podGroupAdmissionRequeue}, nil
+		}
+	}
 	if err := r.claim(ctx, restore, observed.claims); err != nil {
 		return ctrl.Result{}, err
-	}
-	if observed.stale {
-		return ctrl.Result{RequeueAfter: podGroupAdmissionRequeue}, nil
 	}
 	return ctrl.Result{RequeueAfter: podGroupRestoreRequeue(observed, &restore.Status, now)}, nil
 }
@@ -150,10 +159,6 @@ const podGroupRestoreClaimFailedReason = "ClaimFailed"
 // runs again, and a restore whose members wait for their pins is never
 // refused. Reconcile passes the cache first, and the API server when the
 // result would make an irreversible decision.
-//
-// It drops the claims admission prepared unless the restore is current in the
-// API server (isCurrent). A stale restore sends no claim, and the reconcile
-// looks again shortly.
 func (r *PodGroupRestoreReconciler) observe(
 	ctx context.Context,
 	reader client.Reader,
@@ -202,22 +207,13 @@ func (r *PodGroupRestoreReconciler) observe(
 		return podGroupRestoreObservation{}, err
 	}
 	observed.admission, observed.pins, observed.claims = admission.podGroupAdmission, admission.pins, admission.claims
-	if len(observed.claims) > 0 {
-		current, err := r.isCurrent(ctx, restore)
-		if err != nil {
-			return podGroupRestoreObservation{}, err
-		}
-		if !current {
-			observed.claims, observed.stale = nil, true
-		}
-	}
 	return observed, nil
 }
 
-// isCurrent reports whether restore, as the reconcile read it, is what the API
-// server holds: a claim starts from the restore's status, so it needs a
-// restore that the cache has not left behind. A restore the API server no
-// longer has is not current.
+// isCurrent reports whether restore, as the reconcile read or recorded it, is
+// what the API server holds: a claim starts from the restore's status, so it
+// needs a restore that the cache has not left behind. A restore that the API
+// server does not hold is not current.
 func (r *PodGroupRestoreReconciler) isCurrent(ctx context.Context, restore *snapshotv1alpha1.PodGroupRestore) (bool, error) {
 	live := &snapshotv1alpha1.PodGroupRestore{}
 	switch err := r.NonCacheReadClient.Get(ctx, client.ObjectKeyFromObject(restore), live); {

@@ -496,6 +496,33 @@ func TestPodGroupRestoreReconciler_SendsNoClaimForARestoreTheCacheShowsStale(t *
 	assert.Equal(t, podGroupAdmissionRequeue, res.RequeueAfter)
 }
 
+// TestPodGroupRestoreReconciler_SendsNoClaimForARestoreChangedAfterItsStatus:
+// the reconcile records the restore's status, then another writer changes the
+// restore before the claims go out. The API server holds another restore than
+// the one the claims follow, so no claim is sent, and the reconcile looks
+// again shortly.
+func TestPodGroupRestoreReconciler_SendsNoClaimForARestoreChangedAfterItsStatus(t *testing.T) {
+	r, _ := makePodGroupRestoreReconciler(t, pgObjects(rgGatedCluster("a", "b"), []client.Object{rgRestore("a", "b")})...)
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if err := c.SubResource(sub).Patch(ctx, obj, patch, opts...); err != nil {
+				return err
+			}
+			changed := &snapshotv1alpha1.PodGroupRestore{}
+			require.NoError(t, rgAPI(r).Get(ctx, client.ObjectKeyFromObject(obj), changed))
+			changed.Labels = map[string]string{"example.com/team": "a"}
+			return rgAPI(r).Update(ctx, changed)
+		},
+	})
+
+	res := reconcileRestore(t, r)
+
+	assert.Len(t, getRestore(t, r).Status.Members, 2, "the status is recorded")
+	assertGated(t, r, "a")
+	assertGated(t, r, "b")
+	assert.Equal(t, podGroupAdmissionRequeue, res.RequeueAfter)
+}
+
 // TestPodGroupRestoreReconciler_ResumesAfterACrashBetweenClaims finds target
 // a claimed and b still gated, as a crash between the two claims leaves them,
 // and claims b alone.
