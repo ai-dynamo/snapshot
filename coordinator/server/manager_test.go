@@ -110,6 +110,14 @@ func TestEnsure(t *testing.T) {
 	})
 }
 
+// TestEnsureTheLargestMeta checks that a coordinator whose largest value is
+// smaller than the largest Meta writes the Meta of a session of
+// session.MaxMembers members with the longest IDs.
+func TestEnsureTheLargestMeta(t *testing.T) {
+	h := newHarness(t, func(cfg *Config) { cfg.MaxValue, cfg.MaxLibraryValue = 1<<10, 1<<10 })
+	require.NoError(t, h.srv.Ensure(within(t), h.longestSpec(session.MaxMembers)))
+}
+
 // TestEndAtTheMemoryCap covers a session that every member left, or whose
 // deadline or grace period runs out, or that the host removes, while another
 // session fills the memory cap: the control keys are in file storage, so the

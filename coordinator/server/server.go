@@ -129,7 +129,8 @@ type Config struct {
 	//
 	// MaxBytes is not the coordinator's whole memory. The process also holds,
 	// for each connection, up to session.MaxPending(MaxValue) bytes of what
-	// the connection is sent and has not yet taken, about twice MaxValue; and,
+	// the connection is sent and has not yet taken, twice the largest message
+	// it accepts, session.MaxPayload(MaxValue); and,
 	// for each bucket, an ingest queue of up to 128 MiB, which nats-server
 	// fills with the writes it has not stored yet. Size the container's memory
 	// limit for MaxBytes plus those.
@@ -298,7 +299,7 @@ func (s *Server) start() error {
 		// The client speaks first, with its TLS handshake, so the server's INFO
 		// line, which names it, never goes out in plaintext.
 		TLSHandshakeFirst: true,
-		MaxPayload:        int32(s.cfg.MaxValue + session.PayloadHeadroom),
+		MaxPayload:        int32(session.MaxPayload(s.cfg.MaxValue)),
 		MaxPending:        session.MaxPending(s.cfg.MaxValue),
 		WriteDeadline:     writeDeadline,
 		PingInterval:      serverPingInterval,
