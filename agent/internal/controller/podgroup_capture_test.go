@@ -311,10 +311,18 @@ func TestGroupCheckpointThatCannotRecordItsStartFailsTheAttempt(t *testing.T) {
 
 	leader := getContent(t, w, "content-leader")
 	assert.Equal(t, session.ReasonMemberFailed, condition(leader, snapshotv1alpha1.PodSnapshotConditionFailed).Reason,
-		"the member that started reports the attempt's reason")
-	assert.NotNil(t, condition(leader, snapshotv1alpha1.PodSnapshotConditionStarted))
-	assert.Equal(t, []int{7}, k.list(), "only the member that started has its source terminated")
+		"the leader reports the attempt's reason")
 	assert.NotContains(t, executor.steps(), "leader dumped")
+	// The leader may learn that the attempt failed before its admitted barrier
+	// returns, and then never start. Both outcomes are legitimate; only a
+	// member that started has its source terminated.
+	if condition(leader, snapshotv1alpha1.PodSnapshotConditionStarted) != nil {
+		assert.Equal(t, []int{7}, k.list(), "only the member that started has its source terminated")
+	} else {
+		assert.Empty(t, k.list(), "no member started, so no source is touched")
+		assert.NotContains(t, getPod(t, w, "inference", "worker-0").Labels, snapshotv1alpha1.CaptureEligibleLabel,
+			"a leader that never started is left as found")
+	}
 }
 
 func TestGroupCheckpointRefusedBeforeItCommitsLeavesEveryPodAsFound(t *testing.T) {
