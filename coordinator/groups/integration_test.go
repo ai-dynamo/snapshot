@@ -10,6 +10,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -440,7 +442,9 @@ func TestSessionNode(t *testing.T) {
 
 // TestHostOrder builds a host in the order the package doc gives, with the
 // real agentauth.Authorizer reading the attempts as its Placement: an agent's
-// Pod-bound token admits it for a member on its node, and only for one.
+// Pod-bound token admits it for a member on its node, and only for one. Once
+// the group is gone and its session removed, the member that reconnects with
+// its epoch is admitted all the same, and learns that its session was lost.
 func TestHostOrder(t *testing.T) {
 	ctx := within(t)
 	names := nodes(t, 2)
@@ -499,8 +503,9 @@ func TestHostOrder(t *testing.T) {
 		_, holds := srv.Ended(g.UID)
 		return holds && srv.Ready()
 	}, timeout, 10*time.Millisecond)
+	link := newRelay(t, srv.Addr().String())
 	cfg := coordinator.Config{
-		URLs:       []string{"tls://" + srv.Addr().String()},
+		URLs:       []string{"tls://" + link.addr()},
 		RootCAs:    func() (*x509.CertPool, error) { return roots, nil },
 		ServerName: "localhost",
 		Attempt:    string(g.UID),
@@ -517,6 +522,93 @@ func TestHostOrder(t *testing.T) {
 	defer cancelRefused()
 	_, err = coordinator.Connect(refused, cfg)
 	require.ErrorIs(t, err, session.ErrForbidden, "the agent's token must not admit it for a member on another node")
+
+	link.hold()
+	require.NoError(t, k8s.Delete(ctx, g))
+	require.Eventually(t, func() bool {
+		_, holds := srv.Ended(g.UID)
+		return !holds
+	}, timeout, 10*time.Millisecond, "the session of a deleted group must be removed")
+	link.release()
+	require.ErrorIs(t, awaitEnd(t, s), session.ErrCoordinatorLost)
+}
+
+// relay forwards TCP connections to a coordinator, so a test can cut a
+// member's connection and refuse its reconnects for a while, as a network
+// fault would.
+type relay struct {
+	ln net.Listener
+
+	mu    sync.Mutex
+	held  bool
+	conns []net.Conn
+}
+
+// newRelay starts a relay to target, which stops when the test ends.
+func newRelay(t *testing.T, target string) *relay {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	r := &relay{ln: ln}
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for {
+			in, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			out, err := net.Dial("tcp", target)
+			if err != nil {
+				_ = in.Close()
+				continue
+			}
+			if !r.add(in, out) {
+				_, _ = in.Close(), out.Close()
+				continue
+			}
+			wg.Go(func() { _, _ = io.Copy(out, in); _ = out.Close() })
+			wg.Go(func() { _, _ = io.Copy(in, out); _ = in.Close() })
+		}
+	})
+	t.Cleanup(func() {
+		_ = ln.Close()
+		r.hold()
+		wg.Wait()
+	})
+	return r
+}
+
+// addr returns the address the relay listens on.
+func (r *relay) addr() string { return r.ln.Addr().String() }
+
+// add records a forwarded connection's two ends, unless the relay is held.
+func (r *relay) add(in, out net.Conn) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.held {
+		return false
+	}
+	r.conns = append(r.conns, in, out)
+	return true
+}
+
+// hold closes every connection the relay forwards, and refuses new ones until
+// release.
+func (r *relay) hold() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.held = true
+	for _, c := range r.conns {
+		_ = c.Close()
+	}
+	r.conns = nil
+}
+
+// release forwards new connections again.
+func (r *relay) release() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.held = false
 }
 
 // visibleLabel is the label a host that hideSnapshots configures waits for
