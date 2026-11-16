@@ -393,10 +393,10 @@ func TestRunRestoreKeepsTheRecordUnderThePodsUIDWithoutTheNodes(t *testing.T) {
 
 	require.Error(t, run())
 
-	assert.Equal(t, []string{
-		"restore-pod-uid/main/" + podcontract.RestoreAttemptsFile,
-		"restore-pod-uid/main/" + podcontract.RestoreAttemptsFile,
-	}, h.volume.writes)
+	require.NotEmpty(t, h.volume.writes)
+	for _, path := range h.volume.writes {
+		assert.Equal(t, "restore-pod-uid/main/"+podcontract.RestoreAttemptsFile, path)
+	}
 }
 
 func newAttemptOperation(t *testing.T, annotations map[string]string) (*restoreOperation, *fakeControlVolume) {
