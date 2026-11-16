@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package types defines what the operator's packages share: the operator's
-// configuration, and the labels of the resources it writes.
+// configuration, and the labels of the Secrets and ConfigMaps it writes
+// outside Helm.
 package types
 
 import (
