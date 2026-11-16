@@ -129,18 +129,19 @@ func (r *PodGroupRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 // Pod, conditional on the resourceVersion admission read it at. The patch
 // carries only the two annotations and the scheduling gates, so fields that
 // this API version does not know stay on the Pod as they are. It stops at the
-// first error. A conflict proves nothing, since the kubelet and other
-// controllers also write the Pod: the reconcile ends, and the next one reads
-// the Pods again and applies the claim table. Any other error, such as a
-// webhook's refusal or a missing permission, reaches the restore as a warning
-// event, and the reconcile retries. A claim that landed stays, so a restart
-// between two claims finds the first Pod claimed and the second still gated.
+// first error. A conflict, or a Pod that is gone, proves nothing about the
+// claim, since the kubelet and other controllers also write the Pod and its
+// owner may delete it: the reconcile ends, and the next one reads the Pods
+// again and applies the claim table. Any other error, such as a webhook's
+// refusal or a missing permission, reaches the restore as a warning event, and
+// the reconcile retries. A claim that landed stays, so a restart between two
+// claims finds the first Pod claimed and the second still gated.
 func (r *PodGroupRestoreReconciler) claim(ctx context.Context, restore *snapshotv1alpha1.PodGroupRestore, claims []targetClaim) error {
 	for _, c := range claims {
 		patch := client.MergeFromWithOptions(c.original, client.MergeFromWithOptimisticLock{})
 		if err := r.Patch(ctx, c.claimed, patch); err != nil {
 			err = fmt.Errorf("claim Pod %q: %w", c.claimed.Name, err)
-			if !apierrors.IsConflict(err) {
+			if !apierrors.IsConflict(err) && !apierrors.IsNotFound(err) {
 				r.Recorder.Event(restore, corev1.EventTypeWarning, podGroupRestoreClaimFailedReason, err.Error())
 			}
 			return err
@@ -150,7 +151,7 @@ func (r *PodGroupRestoreReconciler) claim(ctx context.Context, restore *snapshot
 }
 
 // podGroupRestoreClaimFailedReason is the reason of the event for a claim that
-// the API server refused for a cause other than a conflict.
+// the API server refused for a cause other than a conflict or a missing Pod.
 const podGroupRestoreClaimFailedReason = "ClaimFailed"
 
 // observe reads, through reader, the PodGroupSnapshot's ranks and each pinned

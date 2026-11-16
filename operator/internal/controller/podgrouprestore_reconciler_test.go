@@ -432,6 +432,34 @@ func TestPodGroupRestoreReconciler_SurfacesAClaimTheAPIServerRefuses(t *testing.
 	assert.Contains(t, events[0], "denied by policy")
 }
 
+// TestPodGroupRestoreReconciler_SurfacesNoClaimOfADeletedTarget deletes target
+// b's Pod between admission's read and the claim. A Pod that is gone proves
+// nothing about the claim, so the restore carries no event: the reconcile ends
+// with the error, and the next one waits for the Pod.
+func TestPodGroupRestoreReconciler_SurfacesNoClaimOfADeletedTarget(t *testing.T) {
+	r, recorder := makePodGroupRestoreReconciler(t, append(rgGatedCluster("a", "b"), rgRestore("a", "b"))...)
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if pod, ok := obj.(*corev1.Pod); ok && pod.Name == "restore-b" {
+				require.NoError(t, rgAPI(r).Delete(ctx, rgPod(t, r, "b")))
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: pgNamespace, Name: "restore"}})
+
+	require.True(t, apierrors.IsNotFound(err), "the reconcile ends with the error: %v", err)
+	assert.Empty(t, drainEvents(recorder), "a Pod that is gone is not worth an event")
+
+	reconcileRestore(t, r)
+	got := getRestore(t, r)
+	admitted := rgCondition(got.Status.Conditions, snapshotv1alpha1.PodGroupConditionAdmitted)
+	require.NotNil(t, admitted)
+	assert.Equal(t, snapshotv1alpha1.PodGroupReasonTargetPodPending, admitted.Reason)
+	assert.Nil(t, rgCondition(got.Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed))
+}
+
 // TestPodGroupRestoreReconciler_ClaimsTargetsTheCacheHasNotSeen: both target
 // Pods were just created, so the cache does not hold them yet. The claim stage
 // reads the API server, which has them, and claims both in this reconcile
