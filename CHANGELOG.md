@@ -81,7 +81,7 @@ commit-level history for each release is on its
   `RestoreAttemptFailed` event, and `nvidia.com/restore-retry-status` holds the
   last failure. Only a failure that left the container untouched is retried,
   in the same container. See
-  [Restore Retries](docs/reference/restore-pod-contract.md#restore-retries).
+  [Restore Retry](docs/design/restore-retry/README.md).
 
 ### Changed
 

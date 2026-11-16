@@ -188,17 +188,8 @@ the signal that ended it.
 
 ## Restore Retries
 
-A destination container gets up to the retry limit plus one restore attempts.
-The limit is `nvidia.com/restore-retry-limit`, or else
-`config.restore.retryLimit`, and defaults to 0 (see the
-[API Reference](api.md#restore)).
-
-The agent retries only a failed attempt that left the container untouched, and
-runs the retry in the same container. A failure changes the container once the
-restore begins to apply the snapshot to it. Such a failure ends the restore,
-and so does a container that stops during an attempt, since another attempt
-needs a new container. The `restartPolicy` does not change which failures are
-retried, and retries also work on nodes without the restore proxy.
+Which failed attempts the agent retries, and how many times, is in
+[Restore Retry](../design/restore-retry/README.md).
 
 ## Nodes Without the Restore Proxy
 
