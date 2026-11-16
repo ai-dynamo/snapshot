@@ -11,6 +11,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unicode/utf8"
 
@@ -252,26 +253,27 @@ func TestRunRestoreEndsWithoutRetryingWhatNoAttemptChanges(t *testing.T) {
 	}
 }
 
+// The bubble's clock ends the attempt's context at its deadline without a real wait.
 func TestRunRestoreEndsWhenTheAttemptTimedOut(t *testing.T) {
-	h, run := newAttemptHarness(t, retryLimit("2"), nil)
-	// The attempt starts by the agent's clock, and its context has already ended by the real one.
-	h.now = h.now.Add(-time.Minute)
-	h.volume.put(t, "host-uid", "main", restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(time.Second), ContainerID: "ctr-abc"})
-	restore := h.w.restoreFn
-	h.w.restoreFn = func(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req executor.RestoreRequest, mounter executor.RestoreMounter) (executor.RestoreResult, error) {
-		_, _ = restore(ctx, rt, log, req, mounter)
-		<-ctx.Done()
-		return executor.RestoreResult{}, untouched(ctx.Err())
-	}
+	synctest.Test(t, func(t *testing.T) {
+		h, run := newAttemptHarness(t, retryLimit("2"), nil)
+		h.volume.put(t, "host-uid", "main", restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(50 * time.Millisecond), ContainerID: "ctr-abc"})
+		restore := h.w.restoreFn
+		h.w.restoreFn = func(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req executor.RestoreRequest, mounter executor.RestoreMounter) (executor.RestoreResult, error) {
+			_, _ = restore(ctx, rt, log, req, mounter)
+			<-ctx.Done()
+			return executor.RestoreResult{}, untouched(ctx.Err())
+		}
 
-	err := run()
+		err := run()
 
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-	assert.Equal(t, []string{"write " + podcontract.RestoreFailedFile, "kill"}, h.calls)
-	failed := h.events(restoreAttemptFailedReason)
-	require.Len(t, failed, 1)
-	assert.Contains(t, failed[0], "not retried: the restore timed out")
-	assert.Empty(t, h.events(restoreRetriesExhaustedReason))
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.Equal(t, []string{"write " + podcontract.RestoreFailedFile, "kill"}, h.calls)
+		failed := h.events(restoreAttemptFailedReason)
+		require.Len(t, failed, 1)
+		assert.Contains(t, failed[0], "not retried: the restore timed out")
+		assert.Empty(t, h.events(restoreRetriesExhaustedReason))
+	})
 }
 
 func TestRunRestoreEndsWhenRetriesRunOut(t *testing.T) {
