@@ -46,19 +46,23 @@ type Store interface {
 }
 
 // Snapshot implements Session.
-func (s *client) Snapshot() Store {
-	return &store{s: s, kv: s.snapshot, ns: session.NamespaceSnapshot, maxValue: s.meta.MaxValue}
-}
+func (s *client) Snapshot() Store { return s.stores[session.NamespaceSnapshot] }
 
 // CuInterpose implements Session.
-func (s *client) CuInterpose() Store {
-	return &store{s: s, kv: s.snapshot, ns: session.NamespaceCuInterpose, maxValue: s.meta.MaxValue}
-}
+func (s *client) CuInterpose() Store { return s.stores[session.NamespaceCuInterpose] }
 
 // Library implements Session.
-func (s *client) Library() Store {
-	return &store{s: s, kv: s.library, ns: session.NamespaceLibrary, maxValue: s.meta.MaxLibraryValue,
-		limitsKeys: true}
+func (s *client) Library() Store { return s.stores[session.NamespaceLibrary] }
+
+// newStore returns the Store of a namespace, whose keys bucket holds, bound as
+// kv. Meta carries the library bucket's largest value apart from the Snapshot
+// bucket's, and the library bucket limits its number of keys.
+func (s *client) newStore(ns session.Namespace, bucket string, kv jetstream.KeyValue) *store {
+	st := &store{s: s, kv: kv, ns: ns, maxValue: s.meta.MaxValue}
+	if bucket == session.LibraryBucket(s.attempt) {
+		st.maxValue, st.limitsKeys = s.meta.MaxLibraryValue, true
+	}
+	return st
 }
 
 // store is one namespace of a session.

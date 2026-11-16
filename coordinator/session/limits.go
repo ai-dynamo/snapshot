@@ -83,16 +83,16 @@ func maxControlRecord() int {
 // metaRecord is the most Meta's record takes in the control bucket of a
 // session of members members.
 func metaRecord(members int) int {
-	return recordFraming + len(subject(ControlBucket(longestAttempt()), KeyMeta)) + maxMetaBytes(members)
+	return recordFraming + len(subject(ControlBucket(longestAttempt()), KeyMeta)) + MaxMetaBytes(members)
 }
 
 // longestAttempt returns the longest attempt UID ValidateAttempt accepts.
 func longestAttempt() string { return strings.Repeat("u", MaxAttemptLength) }
 
-// maxMetaBytes is the size of the largest Meta of a session of members
+// MaxMetaBytes is the size of the largest Meta of a session of members
 // members, encoded: every member with the longest ID and the widest rank, and
 // the widest deadline, epoch and limits.
-func maxMetaBytes(members int) int {
+func MaxMetaBytes(members int) int {
 	meta := Meta{
 		Members: make([]Member, members),
 		// The latest time JSON holds, at the widest UTC offset.

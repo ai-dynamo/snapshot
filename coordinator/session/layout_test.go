@@ -46,11 +46,23 @@ func TestValidateName(t *testing.T) {
 }
 
 // TestNamespaceBucket checks the one mapping from a namespace to its bucket,
-// and that every bucket name fits a stream name.
+// which refuses any other namespace, and that every bucket name fits a stream
+// name.
 func TestNamespaceBucket(t *testing.T) {
-	assert.Equal(t, SnapshotBucket("a"), NamespaceSnapshot.Bucket("a"))
-	assert.Equal(t, SnapshotBucket("a"), NamespaceCuInterpose.Bucket("a"))
-	assert.Equal(t, LibraryBucket("a"), NamespaceLibrary.Bucket("a"))
+	for ns, want := range map[Namespace]string{
+		NamespaceSnapshot:    SnapshotBucket("a"),
+		NamespaceCuInterpose: SnapshotBucket("a"),
+		NamespaceLibrary:     LibraryBucket("a"),
+	} {
+		bucket, err := ns.Bucket("a")
+		require.NoError(t, err)
+		assert.Equal(t, want, bucket, "namespace %s", ns)
+	}
+	assert.ElementsMatch(t, []Namespace{NamespaceSnapshot, NamespaceCuInterpose, NamespaceLibrary}, Namespaces())
+	for _, ns := range []Namespace{"", "other", "Snapshot"} {
+		_, err := ns.Bucket("a")
+		require.ErrorIs(t, err, ErrInvalid, "namespace %q", ns)
+	}
 	assert.ElementsMatch(t, []string{ControlBucket("a"), SnapshotBucket("a"), LibraryBucket("a")}, Buckets("a"))
 	for _, bucket := range Buckets(strings.Repeat("u", MaxAttemptLength)) {
 		assert.LessOrEqual(t, len("KV_"+bucket), maxStreamName, bucket)
@@ -61,11 +73,14 @@ func TestNamespaceBucket(t *testing.T) {
 // namespace in the bucket that holds it, and each control key in the control
 // bucket, and nowhere else.
 func TestMemberPermissionsFollowTheBuckets(t *testing.T) {
-	publish := MemberPermissions("a", "m").Publish
+	permissions := MemberPermissions("a", "m")
+	publish := permissions.Publish
+	for _, ns := range Namespaces() {
+		bucket, err := ns.Bucket("a")
+		require.NoError(t, err)
+		assert.Contains(t, publish, "$KV."+bucket+"."+string(ns)+".>")
+	}
 	for _, subject := range []string{
-		"$KV." + NamespaceSnapshot.Bucket("a") + ".snapshot.>",
-		"$KV." + NamespaceCuInterpose.Bucket("a") + ".cuinterpose.>",
-		"$KV." + NamespaceLibrary.Bucket("a") + ".>",
 		"$KV." + ControlBucket("a") + ".ended",
 		"$KV." + ControlBucket("a") + ".barrier.*.m",
 		"$KV." + ControlBucket("a") + ".left.m",
@@ -75,8 +90,12 @@ func TestMemberPermissionsFollowTheBuckets(t *testing.T) {
 	for _, subject := range publish {
 		assert.NotContains(t, subject, ControlBucket("a")+".snapshot", "an agent's key must not reach the control bucket")
 		assert.NotContains(t, subject, SnapshotBucket("a")+".ended", "a control key must not reach the Snapshot bucket")
+		assert.NotContains(t, subject, SnapshotBucket("a")+".library", "a library key must not reach the Snapshot bucket")
+		assert.NotContains(t, subject, LibraryBucket("a")+".snapshot", "an agent's key must not reach the library bucket")
 		assert.NotContains(t, subject, ".meta", "no member writes meta")
 	}
+	assert.Len(t, publish, cap(publish), "the subjects must fill what was allocated for them")
+	assert.Equal(t, []string{"_INBOX.a.m.>"}, permissions.Subscribe)
 }
 
 // TestControlBytes checks the control bucket's size against its parts, with
@@ -92,7 +111,7 @@ func TestControlBytes(t *testing.T) {
 	record := recordFraming + len("$KV."+ControlBucket(attempt)+"."+arrival) + MaxControlValue
 	require.Equal(t, record, maxControlRecord())
 	for _, members := range []int{1, 2, MaxMembers} {
-		meta := recordFraming + len("$KV."+ControlBucket(attempt)+".meta") + maxMetaBytes(members)
+		meta := recordFraming + len("$KV."+ControlBucket(attempt)+".meta") + MaxMetaBytes(members)
 		assert.Equal(t, int64((members*(ArrivalsPerMember+1)+1)*record+meta), ControlBytes(members),
 			"%d members", members)
 	}
@@ -120,13 +139,13 @@ func TestMaxMetaBytes(t *testing.T) {
 		}
 		encoded, err := json.Marshal(meta)
 		require.NoError(t, err)
-		assert.LessOrEqual(t, len(encoded), maxMetaBytes(members), "%d members", members)
+		assert.LessOrEqual(t, len(encoded), MaxMetaBytes(members), "%d members", members)
 		// Every field is at its widest but the ranks below the last, which
 		// take fewer digits.
 		slack := 0
 		for rank := range members - 1 {
 			slack += len(strconv.Itoa(members-1)) - len(strconv.Itoa(rank))
 		}
-		assert.Equal(t, len(encoded)+slack, maxMetaBytes(members), "%d members", members)
+		assert.Equal(t, len(encoded)+slack, MaxMetaBytes(members), "%d members", members)
 	}
 }

@@ -204,43 +204,22 @@ func (s *Server) create(ctx context.Context, spec Spec) (a *attempt, err error) 
 	if err != nil {
 		return nil, fmt.Errorf("encode meta: %w", err)
 	}
-	uid := string(spec.UID)
 	defer func() {
 		if err == nil {
 			return
 		}
 		cancel()
-		if err := s.deleteBuckets(context.WithoutCancel(ctx), spec.UID); err != nil {
-			s.log.Error(err, "Deleting the buckets of a session that failed to open failed", "attempt", uid)
+		if err := s.deleteBuckets(context.WithoutCancel(ctx), spec); err != nil {
+			s.log.Error(err, "Deleting the buckets of a session that failed to open failed", "attempt", spec.UID)
 		}
 	}()
-	members := len(spec.Members)
-	if a.control, err = s.createBucket(ctx, bucketSpec{
-		name:         session.ControlBucket(uid),
-		storage:      jetstream.FileStorage,
-		maxBytes:     session.ControlBytes(members),
-		maxValue:     max(session.MaxControlValue, len(meta)),
-		maxConsumers: members*session.MaxConsumersPerMember + coordinatorConsumers,
-	}); err != nil {
-		return nil, err
+	created := make(map[string]jetstream.KeyValue)
+	for _, b := range s.bucketSpecs(spec) {
+		if created[b.name], err = s.createBucket(ctx, b); err != nil {
+			return nil, err
+		}
 	}
-	if _, err = s.createBucket(ctx, bucketSpec{
-		name:         session.SnapshotBucket(uid),
-		storage:      jetstream.MemoryStorage,
-		maxValue:     s.cfg.MaxValue,
-		maxConsumers: members * session.MaxConsumersPerMember,
-	}); err != nil {
-		return nil, err
-	}
-	if _, err = s.createBucket(ctx, bucketSpec{
-		name:         session.LibraryBucket(uid),
-		storage:      jetstream.MemoryStorage,
-		maxKeys:      s.cfg.MaxLibraryKeys,
-		maxValue:     s.cfg.MaxLibraryValue,
-		maxConsumers: members * session.MaxConsumersPerMember,
-	}); err != nil {
-		return nil, err
-	}
+	a.control = created[session.ControlBucket(string(spec.UID))]
 	if _, err = a.control.Put(ctx, session.KeyMeta, meta); err != nil {
 		return nil, fmt.Errorf("write meta: %w", err)
 	}
@@ -275,6 +254,35 @@ type bucketSpec struct {
 	maxKeys      int
 	maxValue     int
 	maxConsumers int
+}
+
+// bucketSpecs returns the specs of the buckets of spec's attempt, the ones
+// session.Buckets names: the control bucket, in file storage and sized for the
+// membership, whose largest value fits the largest Meta; and the Snapshot and
+// library buckets, in memory, with the largest values the Config sets, and
+// the library's most keys. create creates them, and deleteBuckets deletes
+// them.
+func (s *Server) bucketSpecs(spec Spec) []bucketSpec {
+	uid, members := string(spec.UID), len(spec.Members)
+	consumers := members * session.MaxConsumersPerMember
+	return []bucketSpec{{
+		name:         session.ControlBucket(uid),
+		storage:      jetstream.FileStorage,
+		maxBytes:     session.ControlBytes(members),
+		maxValue:     max(session.MaxControlValue, session.MaxMetaBytes(members)),
+		maxConsumers: consumers + coordinatorConsumers,
+	}, {
+		name:         session.SnapshotBucket(uid),
+		storage:      jetstream.MemoryStorage,
+		maxValue:     s.cfg.MaxValue,
+		maxConsumers: consumers,
+	}, {
+		name:         session.LibraryBucket(uid),
+		storage:      jetstream.MemoryStorage,
+		maxKeys:      s.cfg.MaxLibraryKeys,
+		maxValue:     s.cfg.MaxLibraryValue,
+		maxConsumers: consumers,
+	}}
 }
 
 // createBucket creates one bucket, bounded by its largest value, by how many
@@ -312,14 +320,14 @@ func (s *Server) createBucket(ctx context.Context, b bucketSpec) (jetstream.KeyV
 	return kv, nil
 }
 
-// deleteBuckets deletes all of an attempt's buckets, whether or not they
-// exist.
-func (s *Server) deleteBuckets(ctx context.Context, uid types.UID) error {
+// deleteBuckets deletes all of the buckets of spec's attempt, whether or not
+// they exist.
+func (s *Server) deleteBuckets(ctx context.Context, spec Spec) error {
 	var errs []error
-	for _, bucket := range session.Buckets(string(uid)) {
-		if err := s.js.DeleteKeyValue(ctx, bucket); err != nil && !errors.Is(err, jetstream.ErrBucketNotFound) &&
+	for _, b := range s.bucketSpecs(spec) {
+		if err := s.js.DeleteKeyValue(ctx, b.name); err != nil && !errors.Is(err, jetstream.ErrBucketNotFound) &&
 			!errors.Is(err, jetstream.ErrStreamNotFound) {
-			errs = append(errs, fmt.Errorf("delete bucket %s: %w", bucket, err))
+			errs = append(errs, fmt.Errorf("delete bucket %s: %w", b.name, err))
 		}
 	}
 	return errors.Join(errs...)
@@ -511,7 +519,7 @@ func (s *Server) Remove(ctx context.Context, uid types.UID) error {
 		s.log.Error(err, "Cancelling a session before removing it failed", "attempt", uid)
 	}
 	a.cancel()
-	if err := s.deleteBuckets(ctx, uid); err != nil {
+	if err := s.deleteBuckets(ctx, a.spec); err != nil {
 		return fmt.Errorf("remove attempt %s: %w", uid, err)
 	}
 	s.discard(a)

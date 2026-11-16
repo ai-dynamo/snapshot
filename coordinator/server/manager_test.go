@@ -451,11 +451,17 @@ func returns(t *testing.T, what string, call func() error) error {
 	}
 }
 
-// TestBucketStorage checks where a session's buckets live: the control bucket
-// in file storage, bounded by the membership, and the data buckets in memory.
+// TestBucketStorage checks that the coordinator creates the buckets package
+// session names, and where they live: the control bucket in file storage,
+// bounded by the membership, and the data buckets in memory.
 func TestBucketStorage(t *testing.T) {
 	h := newHarness(t)
 	spec := h.ensure(3)
+	var names []string
+	for _, b := range h.srv.bucketSpecs(spec) {
+		names = append(names, b.name)
+	}
+	assert.Equal(t, session.Buckets(string(spec.UID)), names)
 	for bucket, want := range map[string]struct {
 		storage  jetstream.StorageType
 		maxBytes int64

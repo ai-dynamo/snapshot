@@ -16,7 +16,6 @@ import (
 	"github.com/ai-dynamo/snapshot/coordinator"
 	"github.com/ai-dynamo/snapshot/coordinator/server"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -267,19 +266,12 @@ func TestDelete(t *testing.T) {
 	ctx := within(t)
 	ses := h.session(t, 1)
 	s := ses.connect(t, 0)
-	uid := string(ses.spec.UID)
-	buckets := map[session.Namespace]jetstream.KeyValue{
-		session.NamespaceSnapshot:    ses.rawBucket(t, 0, session.SnapshotBucket(uid)),
-		session.NamespaceCuInterpose: ses.rawBucket(t, 0, session.SnapshotBucket(uid)),
-		session.NamespaceLibrary:     ses.rawBucket(t, 0, session.LibraryBucket(uid)),
-	}
 	messages := func(ns session.Namespace) uint64 {
-		status, err := buckets[ns].Status(ctx)
+		status, err := ses.rawBucket(t, 0, ses.bucket(t, ns)).Status(ctx)
 		require.NoError(t, err)
 		return status.Values()
 	}
-	for _, ns := range []session.Namespace{session.NamespaceSnapshot, session.NamespaceCuInterpose,
-		session.NamespaceLibrary} {
+	for _, ns := range session.Namespaces() {
 		store := in(s, ns)
 		before := messages(ns)
 		require.NoError(t, store.Delete(ctx, "never-inserted"), "deleting an absent key")

@@ -291,7 +291,15 @@ func (ses *testSession) rawBucket(t *testing.T, member int, bucket string) jetst
 // until the namespace's bucket holds a consumer, since nothing else watches it.
 func (ses *testSession) awaitWait(t *testing.T, ns session.Namespace) {
 	t.Helper()
-	ses.awaitConsumers(t, ns.Bucket(string(ses.spec.UID)), 1)
+	ses.awaitConsumers(t, ses.bucket(t, ns), 1)
+}
+
+// bucket names the session's bucket that holds a namespace.
+func (ses *testSession) bucket(t *testing.T, ns session.Namespace) string {
+	t.Helper()
+	bucket, err := ns.Bucket(string(ses.spec.UID))
+	require.NoError(t, err)
+	return bucket
 }
 
 // awaitMostConsumers waits until the session's Snapshot bucket holds its most

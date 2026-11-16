@@ -218,8 +218,8 @@ func (s *client) options(cfg Config) []nats.Option {
 }
 
 // join waits until the coordinator admits the connection, binds the buckets,
-// reads Meta, and starts verifying the session when asked, following its end,
-// and timing its deadline.
+// reads Meta, makes the Store of each namespace, and starts verifying the
+// session when asked, following its end, and timing its deadline.
 func (s *client) join(ctx context.Context) error {
 	select {
 	case <-s.connected:
@@ -233,15 +233,13 @@ func (s *client) join(ctx context.Context) error {
 	if err != nil {
 		return mapError(err)
 	}
-	if s.control, err = s.bind(ctx, js, session.ControlBucket(s.attempt)); err != nil {
-		return err
+	buckets := make(map[string]jetstream.KeyValue)
+	for _, bucket := range session.Buckets(s.attempt) {
+		if buckets[bucket], err = s.bind(ctx, js, bucket); err != nil {
+			return err
+		}
 	}
-	if s.snapshot, err = s.bind(ctx, js, session.NamespaceSnapshot.Bucket(s.attempt)); err != nil {
-		return err
-	}
-	if s.library, err = s.bind(ctx, js, session.NamespaceLibrary.Bucket(s.attempt)); err != nil {
-		return err
-	}
+	s.control = buckets[session.ControlBucket(s.attempt)]
 	s.mu.Lock()
 	target := s.target()
 	s.mu.Unlock()
@@ -257,6 +255,14 @@ func (s *client) join(ctx context.Context) error {
 	}
 	if _, ok := s.ranks[s.member]; !ok {
 		return fmt.Errorf("the session has no member %q: %w", s.member, session.ErrForbidden)
+	}
+	s.stores = make(map[session.Namespace]*store)
+	for _, ns := range session.Namespaces() {
+		bucket, err := ns.Bucket(s.attempt)
+		if err != nil {
+			return err
+		}
+		s.stores[ns] = s.newStore(ns, bucket, buckets[bucket])
 	}
 	s.epoch.Store(s.meta.Epoch)
 	// Reading Meta verified every reconnect before it.

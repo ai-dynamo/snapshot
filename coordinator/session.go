@@ -102,10 +102,11 @@ type client struct {
 
 	// Set by join, and read-only afterwards. joined is set last, as the
 	// verifier starts.
-	control, snapshot, library jetstream.KeyValue
-	meta                       session.Meta
-	ranks                      map[string]int
-	joined                     bool
+	control jetstream.KeyValue
+	stores  map[session.Namespace]*store
+	meta    session.Meta
+	ranks   map[string]int
+	joined  bool
 
 	// epoch is the epoch the client presents when it connects, zero until it
 	// has read Meta.
