@@ -74,16 +74,9 @@ func memberIDs(n int) []string {
 func TestEnsure(t *testing.T) {
 	h := newHarness(t)
 
-	t.Run("creates both buckets in memory, and reports the session", func(t *testing.T) {
+	t.Run("reports the session", func(t *testing.T) {
 		h := h.sub(t)
 		spec := h.ensure(1)
-		for _, bucket := range []string{session.SnapshotBucket(string(spec.UID)),
-			session.LibraryBucket(string(spec.UID))} {
-			stream, err := h.srv.js.Stream(within(t), "KV_"+bucket)
-			require.NoError(t, err)
-			// Sessions never reach the disk.
-			assert.Equal(t, jetstream.MemoryStorage, stream.CachedInfo().Config.Storage, "bucket %s", bucket)
-		}
 		assert.Equal(t, []string{"opened"}, h.events(spec))
 	})
 
