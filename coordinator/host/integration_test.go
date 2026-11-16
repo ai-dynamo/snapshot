@@ -12,6 +12,7 @@ import (
 	"crypto/x509"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -57,9 +58,10 @@ const (
 var agents = types.NamespacedName{Namespace: "snapshot-system", Name: "snapshot-agent"}
 
 // TestRun runs a coordinator on node-0 from its start to its end: readiness,
-// a client limited to TLS 1.2 refused, an agent admitted for the member on its
-// node only, a session cancelled by its resource's deletion, a rotated
-// certificate, and the shutdown.
+// the sessions' store in the temporary directory, a client limited to TLS 1.2
+// refused, an agent admitted for the member on its node only, a session
+// cancelled by its resource's deletion, a rotated certificate, and the
+// shutdown, which removes the store.
 func TestRun(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	t.Cleanup(cancel)
@@ -86,6 +88,7 @@ func TestRun(t *testing.T) {
 		TLSDir:         dir,
 		Log:            logs.logger(),
 	})
+	store := filepath.Join(os.TempDir(), "snapshot-coordinator")
 	// connect connects an agent as member of the attempt uid, within timeout,
 	// and closes the session when the test ends, not the step.
 	connect := func(ctx context.Context, uid types.UID, member string) (coordinator.Session, error) {
@@ -135,6 +138,12 @@ func TestRun(t *testing.T) {
 			return strings.Contains(l, "Session opened") && strings.Contains(l, string(served.UID))
 		})
 		require.True(t, opened >= 0 && opened < ready, "the session must open before the coordinator is ready")
+	})
+
+	step("the sessions' store is in the temporary directory", func(t *testing.T) {
+		entries, err := os.ReadDir(store)
+		require.NoError(t, err)
+		assert.NotEmpty(t, entries)
 	})
 
 	step("no metrics port", func(t *testing.T) {
@@ -207,6 +216,7 @@ func TestRun(t *testing.T) {
 		for name, a := range map[string]string{"client": addr, "health": health} {
 			require.True(t, closed(a), "the %s port is still open", name)
 		}
+		assert.NoDirExists(t, store)
 	})
 }
 
@@ -420,8 +430,10 @@ type running struct {
 	err    error
 }
 
-// start runs Run with cfg until the test ends.
+// start runs Run with cfg until the test ends, in a temporary directory of
+// its own, which holds the coordinator's store directory.
 func start(t *testing.T, cfg Config) *running {
+	t.Setenv("TMPDIR", t.TempDir())
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &running{cancel: cancel, done: make(chan struct{})}
 	go func() {

@@ -32,8 +32,9 @@
 //     the sessions its node serves and admits clients. Run opens no other
 //     port, and serves no metrics.
 //   - A writable temporary directory, $TMPDIR or else /tmp: the sessions'
-//     control buckets live in a file store there, which Config.MaxBytes
-//     bounds and which does not outlive the process.
+//     control buckets live in a file store in its snapshot-coordinator
+//     subdirectory, which Config.MaxBytes bounds, and which Run empties when
+//     it starts and removes when it stops.
 //
 // The ClusterRole:
 //

@@ -46,6 +46,11 @@ const (
 	// certPoll is how often Run checks for the serving certificate's files
 	// while they are missing.
 	certPoll = 2 * time.Second
+
+	// storeDirName names the store directory, the server's Config.StoreDir,
+	// in the temporary directory. A fixed name lets the next start empty a
+	// store that a crashed coordinator left behind.
+	storeDirName = "snapshot-coordinator"
 )
 
 // Run runs the coordinator that cfg configures until ctx is done, then shuts it
@@ -97,6 +102,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		MaxValue:        cfg.MaxValue,
 		MaxLibraryValue: cfg.MaxLibraryValue,
 		MaxLibraryKeys:  cfg.MaxLibraryKeys,
+		StoreDir:        filepath.Join(os.TempDir(), storeDirName),
 		Log:             cfg.Log.WithName("coordinator"),
 	})
 	if err != nil {
