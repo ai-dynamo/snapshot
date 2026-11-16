@@ -436,6 +436,17 @@ func TestGroupCheckpointThatFailsBeforeItJoins(t *testing.T) {
 		fail func(*NodeController)
 		want string
 	}{
+		"a readiness probe that can never run": {
+			modify: func(g *captureGroup) {
+				g.contents[0].Spec.Containers = []snapshotv1alpha1.ContainerSnapshotConfig{{Name: "main",
+					CheckpointReadinessProbe: &snapshotv1alpha1.CheckpointReadinessProbe{PeriodSeconds: 1, TimeoutSeconds: 1, SuccessThreshold: 1}}}
+			},
+			want: reasonInvalidCheckpointReadinessProbe,
+		},
+		"a container without an ID": {
+			modify: func(g *captureGroup) { g.pods[0].Status.ContainerStatuses[0].ContainerID = "" },
+			want:   "ContainerNotResolved",
+		},
 		"a container that cannot be resolved": {
 			fail: func(w *NodeController) { w.runtime = &fakeRuntime{} },
 			want: "ContainerNotResolved",
