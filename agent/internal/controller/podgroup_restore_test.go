@@ -715,11 +715,15 @@ func TestRestoreMemberOf(t *testing.T) {
 
 func TestCheckGroupPin(t *testing.T) {
 	for name, tc := range map[string]struct {
-		modify     func(*corev1.Pod, *snapshotv1alpha1.PodGroupRestoreMemberStatus)
+		// modify changes the Pod, as the API server and the agent's cache both
+		// hold it, and its pin.
+		modify func(*corev1.Pod, *snapshotv1alpha1.PodGroupRestoreMemberStatus)
+		// stale changes the Pod in the agent's cache only.
+		stale      func(*corev1.Pod)
 		wantReason string
 		pending    bool
 	}{
-		"the pinned Pod and container": {modify: func(*corev1.Pod, *snapshotv1alpha1.PodGroupRestoreMemberStatus) {}},
+		"the pinned Pod and container": {},
 		"another Pod": {
 			modify:     func(_ *corev1.Pod, pin *snapshotv1alpha1.PodGroupRestoreMemberStatus) { pin.Pod.UID = "replaced" },
 			wantReason: snapshotv1alpha1.PodGroupReasonPodIPChanged,
@@ -740,17 +744,30 @@ func TestCheckGroupPin(t *testing.T) {
 			},
 			pending: true,
 		},
+		"an IP the cache does not hold yet": {
+			stale:   func(pod *corev1.Pod) { pod.Status.PodIP = "" },
+			pending: true,
+		},
+		"an IP the cache holds wrong, which the API server clears": {
+			stale:   func(pod *corev1.Pod) { pod.Status.PodIP = "10.9.9.9" },
+			pending: true,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			rg := newRestoreGroup(t)
+			if tc.modify != nil {
+				tc.modify(rg.pods[0], &rg.restore.Status.Members[0])
+			}
 			w, _, _ := groupRestoreController(t, nil, rg, nil)
 			claim, _, _ := podcontract.RestoreGroupClaimOf(rg.pods[0].Annotations)
 			m, err := w.restoreMemberOf(rg.pods[0], claim)
 			require.NoError(t, err)
 			pod := rg.pods[0].DeepCopy()
-			tc.modify(pod, m.pin)
+			if tc.stale != nil {
+				tc.stale(pod)
+			}
 
-			containerID, err := w.checkGroupPin(pod, m)
+			containerID, err := w.checkGroupPin(within(t), pod, m)
 			switch {
 			case tc.pending:
 				assert.Equal(t, reasonGroupPending, pendingRestoreReason(t, err))
@@ -762,6 +779,68 @@ func TestCheckGroupPin(t *testing.T) {
 				require.NoError(t, err)
 				assert.Equal(t, "target-0-engine", containerID)
 			}
+		})
+	}
+}
+
+func TestCheckGroupPinConfirmsAnIPChange(t *testing.T) {
+	for name, tc := range map[string]struct {
+		// apiServer answers the agent's read of the Pod, or nil to read it.
+		apiServer  func(*fake.Clientset, *corev1.Pod)
+		wantReason string
+		wantWait   string
+	}{
+		"a read that fails": {
+			apiServer: func(clientset *fake.Clientset, _ *corev1.Pod) {
+				clientset.PrependReactor("get", "pods", func(clientgotesting.Action) (bool, runtime.Object, error) {
+					return true, nil, errors.New("the API server is unavailable")
+				})
+			},
+			wantWait: "Unable to read Pod inference/target-0; retrying",
+		},
+		"a Pod that is gone": {
+			apiServer: func(clientset *fake.Clientset, pod *corev1.Pod) {
+				require.NoError(t, clientset.CoreV1().Pods(pod.Namespace).Delete(context.Background(), pod.Name, metav1.DeleteOptions{}))
+			},
+			wantReason: snapshotv1alpha1.PodGroupReasonPodIPChanged,
+		},
+		"a Pod that was replaced": {
+			apiServer: func(clientset *fake.Clientset, pod *corev1.Pod) {
+				replaced := pod.DeepCopy()
+				replaced.UID = "replaced"
+				require.NoError(t, clientset.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), replaced, pod.Namespace))
+			},
+			wantReason: snapshotv1alpha1.PodGroupReasonPodIPChanged,
+		},
+		"a Pod whose IP is not the pinned one": {
+			apiServer: func(clientset *fake.Clientset, pod *corev1.Pod) {
+				changed := pod.DeepCopy()
+				changed.Status.PodIP = "10.9.9.9"
+				require.NoError(t, clientset.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), changed, pod.Namespace))
+			},
+			wantReason: snapshotv1alpha1.PodGroupReasonPodIPChanged,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rg := newRestoreGroup(t)
+			w, _, _ := groupRestoreController(t, nil, rg, nil)
+			claim, _, _ := podcontract.RestoreGroupClaimOf(rg.pods[0].Annotations)
+			m, err := w.restoreMemberOf(rg.pods[0], claim)
+			require.NoError(t, err)
+			tc.apiServer(w.clientset.(*fake.Clientset), rg.pods[0])
+			cached := rg.pods[0].DeepCopy()
+			cached.Status.PodIP = "10.9.9.9"
+
+			_, err = w.checkGroupPin(within(t), cached, m)
+			if tc.wantWait != "" {
+				var pending *restorePendingError
+				require.ErrorAs(t, err, &pending)
+				assert.Equal(t, tc.wantWait, pending.message)
+				return
+			}
+			var check *groupCheckError
+			require.ErrorAs(t, err, &check)
+			assert.Equal(t, tc.wantReason, check.reason)
 		})
 	}
 }

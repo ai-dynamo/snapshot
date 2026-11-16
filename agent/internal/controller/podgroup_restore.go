@@ -357,7 +357,7 @@ func (w *NodeController) reportGroupPending(ctx context.Context, log logr.Logger
 // gates. It returns the plan and the destination container's ID.
 func (w *NodeController) preflightGroupRestore(ctx context.Context, pod *corev1.Pod, m *restoreMember) (*restorePlan, string, error) {
 	destination := m.claim.Mapping.Destination
-	containerID, err := w.checkGroupPin(pod, m)
+	containerID, err := w.checkGroupPin(ctx, pod, m)
 	if err != nil {
 		return nil, "", err
 	}
@@ -395,15 +395,22 @@ func (w *NodeController) preflightGroupRestore(ctx context.Context, pod *corev1.
 // the ones the operator pinned at admission. The agent restores only into the
 // container it was pinned to, so a Pod or a container that changed since
 // fails the member with PodIPChanged rather than restore with a stale map.
-func (w *NodeController) checkGroupPin(pod *corev1.Pod, m *restoreMember) (string, error) {
+//
+// pod comes from the agent's cache, which can lag behind the update the
+// operator pinned from: an IP or a container ID the cache does not have yet is
+// waited for, and an IP that differs from the pin fails the member only once
+// the API server confirms it.
+func (w *NodeController) checkGroupPin(ctx context.Context, pod *corev1.Pod, m *restoreMember) (string, error) {
 	pin, destination := m.pin, m.claim.Mapping.Destination
 	if pin.Pod.UID != pod.UID {
 		return "", groupCheckFailed(snapshotv1alpha1.PodGroupReasonPodIPChanged,
 			"the restore Pod is %s, not the pinned %s", pod.UID, pin.Pod.UID)
 	}
-	if pod.Status.PodIP != pin.TargetPodIP {
-		return "", groupCheckFailed(snapshotv1alpha1.PodGroupReasonPodIPChanged,
-			"the restore Pod's IP is %q, not the pinned %q", pod.Status.PodIP, pin.TargetPodIP)
+	switch ip := pod.Status.PodIP; {
+	case ip == "":
+		return "", newRestorePendingError(reasonGroupPending, waitingForPodIP)
+	case ip != pin.TargetPodIP:
+		return "", w.confirmPodIPChanged(ctx, pod, pin)
 	}
 	pinned := pinnedContainerID(m)
 	if pinned == "" {
@@ -424,6 +431,33 @@ func (w *NodeController) checkGroupPin(pod *corev1.Pod, m *restoreMember) (strin
 			"container %q is %s, not the pinned %s", destination, current, pinned)
 	}
 	return current, nil
+}
+
+// waitingForPodIP is the wait of a target whose Pod IP the agent has not seen
+// yet.
+const waitingForPodIP = "Waiting for the Pod's IP"
+
+// confirmPodIPChanged reads the Pod from the API server, for a target whose
+// cached IP is not the pinned one. It fails the member with PodIPChanged only
+// when the API server confirms the change; a Pod there with the pinned IP
+// waits for the cache, and a read that fails is tried again.
+func (w *NodeController) confirmPodIPChanged(ctx context.Context, pod *corev1.Pod, pin *snapshotv1alpha1.PodGroupRestoreMemberStatus) error {
+	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	switch {
+	case apierrors.IsNotFound(err):
+		return groupCheckFailed(snapshotv1alpha1.PodGroupReasonPodIPChanged, "the pinned restore Pod %s is gone", pin.Pod.UID)
+	case err != nil:
+		key := client.ObjectKeyFromObject(pod).String()
+		w.log.Error(err, "Failed to read a restore Pod whose cached IP is not the pinned one", "pod", key)
+		return newRestorePendingError(reasonGroupPending, fmt.Sprintf("Unable to read Pod %s; retrying", key))
+	case live.UID != pin.Pod.UID:
+		return groupCheckFailed(snapshotv1alpha1.PodGroupReasonPodIPChanged,
+			"the restore Pod is %s, not the pinned %s", live.UID, pin.Pod.UID)
+	case live.Status.PodIP != pin.TargetPodIP:
+		return groupCheckFailed(snapshotv1alpha1.PodGroupReasonPodIPChanged,
+			"the restore Pod's IP is %q, not the pinned %q", live.Status.PodIP, pin.TargetPodIP)
+	}
+	return newRestorePendingError(reasonGroupPending, waitingForPodIP)
 }
 
 // pinnedContainerID returns the ID, without its CRI scheme, of the
