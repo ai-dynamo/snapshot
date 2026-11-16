@@ -79,11 +79,9 @@ Pod groups are alpha and off by default. See
 [Pod Groups](../reference/helm-values.md#pod-groups). They require:
 
 - Kubernetes 1.32 or newer. Older API servers refuse the `PodGroupSnapshot`
-  CRD, whose validation rules use the CEL `format` library.
-- Pod-bound ServiceAccount tokens that name the pod's node, as Kubernetes 1.32
-  and newer always issue them. The pod group coordinator admits an agent only
-  by such a token. On a cluster whose tokens do not name the node, the
-  coordinator refuses every agent and logs why.
+  CRD, whose validation rules use the CEL `format` library. The pod group
+  coordinator also admits an agent only by a Pod-bound ServiceAccount token
+  that names the pod's node, as Kubernetes 1.32 and newer always issue them.
 - An API server whose `--service-account-issuer` is an `https` URL. Only then
   does the API server serve its ServiceAccount issuer discovery endpoints,
   which the coordinator reads to verify tokens. Otherwise the coordinator exits
