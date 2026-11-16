@@ -47,14 +47,15 @@ func BuildGroupTarget(pod *corev1.Pod, request GroupTargetRequest, options Optio
 			return nil, fmt.Errorf("a group target must not carry %s when it is created", key)
 		}
 	}
-	options = groupTargetOptions(options)
+	options.EnableStartupGate = true
 	result := pod.DeepCopy()
 	if !HasRestoreGroupGate(result) {
 		result.Spec.SchedulingGates = append(result.Spec.SchedulingGates,
 			corev1.PodSchedulingGate{Name: RestoreGroupSchedulingGate})
 	}
 	destinations := []string{destination}
-	if err := ensureRestorePodSpec(&result.Spec, destinations, options); err != nil {
+	if err := ensureRestorePodSpec(&result.Spec, destinations, options,
+		v1alpha1.PodGroupMaxDeadlineSeconds); err != nil {
 		return nil, err
 	}
 	if err := validateGroupTarget(&result.Spec, destinations, options); err != nil {
@@ -78,15 +79,7 @@ func ValidateGroupTarget(pod *corev1.Pod, request GroupTargetRequest) error {
 	if err != nil {
 		return err
 	}
-	return validateGroupTarget(&pod.Spec, []string{destination}, groupTargetOptions(Options{}))
-}
-
-// groupTargetOptions returns options with the startup gate a group target
-// carries: the standard probe, with the longest group deadline as its budget.
-func groupTargetOptions(options Options) Options {
-	options.EnableStartupGate = true
-	options.startupFailureThreshold = v1alpha1.PodGroupMaxDeadlineSeconds
-	return options
+	return validateGroupTarget(&pod.Spec, []string{destination}, Options{})
 }
 
 func groupTargetDestination(request GroupTargetRequest) (string, error) {
@@ -97,11 +90,15 @@ func groupTargetDestination(request GroupTargetRequest) (string, error) {
 	return destination, nil
 }
 
+// validateGroupTarget checks the destinations of a group target: the minimum
+// protocol, the startup probe that BuildGroupTarget adds, and the seccomp
+// profile that options ask for.
 func validateGroupTarget(spec *corev1.PodSpec, destinations []string, options Options) error {
 	if err := validateRestoreDestinations(spec, destinations); err != nil {
 		return err
 	}
-	return validateCanonicalDestinations(spec, destinations, options)
+	options.EnableStartupGate = true
+	return validateCanonicalDestinations(spec, destinations, options, v1alpha1.PodGroupMaxDeadlineSeconds)
 }
 
 // HasRestoreGroupGate reports whether pod still carries
@@ -166,8 +163,7 @@ func ClaimGroupTarget(pod *corev1.Pod, claim RestoreGroupClaim) (*corev1.Pod, er
 	if err := validateContainerMappingNames(claim.Mapping); err != nil {
 		return nil, err
 	}
-	if err := validateGroupTarget(&pod.Spec, []string{claim.Mapping.Destination},
-		groupTargetOptions(Options{})); err != nil {
+	if err := validateGroupTarget(&pod.Spec, []string{claim.Mapping.Destination}, Options{}); err != nil {
 		return nil, fmt.Errorf("the claim's destination is not a group target's: %w", err)
 	}
 
