@@ -1,0 +1,506 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package sessiontest
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/ai-dynamo/snapshot/coordinator"
+	"github.com/ai-dynamo/snapshot/coordinator/server"
+	"github.com/ai-dynamo/snapshot/coordinator/session"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/types"
+)
+
+// TestInsert covers Insert: the first value under a key wins, inserting the same
+// value again succeeds, and a different value is refused.
+func TestInsert(t *testing.T) {
+	h := newHarness(t)
+	tests := []struct {
+		name          string
+		ns            session.Namespace
+		key           string
+		first, second []byte
+		wantErr       error
+	}{
+		{name: "the same value again succeeds", ns: session.NamespaceSnapshot, key: "ip.0",
+			first: []byte("10.0.0.1"), second: []byte("10.0.0.1")},
+		{name: "a different value is refused", ns: session.NamespaceSnapshot, key: "ip.0",
+			first: []byte("10.0.0.1"), second: []byte("10.0.0.2"), wantErr: session.ErrExists},
+		{name: "an empty value is a value", ns: session.NamespaceCuInterpose, key: "round-1",
+			first: []byte{}, second: []byte("x"), wantErr: session.ErrExists},
+		{name: "a library key may hold any bytes", ns: session.NamespaceLibrary, key: "comm 0\x00/id",
+			first: []byte("id"), second: []byte("id")},
+		{name: "a library key's different value is refused", ns: session.NamespaceLibrary, key: "comm 0\x00/id",
+			first: []byte("id"), second: []byte("other"), wantErr: session.ErrExists},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := within(t)
+			sessions := h.session(t, 2).connectAll(t)
+			require.NoError(t, in(sessions[0], tt.ns).Insert(ctx, tt.key, tt.first))
+			err := in(sessions[1], tt.ns).Insert(ctx, tt.key, tt.second)
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			got, err := in(sessions[1], tt.ns).Get(ctx, tt.key, 0)
+			require.NoError(t, err)
+			assert.Equal(t, string(tt.first), string(got), "the first value must stay")
+		})
+	}
+}
+
+// TestInsertRaceHasOneWinner inserts different values under the same keys from
+// two members at once: exactly one wins each key, and both read its value.
+func TestInsertRaceHasOneWinner(t *testing.T) {
+	h := newHarness(t)
+	ctx := within(t)
+	sessions := h.session(t, 2).connectAll(t)
+	for i := range 20 {
+		key := fmt.Sprintf("race.%d", i)
+		errs := make([]error, 2)
+		var wg sync.WaitGroup
+		for m := range 2 {
+			wg.Go(func() {
+				errs[m] = sessions[m].Snapshot().Insert(ctx, key, fmt.Appendf(nil, "%d", m))
+			})
+		}
+		wg.Wait()
+		winners := 0
+		for _, err := range errs {
+			if err == nil {
+				winners++
+			} else {
+				require.ErrorIs(t, err, session.ErrExists)
+			}
+		}
+		require.Equal(t, 1, winners, "key %s", key)
+		a, err := sessions[0].Snapshot().Get(ctx, key, 0)
+		require.NoError(t, err)
+		b, err := sessions[1].Snapshot().Get(ctx, key, 0)
+		require.NoError(t, err)
+		require.Equal(t, a, b)
+	}
+}
+
+// TestNamespacesAreSeparate stores the same key in every namespace.
+func TestNamespacesAreSeparate(t *testing.T) {
+	h := newHarness(t)
+	ctx := within(t)
+	s := h.session(t, 1).connect(t, 0)
+	namespaces := []session.Namespace{session.NamespaceSnapshot, session.NamespaceCuInterpose, session.NamespaceLibrary}
+	for _, ns := range namespaces {
+		require.NoError(t, in(s, ns).Insert(ctx, "k", []byte(ns)))
+	}
+	for _, ns := range namespaces {
+		got, err := in(s, ns).Get(ctx, "k", 0)
+		require.NoError(t, err)
+		assert.Equal(t, string(ns), string(got))
+	}
+}
+
+// TestInsertReceivesTheHeldValueOnce checks that inserting the value a key
+// already holds receives that value once, as the read that compares it: the
+// write that finds the key taken reads nothing.
+func TestInsertReceivesTheHeldValueOnce(t *testing.T) {
+	h := newHarness(t, withTestMaxValue)
+	ctx := within(t)
+	ses := h.session(t, 2)
+	sessions := ses.connectAll(t)
+	value := bytes.Repeat([]byte{'v'}, testMaxValue)
+	require.NoError(t, sessions[0].Snapshot().Insert(ctx, "k", value))
+	before := ses.proxies[1].sent.Load()
+	require.NoError(t, sessions[1].Snapshot().Insert(ctx, "k", value), "inserting the value a key holds")
+	received := ses.proxies[1].sent.Load() - before
+	assert.GreaterOrEqual(t, received, int64(len(value)))
+	assert.Less(t, received, int64(len(value))*3/2, "the Insert must receive the value once")
+	t.Logf("the Insert received %d bytes, for a value of %d", received, len(value))
+}
+
+// TestKeys covers the keys a Store refuses before sending anything.
+func TestKeys(t *testing.T) {
+	h := newHarness(t)
+	s := h.session(t, 1).connect(t, 0)
+	tests := []struct {
+		name    string
+		ns      session.Namespace
+		key     string
+		wantErr error
+	}{
+		{name: "an empty key", ns: session.NamespaceSnapshot, key: "", wantErr: session.ErrInvalid},
+		{name: "a space", ns: session.NamespaceSnapshot, key: "a b", wantErr: session.ErrInvalid},
+		{name: "a wildcard", ns: session.NamespaceCuInterpose, key: "a.*", wantErr: session.ErrInvalid},
+		{name: "an empty token", ns: session.NamespaceSnapshot, key: "a..b", wantErr: session.ErrInvalid},
+		{name: "a trailing dot", ns: session.NamespaceSnapshot, key: "a.", wantErr: session.ErrInvalid},
+		{name: "a key over the limit", ns: session.NamespaceSnapshot, key: strings.Repeat("k", coordinator.MaxKeyLength+1),
+			wantErr: session.ErrTooLarge},
+		{name: "a library key over the limit", ns: session.NamespaceLibrary,
+			key: strings.Repeat("k", coordinator.MaxKeyLength+1), wantErr: session.ErrTooLarge},
+		{name: "the longest library key", ns: session.NamespaceLibrary,
+			key: strings.Repeat("\xff", coordinator.MaxKeyLength)},
+		{name: "the longest key", ns: session.NamespaceSnapshot, key: strings.Repeat("k", coordinator.MaxKeyLength)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := within(t)
+			err := in(s, tt.ns).Insert(ctx, tt.key, []byte("v"))
+			if tt.wantErr == nil {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, tt.wantErr)
+			_, err = in(s, tt.ns).Get(ctx, tt.key, 0)
+			require.ErrorIs(t, err, tt.wantErr)
+			require.ErrorIs(t, in(s, tt.ns).Delete(ctx, tt.key), tt.wantErr)
+		})
+	}
+}
+
+// TestGet covers Get's outcomes: the value, ErrNotFound without a wait, the
+// value once inserted or ErrNotYet with one, and how the session ended or the
+// context's error when either comes first.
+func TestGet(t *testing.T) {
+	h := newHarness(t, withTestMaxValue)
+	tests := []struct {
+		name string
+		ns   session.Namespace
+		wait time.Duration
+		// before runs before the Get, and during while it waits. The Get is
+		// the first member's.
+		before, during func(t *testing.T, sessions []coordinator.Session)
+		// cancel cancels the Get's context while it waits.
+		cancel  bool
+		want    string
+		wantErr error
+	}{
+		{name: "a present key, without a wait", ns: session.NamespaceSnapshot,
+			before: insert(session.NamespaceSnapshot, "v"), want: "v"},
+		{name: "a present key, with a wait", ns: session.NamespaceSnapshot, wait: time.Minute,
+			before: insert(session.NamespaceSnapshot, "v"), want: "v"},
+		{name: "a present key, with a wait shorter than a round trip", ns: session.NamespaceSnapshot,
+			wait: time.Microsecond, before: insert(session.NamespaceSnapshot, "v"), want: "v"},
+		{name: "a present key, with a wait of a millisecond", ns: session.NamespaceLibrary,
+			wait: time.Millisecond, before: insert(session.NamespaceLibrary, "v"), want: "v"},
+		{name: "an absent key, without a wait", ns: session.NamespaceSnapshot, wantErr: session.ErrNotFound},
+		{name: "an absent key whose wait expires", ns: session.NamespaceSnapshot, wait: 200 * time.Millisecond,
+			wantErr: session.ErrNotYet},
+		{name: "a key inserted during the wait", ns: session.NamespaceSnapshot, wait: time.Minute,
+			during: insert(session.NamespaceSnapshot, "late"), want: "late"},
+		// The wait watches the key's metadata only, and the read that follows
+		// takes the value.
+		{name: "the largest value inserted during the wait", ns: session.NamespaceSnapshot,
+			wait: time.Minute, during: insert(session.NamespaceSnapshot, strings.Repeat("v", testMaxValue)),
+			want: strings.Repeat("v", testMaxValue)},
+		{name: "a library key inserted during the wait", ns: session.NamespaceLibrary, wait: time.Minute,
+			during: insert(session.NamespaceLibrary, "late"), want: "late"},
+		{name: "a key deleted before the wait, then inserted again during it", ns: session.NamespaceCuInterpose,
+			wait: time.Minute,
+			before: func(t *testing.T, sessions []coordinator.Session) {
+				insert(session.NamespaceCuInterpose, "old")(t, sessions)
+				require.NoError(t, sessions[1].CuInterpose().Delete(within(t), "k"))
+			},
+			during: insert(session.NamespaceCuInterpose, "new"), want: "new"},
+		{name: "the session fails during the wait", ns: session.NamespaceSnapshot, wait: time.Minute,
+			during: func(t *testing.T, sessions []coordinator.Session) {
+				require.NoError(t, sessions[1].Fail(within(t), "PeerFailed"))
+			}, wantErr: &session.AbortError{Reason: "PeerFailed"}},
+		{name: "the session fails during a library wait", ns: session.NamespaceLibrary, wait: time.Minute,
+			during: func(t *testing.T, sessions []coordinator.Session) {
+				require.NoError(t, sessions[1].Fail(within(t), "PeerFailed"))
+			}, wantErr: &session.AbortError{Reason: "PeerFailed"}},
+		{name: "the session closes during the wait", ns: session.NamespaceSnapshot, wait: time.Minute,
+			during: func(t *testing.T, sessions []coordinator.Session) {
+				for _, s := range sessions {
+					require.NoError(t, s.Leave(within(t)))
+				}
+			}, wantErr: session.ErrClosed},
+		{name: "the context is cancelled during the wait", ns: session.NamespaceSnapshot, wait: time.Minute,
+			cancel: true, wantErr: context.Canceled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ses := h.session(t, 2)
+			sessions := ses.connectAll(t)
+			if tt.before != nil {
+				tt.before(t, sessions)
+			}
+			ctx, cancel := context.WithCancel(within(t))
+			defer cancel()
+			type result struct {
+				value []byte
+				err   error
+			}
+			got := make(chan result, 1)
+			go func() {
+				value, err := in(sessions[0], tt.ns).Get(ctx, "k", tt.wait)
+				got <- result{value, err}
+			}()
+			if tt.during != nil || tt.cancel {
+				ses.awaitWait(t, tt.ns)
+			}
+			if tt.during != nil {
+				tt.during(t, sessions)
+			}
+			if tt.cancel {
+				cancel()
+			}
+			r := <-got
+			if tt.wantErr != nil {
+				require.ErrorIs(t, r.err, tt.wantErr)
+				return
+			}
+			require.NoError(t, r.err)
+			assert.Equal(t, tt.want, string(r.value))
+		})
+	}
+}
+
+// insert returns a step that inserts value under k in ns from the second
+// member.
+func insert(ns session.Namespace, value string) func(*testing.T, []coordinator.Session) {
+	return func(t *testing.T, sessions []coordinator.Session) {
+		require.NoError(t, in(sessions[1], ns).Insert(within(t), "k", []byte(value)))
+	}
+}
+
+// TestDelete covers Delete: an absent key is no error, and an Insert after a
+// Delete starts afresh. The library bucket limits its keys, so Delete reads
+// first there, and writes nothing for an absent key; in the Snapshot bucket it
+// deletes in one round trip, which leaves a delete marker.
+func TestDelete(t *testing.T) {
+	h := newHarness(t)
+	ctx := within(t)
+	ses := h.session(t, 1)
+	s := ses.connect(t, 0)
+	messages := func(ns session.Namespace) uint64 {
+		status, err := ses.rawBucket(t, 0, ses.bucket(t, ns)).Status(ctx)
+		require.NoError(t, err)
+		return status.Values()
+	}
+	for _, ns := range session.Namespaces() {
+		store := in(s, ns)
+		before := messages(ns)
+		require.NoError(t, store.Delete(ctx, "never-inserted"), "deleting an absent key")
+		markers := uint64(1)
+		if ns == session.NamespaceLibrary {
+			markers = 0
+		}
+		assert.Equal(t, before+markers, messages(ns), "namespace %s: delete markers for an absent key", ns)
+		require.NoError(t, store.Insert(ctx, "k", []byte("first")))
+		require.NoError(t, store.Delete(ctx, "k"))
+		require.NoError(t, store.Delete(ctx, "k"), "deleting twice")
+		_, err := store.Get(ctx, "k", 0)
+		require.ErrorIs(t, err, session.ErrNotFound)
+		require.NoError(t, store.Insert(ctx, "k", []byte("second")), "an Insert after a Delete starts afresh")
+		got, err := store.Get(ctx, "k", 0)
+		require.NoError(t, err)
+		require.Equal(t, "second", string(got))
+	}
+}
+
+// TestStoreLimits covers the errors a write maps the coordinator's limits onto.
+func TestStoreLimits(t *testing.T) {
+	small := func(cfg *server.Config) { cfg.MaxValue, cfg.MaxLibraryValue, cfg.MaxLibraryKeys = 4<<10, 1<<10, 8 }
+	defaults := func(*server.Config) {}
+	tests := []struct {
+		name    string
+		limits  func(*server.Config)
+		ns      session.Namespace
+		value   int
+		repeat  bool
+		wantErr error
+	}{
+		{name: "a value of the Snapshot bucket's largest", limits: withTestMaxValue, ns: session.NamespaceSnapshot,
+			value: testMaxValue},
+		{name: "a value of the library bucket's largest", limits: defaults, ns: session.NamespaceLibrary,
+			value: session.MaxLibraryValue},
+		{name: "a value over Meta's limit", limits: small, ns: session.NamespaceSnapshot, value: 4<<10 + 1,
+			wantErr: session.ErrTooLarge},
+		{name: "a library value over Meta's limit", limits: defaults, ns: session.NamespaceLibrary,
+			value: session.MaxLibraryValue + 1, wantErr: session.ErrTooLarge},
+		{name: "a full library bucket", limits: small, ns: session.NamespaceLibrary, value: 1 << 10, repeat: true,
+			wantErr: session.ErrTooMany},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := within(t)
+			s := newHarness(t, tt.limits).session(t, 1).connect(t, 0)
+			value := make([]byte, tt.value)
+			var err error
+			for i := 0; err == nil; i++ {
+				err = in(s, tt.ns).Insert(ctx, fmt.Sprintf("k%d", i), value)
+				if !tt.repeat {
+					break
+				}
+			}
+			require.ErrorIs(t, err, tt.wantErr)
+		})
+	}
+
+	t.Run("deleting from a full library bucket", func(t *testing.T) {
+		ctx := within(t)
+		store := newHarness(t, small).session(t, 1).connect(t, 0).Library()
+		for i := range 8 {
+			require.NoError(t, store.Insert(ctx, fmt.Sprintf("k%d", i), nil))
+		}
+		require.ErrorIs(t, store.Insert(ctx, "k8", nil), session.ErrTooMany)
+		require.NoError(t, store.Delete(ctx, "never-inserted"), "a key that was never inserted")
+		require.NoError(t, store.Delete(ctx, "k0"), "a key that exists")
+		require.NoError(t, store.Insert(ctx, "k0", []byte("again")), "an Insert after a Delete")
+	})
+}
+
+// TestConcurrentLargeGets reads several of the largest values at once over one
+// connection, and library values beside them. The coordinator drops a
+// connection as a slow consumer once it holds more unsent data than
+// session.MaxPending, so the client reads within it, in bytes: every Get
+// returns its value, and the connection is never dropped.
+func TestConcurrentLargeGets(t *testing.T) {
+	h := newHarness(t, withTestMaxValue)
+	ctx := within(t)
+	ses := h.session(t, 2)
+	sessions := ses.connectAll(t)
+	value := bytes.Repeat([]byte{'v'}, testMaxValue)
+	small := bytes.Repeat([]byte{'l'}, session.MaxLibraryValue)
+	const keys = 4
+	for i := range keys {
+		require.NoError(t, sessions[1].Snapshot().Insert(ctx, fmt.Sprintf("large.%d", i), value))
+		require.NoError(t, sessions[1].Library().Insert(ctx, fmt.Sprintf("small.%d", i), small))
+	}
+
+	got := make(chan error, 2*keys)
+	get := func(store coordinator.Store, key string, want []byte) {
+		read, err := store.Get(ctx, key, 0)
+		if err == nil && !bytes.Equal(read, want) {
+			err = errors.New("a Get returned another value")
+		}
+		got <- err
+	}
+	for i := range keys {
+		go get(sessions[0].Snapshot(), fmt.Sprintf("large.%d", i), value)
+		go get(sessions[0].Library(), fmt.Sprintf("small.%d", i), small)
+	}
+	for range 2 * keys {
+		require.NoError(t, <-got)
+	}
+	for _, line := range h.logs.all() {
+		assert.NotContains(t, line, "Lost the connection", "a Get must not cost the connection")
+	}
+}
+
+// TestSlowReadsAreNotSentAgain holds what the coordinator sends a member, for
+// longer than nats.go lets a request wait unless told otherwise, while the
+// member reads two of the largest values: both arrive once the hold ends, and
+// the connection is never lost. Had a read been sent again during the hold,
+// the coordinator would have had more to send the connection than it holds
+// for it, and dropped it as a slow consumer.
+func TestSlowReadsAreNotSentAgain(t *testing.T) {
+	// Longer than nats.go's 5 s, and short enough that the client's keepalive
+	// sends at most two pings that go unanswered meanwhile.
+	const hold = 5500 * time.Millisecond
+	h := newHarness(t, withTestMaxValue)
+	ctx := within(t)
+	ses := h.session(t, 2)
+	sessions := ses.connectAll(t)
+	value := bytes.Repeat([]byte{'v'}, testMaxValue)
+	for i := range session.MaxConcurrentGets {
+		require.NoError(t, sessions[1].Snapshot().Insert(ctx, fmt.Sprintf("slow.%d", i), value))
+	}
+
+	ses.proxies[0].hold()
+	got := make(chan error, session.MaxConcurrentGets)
+	for i := range session.MaxConcurrentGets {
+		go func() {
+			read, err := sessions[0].Snapshot().Get(ctx, fmt.Sprintf("slow.%d", i), 0)
+			if err == nil && !bytes.Equal(read, value) {
+				err = errors.New("a Get returned another value")
+			}
+			got <- err
+		}()
+	}
+	requireWaitingFor(t, got, hold)
+	ses.proxies[0].release()
+	for range session.MaxConcurrentGets {
+		require.NoError(t, <-got)
+	}
+	for _, line := range h.logs.all() {
+		assert.NotContains(t, line, "Lost the connection", "a slow read must not cost the connection")
+	}
+}
+
+// TestGetWaitsHoldNoReadBudget checks that a Get that waits for an absent key
+// holds none of the connection's read budget, so reads of other keys go on,
+// and that it reads its value, once inserted, within it.
+func TestGetWaitsHoldNoReadBudget(t *testing.T) {
+	h := newHarness(t, withTestMaxValue)
+	ctx := within(t)
+	ses := h.session(t, 2)
+	sessions := ses.connectAll(t)
+	value := bytes.Repeat([]byte{'v'}, testMaxValue)
+	got := make(chan error, session.MaxConcurrentGets+1)
+	for i := range session.MaxConcurrentGets + 1 {
+		go func() {
+			read, err := sessions[0].Snapshot().Get(ctx, fmt.Sprintf("late.%d", i), time.Minute)
+			if err == nil && !bytes.Equal(read, value) {
+				err = errors.New("a Get returned another value")
+			}
+			got <- err
+		}()
+	}
+	ses.awaitConsumers(t, session.SnapshotBucket(string(ses.spec.UID)), session.MaxConcurrentGets+1)
+
+	require.NoError(t, sessions[1].Snapshot().Insert(ctx, "present", []byte("v")))
+	read, err := sessions[0].Snapshot().Get(ctx, "present", 0)
+	require.NoError(t, err, "waits must not hold the budget a read needs")
+	assert.Equal(t, []byte("v"), read)
+
+	for i := range session.MaxConcurrentGets + 1 {
+		require.NoError(t, sessions[1].Snapshot().Insert(ctx, fmt.Sprintf("late.%d", i), value))
+	}
+	for range session.MaxConcurrentGets + 1 {
+		require.NoError(t, <-got)
+	}
+	for _, line := range h.logs.all() {
+		assert.NotContains(t, line, "Lost the connection", "a Get must not cost the connection")
+	}
+}
+
+// TestReplyHeadroom checks that what a read's reply carries beyond its value
+// fits session.ReplyHeadroom with room to spare, with the longest attempt UID,
+// member ID, and key: a library key, which its encoding lengthens. The client
+// counts each read as its bucket's largest value and that headroom.
+func TestReplyHeadroom(t *testing.T) {
+	h := newHarness(t)
+	ctx := within(t)
+	longest := func(prefix string, n int) string { return prefix + strings.Repeat("x", n-len(prefix)) }
+	ses := h.open(t, server.Spec{
+		UID:      types.UID(longest(fmt.Sprintf("attempt-%d-", time.Now().UnixNano()), session.MaxAttemptLength)),
+		Members:  []session.Member{{ID: longest("member-", session.MaxNameLength)}},
+		Deadline: h.clock.Now().Add(time.Hour),
+	})
+	key := strings.Repeat("\xff", coordinator.MaxKeyLength)
+	value := bytes.Repeat([]byte{'v'}, session.MaxLibraryValue)
+	require.NoError(t, ses.connect(t, 0).Library().Insert(ctx, key, value))
+
+	bucket := ses.bucket(t, session.NamespaceLibrary)
+	subject := "$KV." + bucket + "." + string(session.NamespaceLibrary) + "." +
+		base64.RawURLEncoding.EncodeToString([]byte(key))
+	reply, err := ses.rawConn(t, 0).RequestWithContext(ctx, "$JS.API.DIRECT.GET.KV_"+bucket+"."+subject, nil)
+	require.NoError(t, err)
+	require.Equal(t, value, reply.Data)
+	headroom := reply.Size() - len(reply.Data)
+	assert.Less(t, headroom, session.ReplyHeadroom/2)
+	t.Logf("the reply carries %d bytes beyond its value", headroom)
+}
