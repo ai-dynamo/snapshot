@@ -320,10 +320,11 @@ func forgetRestoreComplete(dir *os.File, log logr.Logger) {
 	if err == nil && !failed {
 		err = snapshotruntime.RemoveFileInDir(dir, podcontract.RestoreCompleteFile)
 	}
-	switch {
-	case err != nil:
+	if err != nil {
 		log.Error(err, "Cannot clear the earlier restore's outcome; the restore proxy exits instead of waiting for a new restore")
-	case !failed:
+		return
+	}
+	if !failed {
 		log.Info("Container starts again after its restore succeeded; it waits for a new restore")
 	}
 }
