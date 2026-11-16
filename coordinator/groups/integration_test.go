@@ -103,22 +103,16 @@ type host struct {
 	clock    *clocktesting.FakePassiveClock
 	cache    client.Reader
 	attempts *Attempts
-	// logs holds what the host's manager logs, its reconciles included.
-	logs *logLines
 }
 
 // startHost runs NewAttempts and Setup for coord, the coordinator of node, in
 // a manager of its own, configured by modify, with a fake clock that starts
-// now, and stops the manager when the test ends. The manager logs to the
-// host's logs.
+// now, and stops the manager when the test ends.
 func startHost(t *testing.T, node string, coord *coordinatortest.Coordinator,
 	modify ...func(*manager.Options)) *host {
 	t.Helper()
-	logs := &logLines{}
-	logTo := func(opts *manager.Options) { opts.Logger = logs.logger() }
-	mgr := newManager(t, append([]func(*manager.Options){logTo}, modify...)...)
-	h := &host{node: node, coord: coord, clock: clocktesting.NewFakePassiveClock(time.Now()), cache: mgr.GetCache(),
-		logs: logs}
+	mgr := newManager(t, modify...)
+	h := &host{node: node, coord: coord, clock: clocktesting.NewFakePassiveClock(time.Now()), cache: mgr.GetCache()}
 	var err error
 	h.attempts, err = NewAttempts(context.Background(), mgr)
 	require.NoError(t, err)
@@ -296,45 +290,6 @@ func (h *host) awaitSeen(t *testing.T, uid types.UID, seen func(*attempt) bool) 
 		a, err := h.attempts.get(context.Background(), uid)
 		return err == nil && seen(a)
 	}, timeout, 10*time.Millisecond)
-}
-
-// touchedAnnotation is the annotation awaitReconciled changes on a group
-// resource, which makes its host reconcile it.
-const touchedAnnotation = "groups.coordinator.test/touched"
-
-// reconcileIDPattern finds the ID that the controller logs each reconcile
-// with.
-var reconcileIDPattern = regexp.MustCompile(`"reconcileID"="([^"]+)"`)
-
-// awaitReconciled waits until h's cache shows what seen reports true of the
-// attempt of obj, then until h's reconciler has run on obj since: it changes
-// an annotation of obj, and waits for a reconcile that started after the
-// change to succeed, as the controller logs the start and the end of each.
-// That reconcile read the attempt as the cache showed it, or later.
-func (h *host) awaitReconciled(t *testing.T, obj client.Object, seen func(*attempt) bool) {
-	t.Helper()
-	h.awaitSeen(t, obj.GetUID(), seen)
-	mark := len(h.logs.all())
-	patch := client.MergeFrom(obj.DeepCopyObject().(client.Object))
-	obj.SetAnnotations(map[string]string{touchedAnnotation: time.Now().Format(time.RFC3339Nano)})
-	require.NoError(t, k8s.Patch(within(t), obj, patch))
-	attempt := fmt.Sprintf(`"attempt"=%q`, obj.GetUID())
-	require.Eventually(t, func() bool {
-		started := make(map[string]bool)
-		for _, line := range h.logs.all()[mark:] {
-			id := reconcileIDPattern.FindStringSubmatch(line)
-			if id == nil || !strings.Contains(line, attempt) {
-				continue
-			}
-			switch {
-			case strings.Contains(line, `"msg"="Reconciling"`):
-				started[id[1]] = true
-			case strings.Contains(line, `"msg"="Reconcile successful"`) && started[id[1]]:
-				return true
-			}
-		}
-		return false
-	}, timeout, 10*time.Millisecond, "a reconcile of %s after the change", obj.GetUID())
 }
 
 // requireNotHeld fails the test if h's coordinator holds the session of uid
@@ -794,7 +749,12 @@ func TestMemberFailed(t *testing.T) {
 		g.Status.Members[1].Phase = v1alpha1.CheckpointPhaseFailed
 		g.Status.Members[1].Reason = v1alpha1.ReasonPodSnapshotDeleted
 		require.NoError(t, k8s.Status().Update(within(t), g))
-		h.awaitReconciled(t, g, func(a *attempt) bool { return a.failed })
+		h.awaitSeen(t, g.UID, func(a *attempt) bool { return a.failed })
+		// A reconcile that reads the failure, as the host's own does, leaves
+		// the committed session open.
+		r := &reconciler{attempts: h.attempts, server: h.coord.Server, node: h.node, clock: h.clock}
+		_, err := r.Reconcile(within(t), requestFor(snapshotKind, g))
+		require.NoError(t, err)
 		h.requireNotEnded(t, g.UID)
 	})
 }
@@ -974,14 +934,12 @@ type logLines struct {
 	lines []string
 }
 
-// logger returns a logger that records every line up to V(5), at which
-// controller-runtime logs each reconcile.
 func (l *logLines) logger() logr.Logger {
 	return funcr.New(func(prefix, args string) {
 		l.mu.Lock()
 		defer l.mu.Unlock()
 		l.lines = append(l.lines, prefix+" "+args)
-	}, funcr.Options{Verbosity: 5})
+	}, funcr.Options{})
 }
 
 func (l *logLines) all() []string {
