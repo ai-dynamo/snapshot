@@ -213,8 +213,8 @@ func TestLogsHoldNoSecrets(t *testing.T) {
 		200*time.Millisecond)
 	requireViolation(t, violations, "secret-barrier")
 	h.kick(spec, 1)
-	require.NoError(t, members[0].fail(ctx, "Refused"))
-	require.ErrorIs(t, awaitEnd(t, members[0]), &session.AbortError{Reason: "Refused"})
+	require.NoError(t, members[0].fail(ctx, session.ReasonRefused))
+	require.ErrorIs(t, awaitEnd(t, members[0]), &session.AbortError{Reason: session.ReasonRefused})
 
 	lines := h.logs.all()
 	require.True(t, slicesContain(lines, "Publish Violation"), "the refused publish must be logged")
