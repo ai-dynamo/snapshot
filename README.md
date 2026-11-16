@@ -93,7 +93,7 @@ Snapshot can be installed:
 
 Before installing Snapshot, make sure the following are in place:
 
-- A Kubernetes cluster with NVIDIA GPU nodes running Linux kernel 5.13 or newer
+- A Kubernetes 1.32 or newer cluster with NVIDIA GPU nodes running Linux kernel 5.13 or newer
 - containerd or CRI-O as the container runtime
 - [NVIDIA GPU Operator](https://github.com/NVIDIA/gpu-operator) 26.3 or newer, with MIG disabled
 - NVIDIA kernel-mode driver 580 or newer

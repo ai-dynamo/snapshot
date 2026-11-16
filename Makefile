@@ -112,8 +112,11 @@ verify-generate: verify-crds generate
 govulncheck: $(GOVULNCHECK)
 	for m in api agent operator; do (cd $$m && $(GOVULNCHECK) ./...) || exit 1; done
 
+# The chart's kubeVersion must refuse a cluster older than the baseline.
 helm-lint: $(HELM)
 	$(HELM) lint charts/snapshot/
+	@$(HELM) template charts/snapshot/ --kube-version 1.31.0 2>&1 | grep -q 'chart requires kubeVersion' || \
+	  (echo "ERROR: charts/snapshot renders for Kubernetes 1.31; its kubeVersion must refuse it"; exit 1)
 
 pagebroker-check-generated:
 	$(MAKE) -C agent pagebroker-check-generated

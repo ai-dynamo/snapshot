@@ -153,6 +153,11 @@ commit-level history for each release is on its
   namespace rather than the restore container's (#593), so lookups by PID,
   such as UCX shared-memory endpoints (#802), work after a restore. Only
   checkpoints taken after the upgrade get it; take older ones again.
+- The chart requires Kubernetes 1.32 or newer (`kubeVersion: ">=1.32.0-0"`):
+  `helm upgrade`, `helm template` and `helm install --skip-crds` refuse an older
+  cluster. An older API server already refused the `SnapshotJob` CRD on
+  `helm install`. An install on 1.32 or newer needs no action. See
+  [Prerequisites](docs/get-started/prerequisites.md#baseline-prerequisites).
 
 ### Deprecated
 
