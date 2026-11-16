@@ -27,7 +27,7 @@ func TestDecide(t *testing.T) {
 	}
 	final := func(a *attempt) { a.final = true }
 	deleting := func(a *attempt) { a.deleting = true }
-	failed := func(a *attempt) { a.failure = "PodIPChanged" }
+	failed := func(a *attempt) { a.failed = true }
 	// unranked is a restore whose PodGroupSnapshot is gone.
 	unranked := func(a *attempt) { a.ensurable = false }
 	both := func(changes ...func(*attempt)) func(*attempt) {
@@ -81,7 +81,7 @@ func TestDecide(t *testing.T) {
 
 		{"a member failed, its session open", served(failed), open, now, fail, 0},
 		{"a member failed, its session ended", served(failed), ended, now, none, 0},
-		{"a member failed, no session, served here, member work", served(failed), notHeld, now, ensure, recheck},
+		{"a member failed, no session, served here, member work", served(failed), notHeld, now, ensure, 0},
 		{"a member failed, no session, served by another node",
 			served(both(failed, func(a *attempt) { a.sessionNode = "node-1" })), notHeld, now, none, 0},
 		{"a member failed and final, its session open", served(both(failed, final)), open, now, fail, recheck},

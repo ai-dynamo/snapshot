@@ -205,6 +205,10 @@ type PodGroupSnapshotStatus struct {
 // per member, so each member's snapshot is stored and cleaned up like a
 // standalone one.
 //
+// Delete a PodGroupSnapshot in the background, which is the default. Foreground
+// deletion removes the member PodSnapshots before the group, while agents may
+// still be capturing them.
+//
 // No conversion: this type exists only in v1alpha1 (no other API version), so
 // it is not part of any conversion scheme.
 type PodGroupSnapshot struct {

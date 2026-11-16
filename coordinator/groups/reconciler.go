@@ -34,7 +34,9 @@ type reconciler struct {
 	mu sync.Mutex
 }
 
-// Reconcile implements reconcile.TypedReconciler.
+// Reconcile implements reconcile.TypedReconciler. Once it has ensured a
+// session, it decides again with the session held, and acts on that, so a
+// member that failed before the session opened fails it in the same pass.
 func (r *reconciler) Reconcile(ctx context.Context, req request) (reconcile.Result, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -49,14 +51,19 @@ func (r *reconciler) Reconcile(ctx context.Context, req request) (reconcile.Resu
 	}
 	var h held
 	h.ended, h.session = r.server.Ended(req.uid)
-	act, again := decide(a, r.node, h, r.clock.Now())
+	now := r.clock.Now()
+	act, again := decide(a, r.node, h, now)
+	if act == ensure {
+		if err = r.server.Ensure(ctx, a.spec); err != nil {
+			return reconcile.Result{}, fmt.Errorf("%s the session: %w", act, err)
+		}
+		act, again = decide(a, r.node, held{session: true}, now)
+	}
 	switch act {
-	case ensure:
-		err = r.server.Ensure(ctx, a.spec)
 	case cancel:
 		err = r.server.FailUncommitted(ctx, req.uid, session.ReasonCancelled)
 	case fail:
-		err = r.server.FailUncommitted(ctx, req.uid, a.failure)
+		err = r.server.FailUncommitted(ctx, req.uid, session.ReasonRefused)
 	case remove:
 		err = r.server.Remove(ctx, req.uid)
 	}

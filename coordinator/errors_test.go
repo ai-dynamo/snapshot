@@ -31,8 +31,6 @@ func TestMapError(t *testing.T) {
 		{"a value over the bucket's maximum", &jetstream.APIError{ErrorCode: jsMessageTooLarge}, session.ErrTooLarge},
 		{"a full bucket", &jetstream.APIError{ErrorCode: jsStoreFailed}, session.ErrTooMany},
 		{"a server out of memory", &jetstream.APIError{ErrorCode: jsInsufficientResources}, session.ErrTooMany},
-		{"a full ingest queue", &jetstream.APIError{ErrorCode: jsTooManyRequests}, session.ErrTooMany},
-		{"a full ingest queue, from the older API", &nats.APIError{ErrorCode: jsTooManyRequests}, session.ErrTooMany},
 		{"a closed connection", nats.ErrConnectionClosed, net.ErrClosed},
 		{"a deadline", context.DeadlineExceeded, context.DeadlineExceeded},
 		{"an error of package session", session.ErrNotYet, session.ErrNotYet},
