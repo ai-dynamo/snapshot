@@ -115,11 +115,7 @@ func restoreAttempt(restore *v1alpha1.PodGroupRestore, snapshot *v1alpha1.PodGro
 	everyFinal := true
 	for rank, id := range ids {
 		status := statuses[id]
-		if ensurable {
-			a.add(id, rank, status.NodeName)
-		} else {
-			a.nodes[id] = status.NodeName
-		}
+		a.add(id, rank, status.NodeName)
 		a.memberWork = a.memberWork || status.Pod != nil
 		everyFinal = everyFinal &&
 			(status.Phase == v1alpha1.RestorePhaseReleased || status.Phase == v1alpha1.RestorePhaseFailed)
@@ -167,10 +163,14 @@ func newAttempt(obj *metav1.ObjectMeta, deadlineSeconds int64, conditions []meta
 	}
 }
 
-// add adds the member id at rank, running on node.
+// add adds the member id at rank, running on node. Of an attempt that is not
+// ensurable, whose ranks are not known, it records only the node.
 func (a *attempt) add(id string, rank int, node string) {
-	a.spec.Members = append(a.spec.Members, session.Member{ID: id, Rank: rank})
 	a.nodes[id] = node
+	if !a.ensurable {
+		return
+	}
+	a.spec.Members = append(a.spec.Members, session.Member{ID: id, Rank: rank})
 	if rank == 0 {
 		a.sessionNode = node
 	}
