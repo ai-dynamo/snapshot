@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/ai-dynamo/snapshot/coordinator/coordinatortest"
 	"github.com/stretchr/testify/assert"
@@ -30,6 +31,9 @@ func TestHealthEndpoint(t *testing.T) {
 
 	_, err = serveHealth(addr)
 	require.ErrorContains(t, err, "listen for health probes", "a port in use")
+
+	assert.Equal(t, 90*time.Second, h.srv.IdleTimeout, "http.DefaultTransport's idle timeout")
+	assert.Equal(t, 5*time.Second, h.srv.ReadHeaderTimeout)
 
 	assert.Equal(t, http.StatusOK, probe(addr, "/healthz"))
 	c := coordinatortest.StartUnready(t)

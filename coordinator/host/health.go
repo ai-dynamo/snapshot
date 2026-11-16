@@ -15,9 +15,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 )
 
-// healthHeaderTimeout bounds how long the health endpoint waits for a
-// request's headers.
-const healthHeaderTimeout = 5 * time.Second
+const (
+	// healthHeaderTimeout bounds how long the health endpoint waits for a
+	// request's headers.
+	healthHeaderTimeout = 5 * time.Second
+
+	// healthIdleTimeout bounds how long the health endpoint keeps a
+	// connection open between requests: http.DefaultTransport's own limit,
+	// which controller-runtime's probe server also uses.
+	healthIdleTimeout = 90 * time.Second
+)
 
 // errNotReady is the readiness check's failure.
 var errNotReady = errors.New("the coordinator does not admit clients yet")
@@ -43,7 +50,11 @@ func serveHealth(addr string) (*healthEndpoint, error) {
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", healthz.CheckHandler{Checker: healthz.Ping})
 	mux.Handle("/readyz", healthz.CheckHandler{Checker: h.ready})
-	h.srv = &http.Server{Handler: mux, ReadHeaderTimeout: healthHeaderTimeout}
+	h.srv = &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: healthHeaderTimeout,
+		IdleTimeout:       healthIdleTimeout,
+	}
 	go func() { h.served <- h.srv.Serve(l) }()
 	return h, nil
 }
