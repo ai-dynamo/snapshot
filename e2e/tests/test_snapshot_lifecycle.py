@@ -891,12 +891,11 @@ def test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot(
         assert "RestoreIncompatible" not in restore_event_reasons(
             config.namespace, run.restore_pod
         )
-        # With no retries the restore fails as it always has, and still says
-        # where.
-        assert_retry_status(
-            k8s.read_pod(config.namespace, run.restore_pod),
-            attempt=1,
-            retry_limit=0,
+        # With no retries the restore fails as it always has, with no retry
+        # status and no attempt events.
+        restored_pod = k8s.read_pod(config.namespace, run.restore_pod)
+        assert snap.RESTORE_RETRY_STATUS_ANNOTATION not in (
+            restored_pod.metadata.annotations or {}
         )
         assert "RestoreAttemptFailed" not in restore_event_reasons(
             config.namespace, run.restore_pod
