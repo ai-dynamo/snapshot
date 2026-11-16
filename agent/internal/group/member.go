@@ -36,11 +36,6 @@ const (
 	Release         = "release"
 )
 
-// ReasonRefused is the reason a member fails an attempt with before it
-// commits, which leaves every member as Snapshot found it. A member that fails
-// later uses session.ReasonMemberFailed.
-const ReasonRefused = "Refused"
-
 // Admission is what a member contributes to the admission exchange, under
 // admit.<rank> in the snapshot namespace. Encoding one twice gives the same
 // bytes, so publishing it again is harmless.
@@ -186,11 +181,12 @@ func (m *Member) Barrier(ctx context.Context, name string) error {
 }
 
 // Fail ends the attempt for every member, unless it has ended already, and
-// closes the connection. The reason is ReasonRefused until the member calls
-// the Admitted barrier, and session.ReasonMemberFailed after, since the
-// attempt may then have committed.
+// closes the connection. The reason is session.ReasonRefused, which leaves
+// every member as Snapshot found it, until the member calls the Admitted
+// barrier, and session.ReasonMemberFailed after, since the attempt may then
+// have committed.
 func (m *Member) Fail(ctx context.Context) error {
-	reason := ReasonRefused
+	reason := session.ReasonRefused
 	if m.committed.Load() {
 		reason = session.ReasonMemberFailed
 	}

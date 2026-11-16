@@ -103,7 +103,7 @@ func TestFailEndsTheAttemptForEveryMember(t *testing.T) {
 		committed bool
 		reason    string
 	}{
-		{name: "before the attempt commits", reason: ReasonRefused},
+		{name: "before the attempt commits", reason: session.ReasonRefused},
 		{name: "after the attempt commits", committed: true, reason: session.ReasonMemberFailed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
