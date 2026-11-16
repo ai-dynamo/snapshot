@@ -53,10 +53,10 @@ agent needs.
 With `podGroups.enabled`, the pod group coordinator runs in the agent pod, and
 rolls out with it:
 
-- A coordinator that cannot start stalls the agent DaemonSet's rollout after
-  one node, since the agent pod is ready only once the coordinator is. Then
-  `helm upgrade --wait` or `--atomic` fails or rolls back. For the usual causes,
-  see
+- A coordinator that never becomes ready stalls the agent DaemonSet's rollout
+  after one node, since the agent pod is ready only once the coordinator is.
+  Then `helm upgrade --wait` or `--atomic` fails or rolls back. For the usual
+  causes, see
   [An Agent Pod Stays Unready with Pod Groups Enabled](../troubleshooting/agent.md#an-agent-pod-stays-unready-with-pod-groups-enabled).
 - A pod that already holds `coordinator.port` or `coordinator.healthPort` on a
   node keeps the whole agent pod off that node, single-pod snapshots included.
