@@ -198,9 +198,9 @@ func TestCoordinatorLost(t *testing.T) {
 		h := newHarness(t)
 		ctx := within(t)
 		s := h.session(t, 1).connect(t, 0)
-		require.NoError(t, s.Fail(ctx, "Refused"))
+		require.NoError(t, s.Fail(ctx, session.ReasonRefused))
 		h.restart()
-		require.ErrorIs(t, s.Err(), &session.AbortError{Reason: "Refused"})
+		require.ErrorIs(t, s.Err(), &session.AbortError{Reason: session.ReasonRefused})
 	})
 }
 
@@ -241,7 +241,7 @@ func TestRemoved(t *testing.T) {
 	t.Run("a session that ended keeps its outcome", func(t *testing.T) {
 		h := newHarness(t)
 		ses := h.session(t, 1)
-		require.NoError(t, ses.connect(t, 0).Fail(within(t), "Refused"))
+		require.NoError(t, ses.connect(t, 0).Fail(within(t), session.ReasonRefused))
 		require.NoError(t, h.srv.Remove(within(t), ses.spec.UID))
 		assert.Equal(t, []string{"opened", "failed Refused"}, h.events(ses.spec))
 	})
@@ -265,7 +265,7 @@ func TestRemoved(t *testing.T) {
 			break
 		}
 		// The members of the full session get an answer, not a hang.
-		require.ErrorIs(t, sessions[1].Fail(ctx, "Refused"), session.ErrTooMany)
+		require.ErrorIs(t, sessions[1].Fail(ctx, session.ReasonRefused), session.ErrTooMany)
 
 		start := time.Now()
 		require.NoError(t, h.srv.Remove(ctx, ses.spec.UID))

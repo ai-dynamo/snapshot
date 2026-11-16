@@ -71,10 +71,10 @@ func (e *AbortError) Is(target error) bool {
 	return ok && t.Reason == e.Reason
 }
 
-// The reasons a session fails with besides those a member supplies to Fail:
-// the coordinator's, and the one that replaces an ended key that holds no
-// reason. They match the condition
-// reasons the operator reports on the group resource.
+// The reasons both sides of a session name: the coordinator's, the one a
+// session fails with before it commits, and the one that replaces an ended key
+// that holds no reason. They match the condition reasons the operator reports
+// on the group resource.
 const (
 	// ReasonDeadlineExceeded is the reason the coordinator fails a session
 	// with when its deadline passes.
@@ -91,6 +91,10 @@ const (
 	// ReasonCancelled is the reason the coordinator fails a session still open
 	// when it removes it, which means the group resource was deleted.
 	ReasonCancelled = "Cancelled"
+
+	// ReasonRefused is the reason a session fails with before it commits,
+	// when a member cannot go on. The member's own cause stays in its status.
+	ReasonRefused = "Refused"
 
 	// ReasonInvalid is the reason EndedError reports for a session whose ended
 	// key holds bytes that are not a valid condition reason, which any

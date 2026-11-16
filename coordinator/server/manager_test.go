@@ -170,8 +170,8 @@ func TestEndAtTheMemoryCap(t *testing.T) {
 	t.Run("a member fails the session", func(t *testing.T) {
 		h := newHarness(t, capped)
 		_, members := atTheCap(t, h, 2)
-		require.NoError(t, members[0].fail(within(t), "Refused"))
-		endsSoon(t, members[1], &session.AbortError{Reason: "Refused"})
+		require.NoError(t, members[0].fail(within(t), session.ReasonRefused))
+		endsSoon(t, members[1], &session.AbortError{Reason: session.ReasonRefused})
 	})
 
 	t.Run("removing the session records Cancelled", func(t *testing.T) {
@@ -216,7 +216,7 @@ func TestEndAtAFullControlBucket(t *testing.T) {
 		h.fillControl(h.connect(spec, 0))
 		o := h.connect(other, 0)
 		require.NoError(t, o.arrive(within(t), "admitted"))
-		require.NoError(t, o.fail(within(t), "Refused"))
+		require.NoError(t, o.fail(within(t), session.ReasonRefused))
 		// Shutdown could not record the full session's end.
 		require.NoError(t, h.srv.Remove(within(t), spec.UID))
 	})
