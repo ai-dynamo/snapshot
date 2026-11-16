@@ -38,14 +38,16 @@ type Store interface {
 	// most consumers waits for one to free, within the wait.
 	Get(ctx context.Context, key string, wait time.Duration) ([]byte, error)
 
-	// Delete removes key whether or not it exists. In the library bucket,
-	// which limits its number of keys, deleted ones included, it writes
-	// nothing if key is absent, so deleting a key that was never inserted
-	// succeeds even in a full bucket. A later Insert of key starts afresh.
-	// Otherwise it writes a delete marker, which takes memory, so at the
-	// coordinator's memory cap it reports session.ErrTooMany, like any write:
-	// a session cannot free memory by deleting its keys once the cap is
-	// reached, and frees it only when the host removes it.
+	// Delete removes the value key holds, if any. It reads key's revision and
+	// deletes that revision only, so a value inserted after the read stays,
+	// even when Delete is sent again after a lost reply. A later Insert of key
+	// starts afresh. Deleting an absent key writes nothing, so it succeeds
+	// even in a full library bucket, which limits its number of keys, deleted
+	// ones included. Deleting a value writes a delete marker, which takes
+	// memory, so at the coordinator's memory cap it reports
+	// session.ErrTooMany, like any write: a session cannot free memory by
+	// deleting its keys once the cap is reached, and frees it only when the
+	// host removes it.
 	Delete(ctx context.Context, key string) error
 }
 
@@ -60,11 +62,11 @@ func (s *client) Library() Store { return s.stores[session.NamespaceLibrary] }
 
 // newStore returns the Store of a namespace, whose keys the bucket name holds,
 // bound as b. Meta carries the library bucket's largest value apart from the
-// Snapshot bucket's, and the library bucket limits its number of keys.
+// Snapshot bucket's.
 func (s *client) newStore(ns session.Namespace, name string, b bucket) *store {
 	st := &store{s: s, b: b, ns: ns, maxValue: s.meta.MaxValue}
 	if name == session.LibraryBucket(s.attempt) {
-		st.maxValue, st.limitsKeys = s.meta.MaxLibraryValue, true
+		st.maxValue = s.meta.MaxLibraryValue
 	}
 	st.cost = readCost{bytes: readSize(st.maxValue), slot: name == session.SnapshotBucket(s.attempt)}
 	return st
@@ -82,9 +84,6 @@ type store struct {
 	maxValue int
 	// cost is what each read takes of the connection's budget.
 	cost readCost
-	// limitsKeys is set for a bucket that limits its number of keys, deleted
-	// ones included, which a delete marker for an absent key would take one of.
-	limitsKeys bool
 }
 
 // key returns the bucket key of a caller's key.
@@ -166,16 +165,23 @@ func (st *store) Get(ctx context.Context, key string, wait time.Duration) ([]byt
 }
 
 // read reads the value of k, or reports session.ErrNotFound, within the
-// connection's budget. Every value a store reads goes through it.
+// connection's budget.
 func (st *store) read(ctx context.Context, k string) ([]byte, error) {
+	r, err := st.lookup(ctx, k)
+	return r.value, err
+}
+
+// lookup reads the latest record of k, or reports session.ErrNotFound if k is
+// absent, within the connection's budget.
+func (st *store) lookup(ctx context.Context, k string) (record, error) {
 	var r record
 	if err := st.s.read(ctx, st.cost, latest(st.b, k, &r)); err != nil {
-		return nil, err
+		return record{}, err
 	}
 	if r.deleted {
-		return nil, session.ErrNotFound
+		return record{}, session.ErrNotFound
 	}
-	return r.value, nil
+	return r, nil
 }
 
 // readWhenPresent waits up to wait for k to be present, then reads it, or
@@ -210,14 +216,21 @@ func (st *store) Delete(ctx context.Context, key string) error {
 	if err != nil {
 		return err
 	}
-	if st.limitsKeys {
-		_, err := st.read(ctx, k)
-		if errors.Is(err, session.ErrNotFound) {
+	found, err := st.lookup(ctx, k)
+	if errors.Is(err, session.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return st.s.do(ctx, func(ctx context.Context) error {
+		err := st.b.kv.Delete(ctx, k, jetstream.LastRevision(found.revision))
+		if errors.Is(err, jetstream.ErrKeyRevisionMismatch) {
+			// The value found is gone: an earlier try deleted it and its
+			// reply was lost, or another member deleted it, and may have
+			// inserted a newer value, which stays.
 			return nil
 		}
-		if err != nil {
-			return err
-		}
-	}
-	return st.s.do(ctx, func(ctx context.Context) error { return st.b.kv.Delete(ctx, k) })
+		return err
+	})
 }
