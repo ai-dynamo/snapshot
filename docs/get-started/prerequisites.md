@@ -89,5 +89,5 @@ Pod groups are alpha and off by default. See
 - Every node reaching every other node on TCP `coordinator.port`, `4224` by
   default. An agent connects to the coordinator on its group's rank-0 node. The
   health probes are node-local, so a blocked port does not show as an unready
-  pod. For example, OpenShift's default node-to-node rules open only ports 9000
-  to 9999.
+  pod. On OpenShift, `4224` is outside the documented node-to-node port
+  ranges: set `coordinator.port` to a free port from 9000 to 9999 there.
