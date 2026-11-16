@@ -86,6 +86,10 @@ func metaRecord(members int) int {
 	return recordFraming + len(Subject(ControlBucket(longestAttempt()), KeyMeta)) + MaxMetaBytes(members)
 }
 
+// ControlValueBytes is the largest value the control bucket of a session of
+// members members holds: the largest Meta, or MaxControlValue.
+func ControlValueBytes(members int) int { return max(MaxControlValue, MaxMetaBytes(members)) }
+
 // longestAttempt returns the longest attempt UID ValidateAttempt accepts.
 func longestAttempt() string { return strings.Repeat("u", MaxAttemptLength) }
 

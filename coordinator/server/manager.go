@@ -270,7 +270,7 @@ func (s *Server) bucketSpecs(spec Spec) []bucketSpec {
 		name:         session.ControlBucket(uid),
 		storage:      jetstream.FileStorage,
 		maxBytes:     session.ControlBytes(members),
-		maxValue:     max(session.MaxControlValue, session.MaxMetaBytes(members)),
+		maxValue:     session.ControlValueBytes(members),
 		maxConsumers: consumers + coordinatorConsumers,
 	}, {
 		name:         session.SnapshotBucket(uid),

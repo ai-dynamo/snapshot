@@ -258,15 +258,20 @@ func (s *client) join(ctx context.Context) error {
 		}
 	}
 	s.control = buckets[session.ControlBucket(s.attempt)]
+	// What the coordinator buffers for the connection, session.MaxPending, is
+	// MaxConcurrentGets of the largest messages it takes, which it announced
+	// as the connection began: the budget holds as much before Meta is read.
+	s.budget = semaphore.NewWeighted(session.MaxConcurrentGets * s.nc.MaxPayload())
+	s.slots = semaphore.NewWeighted(session.MaxConcurrentGets)
 	s.mu.Lock()
 	target := s.target()
 	s.mu.Unlock()
-	if err := s.do(ctx, func(ctx context.Context) error {
-		s.meta, err = readMeta(ctx, s.control.kv)
-		return err
-	}); err != nil {
+	// The membership, which bounds Meta, is Meta's to tell.
+	var meta session.Meta
+	if err := s.read(ctx, controlRead(session.MaxMembers), s.readMeta(&meta)); err != nil {
 		return err
 	}
+	s.meta = meta
 	s.ranks = make(map[string]int, len(s.meta.Members))
 	for _, m := range s.meta.Members {
 		s.ranks[m.ID] = m.Rank
@@ -274,8 +279,6 @@ func (s *client) join(ctx context.Context) error {
 	if _, ok := s.ranks[s.member]; !ok {
 		return fmt.Errorf("the session has no member %q: %w", s.member, session.ErrForbidden)
 	}
-	s.budget = semaphore.NewWeighted(session.MaxPending(s.meta.MaxValue))
-	s.slots = semaphore.NewWeighted(session.MaxConcurrentGets)
 	s.stores = make(map[session.Namespace]*store)
 	for _, ns := range session.Namespaces() {
 		name, err := ns.Bucket(s.attempt)
@@ -315,20 +318,30 @@ func (s *client) bind(ctx context.Context, js jetstream.JetStream, name string) 
 	return b, err
 }
 
-// readMeta reads and decodes the meta key.
-func readMeta(ctx context.Context, kv jetstream.KeyValue) (session.Meta, error) {
-	entry, err := kv.Get(ctx, session.KeyMeta)
-	if errors.Is(err, jetstream.ErrKeyNotFound) {
-		return session.Meta{}, fmt.Errorf("the session has no meta: %w", session.ErrNotFound)
+// readMeta returns an operation that reads and decodes the meta key into meta,
+// which a read of the control bucket runs.
+func (s *client) readMeta(meta *session.Meta) func(context.Context) error {
+	var r record
+	read := latest(s.control, session.KeyMeta, &r)
+	return func(ctx context.Context) error {
+		err := read(ctx)
+		if errors.Is(err, session.ErrNotFound) || err == nil && r.deleted {
+			return fmt.Errorf("the session has no meta: %w", session.ErrNotFound)
+		}
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(r.value, meta); err != nil {
+			return fmt.Errorf("decode the session's meta: %w", err)
+		}
+		return nil
 	}
-	if err != nil {
-		return session.Meta{}, err
-	}
-	var meta session.Meta
-	if err := json.Unmarshal(entry.Value(), &meta); err != nil {
-		return session.Meta{}, fmt.Errorf("decode the session's meta: %w", err)
-	}
-	return meta, nil
+}
+
+// controlRead is what a read of the control bucket of a session of members
+// members takes of the connection's budget: the most its reply holds.
+func controlRead(members int) readCost {
+	return readCost{bytes: int64(session.ControlValueBytes(members)) + session.ReplyHeadroom}
 }
 
 // Rank implements Session.

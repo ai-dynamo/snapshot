@@ -298,20 +298,13 @@ func (s *client) Fail(ctx context.Context, reason string) error {
 	if err := session.ValidateReason(reason); err != nil {
 		return err
 	}
-	err := s.do(ctx, func(ctx context.Context) error {
-		_, err := s.control.kv.Create(ctx, session.KeyEnded, []byte(reason))
-		if !errors.Is(err, jetstream.ErrKeyExists) {
-			return err
-		}
-		entry, err := s.control.kv.Get(ctx, session.KeyEnded)
-		if err != nil {
-			return err
-		}
-		return session.EndedError(entry.Value())
-	})
-	if err == nil {
+	created, held, err := s.create(ctx, s.control, session.KeyEnded, []byte(reason), controlRead(len(s.meta.Members)))
+	if created {
 		s.finish(&session.AbortError{Reason: reason})
 		return nil
+	}
+	if err == nil {
+		err = session.EndedError(held)
 	}
 	if errors.Is(err, &session.AbortError{Reason: reason}) {
 		return nil

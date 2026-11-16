@@ -71,11 +71,13 @@ func (s *client) check() {
 		s.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), attemptTimeout)
 		_, err := s.control.kv.Status(ctx)
+		cancel()
 		var meta session.Meta
 		if err == nil {
-			meta, err = readMeta(ctx, s.control.kv)
+			// Once, as any read, and outside retry, which would wait for
+			// this very verification when it finds the bucket missing.
+			err = s.readOnce(context.Background(), controlRead(len(s.meta.Members)), s.readMeta(&meta))
 		}
-		cancel()
 		switch {
 		case err == nil && meta.Epoch == s.meta.Epoch:
 			s.settled(target)
