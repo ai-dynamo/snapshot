@@ -400,6 +400,46 @@ func TestConcurrentLargeGets(t *testing.T) {
 	}
 }
 
+// TestSlowReadsAreNotSentAgain holds what the coordinator sends a member, for
+// longer than nats.go lets a request wait unless told otherwise, while the
+// member reads two of the largest values: both arrive once the hold ends, and
+// the connection is never lost. Had a read been sent again during the hold,
+// the coordinator would have had more to send the connection than it holds
+// for it, and dropped it as a slow consumer.
+func TestSlowReadsAreNotSentAgain(t *testing.T) {
+	// Longer than nats.go's 5 s, and short enough that the client's keepalive
+	// sends at most two pings that go unanswered meanwhile.
+	const hold = 5500 * time.Millisecond
+	h := newHarness(t, withTestMaxValue)
+	ctx := within(t)
+	ses := h.session(t, 2)
+	sessions := ses.connectAll(t)
+	value := bytes.Repeat([]byte{'v'}, testMaxValue)
+	for i := range session.MaxConcurrentGets {
+		require.NoError(t, sessions[1].Snapshot().Insert(ctx, fmt.Sprintf("slow.%d", i), value))
+	}
+
+	ses.proxies[0].hold()
+	got := make(chan error, session.MaxConcurrentGets)
+	for i := range session.MaxConcurrentGets {
+		go func() {
+			read, err := sessions[0].Snapshot().Get(ctx, fmt.Sprintf("slow.%d", i), 0)
+			if err == nil && !bytes.Equal(read, value) {
+				err = errors.New("a Get returned another value")
+			}
+			got <- err
+		}()
+	}
+	requireWaitingFor(t, got, hold)
+	ses.proxies[0].release()
+	for range session.MaxConcurrentGets {
+		require.NoError(t, <-got)
+	}
+	for _, line := range h.logs.all() {
+		assert.NotContains(t, line, "Lost the connection", "a slow read must not cost the connection")
+	}
+}
+
 // TestGetWaitsHoldNoReadBudget checks that a Get that waits for an absent key
 // holds none of the connection's read budget, so reads of other keys go on,
 // and that it reads its value, once inserted, within it.

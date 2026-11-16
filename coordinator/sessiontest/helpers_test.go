@@ -473,6 +473,9 @@ type proxy struct {
 	mu     sync.Mutex
 	target string
 	conns  map[net.Conn]struct{}
+	// held is open while what the coordinator sends is held, and nil
+	// otherwise.
+	held chan struct{}
 }
 
 // newProxy starts a proxy to target, and stops it when the test ends.
@@ -537,6 +540,12 @@ func (p *proxy) toClient(in, out net.Conn) {
 		n, err := out.Read(buf)
 		if n > 0 {
 			p.sent.Add(int64(n))
+			p.mu.Lock()
+			held := p.held
+			p.mu.Unlock()
+			if held != nil {
+				<-held
+			}
 			if _, err := in.Write(buf[:n]); err != nil {
 				return
 			}
@@ -565,6 +574,26 @@ func (p *proxy) cut() {
 	}
 }
 
+// hold keeps what the coordinator sends from reaching the member, as a
+// network that stalls would, until release. The member's own sends go on.
+func (p *proxy) hold() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.held == nil {
+		p.held = make(chan struct{})
+	}
+}
+
+// release delivers what hold kept, and what follows.
+func (p *proxy) release() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.held != nil {
+		close(p.held)
+		p.held = nil
+	}
+}
+
 // retarget sends the connections the proxy accepts from now on to target.
 func (p *proxy) retarget(target string) {
 	p.mu.Lock()
@@ -575,6 +604,7 @@ func (p *proxy) retarget(target string) {
 // stop closes the proxy and every connection it carries, and waits until they
 // have all ended.
 func (p *proxy) stop() {
+	p.release()
 	_ = p.ln.Close()
 	<-p.accepted
 	p.cut()
