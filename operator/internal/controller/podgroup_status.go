@@ -220,20 +220,21 @@ func newPodGroupAttempt(
 	}
 }
 
-// memberCause is the cause that fails the unfinished member m: the three ways
-// the operator itself ends an attempt. A group deleted before the commit
-// cancels only the members with no work; a member with work reports its own end,
-// so its work is never cut from under its agent. The cause does not depend on
-// the group's Failed reason, so a group that failed because of one member still
-// fails the others at its deadline. Its message is the member's fixed one,
-// since every member gets it; failure explains the group's.
-func (a *podGroupAttempt) memberCause(m *podGroupMemberView) *podGroupCause {
+// memberCause is the cause that fails an unfinished member, whose work exists
+// when hasWork: the three ways the operator itself ends an attempt. A group
+// deleted before the commit cancels only the members with no work; a member
+// with work reports its own end, so its work is never cut from under its
+// agent. The cause does not depend on the group's Failed reason, so a group
+// that failed because of one member still fails the others at its deadline.
+// Its message is the member's fixed one, since every member gets it; failure
+// explains the group's.
+func (a *podGroupAttempt) memberCause(hasWork bool) *podGroupCause {
 	switch {
 	case a.admission.state == podGroupAdmissionRefused:
 		return &podGroupCause{a.admission.reason, a.kind.refusedMemberMessage}
 	case a.pastDeadline:
 		return &podGroupCause{snapshotv1alpha1.PodGroupReasonDeadlineExceeded, a.kind.deadlineMemberMessage}
-	case a.deleting && !a.outcomes.committed && !m.hasWork:
+	case a.deleting && !a.outcomes.committed && !hasWork:
 		return &podGroupCause{snapshotv1alpha1.PodGroupReasonCancelled, a.kind.cancelledMemberMessage}
 	}
 	return nil
@@ -287,19 +288,20 @@ func (a *podGroupAttempt) updateConditions(conditions *[]metav1.Condition, now t
 //	   hiddenStartReason included             a group-level one, otherwise
 //	                                          MemberFailed
 //	3  not committed, and reported            the named member's reason if it is
-//	                                          a group-level one, otherwise Refused
+//	                                          a group-level one, otherwise
+//	                                          Refused
 //	4  the deadline passed                    DeadlineExceeded
 //	5  deleted, and not committed             Cancelled
 //	6  every member final, some member Failed MemberFailed
 //
 // The group-level reasons are CoordinatorLost, DeadlineExceeded, Cancelled and
-// PodIPChanged (see groupLevelReason). PodIPChanged is a restore member's group
-// check, which a checkpoint member never reports. Rows 2, 3 and 6 name the
-// named member, with its reason and message. Row 4 adds the member that had already
-// failed on its own, if any. Refused is certain: it needs every member to have
-// reported, so none can still start, and none whose record of its start may
-// be gone. A finished attempt never waits for its deadline: once every member
-// is final, row 2, 3, 5 or 6 applies.
+// PodIPChanged (see podGroupMemberFailureReason). PodIPChanged is a restore
+// member's group check, which a checkpoint member never reports. Rows 2, 3
+// and 6 name the named member, with its reason and message. Row 4 adds the
+// member that had already failed on its own, if any. Refused is certain: it
+// needs every member to have reported, so none can still start, and none
+// whose record of its start may be gone. A finished attempt never waits for
+// its deadline: once every member is final, row 2, 3, 5 or 6 applies.
 func (a *podGroupAttempt) failure(conditions []metav1.Condition) *podGroupCause {
 	outcomes := a.outcomes
 	named := outcomes.named
@@ -307,10 +309,10 @@ func (a *podGroupAttempt) failure(conditions []metav1.Condition) *podGroupCause 
 	case a.admission.state == podGroupAdmissionRefused:
 		return &podGroupCause{a.admission.reason, a.admission.message}
 	case outcomes.committed && named != nil:
-		reason := groupLevelReason(named.reason, snapshotv1alpha1.PodGroupReasonMemberFailed)
+		reason := podGroupMemberFailureReason(named.reason, snapshotv1alpha1.PodGroupReasonMemberFailed)
 		return &podGroupCause{reason, podGroupMemberFailureMessage(named)}
 	case !outcomes.committed && outcomes.reported && named != nil:
-		reason := groupLevelReason(named.reason, snapshotv1alpha1.PodGroupReasonRefused)
+		reason := podGroupMemberFailureReason(named.reason, snapshotv1alpha1.PodGroupReasonRefused)
 		return &podGroupCause{reason, podGroupMemberFailureMessage(named)}
 	case a.pastDeadline:
 		message := a.deadlineMessage(conditions)
@@ -326,10 +328,15 @@ func (a *podGroupAttempt) failure(conditions []metav1.Condition) *podGroupCause 
 	return nil
 }
 
-// groupLevelReason returns a member's reason when it says how the whole group
-// ended: CoordinatorLost, DeadlineExceeded, Cancelled or PodIPChanged. Any other
-// reason is the member's own, and the group fails with fallback.
-func groupLevelReason(memberReason, fallback string) string {
+// podGroupMemberFailureReason is the Failed reason of a group whose failure
+// names a member that failed with memberReason: that reason if it is a
+// group-level one, which says how the whole group ended, and fallback
+// otherwise. The group-level reasons are CoordinatorLost, DeadlineExceeded,
+// Cancelled and PodIPChanged. Unlike the shared reasons of
+// isSharedMemberReason, they include PodIPChanged, a member's own check that
+// ends the whole group, and leave out Refused and MemberFailed, between which
+// failure picks the fallback by whether the attempt committed.
+func podGroupMemberFailureReason(memberReason, fallback string) string {
 	switch memberReason {
 	case snapshotv1alpha1.PodGroupReasonCoordinatorLost,
 		snapshotv1alpha1.PodGroupReasonDeadlineExceeded,
@@ -342,18 +349,23 @@ func groupLevelReason(memberReason, fallback string) string {
 
 // nameFailedMember returns which of two Failed members, named before m in rank
 // order, a group failure names. A member with a cause of its own wins over one
-// with a group reason, which only says how the group's session ended for it;
-// otherwise the first in rank order wins.
+// with a shared reason (see isSharedMemberReason), which only says how the
+// session ended for it; otherwise the first in rank order wins.
 func nameFailedMember(named, m *podGroupMemberView) *podGroupMemberView {
-	if named == nil || (isPodGroupSessionReason(named.reason) && !isPodGroupSessionReason(m.reason)) {
+	if named == nil || (isSharedMemberReason(named.reason) && !isSharedMemberReason(m.reason)) {
 		return m
 	}
 	return named
 }
 
-// isPodGroupSessionReason reports whether a member's reason is one of the group
-// reasons, which every member of a session that ended reports alike.
-func isPodGroupSessionReason(reason string) bool {
+// isSharedMemberReason reports whether a member's reason is a shared one,
+// which every member of a session that ended reports alike: Refused,
+// MemberFailed, CoordinatorLost, DeadlineExceeded or Cancelled. It says how the
+// session ended, not what went wrong in the member. Unlike the group-level
+// reasons of podGroupMemberFailureReason, the shared reasons include Refused
+// and MemberFailed, and leave out PodIPChanged, which says what went wrong in
+// its member.
+func isSharedMemberReason(reason string) bool {
 	switch reason {
 	case snapshotv1alpha1.PodGroupReasonRefused,
 		snapshotv1alpha1.PodGroupReasonMemberFailed,

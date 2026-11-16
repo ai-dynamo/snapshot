@@ -261,12 +261,17 @@ func TestPodGroupSnapshotReconciler_RefusesAnEndedSourcePod(t *testing.T) {
 		mutate func(pod *corev1.Pod)
 		want   string
 	}{
-		{"succeeded", func(pod *corev1.Pod) { pod.Status.Phase = corev1.PodSucceeded }, `pod "pod-b" is Succeeded`},
-		{"failed", func(pod *corev1.Pod) { pod.Status.Phase = corev1.PodFailed }, `pod "pod-b" is Failed`},
+		{"succeeded", func(pod *corev1.Pod) { pod.Status.Phase = corev1.PodSucceeded }, `source Pod "pod-b" is Succeeded`},
+		{"failed", func(pod *corev1.Pod) { pod.Status.Phase = corev1.PodFailed }, `source Pod "pod-b" is Failed`},
 		{"being deleted", func(pod *corev1.Pod) {
 			pod.DeletionTimestamp = ptr.To(metav1.Now())
 			pod.Finalizers = []string{"test/hold"}
-		}, `pod "pod-b" is being deleted`},
+		}, `source Pod "pod-b" is being deleted`},
+		{"being deleted before it is scheduled", func(pod *corev1.Pod) {
+			pod.Spec.NodeName = ""
+			pod.DeletionTimestamp = ptr.To(metav1.Now())
+			pod.Finalizers = []string{"test/hold"}
+		}, `source Pod "pod-b" is being deleted`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pod := pgSourcePod("b", "node-1")
@@ -281,7 +286,7 @@ func TestPodGroupSnapshotReconciler_RefusesAnEndedSourcePod(t *testing.T) {
 			failed := groupCondition(t, getGroup(t, r), snapshotv1alpha1.PodGroupConditionFailed)
 			require.NotNil(t, failed)
 			assert.Equal(t, snapshotv1alpha1.PodGroupReasonRefused, failed.Reason)
-			assert.Equal(t, `member "b": `+errPodSnapshotSourcePodEnded.Error()+": "+tc.want, failed.Message)
+			assert.Equal(t, `member "b": `+tc.want, failed.Message)
 		})
 	}
 }
@@ -718,7 +723,7 @@ func TestPodGroupSnapshotReconciler_Lifecycle(t *testing.T) {
 	got := getGroup(t, r)
 	assert.Equal(t, snapshotv1alpha1.CheckpointPhaseCheckpointing, got.Status.Members[0].Phase)
 	assert.Equal(t, pgStartedAt.Unix(), got.Status.Members[0].StartedAt.Unix())
-	assert.Equal(t, []string{"Normal Committed every member passed admission, and the checkpoint has started"},
+	assert.Equal(t, []string{"Normal Committed the agents passed their admitted barrier, and the checkpoint has started"},
 		drainEvents(recorder))
 	restartChecks("committed")
 
@@ -778,7 +783,7 @@ func TestPodGroupSnapshotReconciler_MemberFailure(t *testing.T) {
 		assert.Equal(t, snapshotv1alpha1.PodGroupReasonMemberFailed, cond.Reason)
 		assert.Equal(t, `member "b" (rank 1) failed with SourcePodGone: SourcePodGone message`, cond.Message)
 		assert.Equal(t, []string{
-			"Normal Committed every member passed admission, and the checkpoint has started",
+			"Normal Committed the agents passed their admitted barrier, and the checkpoint has started",
 			"Warning MemberFailed " + cond.Message,
 		}, drainEvents(recorder))
 	})
@@ -1208,7 +1213,7 @@ func TestPodGroupSnapshotReconciler_ConfirmsADeletion(t *testing.T) {
 		assert.Equal(t, snapshotv1alpha1.CheckpointPhaseCheckpointing, got.Status.Members[0].Phase)
 		assert.NotNil(t, got.Status.Members[0].StartedAt)
 		assert.Positive(t, res.RequeueAfter, "the deadline still applies")
-		assert.Equal(t, []string{"Normal Committed every member passed admission, and the checkpoint has started"},
+		assert.Equal(t, []string{"Normal Committed the agents passed their admitted barrier, and the checkpoint has started"},
 			drainEvents(recorder))
 	})
 

@@ -71,13 +71,13 @@ type PodGroupSnapshotReconciler struct {
 //
 // Every irreversible decision is made from the API server. The reconciler
 // observes through the cache first. When the status derived from that would
-// make a change that can never be undone (podGroupSnapshotChangeIsIrreversible),
-// it observes again through the API server and derives again from the
-// persisted status, never from the first derived one, whose final phases would
-// stick. It records only the second pass, and acts on that pass's observation
-// and status. This keeps cache lag out of every final decision; it does not
-// make the reads and the status write atomic, so a report that lands in
-// between is the next reconcile's.
+// make an irreversible change (podGroupSnapshotChangeIsIrreversible), it
+// observes again through the API server and derives again from the persisted
+// status, never from the first derived one, whose final phases would stick.
+// It records only the second pass, and acts on that pass's observation and
+// status. This keeps cache lag out of every final decision; it does not make
+// the reads and the status write atomic, so a report that lands in between is
+// the next reconcile's.
 func (r *PodGroupSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	group := &snapshotv1alpha1.PodGroupSnapshot{}
 	if err := r.Get(ctx, req.NamespacedName, group); err != nil {

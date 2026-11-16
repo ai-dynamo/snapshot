@@ -245,7 +245,8 @@ starts only after the `PodGroupRestore` exists, so the probe cannot expire
 before the restore's deadline. That is safe because the probe never decides the
 outcome: the node agent fails a member at its deadline and stops the workload,
 and the probe only holds the container back until the agent releases it. A
-group target must carry exactly this probe, not the standalone one.
+group target must carry exactly the probe of the API version it was built
+against, not the standalone one.
 
 Name the destination container in the `PodGroupRestore`, in the target's
 `containerMappings`. The operator claims no target until every target passes
