@@ -1,0 +1,18 @@
+{
+  "combinedRecordCount": 203,
+  "expiresAt": "2026-11-30T08:07:59.567Z",
+  "formatVersion": 1,
+  "generatedAt": "2026-11-16T08:07:59.567Z",
+  "historyRecordCount": 199,
+  "key": "run-43826362753",
+  "previewRecordCount": 4,
+  "source": {
+    "branch": "schwinns/fix-cuinterpose-snapshot-failure",
+    "commit": "164577353f6a0bb88e1d4e91cfcaaf07a40b3f4c",
+    "event": "workflow_dispatch",
+    "pullRequest": null,
+    "runAttempt": 1,
+    "runId": "43826362753",
+    "runUrl": "https://github.com/ai-dynamo/snapshot/actions/runs/43826362753"
+  }
+}
