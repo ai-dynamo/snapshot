@@ -49,7 +49,12 @@ func (r *SnapshotJobReconciler) createPodSnapshotForSourceJob(ctx context.Contex
 		return observed, ctrl.Result{RequeueAfter: sourcePodRequeueBackstop}, nil
 	}
 
-	snap, err := r.createPodSnapshot(ctx, sj, pod)
+	desired, failure := desiredPodSnapshot(sj, pod)
+	if failure != nil {
+		observed.failure = failure
+		return observed, ctrl.Result{}, nil
+	}
+	snap, err := r.createPodSnapshot(ctx, sj, desired)
 	if errors.Is(err, errPodSnapshotNameConflict) {
 		observed.failure = &snapshotJobFailure{reason: snapshotv1alpha1.ReasonPodSnapshotNameConflict, cause: err}
 		return observed, ctrl.Result{}, nil
@@ -165,9 +170,9 @@ func (r *SnapshotJobReconciler) validatePodSnapshotForAdoption(ctx context.Conte
 		}, nil
 	}
 
-	desired, err := buildPodSnapshot(sj, pod)
-	if err != nil {
-		return &snapshotJobFailure{reason: snapshotv1alpha1.ReasonInvalidSpec, cause: err}, nil
+	desired, failure := desiredPodSnapshot(sj, pod)
+	if failure != nil {
+		return failure, nil
 	}
 	if !podSnapshotHasExpectedIdentity(snap, desired) {
 		return &snapshotJobFailure{
@@ -177,6 +182,18 @@ func (r *SnapshotJobReconciler) validatePodSnapshotForAdoption(ctx context.Conte
 		}, nil
 	}
 	return nil, nil
+}
+
+// desiredPodSnapshot builds the PodSnapshot that a SnapshotJob wants for its
+// source Pod, for creation and for adoption alike. The spec is immutable, so a
+// template the controller refuses stays refused: the refusal fails the
+// SnapshotJob with InvalidSpec instead of retrying.
+func desiredPodSnapshot(sj *snapshotv1alpha1.SnapshotJob, pod *corev1.Pod) (*snapshotv1alpha1.PodSnapshot, *snapshotJobFailure) {
+	snap, err := buildPodSnapshot(sj, pod)
+	if err != nil {
+		return nil, &snapshotJobFailure{reason: snapshotv1alpha1.ReasonInvalidSpec, cause: err}
+	}
+	return snap, nil
 }
 
 // buildPodSnapshot constructs the desired PodSnapshot for a SnapshotJob's source
@@ -250,23 +267,19 @@ func podSnapshotTemplateMetadata(sj *snapshotv1alpha1.SnapshotJob) (map[string]s
 	return labels, annotations, nil
 }
 
-// createPodSnapshot creates this SnapshotJob's PodSnapshot. The caller has
-// confirmed via findOwnedPodSnapshot that none exists, so this is a pure create.
-// On AlreadyExists the object at the deterministic name is classified: cache lag
-// (ours) is adopted; a foreign owner is terminal.
-func (r *SnapshotJobReconciler) createPodSnapshot(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, pod *corev1.Pod) (*snapshotv1alpha1.PodSnapshot, error) {
-	snap, err := buildPodSnapshot(sj, pod)
-	if err != nil {
-		return nil, err
-	}
-	if err := r.Create(ctx, snap); err != nil {
+// createPodSnapshot creates desired, this SnapshotJob's PodSnapshot. The caller
+// has confirmed via findOwnedPodSnapshot that none exists, so this is a pure
+// create. On AlreadyExists the object at the deterministic name is classified:
+// cache lag (ours) is adopted; a foreign owner is terminal.
+func (r *SnapshotJobReconciler) createPodSnapshot(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, desired *snapshotv1alpha1.PodSnapshot) (*snapshotv1alpha1.PodSnapshot, error) {
+	if err := r.Create(ctx, desired); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			return r.classifyExistingPodSnapshot(ctx, sj, snap, err)
+			return r.classifyExistingPodSnapshot(ctx, sj, desired, err)
 		}
 		r.Recorder.Event(sj, corev1.EventTypeWarning, "PodSnapshotCreateFailed", err.Error())
-		return nil, fmt.Errorf("create PodSnapshot %q: %w", snap.Name, err)
+		return nil, fmt.Errorf("create PodSnapshot %q: %w", desired.Name, err)
 	}
-	return snap, nil
+	return desired, nil
 }
 
 // classifyExistingPodSnapshot resolves what holds the SnapshotJob's deterministic
