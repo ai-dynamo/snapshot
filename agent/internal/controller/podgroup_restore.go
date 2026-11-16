@@ -593,9 +593,11 @@ type groupRestoreRun struct {
 // A member that never started is left as Snapshot found it; one that started
 // is failed, which ends its restored processes. The report carries the
 // member's own failure, or the attempt's reason when the attempt ended, which
-// also goes on nvidia.com/GroupRestoreFailed.
+// also goes on nvidia.com/GroupRestoreFailed. The attempt's deadline alone
+// bounds the member and its post-restore action, not restore.timeoutSeconds,
+// so a member that runs out of time fails as the group does.
 func (w *NodeController) runGroupRestore(ctx context.Context, log logr.Logger, pod *corev1.Pod, m *restoreMember, plan *restorePlan, containerID string) bool {
-	restoreCtx, cancel := attemptContext(ctx, m.deadline, w.config.Restore.RestoreTimeout())
+	restoreCtx, cancel := context.WithDeadline(ctx, m.deadline)
 	defer cancel()
 	destination := m.claim.Mapping.Destination
 
@@ -797,15 +799,14 @@ func (w *NodeController) planRecoveredPostRestore(ctx context.Context, log logr.
 }
 
 // recoverGroupPostRestore runs a released member's post-restore action after
-// a restart, bounded as the first run was: by the attempt's deadline and the
-// restore timeout, whichever comes first. A restart never renews that budget,
-// so past the deadline the action fails without running, as it would have
-// without the restart.
+// a restart, bounded as the first run was: by the attempt's deadline. A
+// restart never renews it, so past the deadline the action fails without
+// running, as it would have without the restart.
 func (w *NodeController) recoverGroupPostRestore(ctx context.Context, op *restoreOperation, m *restoreMember) error {
 	if op.postRestore == nil {
 		return nil
 	}
-	postCtx, cancel := attemptContext(ctx, m.deadline, w.config.Restore.RestoreTimeout())
+	postCtx, cancel := context.WithDeadline(ctx, m.deadline)
 	defer cancel()
 	if postCtx.Err() != nil {
 		return op.failPostRestore(ctx, postRestoreStepError(executor.StepPostRestore,

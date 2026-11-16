@@ -170,8 +170,8 @@ writes. See
 `config.*` renders into the agent ConfigMap.
 
 - `config.overlay.exclusions` - Rootfs-diff tar exclusions. Default: `/proc`, `/sys`, `/dev`, `*/.cache/huggingface`, `*/__pycache__`, `*.pyc`. A file the checkpointed processes hold open or mapped at dump time is archived even when an exclusion matches it, so CRIU can reopen it. Other excluded files are not restored; the workload must recreate them if needed.
-- `config.checkpoint.timeoutSeconds` - Maximum seconds for a checkpoint before the agent marks it failed. Default `3600`.
-- `config.restore.timeoutSeconds` - Maximum seconds for a restore before the agent marks it failed. Default `7200`.
+- `config.checkpoint.timeoutSeconds` - Maximum seconds for a checkpoint before the agent marks it failed. Default `3600`. A member of a `PodGroupSnapshot` is bounded by the group's `deadlineSeconds` instead.
+- `config.restore.timeoutSeconds` - Maximum seconds for a restore before the agent marks it failed. Default `7200`. A target of a `PodGroupRestore` is bounded by the group's `deadlineSeconds` instead.
 
 `config.criu.*` - CRIU options:
 

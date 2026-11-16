@@ -154,14 +154,3 @@ func joinFailureReason(err error, deadline, now time.Time) (string, bool) {
 	}
 	return reasonCoordinatorUnreachable, false
 }
-
-// attemptContext bounds a member's part in an attempt by the attempt's
-// deadline, and by limit when it is set and earlier.
-func attemptContext(ctx context.Context, deadline time.Time, limit time.Duration) (context.Context, context.CancelFunc) {
-	if limit > 0 {
-		if byLimit := time.Now().Add(limit); byLimit.Before(deadline) {
-			deadline = byLimit
-		}
-	}
-	return context.WithDeadline(ctx, deadline)
-}

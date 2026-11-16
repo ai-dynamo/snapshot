@@ -236,6 +236,8 @@ func contentStarted(content *snapshotv1alpha1.PodSnapshotContent) bool {
 // runs the dump as the member's part in the group's capture. The attempt
 // commits at the admitted barrier, and the member records that it started,
 // the Started condition on its content, before its first irreversible step.
+// The attempt's deadline alone bounds the member, not checkpoint.timeoutSeconds,
+// so a member that runs out of time fails as the group does.
 //
 // There is no second attempt: the session is single-use, and a member that
 // fails fails the attempt for every member. Repeats of the dump against the
@@ -258,7 +260,7 @@ func (w *NodeController) runGroupCheckpoint(
 ) (retErr error) {
 	logger := logr.FromContextOrDiscard(ctx).WithValues("attempt", member.attempt, "member", member.id)
 	ctx = logr.NewContext(ctx, logger)
-	captureCtx, cancel := attemptContext(ctx, member.deadline, w.config.Checkpoint.CheckpointTimeout())
+	captureCtx, cancel := context.WithDeadline(ctx, member.deadline)
 	defer cancel()
 
 	g, err := w.joinAttempt(captureCtx, member.attempt, member.id, w.captureSessionNode(member))

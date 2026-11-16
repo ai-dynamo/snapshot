@@ -597,6 +597,26 @@ func TestGroupRestoreThatPanicsAfterItStartedFailsTheMember(t *testing.T) {
 		"the attempt fails for the peer")
 }
 
+func TestGroupRestoreIsBoundByTheGroupsDeadlineOnly(t *testing.T) {
+	rg := newRestoreGroup(t)
+	srv := ensureSession(t, restoreGroupUID, captureMemberIDs)
+	var deadline time.Time
+	w, _, _ := groupRestoreController(t, srv, rg,
+		func(ctx context.Context, _ snapshotruntime.Runtime, _ logr.Logger, _ executor.RestoreRequest, _ executor.RestoreMounter) (executor.RestoreResult, error) {
+			deadline, _ = ctx.Deadline()
+			return executor.RestoreResult{}, errors.New("stop once the deadline is read")
+		})
+	w.config.Restore.TimeoutSeconds = 60
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	claim, _, err := podcontract.RestoreGroupClaimOf(rg.pods[0].Annotations)
+	require.NoError(t, err)
+
+	w.processGroupRestorePod(ctx, rg.pods[0], claim, nil)
+	assert.WithinDuration(t, rg.restore.CreationTimestamp.Add(600*time.Second), deadline, time.Second,
+		"restore.timeoutSeconds does not bound a member, so it fails as the group does")
+}
+
 func TestGroupRestoreAfterARestart(t *testing.T) {
 	started := func(pod *corev1.Pod) {
 		pod.Status.Conditions = append(pod.Status.Conditions,

@@ -517,6 +517,24 @@ func TestGroupCheckpointThatCannotJoin(t *testing.T) {
 	}
 }
 
+func TestGroupCheckpointIsBoundByTheGroupsDeadlineOnly(t *testing.T) {
+	g := newCaptureGroup()
+	srv := ensureSession(t, captureGroupUID, captureMemberIDs)
+	var deadline time.Time
+	w, _ := groupCaptureController(t, srv, g, func(ctx context.Context, _ CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		deadline, _ = ctx.Deadline()
+		return nil, errors.New("stop once the deadline is read")
+	}, nil)
+	timeout := 60
+	w.config.Checkpoint.TimeoutSeconds = &timeout
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	require.NoError(t, w.reconcileCapture(ctx, "content-leader"))
+	assert.WithinDuration(t, g.group.CreationTimestamp.Add(600*time.Second), deadline, time.Second,
+		"checkpoint.timeoutSeconds does not bound a member, so it fails as the group does")
+}
+
 func TestCaptureMemberOf(t *testing.T) {
 	t.Run("a member", func(t *testing.T) {
 		g := newCaptureGroup()
