@@ -66,7 +66,7 @@ text{font-family:Helvetica,Arial,"Liberation Sans",sans-serif}
 <line class="arw" x1="88.6" y1="136.0" x2="223.7" y2="136.0" stroke-width="1.2" marker-end="url(#ah)"/>
 <rect class="k-t" x="103.7" y="150.0" width="244.0" height="44" rx="5" stroke-width="0.8"/>
 <text x="225.7" y="164.0" class="k-t-t" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">preflight: artifact, compatibility, GPU</text>
-<text x="225.7" y="180.0" class="k-t-t" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">map, probe budget</text>
+<text x="225.7" y="180.0" class="k-t-t" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">map</text>
 <text x="362.9" y="214.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">connect for (session UID, member ID) with a</text>
 <text x="362.9" y="230.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">Pod-bound token</text>
 <line class="arw" x1="225.7" y1="242.0" x2="498.0" y2="242.0" stroke-width="1.2" marker-end="url(#ah)"/>

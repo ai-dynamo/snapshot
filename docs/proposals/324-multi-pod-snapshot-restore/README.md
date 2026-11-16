@@ -167,7 +167,7 @@ becomes load-bearing: it is what keeps a restored member from acting before its
 peers are reconstructed, so a workload that cannot honor it is not supported,
 and [Workload contract](#workload-contract) defines which threads it covers.
 The owner must not delete or replace a source until the group's capture has
-ended, Ready or Failed, and group restore Pods must carry the existing restore startup probe and arrive held by Snapshot's scheduling gate. Placement stays
+ended, Ready or Failed, and group restore Pods must carry the group restore startup probe, which allows the longest deadline, and arrive held by Snapshot's scheduling gate. Placement stays
 with the owner, but Snapshot refuses a restore that cannot work, for example one
 whose members share GPU memory across nodes but were placed in different fabric
 domains, because such a restore would otherwise fail only after its destructive
@@ -211,12 +211,12 @@ Redis-compatible server.
 | Between CRIU restore and CUDA unlock, a thread that calls CUDA blocks on the lock, which is not a recommended use of CUDA Checkpoint, and a failure in that window could leave such a thread stuck. | The locked window involves no coordination and lasts as long as for a single Pod, failing a restore terminates every restored process, and qualification measures both restore windows and injects failures into each. |
 | CRIU's network lock at capture and the agent's hold at restore pause the traffic of preserved connections while keepalive, retransmission, and user timeouts keep running, so a long dump or a slow peer can break them ([snapshot#577](https://github.com/ai-dynamo/snapshot/issues/577)). | Holds are taken as late and lifted as early as possible, and qualification measures the whole interruption, including staggered dumps, to document the supported limits. |
 | At capture, CRIU's network lock covers a member's IP traffic only from the moment CRIU freezes it, and never covers RDMA, shared volumes, or external services, while dumps finish at different times. | Members must stop such traffic before reporting `ready-for-snapshot`, as the workload contract requires, and libraries tear down RDMA transports before the dump, which for NCCL means the application calling NCCL Checkpoint's prepare until CUDA's prepare phase does it. |
-| Sessions live only in the coordinator's memory, so an attempt in flight ends if the agent that hosts its session restarts. | Each session lives in the agent on the node of the attempt's rank-0 member, which the attempt depends on anyway, since a restarted agent fails its own member; losing it is fail-stop and reported as `CoordinatorLost`, sessions on other nodes are unaffected, and a broken connection that reconnects does not fail an attempt. Every session pattern is safe to repeat, so replicating sessions later changes only the coordinator. |
-| Sessions hosted on the same node share the coordinator's memory, so a compromised workload can fill it with records forged through its relay and make concurrent attempts fail until its own attempt ends at its deadline. A compromised agent can also add messages to another attempt's buckets, which count against that attempt's limits, because JetStream does not bound a consumer's deliveries by its creator's permissions ([nats-server#8274](https://github.com/nats-io/nats-server/issues/8274)). | Sessions stay isolated otherwise: no client can read another session or change its keys, since a delivered message keeps its original subject, libraries are bounded per session, each bucket bounds how many watches its members open, and the cap protects the coordinator itself. A byte limit per session would reserve that memory whether a session uses it or not, so alpha shares it, and beta revisits both limitations together, for example with one NATS account per attempt, once cuInterpose's largest records are measured. |
+| Sessions live only as long as the coordinator that holds them, so an attempt in flight ends if the agent that hosts its session restarts. | Each session lives in the agent on the node of the attempt's rank-0 member, which the attempt depends on anyway, since a restarted agent fails its own member; losing it is fail-stop and reported as `CoordinatorLost`, sessions on other nodes are unaffected, and a broken connection that reconnects does not fail an attempt. Every session pattern is safe to repeat, so replicating sessions later changes only the coordinator. |
+| Sessions hosted on the same node share the coordinator's memory, so a compromised workload can fill it with records forged through its relay and make concurrent attempts' data writes fail until its own attempt ends at its deadline. Every client the coordinator admits is an agent, and agents are one trust domain: in the coordinator's shared NATS account, a compromised agent can change another attempt's keys, for example through the reply subject of a request, which its permissions don't cover. | The sessions that the cap affects still end promptly, since their control keys live outside it, libraries are bounded per session, each bucket bounds how many watches its members open, and the cap protects the coordinator itself. A compromised agent gains nothing it lacks already, since the agent's ServiceAccount can patch any Pod, and the token review keeps everything that isn't an agent out. Beta revisits both limits together: one NATS account per attempt to isolate agents from each other, and memory isolated per session once cuInterpose's largest records are measured, while a ValidatingAdmissionPolicy that lets the agent change only Pods' metadata and status narrows what a compromised agent can do. |
 | The agent sits on every coordination path, and an agent can restart in the middle of a restore. | The agent records its intent before CRIU starts and treats `restore-complete` as proof of release, so a restarted agent never replays CRIU and never kills a released workload. |
 | Importing GPU memory shared from another node after a native CUDA restore depends on a driver fix, and cuInterpose currently infers the kind of an imported FABRIC handle from its opaque contents. | Cross-node sharing in alpha requires a driver with the fix, and a public query for the handle kind is a beta prerequisite. |
 | CUDA Checkpoint's prepare and resume phases are not released yet. | Until they are, the application calls NCCL Checkpoint's prepare and restore itself, and NCCL restores after release through the library endpoint. |
-| A restore Pod may already have spent part of its 30-minute startup probe waiting for its peers. | Admission refuses with `GateBudgetTooShort` unless every restore Pod's remaining probe time covers the remaining deadline. |
+| A group restore Pod's container starts only after its claim, so its startup probe runs while the restore waits for its peers. | A group target's probe allows the longest deadline, a day, so it never expires before the restore's own deadline; the agent fails a member at that deadline and stops its workload, so the probe never decides an outcome. |
 
 ## Design Details
 
@@ -262,7 +262,7 @@ coordinator stays small, and new participants integrate without changing it.
 | Component | Runs as | Responsibility |
 | --- | --- | --- |
 | Group controllers | Snapshot operator | Validate groups, pin identities, create member `PodSnapshot`s, enforce the deadline, and aggregate member results into one outcome. |
-| Snapshot coordinator | Snapshot agent; the agent on the node of an attempt's rank-0 member serves its session | Embed a NATS server with in-memory JetStream, create two buckets per attempt, authenticate every connection and scope it to its attempt, enforce the deadline and the grace period, and fail every member when one fails. |
+| Snapshot coordinator | Snapshot agent; the agent on the node of an attempt's rank-0 member serves its session | Embed a NATS server with JetStream, create three buckets per attempt, authenticate every connection and scope it to its attempt, enforce the deadline and the grace period, and fail every member when one fails. |
 | Group executor | Snapshot agent | Run each member's capture or restore as session phases around the existing CUDA and CRIU steps, and record its intent before destructive work. |
 | Session proxy | Snapshot agent | Hold one NATS connection per hosted member, serve the relay's socket and the Pod's endpoint, and confine each to its namespace. |
 | cuInterpose relay | Short-lived process in each Pod that uses cuInterpose | Fan commands out to the Pod's processes as in SNEP-295 and, in the lowest rank that runs one, also lead the group. |
@@ -281,21 +281,35 @@ unfinished attempt whose rank-0 member runs on its node, so sessions need no
 creation API and the resource remains the single source of truth. The coordinator removes a session and all of its
 keys once its resource is deleted, or once the resource is final and the
 session has ended or its deadline has passed, so a session whose end cannot be
-recorded, for instance at the memory cap, is still removed. Once a
-resource's deletion has started, the coordinator fails its session with
-`Cancelled` unless every member has already arrived at the `admitted` barrier.
-Members decide on their own that a barrier is complete, so a member that saw it
-complete just before can still start, which its `startedAt` records.
+recorded is still removed. A restore's session depends on the restore alone:
+deleting the `PodGroupSnapshot` after the restore's release leaves its session
+open for the members' post-release rendezvous. Before the commit, the
+coordinator also ends a session early. Once a resource's deletion has started,
+it fails the session with `Cancelled`, and once the resource's status shows a
+`Failed` member, it fails it with `Refused`, the reason a member's agent uses
+before the commit, so a member that fails before it joins, or a failure that
+only the operator sees, ends the attempt at once instead of at its deadline.
+It does neither once every member has arrived at the `admitted` barrier, which
+it hosts. Members decide on their own that a barrier is complete, so a member
+that saw it complete just before can still start, which its `startedAt`
+records.
 
-A session is two key-value buckets in the coordinator's embedded NATS server,
-both held in memory. One serves Snapshot's own components, the agents and
-relays, and holds a `meta` key with the members, their ranks, the deadline, and
-an epoch, which every agent reads when it connects; the other holds library
+A session is three key-value buckets in the coordinator's embedded NATS
+server. A small control bucket holds the session's own keys: a `meta` key with
+the members, their ranks, the deadline, and an epoch, which every agent reads
+when it connects, how the session ended, and every barrier arrival and
+departure. Two data buckets hold what the session carries: one serves
+Snapshot's own components, the agents and relays, and the other holds library
 keys, such as NCCL Checkpoint's communicator identifiers. Each bucket limits the
 size of a value, and the library bucket also limits its number of keys, so
-libraries cannot exhaust what Snapshot's own keys need. Neither bucket reserves
-memory: one cap bounds the memory of all sessions, which they share. Members
-coordinate through six patterns, each built from standard NATS key-value
+libraries cannot exhaust what Snapshot's own keys need. The data buckets live
+in memory and reserve none of it: one cap bounds the memory of all sessions,
+which they share. The control bucket lives instead in a small file store,
+bounded per session by its number of members, because NATS limits memory and
+file storage separately, so a session whose peers fill the memory cap can still
+end, fail, and release every wait. That store sits in a directory the
+coordinator owns, which it empties when it starts, so like the rest of a session
+it never outlives the coordinator. Members coordinate through six patterns, each built from standard NATS key-value
 operations, which [Session semantics](#session-semantics) defines precisely.
 
 | Pattern | Purpose | Used by |
@@ -597,8 +611,7 @@ attempt fails.
 
 The agents' admission waits for the operator's, which pins nothing until it
 passes. Each agent then resolves its member's artifact, runs the existing
-compatibility checks, verifies that the restore Pod's remaining startup-probe
-time covers the remaining deadline, and contributes its new Pod IP, the capture
+compatibility checks, and contributes its new Pod IP, the capture
 ID from its artifact, its fabric domain, its GPU count, and whether its artifact
 holds cuInterpose state. Every agent therefore ends admission holding the
 complete IP map, built from the member table in its own artifact and the new
@@ -821,7 +834,7 @@ either window of the [workload contract](#workload-contract).
 
 | Event | Member without a record | Member with a record | Released member |
 | --- | --- | --- | --- |
-| Validation refusal, placement mismatch, or short probe budget | Left as found; the attempt ends with `Refused` or `GateBudgetTooShort` | Not applicable, since refusals precede the commit | Not applicable |
+| Validation refusal or placement mismatch | Left as found; the attempt ends with `Refused` | Not applicable, since refusals precede the commit | Not applicable |
 | Member error during a phase, including a Pod IP or container change | Left as found | Fails with `MemberFailed` or `PodIPChanged` | Keeps running; the rendezvous ends |
 | Agent connection broken while the agent and the coordinator keep running | The agent reconnects within a grace period, resumes its waits, and sends again what it had not seen answered, and the attempt continues | Same | Same |
 | Agent connection not restored within the grace period, agent restart, or coordinator restart | Left as found | Fails with `MemberFailed` or `CoordinatorLost` | Keeps running; the rendezvous ends |
@@ -863,9 +876,10 @@ gone. It leaves its member as Snapshot found it, and the member's grace period
 fails the attempt with `MemberFailed`, after which the owner retries with a new
 attempt.
 
-The coordinator, by contrast, keeps sessions only in memory. In alpha its
-embedded server holds every bucket in memory, without replicas, so restarting
-the agent that hosts a session loses it. When the coordinator creates
+The coordinator, by contrast, keeps sessions only for its own lifetime. In
+alpha its embedded server holds the data buckets in memory and the control
+bucket in a store that it empties when it starts, without replicas, so
+restarting the agent that hosts a session loses it. When the coordinator creates
 a session, it writes an epoch, drawn at random, into the session's `meta` key,
 and every agent presents the epoch it read whenever it reconnects. If the
 coordinator has recreated the session since, it fails the session with
@@ -903,7 +917,8 @@ the coordinator relies on nothing else.
   wait expires. In every case it returns as soon as the session ends, with how
   the session ended.
 - `Delete(key)` removes the key whether or not it exists, and a later `Insert`
-  of that key starts afresh.
+  of that key starts afresh. It writes a marker, so at a full memory cap it
+  fails like an `Insert`.
 - `Barrier(name)` records that the caller's member has arrived, then returns
   once every member listed in `meta` has arrived; only agents use it. It needs
   no count and no creation, a member that arrives again changes nothing, and a
@@ -961,7 +976,7 @@ released members are unaffected.
 | --- | --- | --- |
 | Attempt deadline | `spec.deadlineSeconds` from creation, at most a day | The coordinator and the operator, with reason `DeadlineExceeded` |
 | Phase timeout | The operation's own timeout plus a margin, never beyond the attempt deadline | Each barrier and each cuInterpose round |
-| Startup-probe budget | Each restore Pod's remaining probe time must cover the remaining deadline | Restore admission, with reason `GateBudgetTooShort` |
+| Group target startup probe | One-second checks for the longest deadline, a day, so it never expires before the restore's deadline | The group target contract, `podcontract.BuildGroupTarget` |
 | Post-release rendezvous | NCCL Checkpoint's own timeout, 300 seconds by default | Only libraries that restore after release |
 
 ### API
@@ -1053,8 +1068,10 @@ deletes its members, but not under a restore that reads them: a finalizer keeps
 the `PodGroupSnapshot` and its members while any unfinished `PodGroupRestore`
 references its UID, and once its deletion has started, new restores of it are
 refused. The same finalizer keeps each group resource, of either kind, while its
-own attempt runs, so a group deleted after its commit goes only once its
-attempt has ended. A `PodGroupSnapshot` can be restored many times, and each
+own attempt runs. The operator sees the commit only through a member's
+`startedAt`, so when a group is deleted, it cancels at once only the members
+that have no work yet, and holds the group until every member with work has
+reported its end, bounded by the deadline. A `PodGroupSnapshot` can be restored many times, and each
 `PodGroupRestore` is one attempt with its own session, so every restore starts
 from an empty rendezvous store. Agents keep reporting where they
 report today, on each member's `PodSnapshotContent` and on each restore Pod's
@@ -1063,7 +1080,7 @@ report today, on each member's `PodSnapshotContent` and on each restore Pod's
 operator alone aggregates those results into the group's status. Because those
 public reasons cannot carry a reason of the group, a restore member that fails
 for one, the session's reason or one of the agent's group checks such as
-`PodIPChanged` or `GateBudgetTooShort`, also sets the Pod condition
+`PodIPChanged`, also sets the Pod condition
 `nvidia.com/GroupRestoreFailed` to True with that reason, in the same status
 update as `nvidia.com/Restored`. `Restored` remains the only signal that the
 member failed; `GroupRestoreFailed` only says why, and a member that fails on
@@ -1103,9 +1120,10 @@ barrier, and `Failed` keeps the first reason it receives:
 - `MemberFailed`, or the session's `CoordinatorLost`, `DeadlineExceeded`, or
   `Cancelled`, or a restore member's `PodIPChanged`, as soon as a member has
   failed and some member has started;
-- `Refused`, or a restore member's `GateBudgetTooShort` or `PodIPChanged`, only
-  once every member has reported its end and none has started, so these reasons
-  always mean that no workload was changed;
+- `Refused`, or the session's `CoordinatorLost`, `DeadlineExceeded`, or
+  `Cancelled`, or a restore member's `PodIPChanged`, only once every member has
+  reported its end and none has started, so in this case no workload was
+  changed;
 - `DeadlineExceeded` at the deadline, and `Cancelled` when the group is deleted
   before any member started;
 - `MemberFailed` when every member has ended in any other way, for instance
@@ -1156,15 +1174,20 @@ Pods and permission to create TokenReviews.
 ### Security
 
 No credential ever reaches a workload. Each agent connects to the coordinator's
-embedded NATS server over TLS, presenting an audience-scoped, Pod-bound
-ServiceAccount token together with the attempt and member it acts for. The
+embedded NATS server over TLS, starting with the handshake before any NATS
+protocol byte, presenting an audience-scoped, Pod-bound ServiceAccount token
+together with the attempt and member it acts for. The
 coordinator authenticates every connection in-process: the server's
 client-authentication hook calls the coordinator, which verifies the token with
 a TokenReview, checks that the member's Pod runs on the agent's node, and only
 then admits the connection, with permissions limited to that attempt's buckets
 and to the JetStream API operations that reading, watching, and writing them
-require. A connection therefore cannot reach another attempt's keys or the
-server's system events. The coordinator's own connection, which creates and
+require. For an attempt the coordinator no longer holds, it checks only the
+token and the ServiceAccount, so a member of a removed session connects and
+learns `CoordinatorLost`. These permissions keep an agent from mistakes, not a
+compromised agent: in the shared account, the reply subject of a request can
+still reach another attempt's keys. No connection reaches the server's system
+events. The coordinator's own connection, which creates and
 removes buckets and listens for disconnections, is made inside its process with
 a credential generated at startup that never leaves its memory, and no signing
 keys are issued or stored.
@@ -1174,8 +1197,9 @@ namespace: the cuInterpose relay reaches only the `cuinterpose` namespace, and w
 processes only the library bucket, because the agent is the component that
 knows which local client sent each request. The design relies on trusted agents
 for this, as it already does for running CRIU and entering workload namespaces;
-a compromised agent could act for the members on its own node, but not for
-members elsewhere or for other attempts. Inside a node, the per-Pod endpoint is
+every agent holds the same ServiceAccount, which can already patch any Pod, so
+the agents form one trust domain, and a compromised agent could act for any
+member of any attempt, which gives it nothing it lacks already. Inside a node, the per-Pod endpoint is
 reachable only from that Pod, so the endpoint itself identifies the caller, and
 workload processes can never forge cuInterpose commands or Snapshot barriers.
 
@@ -1183,15 +1207,24 @@ The data that crosses the session is small but sensitive, since fabric handles,
 communicator identifiers, and topology records could help an attacker reach
 another workload's memory or connections. It therefore exists only in the
 coordinator's memory for the lifetime of one session, because JetStream keeps
-the buckets' contents in memory only, and it is never written to disk, to etcd,
-to logs, or to checkpoint images; in addition, using a fabric handle still
+the data buckets in memory only, and it is never written to disk, to etcd, to
+logs, or to checkpoint images; only the control bucket, which holds membership,
+barrier arrivals, and how the session ended, goes to the coordinator's
+temporary directory, which it empties when it starts; in addition, using a fabric handle still
 requires access to the same fabric domain, which the platform grants per
 workload.
 
 The agent's privileges do not grow in kind, because it already enters workload
 namespaces, although it now also creates a loopback listener and narrow packet
-rules there, both of which it removes on every exit path. The coordinator needs
-no write access to the API. The operator gains one write on workload Pods, the
+rules there, both of which it removes on every exit path. The coordinator
+writes nothing to the API, but in alpha it runs as a container of the agent's
+Pod, non-root and with no capabilities, so it shares the agent's ServiceAccount
+and the host's network, PID, and IPC namespaces: code running in it could take
+over the privileged agent on every node, and reach the node's local services
+and any cloud metadata endpoint. Its pre-authentication path is therefore kept
+small, with the TLS handshake first and a token header checked before it is
+parsed, and a coordinator of its own, with its own ServiceAccount, remains an
+option for beta. The operator gains one write on workload Pods, the
 claim of a restore target, which writes its binding and its map and removes
 Snapshot's gate in one patch conditional on the Pod's `resourceVersion`, and
 only for Pods that a `PodGroupRestore` names and that carry the gate; the chart
@@ -1201,7 +1234,8 @@ whose number of keys and value size are small, and the server caps the memory of
 all sessions together and disconnects a client that stops reading, so a flood
 cannot exhaust the coordinator. Sessions do share that memory, however, so
 records forged through the workload's relay can make concurrent attempts fail
-until its own attempt ends ([Limitations, Risks, and
+until its own attempt ends, although those attempts still end promptly, since
+their control keys live outside that cap ([Limitations, Risks, and
 Mitigations](#limitations-risks-and-mitigations)). Pods that use the host
 network are refused unless their libraries use the Unix-socket endpoint, because
 their loopback interface is shared with the node.
@@ -1214,7 +1248,10 @@ value, off by default in alpha, that turns on the group controllers and the
 coordinator in every agent. The chart gains the coordinator's TLS and resource
 settings, together with the limits of its embedded NATS server, namely total
 memory, maximum message size, the value limits of each session's buckets, and
-the key limit of its library bucket, while the agent gains a switch for the
+the key limit of its library bucket; the coordinator refuses a total memory too
+small for the control keys of the largest group, and the chart sizes the
+coordinator's temporary directory from that same total, so the coordinator
+refuses a write before the kubelet would evict it. The agent gains a switch for the
 library endpoint. No NATS deployment is needed, since the server runs inside the
 coordinator, and a plain `PodSnapshot` needs no configuration change.
 
@@ -1256,7 +1293,7 @@ groups of 2 to 16 Pods, and larger groups are measured before beta.
 
 `PodGroupSnapshot` and `PodGroupRestore` report `Admitted`, `Released`, `Ready`,
 and `Failed` conditions, with reasons that distinguish `Refused`,
-`DeadlineExceeded`, `GateBudgetTooShort`, `PodIPChanged`,
+`DeadlineExceeded`, `PodIPChanged`,
 `TargetInUse`, `ArtifactUnavailable`, `MemberFailed`, `CoordinatorLost`, and
 `Cancelled`. Until the attempt commits, the reason of `Admitted` says what it
 waits for, such as `TargetPodUnscheduled` while a claimed target finds no node,
@@ -1446,9 +1483,8 @@ The Go definitions below cover every new public type. They reuse
 `PodSnapshotTemplateMetadata` unchanged, so a group member is described and
 configured exactly like a standalone capture, and their validation markers express the structural,
 immutability, and write-once rules that the API server enforces without a
-webhook. Cross-object and live checks, such as whether a target Pod exists or
-whether its startup probe has enough time left, stay with the controllers and
-agents. The operator is the only writer of both status blocks.
+webhook. Cross-object and live checks, such as whether a target Pod exists,
+stay with the controllers and agents. The operator is the only writer of both status blocks.
 
 ```go
 package v1alpha1
@@ -1458,10 +1494,16 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// Condition types. Released applies to PodGroupRestore only: it is True once
-// the release barrier completes, after which the attempt's outcome no longer
-// affects a released member. Ready is True once every member is Checkpointed,
-// or every member is Released.
+// PodGroupMaxDeadlineSeconds is the longest deadlineSeconds of either kind, a
+// day: the Maximum marker on both fields. A group restore target's startup
+// probe allows this many one-second failures.
+const PodGroupMaxDeadlineSeconds = 86400
+
+// Condition types. Admitted is True, with Committed, once the attempt commits,
+// which the operator sees as the first member's startedAt. Released applies to
+// PodGroupRestore only: it is True once the release barrier completes, after
+// which the attempt's outcome no longer affects a released member. Ready is
+// True once every member is Checkpointed, or every member is Released.
 const (
 	PodGroupConditionAdmitted = "Admitted"
 	PodGroupConditionReleased = "Released"
@@ -1481,7 +1523,6 @@ const PodSnapshotConditionStarted = "Started"
 const (
 	PodGroupReasonRefused             = "Refused"
 	PodGroupReasonDeadlineExceeded    = "DeadlineExceeded"
-	PodGroupReasonGateBudgetTooShort  = "GateBudgetTooShort"
 	PodGroupReasonPodIPChanged        = "PodIPChanged"
 	PodGroupReasonTargetInUse         = "TargetInUse"
 	PodGroupReasonTargetPodDeleted    = "TargetPodDeleted"
@@ -1495,8 +1536,9 @@ const (
 // operator waits for a source Pod to be scheduled, for a target Pod to exist,
 // for a claimed target Pod to be scheduled, then to have an address and a
 // destination container, for the agent on a member's node, or for the members
-// of an earlier group of the same name to be deleted, then for the members to
-// pass admission. Committed marks the first startedAt.
+// of an earlier group of the same name to be deleted, then for the agents'
+// admitted barrier. Committed marks the first startedAt, which shows the
+// commit.
 const (
 	PodGroupReasonSourcePodUnscheduled = "SourcePodUnscheduled"
 	PodGroupReasonTargetPodPending     = "TargetPodPending"
@@ -1620,6 +1662,7 @@ const (
 
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.podSnapshot) || (has(self.podSnapshot) && self.podSnapshot == oldSelf.podSnapshot)",message="podSnapshot is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.content) || (has(self.content) && self.content == oldSelf.content)",message="content is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.nodeName) || (has(self.nodeName) && self.nodeName == oldSelf.nodeName)",message="nodeName is write-once"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.startedAt) || (has(self.startedAt) && self.startedAt == oldSelf.startedAt)",message="startedAt is write-once"
 // +kubebuilder:validation:XValidation:rule="!(oldSelf.phase in ['Checkpointed', 'Failed']) || self.phase == oldSelf.phase",message="final phases are immutable"
 type PodGroupSnapshotMemberStatus struct {
@@ -1733,8 +1776,8 @@ type PodGroupRestoreTarget struct {
 type PodGroupRestoreSpec struct {
 	SnapshotRef ObjectIdentity `json:"snapshotRef"`
 	// DeadlineSeconds bounds the restore, counted from creation, to at most
-	// a day. Admission refuses targets whose startup probe cannot cover what
-	// remains of it.
+	// a day, PodGroupMaxDeadlineSeconds, which a group target's startup probe
+	// allows.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=86400
 	DeadlineSeconds int64 `json:"deadlineSeconds"`
@@ -1921,7 +1964,7 @@ const (
 
 	// GroupRestoreFailedCondition is set to True on a group restore Pod whose
 	// member fails for a reason of the group: the session's reason, or one of
-	// the agent's group checks such as PodIPChanged or GateBudgetTooShort. The
+	// the agent's group checks such as PodIPChanged. The
 	// agent sets it in the same status update as nvidia.com/Restored, which
 	// stays the only signal that the member failed. A member that fails on its
 	// own leaves it unset.
