@@ -461,6 +461,47 @@ func countJoins(w *NodeController) *atomic.Int32 {
 	return joins
 }
 
+func TestGroupRestoreReportsEveryPreflightFailure(t *testing.T) {
+	for name, tc := range map[string]struct {
+		// target returns the Pod to serve, which it adds to rg's Pods.
+		target func(*testing.T, *restoreGroup) *corev1.Pod
+		want   string
+	}{
+		"a claimed Pod that its PodGroupRestore has no target for": {
+			target: func(t *testing.T, rg *restoreGroup) *corev1.Pod {
+				rg.pods = append(rg.pods, groupTarget(t, "stranger", "10.1.0.9"))
+				return rg.pods[len(rg.pods)-1]
+			},
+			want: "has no target for it",
+		},
+		"a Pod that is not Pending or Running": {
+			target: func(_ *testing.T, rg *restoreGroup) *corev1.Pod {
+				rg.pods[0].Status.Phase = corev1.PodSucceeded
+				return rg.pods[0]
+			},
+			want: "expected Pending or Running",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rg := newRestoreGroup(t)
+			pod := tc.target(t, rg)
+			restoreFn := &memberRestore{}
+			w, _, _ := groupRestoreController(t, nil, rg, restoreFn.fn)
+			joins := countJoins(w)
+
+			assert.False(t, serveTarget(t, w, pod))
+
+			restored := podCondition(t, w, pod.Name, podcontract.RestoredCondition)
+			require.NotNil(t, restored, "the failure is reported on the Pod, as every preflight failure is")
+			assert.Equal(t, corev1.ConditionFalse, restored.Status)
+			assert.Equal(t, podcontract.RestoreReasonFailed, restored.Reason)
+			assert.Contains(t, restored.Message, tc.want)
+			assert.Empty(t, restoreFn.steps())
+			assert.Zero(t, joins.Load())
+		})
+	}
+}
+
 // failReads makes w's reads of one kind fail with the error that fail
 // returns for it, while fail returns one.
 func failReads(w *NodeController, fail func(client.Object) error) {

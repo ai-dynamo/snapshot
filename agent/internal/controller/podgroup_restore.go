@@ -325,7 +325,7 @@ func (w *NodeController) processGroupRestorePod(ctx context.Context, pod *corev1
 	}
 	member, err := w.restoreMemberOf(pod, claim)
 	if err != nil {
-		return w.finishGroupRestore(ctx, log, pod, failedOutcome(nil, pod, "", err)) != nil
+		return w.handleGroupPreflightError(ctx, log, pod, nil, err)
 	}
 	if member == nil {
 		w.reportGroupPending(ctx, log, pod, nil, fmt.Sprintf("Waiting for PodGroupRestore %s, which claims this Pod", claim.UID))
@@ -336,8 +336,8 @@ func (w *NodeController) processGroupRestorePod(ctx context.Context, pod *corev1
 		return w.recoverStartedGroupRestore(ctx, log, pod, member)
 	}
 	if !isRestorePodActive(pod) {
-		return w.finishGroupRestore(ctx, log, pod, failedOutcome(member, pod, "",
-			fmt.Errorf("pod %s/%s is not eligible for restore in phase %s; expected Pending or Running", pod.Namespace, pod.Name, pod.Status.Phase))) != nil
+		return w.handleGroupPreflightError(ctx, log, pod, member,
+			fmt.Errorf("pod %s/%s is not eligible for restore in phase %s; expected Pending or Running", pod.Namespace, pod.Name, pod.Status.Phase))
 	}
 	if member.pin == nil {
 		w.reportGroupPending(ctx, log, pod, member, fmt.Sprintf("Waiting for PodGroupRestore %s to pin this Pod", member.restore.Name))
