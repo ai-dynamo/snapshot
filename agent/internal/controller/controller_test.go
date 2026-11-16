@@ -702,6 +702,46 @@ func TestRestorePodContainersKeepsAggregateInProgressWhileDestinationIsPending(t
 	assert.Contains(t, payload, "1 pending")
 }
 
+// Two destinations that fail in the same pass land in one write, after the
+// workers return, and a pass that changes nothing writes nothing.
+func TestRestorePodContainersPublishesTheRetryStatusOncePerPass(t *testing.T) {
+	pod := multiRestorePod()
+	pod.Annotations[podcontract.RestoreRetryLimitAnnotation] = "2"
+	w := makeTestController(t, pod)
+	w.config.Restore.TimeoutSeconds = 600
+	w.runtime = &fakeRuntime{resolveContainerPID: 4242, podUID: "host-uid"}
+	volume := newFakeControlVolume(w)
+	w.restoreFn = func(_ context.Context, _ snapshotruntime.Runtime, _ logr.Logger, req executor.RestoreRequest, _ executor.RestoreMounter) (executor.RestoreResult, error) {
+		if req.DestinationContainerName == "engine-0" {
+			return executor.RestoreResult{}, untouched(storeUnreachable)
+		}
+		return executor.RestoreResult{}, changedByCRIU
+	}
+	h := &retryStatusHarness{w: w, pod: pod, volume: volume}
+	plan := &restorePlan{
+		artifact: &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"},
+		mappings: []podcontract.ContainerMapping{{Source: "main", Destination: "engine-0"}, {Source: "main", Destination: "engine-1"}},
+	}
+
+	assert.True(t, w.restorePodContainers(context.Background(), pod, plan, "inference/restore-worker"))
+
+	applies := h.applies()
+	require.Len(t, applies, 1)
+	value, status := appliedRetryStatus(t, applies[0])
+	assert.Equal(t, podcontract.RestoreRetryStatus{
+		"engine-0": {Attempt: 1, RetryLimit: 2, LastFailure: podcontract.FailureSummary{Step: "preparing PageBroker restore", Cause: "PageBroker STORAGE_UNAVAILABLE: store unreachable"}},
+		"engine-1": {Attempt: 1, RetryLimit: 2, LastFailure: podcontract.FailureSummary{Step: "restoring with CRIU", Cause: "criu restore failed"}},
+	}, status)
+
+	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	// The fake clientset lets the later status apply by the same field manager
+	// drop the annotation; an API server tracks the two apart.
+	live.Annotations[podcontract.RestoreRetryStatusAnnotation] = value
+	assert.True(t, w.restorePodContainers(context.Background(), live, plan, "inference/restore-worker"))
+	assert.Len(t, h.applies(), 1, "a pass that only waited wrote the retry status again")
+}
+
 func TestLogWithStepAddsTheStepKeyOnlyWhenNamed(t *testing.T) {
 	var lines []string
 	log := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{})
