@@ -109,8 +109,8 @@ var podGroupRestoreKind = podGroupKind{
 	deadlineMemberMessage:  podGroupRestoreDeadlineMemberMessage,
 	cancelledMemberMessage: podGroupRestoreCancelledMemberMessage,
 	cancelledMessage:       podGroupRestoreCancelledMessage,
-	committedMessage:       "every member passed admission, and the restore has started",
-	admittingMessage:       "every member is pinned to its restore Pod; waiting for every member to pass admission",
+	committedMessage:       "the agents passed their admitted barrier, and the restore has started",
+	admittingMessage:       "every member is pinned to its restore Pod; waiting for the agents to pass their admitted barrier",
 }
 
 // derivePodGroupRestoreStatus computes a PodGroupRestore's status from its

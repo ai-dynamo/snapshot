@@ -692,7 +692,7 @@ func TestPodGroupRestoreReconciler_Lifecycle(t *testing.T) {
 	got = getRestore(t, r)
 	assert.Equal(t, snapshotv1alpha1.RestorePhaseRestoring, got.Status.Members[1].Phase)
 	assert.Equal(t, pgStartedAt.Unix(), got.Status.Members[1].StartedAt.Unix())
-	assert.Equal(t, []string{"Normal Committed every member passed admission, and the restore has started"}, drainEvents(recorder))
+	assert.Equal(t, []string{"Normal Committed the agents passed their admitted barrier, and the restore has started"}, drainEvents(recorder))
 	restartChecks("committed")
 
 	rgReport(t, r, "a", prStarted, prReleased)
@@ -1090,7 +1090,7 @@ func TestPodGroupRestoreReconciler_ConfirmsACancellation(t *testing.T) {
 	assert.Contains(t, got.Finalizers, snapshotv1alpha1.PodGroupInUseFinalizer)
 	assert.Nil(t, rgCondition(got.Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed), "not cancelled")
 	assert.Equal(t, snapshotv1alpha1.RestorePhaseRestoring, got.Status.Members[0].Phase)
-	assert.Equal(t, []string{"Normal Committed every member passed admission, and the restore has started"}, drainEvents(recorder))
+	assert.Equal(t, []string{"Normal Committed the agents passed their admitted barrier, and the restore has started"}, drainEvents(recorder))
 }
 
 // TestPodGroupRestoreReconciler_RecordsNothingWhenTheLiveReadFails: at the
