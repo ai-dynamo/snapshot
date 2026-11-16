@@ -259,12 +259,17 @@ func TestPodGroupSnapshotReconciler_RefusesAnEndedSourcePod(t *testing.T) {
 		mutate func(pod *corev1.Pod)
 		want   string
 	}{
-		{"succeeded", func(pod *corev1.Pod) { pod.Status.Phase = corev1.PodSucceeded }, `pod "pod-b" is Succeeded`},
-		{"failed", func(pod *corev1.Pod) { pod.Status.Phase = corev1.PodFailed }, `pod "pod-b" is Failed`},
+		{"succeeded", func(pod *corev1.Pod) { pod.Status.Phase = corev1.PodSucceeded }, `source Pod "pod-b" is Succeeded`},
+		{"failed", func(pod *corev1.Pod) { pod.Status.Phase = corev1.PodFailed }, `source Pod "pod-b" is Failed`},
 		{"being deleted", func(pod *corev1.Pod) {
 			pod.DeletionTimestamp = ptr.To(metav1.Now())
 			pod.Finalizers = []string{"test/hold"}
-		}, `pod "pod-b" is being deleted`},
+		}, `source Pod "pod-b" is being deleted`},
+		{"being deleted before it is scheduled", func(pod *corev1.Pod) {
+			pod.Spec.NodeName = ""
+			pod.DeletionTimestamp = ptr.To(metav1.Now())
+			pod.Finalizers = []string{"test/hold"}
+		}, `source Pod "pod-b" is being deleted`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pod := pgSourcePod("b", "node-1")
@@ -279,7 +284,7 @@ func TestPodGroupSnapshotReconciler_RefusesAnEndedSourcePod(t *testing.T) {
 			failed := groupCondition(t, getGroup(t, r), snapshotv1alpha1.PodGroupConditionFailed)
 			require.NotNil(t, failed)
 			assert.Equal(t, snapshotv1alpha1.PodGroupReasonRefused, failed.Reason)
-			assert.Equal(t, `member "b": `+errPodSnapshotSourcePodEnded.Error()+": "+tc.want, failed.Message)
+			assert.Equal(t, `member "b": `+tc.want, failed.Message)
 		})
 	}
 }

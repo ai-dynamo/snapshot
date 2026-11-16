@@ -28,7 +28,8 @@ import (
 //  2. no PodSnapshot holds a member's name, except this group's own, or one an
 //     earlier PodGroupSnapshot of the same name left, which admission waits
 //     for garbage collection to remove;
-//  3. every source Pod exists with the pinned UID;
+//  3. every source Pod exists with the pinned UID, and has neither finished
+//     nor begun to be deleted (sourcePodEnded);
 //  4. every source Pod is scheduled, or admission waits;
 //  5. the agent on every member's node is ready for groups, or admission waits.
 //
@@ -80,9 +81,13 @@ func (r *PodGroupSnapshotReconciler) admit(ctx context.Context, reader client.Re
 			}
 			return podGroupAdmission{}, fmt.Errorf("get source Pod %q of member %q: %w", ref.Name, member.ID, err)
 		}
-		switch err := validateSourcePod(ref, pod); {
-		case errors.Is(err, errPodSnapshotStalePodRef), errors.Is(err, errPodSnapshotSourcePodEnded):
+		err := validateSourcePod(ref, pod)
+		ended := sourcePodEnded(pod)
+		switch {
+		case errors.Is(err, errPodSnapshotStalePodRef):
 			return podGroupRefusal(fmt.Sprintf("member %q: %v", member.ID, err)), nil
+		case ended != nil:
+			return podGroupRefusal(fmt.Sprintf("member %q: %v", member.ID, ended)), nil
 		case errors.Is(err, errPodSnapshotPodUnscheduled):
 			unscheduled = append(unscheduled, fmt.Sprintf("member %q: source Pod %q is not scheduled to a node yet", member.ID, ref.Name))
 		case err != nil:
@@ -106,6 +111,21 @@ func (r *PodGroupSnapshotReconciler) admit(ctx context.Context, reader client.Re
 		return *wait, nil
 	}
 	return podGroupAdmission{state: podGroupAdmissionPassed}, nil
+}
+
+// sourcePodEnded returns why pod can never be checkpointed: it has finished,
+// Succeeded or Failed, or it is being deleted. It returns nil for a Pod that
+// may still run. Admission alone makes this check, before any member work
+// exists. The PodSnapshot controller does not: a content it created before its
+// source Pod ended may still hold the checkpoint.
+func sourcePodEnded(pod *corev1.Pod) error {
+	switch {
+	case pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed:
+		return fmt.Errorf("source Pod %q is %s", pod.Name, pod.Status.Phase)
+	case pod.DeletionTimestamp != nil:
+		return fmt.Errorf("source Pod %q is being deleted", pod.Name)
+	}
+	return nil
 }
 
 // podGroupSnapshotSpecRefusal makes the spec checks that the CRD cannot, and

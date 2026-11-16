@@ -66,10 +66,6 @@ var errPodSnapshotPodUnscheduled = errors.New("source pod is not yet scheduled t
 // terminal mismatch, not a retryable condition.
 var errPodSnapshotStalePodRef = errors.New("source pod UID does not match the pinned PodSnapshot source")
 
-// errPodSnapshotSourcePodEnded signals the live pod has finished or is being deleted, so it can no
-// longer be checkpointed: a terminal refusal, like a stale reference.
-var errPodSnapshotSourcePodEnded = errors.New("source pod has ended")
-
 // errContentConflict marks an existing PodSnapshotContent that does not belong to this PodSnapshot.
 var errContentConflict = errors.New("existing PodSnapshotContent belongs to another PodSnapshot")
 
@@ -316,9 +312,6 @@ func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap 
 		if errors.Is(err, errPodSnapshotStalePodRef) {
 			return sr.failPodSnapshot(ctx, snap, "StalePodReference", err)
 		}
-		if errors.Is(err, errPodSnapshotSourcePodEnded) {
-			return sr.failPodSnapshot(ctx, snap, podSnapshotReasonSourcePodGone, err)
-		}
 		return ctrl.Result{}, fmt.Errorf("validate source pod: %w", err)
 	}
 	if annotation := sr.TestFailureAnnotation; annotation != "" && pod.Annotations[annotation] == "true" {
@@ -371,20 +364,13 @@ func (sr *PodSnapshotReconciler) getSourcePod(ctx context.Context, snap *snapsho
 }
 
 // validateSourcePod requires the pod, when the source reference pins a pod UID, to match it
-// (rejecting a same-named recreation), to be running or pending rather than Succeeded, Failed or
-// being deleted, and to be scheduled. It returns one of three sentinels: errPodSnapshotStalePodRef
-// or errPodSnapshotSourcePodEnded (terminal), or errPodSnapshotPodUnscheduled (pending). The UID
-// check comes first: a stale reference is terminal whether or not the replacement ever ends or
-// schedules. PodGroupSnapshot admission applies the same checks to each member's source.
+// (rejecting a same-named recreation), and to be scheduled. It returns one of two sentinels:
+// errPodSnapshotStalePodRef (terminal) or errPodSnapshotPodUnscheduled (pending). The UID check
+// comes first: a stale reference is terminal whether or not the replacement ever schedules.
+// PodGroupSnapshot admission applies the same checks to each member's source.
 func validateSourcePod(ref snapshotv1alpha1.PodReference, pod *corev1.Pod) error {
 	if wantUID := ref.UID; wantUID != "" && pod.UID != wantUID {
 		return fmt.Errorf("%w: live pod %q UID %q, want %q", errPodSnapshotStalePodRef, pod.Name, pod.UID, wantUID)
-	}
-	switch {
-	case pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed:
-		return fmt.Errorf("%w: pod %q is %s", errPodSnapshotSourcePodEnded, pod.Name, pod.Status.Phase)
-	case pod.DeletionTimestamp != nil:
-		return fmt.Errorf("%w: pod %q is being deleted", errPodSnapshotSourcePodEnded, pod.Name)
 	}
 	if pod.Spec.NodeName == "" {
 		return errPodSnapshotPodUnscheduled
