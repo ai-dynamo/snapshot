@@ -203,6 +203,61 @@ pageBroker:
       cpu: 32
       memory: 256Gi
 
+# The coordinator of pod groups: a container in each agent Pod that holds the
+# coordination sessions of the groups whose rank-0 member runs on its node. It
+# runs as non-root with no capabilities, but shares the agent's ServiceAccount
+# and the host's namespaces. Deployed only with podGroups.enabled.
+coordinator:
+  # The port agents connect to, over TLS. The agent Pod uses the host's
+  # network, so it is a port on the node's IP.
+  port: 4224
+  # The port of the health endpoint the probes read, /healthz and /readyz, also
+  # on the node's IP.
+  healthPort: 4225
+  # The memory, in bytes, that every session's data shares. A group's writes
+  # fail once it is full. Keep resources.limits.memory at about twice this. The
+  # coordinator refuses to start with less than a group of 256 members needs,
+  # about 8 MiB. It also bounds the control buckets' file store in the
+  # coordinator's /tmp, an emptyDir on node disk sized to this plus 64 MiB.
+  maxMemoryBytes: 1073741824
+  # The largest value, in bytes, an agent may write to a session.
+  maxValueBytes: 33554432
+  # The largest value, in bytes, a communication library may write to a session.
+  maxLibraryValueBytes: 4096
+  # How many keys communication libraries may write to a session, deleted ones
+  # included.
+  maxLibraryKeys: 4096
+  # The Go runtime takes limits.memory as its soft memory limit, GOMEMLIMIT, so
+  # it collects garbage as the heap nears it. At about twice maxMemoryBytes, the
+  # sessions' live data stays well below it. Without a memory limit, GOMEMLIMIT
+  # is the node's allocatable memory, and does nothing.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 2Gi
+  # The coordinator serves tls.crt and tls.key, and agents trust the CA bundle
+  # ca.crt for serverName. By default the operator issues all three under a
+  # private CA, in the release's namespace. To bring your own, for example from
+  # cert-manager and trust-manager, set serving.secretName and one trust
+  # source; that turns the operator's issuer off.
+  tls:
+    serving:
+      # A kubernetes.io/tls Secret in the release's namespace, with tls.crt and
+      # tls.key. Its certificate must name serverName as a DNS name.
+      secretName: ""
+    # The CA bundle agents trust: exactly one of a ConfigMap and a Secret in the
+    # release's namespace, and the key that holds the bundle.
+    trust:
+      configMapName: ""
+      secretName: ""
+      key: ca.crt
+    # The name agents verify the serving certificate against, never resolved.
+    # Set it only with your own serving Secret. Empty is
+    # <release fullname>-coordinator.<namespace>.
+    serverName: ""
+
 # DaemonSet configuration for the checkpoint/restore agent
 daemonset:
   # Agent and nsrestore log level (trace, debug, info, warn, error)
@@ -381,3 +436,9 @@ config:
     libDir: "/usr/local/lib/snapshot/criu-plugins"
     allowUprobes: true             # Leave enabled for kernel/userspace probe compatibility
     skipInFlight: true             # Skip in-flight TCP connections
+
+# Alpha: pod groups (SNEP-324), which checkpoint a group of cooperating Pods
+# together and restore it. The chart installs what pod groups need only when
+# this is true.
+podGroups:
+  enabled: false

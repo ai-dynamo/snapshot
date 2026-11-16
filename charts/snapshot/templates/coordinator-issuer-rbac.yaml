@@ -1,0 +1,49 @@
+{{- if and .Values.rbac.create .Values.podGroups.enabled (include "snapshot.coordinatorBuiltInIssuer" .) }}
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The operator's built-in issuer of the coordinator's TLS certificate writes
+# three resources in the release's namespace: the CA Secret, the serving Secret
+# and the trust bundle ConfigMap. Left out when coordinator.tls brings your own.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "snapshot.fullname" . }}-operator-coordinator-tls
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "snapshot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    # Top-level "create" cannot be scoped by resourceNames.
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames:
+      - {{ include "snapshot.coordinatorCASecretName" . | quote }}
+      - {{ include "snapshot.coordinatorTLSSecretName" . | quote }}
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames:
+      - {{ include "snapshot.coordinatorCABundleName" . | quote }}
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "snapshot.fullname" . }}-operator-coordinator-tls
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "snapshot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "snapshot.fullname" . }}-operator-coordinator-tls
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "snapshot.operatorServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
