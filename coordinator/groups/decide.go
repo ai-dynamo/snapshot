@@ -63,10 +63,10 @@ const recheck = 5 * time.Second
 //	none    otherwise
 //
 // cancel and fail end the session through server.Server.FailUncommitted:
-// cancel with session.ReasonCancelled, fail with the reason of the first Failed
-// member, or session.ReasonMemberFailed if it records none. The server leaves
-// the session open once every member has arrived at the admitted barrier,
-// since members may then have started.
+// cancel with session.ReasonCancelled, fail with session.ReasonRefused, the
+// reason every member reports; the Failed member's own reason stays in its
+// status. The server leaves the session open once every member has arrived at
+// the admitted barrier, since members may then have started.
 //
 // A final attempt whose session is still open is looked at again after
 // recheck, or at its deadline if that is sooner. Ensure never revives a
@@ -90,7 +90,7 @@ func decide(a *attempt, node string, h held, now time.Time) (action, time.Durati
 	switch {
 	case a.deleting && open:
 		return cancel, again
-	case a.failure != "" && open:
+	case a.failed && open:
 		return fail, again
 	case !a.ensurable:
 		return none, again

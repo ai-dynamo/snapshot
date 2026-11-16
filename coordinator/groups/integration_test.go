@@ -735,7 +735,7 @@ func TestDeletion(t *testing.T) {
 
 // TestMemberFailed covers a group resource of either kind whose status shows
 // a Failed member: before every member has arrived at the admitted barrier,
-// its session fails with the member's reason, so the peers waiting there
+// its session fails with session.ReasonRefused, so the peers waiting there
 // learn it at once instead of at the deadline; afterwards, it stays open.
 func TestMemberFailed(t *testing.T) {
 	names := nodes(t, 1)
@@ -758,7 +758,7 @@ func TestMemberFailed(t *testing.T) {
 		g.Status.Members[1].Phase = v1alpha1.CheckpointPhaseFailed
 		g.Status.Members[1].Reason = v1alpha1.ReasonPodSnapshotDeleted
 		require.NoError(t, k8s.Status().Update(within(t), g))
-		require.ErrorIs(t, <-arrived, &session.AbortError{Reason: v1alpha1.ReasonPodSnapshotDeleted})
+		require.ErrorIs(t, <-arrived, &session.AbortError{Reason: session.ReasonRefused})
 	})
 
 	t.Run("a restore, before the admitted barrier completes", func(t *testing.T) {
@@ -768,7 +768,7 @@ func TestMemberFailed(t *testing.T) {
 		r.Status.Members[1].Phase = v1alpha1.RestorePhaseFailed
 		r.Status.Members[1].Reason = v1alpha1.PodGroupReasonTargetPodDeleted
 		require.NoError(t, k8s.Status().Update(within(t), r))
-		require.ErrorIs(t, <-arrived, &session.AbortError{Reason: v1alpha1.PodGroupReasonTargetPodDeleted})
+		require.ErrorIs(t, <-arrived, &session.AbortError{Reason: session.ReasonRefused})
 	})
 
 	t.Run("a member that failed before its session opened", func(t *testing.T) {
@@ -782,8 +782,7 @@ func TestMemberFailed(t *testing.T) {
 		g.Status.Members[1].Reason = v1alpha1.ReasonPodSnapshotDeleted
 		require.NoError(t, k8s.Status().Update(within(t), g), "member work and the failure in one change")
 		h.awaitHeld(t, g.UID, true)
-		require.ErrorIs(t, awaitEnd(t, h.connect(t, g.UID, "a")),
-			&session.AbortError{Reason: v1alpha1.ReasonPodSnapshotDeleted})
+		require.ErrorIs(t, awaitEnd(t, h.connect(t, g.UID, "a")), &session.AbortError{Reason: session.ReasonRefused})
 	})
 
 	t.Run("once it has completed, the session stays open", func(t *testing.T) {
@@ -795,7 +794,7 @@ func TestMemberFailed(t *testing.T) {
 		g.Status.Members[1].Phase = v1alpha1.CheckpointPhaseFailed
 		g.Status.Members[1].Reason = v1alpha1.ReasonPodSnapshotDeleted
 		require.NoError(t, k8s.Status().Update(within(t), g))
-		h.awaitReconciled(t, g, func(a *attempt) bool { return a.failure != "" })
+		h.awaitReconciled(t, g, func(a *attempt) bool { return a.failed })
 		h.requireNotEnded(t, g.UID)
 	})
 }

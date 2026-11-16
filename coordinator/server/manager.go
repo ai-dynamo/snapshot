@@ -540,10 +540,10 @@ func (s *Server) Remove(ctx context.Context, uid types.UID) error {
 // valid condition reason, unless every member has arrived at
 // session.BarrierAdmitted, which commits the attempt. The host fails a session
 // this way before the commit: with session.ReasonCancelled once its group
-// resource's deletion has started, and with a member's reason once that member
-// has failed. It is best effort: members decide on their own that the barrier
-// is complete, so a member that saw it complete just before FailUncommitted
-// read the arrivals can still start. The commit is final: once
+// resource's deletion has started, and with session.ReasonRefused once one of
+// its members has failed. It is best effort: members decide on their own that
+// the barrier is complete, so a member that saw it complete just before
+// FailUncommitted read the arrivals can still start. The commit is final: once
 // FailUncommitted has seen it, it leaves the session open from then on, even if
 // an arrival is deleted. FailUncommitted returns nil once the session has
 // ended, however it ended, and when it leaves a committed session open. It

@@ -128,29 +128,24 @@ func TestCaptureAttempt(t *testing.T) {
 	for _, tt := range []struct {
 		name     string
 		statuses []v1alpha1.PodGroupSnapshotMemberStatus
-		failure  string
+		failed   bool
 	}{
 		{"no member failed", []v1alpha1.PodGroupSnapshotMemberStatus{
 			{ID: "a", Phase: v1alpha1.CheckpointPhaseCheckpointing},
 			{ID: "b", Phase: v1alpha1.CheckpointPhaseCheckpointed},
-		}, ""},
-		{"the first failed member in rank order", []v1alpha1.PodGroupSnapshotMemberStatus{
-			{ID: "c", Phase: v1alpha1.CheckpointPhaseFailed, Reason: "Refused"},
-			{ID: "b", Phase: v1alpha1.CheckpointPhaseFailed, Reason: "PodSnapshotDeleted"},
-		}, "PodSnapshotDeleted"},
-		{"the first failed member records no reason", []v1alpha1.PodGroupSnapshotMemberStatus{
-			{ID: "a", Phase: v1alpha1.CheckpointPhaseFailed},
-			{ID: "c", Phase: v1alpha1.CheckpointPhaseFailed, Reason: "Refused"},
-		}, session.ReasonMemberFailed},
-		{"the only failed member records no reason", []v1alpha1.PodGroupSnapshotMemberStatus{
+		}, false},
+		{"a member failed", []v1alpha1.PodGroupSnapshotMemberStatus{
 			{ID: "a", Phase: v1alpha1.CheckpointPhaseCheckpointing},
-			{ID: "b", Phase: v1alpha1.CheckpointPhaseFailed},
-		}, session.ReasonMemberFailed},
+			{ID: "b", Phase: v1alpha1.CheckpointPhaseFailed, Reason: "PodSnapshotDeleted"},
+		}, true},
+		{"a failed member that records no reason", []v1alpha1.PodGroupSnapshotMemberStatus{
+			{ID: "c", Phase: v1alpha1.CheckpointPhaseFailed},
+		}, true},
 	} {
-		t.Run("failure: "+tt.name, func(t *testing.T) {
+		t.Run("failed: "+tt.name, func(t *testing.T) {
 			g := newSnapshot("snapshot-uid", "a", "b", "c")
 			g.Status.Members = tt.statuses
-			assert.Equal(t, tt.failure, captureAttempt(g).failure)
+			assert.Equal(t, tt.failed, captureAttempt(g).failed)
 		})
 	}
 }
@@ -218,7 +213,7 @@ func TestRestoreAttempt(t *testing.T) {
 			assert.True(t, a.memberWork)
 			assert.True(t, a.final)
 			assert.True(t, a.deleting)
-			assert.Equal(t, "PodIPChanged", a.failure, "c comes first in spec.targets")
+			assert.True(t, a.failed)
 		})
 	}
 
@@ -271,26 +266,29 @@ func TestRestoreAttempt(t *testing.T) {
 		assert.True(t, a.deleting)
 	})
 
-	t.Run("failure: the first failed member in the PodGroupSnapshot's rank order", func(t *testing.T) {
-		r := newRestore(snapshot, "c", "b", "a")
-		r.Status.Members = []v1alpha1.PodGroupRestoreMemberStatus{
-			{ID: "c", Phase: v1alpha1.RestorePhaseFailed, Reason: "PodIPChanged"},
-			{ID: "b", Phase: v1alpha1.RestorePhaseRestoring},
-			{ID: "a", Phase: v1alpha1.RestorePhaseFailed, Reason: "TargetPodDeleted"},
-		}
-		a, ok := restoreAttempt(r, snapshot)
-		require.True(t, ok)
-		assert.Equal(t, "TargetPodDeleted", a.failure, "a ranks before c, which comes first in spec.targets")
-	})
-
-	t.Run("failure: a failed member that records no reason", func(t *testing.T) {
-		r := newRestore(snapshot, "a", "b", "c")
-		r.Status.Members = []v1alpha1.PodGroupRestoreMemberStatus{
+	for _, tt := range []struct {
+		name     string
+		statuses []v1alpha1.PodGroupRestoreMemberStatus
+		failed   bool
+	}{
+		{"no member failed", []v1alpha1.PodGroupRestoreMemberStatus{
 			{ID: "a", Phase: v1alpha1.RestorePhaseRestoring},
-			{ID: "c", Phase: v1alpha1.RestorePhaseFailed},
-		}
-		a, ok := restoreAttempt(r, snapshot)
-		require.True(t, ok)
-		assert.Equal(t, session.ReasonMemberFailed, a.failure)
-	})
+			{ID: "b", Phase: v1alpha1.RestorePhaseReleased},
+		}, false},
+		{"a member failed", []v1alpha1.PodGroupRestoreMemberStatus{
+			{ID: "b", Phase: v1alpha1.RestorePhaseRestoring},
+			{ID: "c", Phase: v1alpha1.RestorePhaseFailed, Reason: "PodIPChanged"},
+		}, true},
+		{"a failed member that records no reason", []v1alpha1.PodGroupRestoreMemberStatus{
+			{ID: "a", Phase: v1alpha1.RestorePhaseFailed},
+		}, true},
+	} {
+		t.Run("failed: "+tt.name, func(t *testing.T) {
+			r := newRestore(snapshot, "a", "b", "c")
+			r.Status.Members = tt.statuses
+			a, ok := restoreAttempt(r, snapshot)
+			require.True(t, ok)
+			assert.Equal(t, tt.failed, a.failed)
+		})
+	}
 }

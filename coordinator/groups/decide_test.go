@@ -27,7 +27,7 @@ func TestDecide(t *testing.T) {
 	}
 	final := func(a *attempt) { a.final = true }
 	deleting := func(a *attempt) { a.deleting = true }
-	failed := func(a *attempt) { a.failure = "PodIPChanged" }
+	failed := func(a *attempt) { a.failed = true }
 	// unranked is a restore whose PodGroupSnapshot is gone.
 	unranked := func(a *attempt) { a.ensurable = false }
 	both := func(changes ...func(*attempt)) func(*attempt) {
