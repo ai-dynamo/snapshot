@@ -451,6 +451,8 @@ jobs:
       - name: Collect diagnostics
         if: ${{ failure() && steps.selected.outputs.run == 'true' }}
         timeout-minutes: 5
+        env:
+          KUBECONFIG: ${{ env.SNAPSHOT_E2E_TARGET_KUBECONFIG }}
         run: |
           set +e
           out="${RUNNER_TEMP}/diagnostics"

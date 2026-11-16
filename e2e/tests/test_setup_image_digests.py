@@ -34,6 +34,10 @@ def status(name: str, image: str, digest: str) -> client.V1ContainerStatus:
 def pod(name: str, *statuses, init=()) -> client.V1Pod:
     return client.V1Pod(
         metadata=client.V1ObjectMeta(name=name),
+        spec=client.V1PodSpec(
+            containers=[client.V1Container(name=item.name, image=item.image) for item in statuses],
+            init_containers=[client.V1Container(name=item.name, image=item.image) for item in init],
+        ),
         status=client.V1PodStatus(
             container_statuses=list(statuses),
             init_container_statuses=list(init),
@@ -194,10 +198,15 @@ def descriptor(digest, arch="amd64", **extra):
             "platform": {"os": "linux", "architecture": arch}, **extra}
 
 
-def verify_pagebroker(monkeypatch, recorded, actual):
+def verify_pagebroker(monkeypatch, recorded, actual, *, status_image=None, runtime_reference=None):
     pods = running(pagebroker=actual)
     for item in pods:
-        item.spec = client.V1PodSpec(containers=[], node_name="worker")
+        item.spec.node_name = "worker"
+    pagebroker = pods[-1].status.container_statuses[-1]
+    if status_image is not None:
+        pagebroker.image = status_image
+    if runtime_reference is not None:
+        pagebroker.image_id = runtime_reference
     monkeypatch.setattr(client.CoreV1Api, "list_namespaced_pod", lambda *args, **kwargs: client.V1PodList(items=pods))
     setup.verify_running_images(namespace="test", release="snapshot", expected={**EXPECTED, "pagebroker": recorded})
 
@@ -215,14 +224,57 @@ def test_different_provenance_indexes_with_the_same_platform_image_pass(monkeypa
     assert not any(url.endswith(OPERATOR) or url.endswith(AGENT) for url in calls)
 
 
-def test_different_runnable_content_still_fails(monkeypatch, registry):
+@pytest.mark.parametrize("mirrored", [False, True])
+def test_different_runnable_content_still_fails(monkeypatch, registry, mirrored):
     register, _, _ = registry
     first = register({"mediaType": MANIFEST, "layers": [{"digest": OPERATOR}]})
     second = register({"mediaType": MANIFEST, "layers": [{"digest": AGENT}]})
     old = register({"mediaType": INDEX, "manifests": [descriptor(first)]})
     new = register({"mediaType": INDEX, "manifests": [descriptor(second)]})
     with pytest.raises(setup.SetupError, match="runs pagebroker"):
-        verify_pagebroker(monkeypatch, new, old)
+        verify_pagebroker(
+            monkeypatch, new, old,
+            status_image="dynamoci.azurecr.io/stale/other-image:old" if mirrored else None,
+            runtime_reference=f"dynamoci.azurecr.io/mirror/pagebroker@{old}" if mirrored else None,
+        )
+
+
+@pytest.mark.parametrize("runtime_kind", ["mirror", "bare", "docker-pullable"])
+def test_mirrored_status_names_resolve_content_from_the_desired_repository(monkeypatch, registry, runtime_kind):
+    register, _, calls = registry
+    image = register({"mediaType": MANIFEST, "layers": [{"digest": AGENT}]})
+    old = register({"mediaType": INDEX, "manifests": [descriptor(image)], "annotations": {"build": "old"}})
+    new = register({"mediaType": INDEX, "manifests": [descriptor(image)], "annotations": {"build": "new"}})
+    aliases = {
+        "mirror": f"dynamoci.azurecr.io/ghcr.io/ai-dynamo/snapshot/pagebroker@{old}",
+        "bare": old,
+        "docker-pullable": f"docker-pullable://dynamoci.azurecr.io/mirror/pagebroker@{old}",
+    }
+    verify_pagebroker(
+        monkeypatch, new, old,
+        status_image="dynamoci.azurecr.io/stale/other-image:v0.0.0-g2e263f0e",
+        runtime_reference=aliases[runtime_kind],
+    )
+    requests = [url for url in calls if "/manifests/" in url]
+    assert requests
+    assert all(url.startswith("https://ghcr.io/v2/ai-dynamo/snapshot/pagebroker/manifests/") for url in requests)
+
+
+@pytest.mark.parametrize("group", ["containers", "init_containers"])
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_missing_or_ambiguous_spec_matches_fail_closed(group, ambiguous):
+    pods = running()
+    containers = getattr(pods[0].spec, group)
+    target = containers[0]
+    setattr(pods[0].spec, group, [target, target] if ambiguous else [])
+    problems = setup.running_image_mismatches(pods, EXPECTED)
+    assert any(f"/{target.name} needs one matching container image in the Pod spec" in problem for problem in problems)
+
+
+def test_missing_pod_spec_fails_closed():
+    pods = running()
+    pods[0].spec = None
+    assert any("has no Pod spec" in problem for problem in setup.running_image_mismatches(pods, EXPECTED))
 
 
 @pytest.mark.parametrize("entries", [[], [descriptor(AGENT, "arm64")], [descriptor(AGENT), descriptor(PAGEBROKER)], "invalid"])

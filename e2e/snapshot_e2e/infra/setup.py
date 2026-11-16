@@ -457,33 +457,43 @@ def running_image_mismatches(
     problems = []
     seen = set()
     for pod in pods:
-        statuses = [
-            *(pod.status.init_container_statuses or []),
-            *(pod.status.container_statuses or []),
-        ]
-        for status in statuses:
-            name = image_name(status.image or "")
-            if name not in expected:
-                continue
-            seen.add(name)
-            # containerd reports repo@sha256:..., Docker prefixes docker-pullable://.
-            running = (status.image_id or "").rsplit("@", 1)[-1]
-            if running != expected[name]:
-                detail = ""
-                if equivalent is not None:
-                    try:
-                        runtime_image = (status.image_id or "").removeprefix("docker-pullable://")
-                        repository = (status.image or "").split("@", 1)[0].rsplit(":", 1)[0]
-                        if "@" in runtime_image and runtime_image.rsplit("@", 1)[0] != repository:
-                            raise SetupError("runtime image belongs to another repository")
-                        if equivalent(pod, status.image, running, expected[name]):
-                            continue
-                    except SetupError as exc:
-                        detail = f"; could not verify platform image: {exc}"
-                problems.append(
-                    f"{pod.metadata.name}/{status.name} runs {name} {running or 'unknown'}, "
-                    f"expected {expected[name]}{detail}"
-                )
+        if pod.spec is None:
+            problems.append(f"{pod.metadata.name} has no Pod spec to identify running images")
+            continue
+        groups = (
+            (pod.status.init_container_statuses or [], pod.spec.init_containers or []),
+            (pod.status.container_statuses or [], pod.spec.containers or []),
+        )
+        for statuses, containers in groups:
+            for status in statuses:
+                matches = [container for container in containers if container.name == status.name]
+                if len(matches) != 1 or not matches[0].image:
+                    problems.append(
+                        f"{pod.metadata.name}/{status.name} needs one matching container image "
+                        f"in the Pod spec, found {len(matches)}"
+                    )
+                    continue
+                # Runtime image names can be stale or rewritten by a registry
+                # mirror. The Pod spec names the requested repository; only
+                # image_id supplies evidence of the content actually running.
+                image = matches[0].image
+                name = image_name(image)
+                if name not in expected:
+                    continue
+                seen.add(name)
+                running = (status.image_id or "").rsplit("@", 1)[-1]
+                if running != expected[name]:
+                    detail = ""
+                    if equivalent is not None:
+                        try:
+                            if equivalent(pod, image, running, expected[name]):
+                                continue
+                        except SetupError as exc:
+                            detail = f"; could not verify platform image: {exc}"
+                    problems.append(
+                        f"{pod.metadata.name}/{status.name} runs {name} {running or 'unknown'}, "
+                        f"expected {expected[name]}{detail}"
+                    )
     for name in sorted(set(expected) - seen):
         problems.append(f"no running container uses the {name} image")
     return problems

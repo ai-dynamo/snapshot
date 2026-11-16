@@ -57,10 +57,11 @@ install those images rather than main's. Each suite receives the digests the
 build recorded in `SNAPSHOT_E2E_IMAGE_DIGESTS`, a JSON object keyed `operator`,
 `agent`, and `pagebroker`. With it set, `setup.py` uses `imagePullPolicy: Always`
 and checks each running Snapshot image against the recorded build. If the
-runtime reports a different image index, setup resolves both immutable digests
-in GHCR and compares their runnable manifests for the node's OS and architecture.
+runtime reports a different image index, setup uses the matching container's
+desired image in the Pod spec to resolve both immutable digests in GHCR and compares their runnable manifests for the node's OS and architecture.
 Indexes with identical runnable content can differ in their provenance
-attestations. Different runnable content or a failed lookup still fails setup;
+attestations. Runtime image names may refer to a registry mirror or an older
+cached tag. Different runnable content or a failed lookup still fails setup;
 the candidate record retains the original build digest.
 
 The native GPU workflow runs independent lifecycle tests with two workers, then runs `serial` tests alone after both workers finish. This keeps the node-wide artifact sweep and operator restart cases isolated. Both phases report test durations and upload JUnit results. The framework workflow reuses the caller's successful `make check` only for the same commit; scheduled and manual runs still validate the repository themselves.
