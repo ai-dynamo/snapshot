@@ -67,8 +67,10 @@ what that means for an upgrade, see
 
 1. The serving Secret, `<fullname>-coordinator-tls` or
    `coordinator.tls.serving.secretName`. Until it exists, the coordinator waits
-   for it, unready, and logs `Waiting for the serving certificate`. With the
-   operator's issuer, the operator log says why it is missing:
+   for it, unready, and logs `Waiting for the serving certificate`. After the
+   Secret appears, the kubelet can take about a minute to fill the
+   coordinator's volume. With the operator's issuer, the operator log says why
+   the Secret is missing:
 
    ```bash
    kubectl get secret <fullname>-coordinator-tls -n <namespace>
