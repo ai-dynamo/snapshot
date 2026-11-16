@@ -45,7 +45,6 @@ func newFakeControlVolume(w *NodeController) *fakeControlVolume {
 	w.readPodControlFileFn = v.read
 	w.writePodControlSentinelFn = v.write
 	w.removePodControlFileFn = v.remove
-	w.podControlSentinelExistsFn = v.exists
 	return v
 }
 
@@ -58,19 +57,6 @@ func (v *fakeControlVolume) remove(uid, container, name string) error {
 	}
 	delete(v.files, uid+"/"+container+"/"+name)
 	return nil
-}
-
-func (v *fakeControlVolume) exists(uid, container, name string) (bool, error) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	_, ok := v.files[uid+"/"+container+"/"+name]
-	return ok, nil
-}
-
-func (v *fakeControlVolume) putSentinel(uid, container, name string) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.files[uid+"/"+container+"/"+name] = nil
 }
 
 func (v *fakeControlVolume) read(uid, container, name string, maxBytes int64) ([]byte, error) {
@@ -417,9 +403,7 @@ func newAttemptOperation(t *testing.T, annotations map[string]string) (*restoreO
 	w.runtime = &fakeRuntime{podUID: "host-uid"}
 	volume := newFakeControlVolume(w)
 	artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}
-	op := w.newRestoreOperation(pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Now())
-	op.nodeUID = op.nodePodUID(context.Background())
-	return op, volume
+	return w.newRestoreOperation(pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Now()), volume
 }
 
 func TestRetryLimit(t *testing.T) {

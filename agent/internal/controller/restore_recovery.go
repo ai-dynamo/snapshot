@@ -46,10 +46,6 @@ var errRetryScheduled = errors.New("the restore waits for its next attempt")
 // stopped.
 var errContainerStopped = errors.New("the container stopped during the attempt")
 
-// errRestoreAlreadyFailed is a destination whose restore-failed an earlier
-// pass wrote.
-var errRestoreAlreadyFailed = errors.New("the restore already failed in an earlier pass")
-
 type recovery int
 
 const (
