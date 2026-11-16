@@ -431,10 +431,6 @@ func TestGroupRestoreReasons(t *testing.T) {
 			modify: func(rg *restoreGroup) { rg.pods[0].Status.ContainerStatuses[0].ContainerID = "containerd://another" },
 			want:   snapshotv1alpha1.PodGroupReasonPodIPChanged,
 		},
-		"a startup probe shorter than the deadline": {
-			modify: func(rg *restoreGroup) { rg.restore.Spec.DeadlineSeconds = 2 * 3600 },
-			want:   snapshotv1alpha1.PodGroupReasonGateBudgetTooShort,
-		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			rg := newRestoreGroup(t)
@@ -768,24 +764,6 @@ func TestCheckGroupPin(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestCheckStartupBudget(t *testing.T) {
-	now := time.Now()
-	pod := groupTarget(t, "target", "10.1.0.1")
-	pod.Status.ContainerStatuses[0].State.Running.StartedAt = metav1.NewTime(now.Add(-10 * time.Minute))
-
-	// The restore gate gives up 1800 one-second periods after the container
-	// started: 20 minutes from now.
-	require.NoError(t, checkStartupBudget(pod, "engine", now.Add(19*time.Minute), now))
-	err := checkStartupBudget(pod, "engine", now.Add(21*time.Minute), now)
-	var check *groupCheckError
-	require.ErrorAs(t, err, &check)
-	assert.Equal(t, snapshotv1alpha1.PodGroupReasonGateBudgetTooShort, check.reason)
-	assert.Contains(t, err.Error(), "gives up in 20m0s, before the restore's deadline in 21m0s")
-
-	pod.Spec.Containers[0].StartupProbe = nil
-	assert.NoError(t, checkStartupBudget(pod, "engine", now.Add(24*time.Hour), now), "no probe, no budget to run out")
 }
 
 func TestEnqueueGroupTargets(t *testing.T) {

@@ -353,9 +353,8 @@ func (w *NodeController) reportGroupPending(ctx context.Context, log logr.Logger
 
 // preflightGroupRestore checks a pinned target before it joins its attempt:
 // the Pod and the container the NRI plugin prepared are the ones the operator
-// pinned, the member's artifact resolves and passes the compatibility gates,
-// and the destination's startup probe leaves the restore its deadline. It
-// returns the plan and the destination container's ID.
+// pinned, and the member's artifact resolves and passes the compatibility
+// gates. It returns the plan and the destination container's ID.
 func (w *NodeController) preflightGroupRestore(ctx context.Context, pod *corev1.Pod, m *restoreMember) (*restorePlan, string, error) {
 	destination := m.claim.Mapping.Destination
 	containerID, err := w.checkGroupPin(pod, m)
@@ -376,9 +375,6 @@ func (w *NodeController) preflightGroupRestore(ctx context.Context, pod *corev1.
 	}
 	skipCompatCheck := w.skipCompatCheckRequested(pod)
 	if err := w.preflightCompatibility(ctx, pod, artifact, mappings, skipCompatCheck); err != nil {
-		return nil, "", err
-	}
-	if err := checkStartupBudget(pod, destination, m.deadline, w.nowFn()); err != nil {
 		return nil, "", err
 	}
 	postRestore, postRestorePeriod, err := planPostRestore(pod, mappings,
@@ -494,36 +490,6 @@ func (w *NodeController) groupRestoreContent(ctx context.Context, pod *corev1.Po
 		return nil, nil, fmt.Errorf("the target maps container %q, but member %q checkpointed %q", m.claim.Mapping.Source, m.id, source)
 	}
 	return content, &restoreTarget{SnapshotName: snap.Name, ContentUID: string(content.UID), SourceContainerName: source}, nil
-}
-
-// checkStartupBudget refuses a restore whose destination's startup probe
-// gives up before the restore's deadline: the time left in the probe must
-// cover the time left before the deadline, or the kubelet could restart the
-// container while its peers still wait for it.
-func checkStartupBudget(pod *corev1.Pod, destination string, deadline, now time.Time) error {
-	i := slices.IndexFunc(pod.Spec.Containers, func(c corev1.Container) bool { return c.Name == destination })
-	if i < 0 || pod.Spec.Containers[i].StartupProbe == nil {
-		return nil
-	}
-	probe := pod.Spec.Containers[i].StartupProbe
-	period, threshold := probe.PeriodSeconds, probe.FailureThreshold
-	if period <= 0 {
-		period = 10
-	}
-	if threshold <= 0 {
-		threshold = 3
-	}
-	started := now
-	if status := containerStatus(pod, destination); status != nil && status.State.Running != nil && !status.State.Running.StartedAt.IsZero() {
-		started = status.State.Running.StartedAt.Time
-	}
-	givesUp := started.Add(time.Duration(probe.InitialDelaySeconds+period*threshold) * time.Second)
-	if givesUp.Before(deadline) {
-		return groupCheckFailed(snapshotv1alpha1.PodGroupReasonGateBudgetTooShort,
-			"the startup probe of container %q gives up in %s, before the restore's deadline in %s",
-			destination, givesUp.Sub(now).Round(time.Second), deadline.Sub(now).Round(time.Second))
-	}
-	return nil
 }
 
 // handleGroupPreflightError reports a target that cannot restore yet, or at

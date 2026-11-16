@@ -53,7 +53,6 @@ message of `nvidia.com/Restored` for a reason of the member's own:
 | Reason | Cause | What to do |
 | --- | --- | --- |
 | `PodIPChanged` | The Pod, its destination container, or its IP is not the one the operator pinned, for example after a container restart | Create new gated Pods and a new `PodGroupRestore` |
-| `GateBudgetTooShort` | The destination's startup probe gives up before the restore's deadline | Lower `deadlineSeconds`, or create the targets closer to the restore |
 | `CoordinatorUnreachable` | The node agent could not join the group's attempt. The agent's log shows what it waited for | Check that the agent Pod on the rank-0 member's node is Ready |
 
 A target that fails before the restore starts is left as Snapshot found it,
