@@ -4,8 +4,12 @@
 package session
 
 import (
+	"encoding/json"
+	"math"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -42,11 +46,23 @@ func TestValidateName(t *testing.T) {
 }
 
 // TestNamespaceBucket checks the one mapping from a namespace to its bucket,
-// and that every bucket name fits a stream name.
+// which refuses any other namespace, and that every bucket name fits a stream
+// name.
 func TestNamespaceBucket(t *testing.T) {
-	assert.Equal(t, SnapshotBucket("a"), NamespaceSnapshot.Bucket("a"))
-	assert.Equal(t, SnapshotBucket("a"), NamespaceCuInterpose.Bucket("a"))
-	assert.Equal(t, LibraryBucket("a"), NamespaceLibrary.Bucket("a"))
+	for ns, want := range map[Namespace]string{
+		NamespaceSnapshot:    SnapshotBucket("a"),
+		NamespaceCuInterpose: SnapshotBucket("a"),
+		NamespaceLibrary:     LibraryBucket("a"),
+	} {
+		bucket, err := ns.Bucket("a")
+		require.NoError(t, err)
+		assert.Equal(t, want, bucket, "namespace %s", ns)
+	}
+	assert.ElementsMatch(t, []Namespace{NamespaceSnapshot, NamespaceCuInterpose, NamespaceLibrary}, Namespaces())
+	for _, ns := range []Namespace{"", "other", "Snapshot"} {
+		_, err := ns.Bucket("a")
+		require.ErrorIs(t, err, ErrInvalid, "namespace %q", ns)
+	}
 	assert.ElementsMatch(t, []string{ControlBucket("a"), SnapshotBucket("a"), LibraryBucket("a")}, Buckets("a"))
 	for _, bucket := range Buckets(strings.Repeat("u", MaxAttemptLength)) {
 		assert.LessOrEqual(t, len("KV_"+bucket), maxStreamName, bucket)
@@ -57,11 +73,14 @@ func TestNamespaceBucket(t *testing.T) {
 // namespace in the bucket that holds it, and each control key in the control
 // bucket, and nowhere else.
 func TestMemberPermissionsFollowTheBuckets(t *testing.T) {
-	publish := MemberPermissions("a", "m").Publish
+	permissions := MemberPermissions("a", "m")
+	publish := permissions.Publish
+	for _, ns := range Namespaces() {
+		bucket, err := ns.Bucket("a")
+		require.NoError(t, err)
+		assert.Contains(t, publish, "$KV."+bucket+"."+string(ns)+".>")
+	}
 	for _, subject := range []string{
-		"$KV." + NamespaceSnapshot.Bucket("a") + ".snapshot.>",
-		"$KV." + NamespaceCuInterpose.Bucket("a") + ".cuinterpose.>",
-		"$KV." + NamespaceLibrary.Bucket("a") + ".>",
 		"$KV." + ControlBucket("a") + ".ended",
 		"$KV." + ControlBucket("a") + ".barrier.*.m",
 		"$KV." + ControlBucket("a") + ".left.m",
@@ -71,13 +90,71 @@ func TestMemberPermissionsFollowTheBuckets(t *testing.T) {
 	for _, subject := range publish {
 		assert.NotContains(t, subject, ControlBucket("a")+".snapshot", "an agent's key must not reach the control bucket")
 		assert.NotContains(t, subject, SnapshotBucket("a")+".ended", "a control key must not reach the Snapshot bucket")
+		assert.NotContains(t, subject, SnapshotBucket("a")+".library", "a library key must not reach the Snapshot bucket")
+		assert.NotContains(t, subject, LibraryBucket("a")+".snapshot", "an agent's key must not reach the library bucket")
 		assert.NotContains(t, subject, ".meta", "no member writes meta")
+	}
+	assert.Len(t, publish, cap(publish), "the subjects must fill what was allocated for them")
+	assert.Equal(t, []string{"_INBOX.a.m.>"}, permissions.Subscribe)
+}
+
+// TestControlBytes checks the control bucket's size against its parts, with
+// the longest names: each member adds its arrivals and its departure, each as
+// large as the largest record, an arrival of the longest names with the
+// longest reason's bytes, and the session adds its end and the largest Meta.
+func TestControlBytes(t *testing.T) {
+	attempt, name := strings.Repeat("u", MaxAttemptLength), strings.Repeat("n", MaxNameLength)
+	arrival := BarrierKey(name, name)
+	for _, key := range []string{KeyMeta, KeyEnded, LeftKey(name)} {
+		assert.Less(t, len(key), len(arrival), "an arrival must have the longest key")
+	}
+	record := recordFraming + len("$KV."+ControlBucket(attempt)+"."+arrival) + MaxControlValue
+	require.Equal(t, record, maxControlRecord())
+	for _, members := range []int{1, 2, MaxMembers} {
+		meta := recordFraming + len("$KV."+ControlBucket(attempt)+".meta") + MaxMetaBytes(members)
+		assert.Equal(t, int64((members*(ArrivalsPerMember+1)+1)*record+meta), ControlBytes(members),
+			"%d members", members)
 	}
 }
 
-// TestControlBytes checks that the control bucket's size grows with the
-// membership.
-func TestControlBytes(t *testing.T) {
-	assert.Equal(t, int64(ControlBytesBase+ControlBytesPerMember), ControlBytes(1))
-	assert.Equal(t, int64(ControlBytesBase+256*ControlBytesPerMember), ControlBytes(256))
+// TestMaxControlValue checks that the longest reason fills the largest value
+// of a control key, and that no longer one is a reason.
+func TestMaxControlValue(t *testing.T) {
+	require.NoError(t, ValidateReason(strings.Repeat("A", MaxControlValue)))
+	require.ErrorIs(t, ValidateReason(strings.Repeat("A", MaxControlValue+1)), ErrInvalid)
+}
+
+// TestMaxMetaBytes checks that the largest Meta of a membership holds every
+// Meta of it, with each field at its widest, and only those.
+func TestMaxMetaBytes(t *testing.T) {
+	for _, members := range []int{1, 10, MaxMembers} {
+		meta := Meta{
+			Deadline:        time.Date(2026, 10, 30, 12, 0, 0, 123456789, time.FixedZone("", 5*60*60+30*60)),
+			Epoch:           math.MaxUint64,
+			MaxValue:        math.MaxInt,
+			MaxLibraryValue: math.MaxInt,
+		}
+		for rank := range members {
+			meta.Members = append(meta.Members, Member{ID: strings.Repeat("m", MaxNameLength), Rank: rank})
+		}
+		encoded, err := json.Marshal(meta)
+		require.NoError(t, err)
+		assert.LessOrEqual(t, len(encoded), MaxMetaBytes(members), "%d members", members)
+		// Every field is at its widest but the ranks below the last, which
+		// take fewer digits.
+		slack := 0
+		for rank := range members - 1 {
+			slack += len(strconv.Itoa(members-1)) - len(strconv.Itoa(rank))
+		}
+		assert.Equal(t, len(encoded)+slack, MaxMetaBytes(members), "%d members", members)
+	}
+}
+
+// TestMaxPending checks that what the coordinator buffers for a connection
+// holds the replies of session.MaxConcurrentGets reads of the Snapshot
+// bucket's largest values, and of a library read beside them.
+func TestMaxPending(t *testing.T) {
+	assert.LessOrEqual(t, ReplyHeadroom, PayloadHeadroom)
+	replies := int64(MaxConcurrentGets*(MaxValue+ReplyHeadroom) + MaxLibraryValue + ReplyHeadroom)
+	assert.LessOrEqual(t, replies, MaxPending(MaxValue))
 }

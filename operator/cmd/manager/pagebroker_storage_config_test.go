@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ai-dynamo/snapshot/api/storage"
+	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 )
 
 func fakeClient(t *testing.T) *fake.ClientBuilder {
@@ -26,15 +27,21 @@ func fakeClient(t *testing.T) *fake.ClientBuilder {
 	return fake.NewClientBuilder().WithScheme(scheme)
 }
 
+// releaseLabels are the labels of the ConfigMap that release "snapshot" writes.
+func releaseLabels() map[string]string {
+	labels := operatortypes.Labels()
+	labels[operatortypes.InstanceLabel] = "snapshot"
+	return labels
+}
+
 func TestEnsurePageBrokerS3ConfigCreates(t *testing.T) {
 	c := fakeClient(t).Build()
 	s3 := storage.S3{Endpoint: "https://s3.example.com", Region: "us-east-1", Bucket: "snapshot-bucket", Prefix: "containers"}
-	labels := map[string]string{"app.kubernetes.io/instance": "snapshot"}
-	require.NoError(t, ensurePageBrokerS3Config(t.Context(), c, "snapshot", "snapshot-pagebroker-storage-config", labels, s3, "store-v1-abc", pageBrokerS3Settings{}))
+	require.NoError(t, ensurePageBrokerS3Config(t.Context(), c, "snapshot", "snapshot-pagebroker-storage-config", "snapshot", s3, "store-v1-abc", pageBrokerS3Settings{}))
 
 	var cm corev1.ConfigMap
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "snapshot", Name: "snapshot-pagebroker-storage-config"}, &cm))
-	assert.Equal(t, labels, cm.Labels)
+	assert.Equal(t, releaseLabels(), cm.Labels)
 	var decoded pageBrokerS3Config
 	require.NoError(t, json.Unmarshal([]byte(cm.Data[PageBrokerS3ConfigKey]), &decoded))
 	assert.Equal(t, pageBrokerS3Config{
@@ -50,20 +57,29 @@ func TestEnsurePageBrokerS3ConfigUpdatesExisting(t *testing.T) {
 	}
 	c := fakeClient(t).WithObjects(existing).Build()
 	s3 := storage.S3{Endpoint: "https://s3.example.com", Region: "us-east-1", Bucket: "snapshot-bucket"}
-	labels := map[string]string{"app.kubernetes.io/instance": "snapshot"}
-	require.NoError(t, ensurePageBrokerS3Config(t.Context(), c, "snapshot", "snapshot-pagebroker-storage-config", labels, s3, "store-v1-fresh", pageBrokerS3Settings{}))
+	require.NoError(t, ensurePageBrokerS3Config(t.Context(), c, "snapshot", "snapshot-pagebroker-storage-config", "snapshot", s3, "store-v1-fresh", pageBrokerS3Settings{}))
 
 	var cm corev1.ConfigMap
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "snapshot", Name: "snapshot-pagebroker-storage-config"}, &cm))
 	assert.Contains(t, cm.Data[PageBrokerS3ConfigKey], `"storeId":"store-v1-fresh"`)
-	assert.Equal(t, labels, cm.Labels)
+	assert.Equal(t, releaseLabels(), cm.Labels)
+}
+
+func TestEnsurePageBrokerS3ConfigWithoutReleaseName(t *testing.T) {
+	c := fakeClient(t).Build()
+	s3 := storage.S3{Endpoint: "https://s3.example.com", Region: "us-east-1", Bucket: "snapshot-bucket"}
+	require.NoError(t, ensurePageBrokerS3Config(t.Context(), c, "snapshot", "snapshot-pagebroker-storage-config", "", s3, "store-v1-abc", pageBrokerS3Settings{}))
+
+	var cm corev1.ConfigMap
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "snapshot", Name: "snapshot-pagebroker-storage-config"}, &cm))
+	assert.Equal(t, operatortypes.Labels(), cm.Labels)
 }
 
 func TestEnsurePageBrokerS3ConfigIsIdempotent(t *testing.T) {
 	c := fakeClient(t).Build()
 	s3 := storage.S3{Endpoint: "https://s3.example.com", Region: "us-east-1", Bucket: "snapshot-bucket"}
 	for range 2 {
-		require.NoError(t, ensurePageBrokerS3Config(t.Context(), c, "snapshot", "snapshot-pagebroker-storage-config", nil, s3, "store-v1-abc", pageBrokerS3Settings{}))
+		require.NoError(t, ensurePageBrokerS3Config(t.Context(), c, "snapshot", "snapshot-pagebroker-storage-config", "", s3, "store-v1-abc", pageBrokerS3Settings{}))
 	}
 }
 
@@ -78,7 +94,7 @@ func TestEnsurePageBrokerS3ConfigWritesSettings(t *testing.T) {
 		CAFile:     "/etc/snapshot-s3-ca/ca.crt",
 		Limits:     &pageBrokerS3Limits{StagingBytes: &staging, ActiveTransactions: &active},
 	}
-	require.NoError(t, ensurePageBrokerS3Config(t.Context(), c, "snapshot", "snapshot-pagebroker-storage-config", nil, s3, "store-v1-abc", settings))
+	require.NoError(t, ensurePageBrokerS3Config(t.Context(), c, "snapshot", "snapshot-pagebroker-storage-config", "", s3, "store-v1-abc", settings))
 
 	var cm corev1.ConfigMap
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "snapshot", Name: "snapshot-pagebroker-storage-config"}, &cm))
@@ -97,7 +113,7 @@ func TestEnsurePageBrokerS3ConfigWritesSettings(t *testing.T) {
 func TestEnsurePageBrokerS3ConfigOmitsAbsentSettings(t *testing.T) {
 	c := fakeClient(t).Build()
 	s3 := storage.S3{Endpoint: "https://s3.example.com", Region: "us-east-1", Bucket: "snapshot-bucket"}
-	require.NoError(t, ensurePageBrokerS3Config(t.Context(), c, "snapshot", "snapshot-pagebroker-storage-config", nil, s3, "store-v1-abc", pageBrokerS3Settings{}))
+	require.NoError(t, ensurePageBrokerS3Config(t.Context(), c, "snapshot", "snapshot-pagebroker-storage-config", "", s3, "store-v1-abc", pageBrokerS3Settings{}))
 
 	var cm corev1.ConfigMap
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "snapshot", Name: "snapshot-pagebroker-storage-config"}, &cm))

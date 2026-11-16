@@ -20,7 +20,19 @@ import (
 	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+// runtimeLog records what controller-runtime's packages log, which they send
+// to its global logger.
+var runtimeLog = &logLines{}
+
+// TestMain gives controller-runtime its global logger before any test runs:
+// controller-runtime keeps the first one it is given.
+func TestMain(m *testing.M) {
+	ctrllog.SetLogger(runtimeLog.logger())
+	os.Exit(m.Run())
+}
 
 // probe returns the status of a GET of path from the health endpoint at
 // addr, or 0 if it does not answer.
@@ -55,8 +67,9 @@ func freePort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-// logLines records every line the coordinator logs, which never holds a key,
-// a value, a barrier name, or a token. The test never prints them.
+// logLines records every line the coordinator logs, at every verbosity,
+// which never holds a key, a value, a barrier name, or a token. The test never
+// prints them.
 type logLines struct {
 	mu    sync.Mutex
 	lines []string
@@ -67,7 +80,7 @@ func (l *logLines) logger() logr.Logger {
 		l.mu.Lock()
 		defer l.mu.Unlock()
 		l.lines = append(l.lines, prefix+" "+args)
-	}, funcr.Options{})
+	}, funcr.Options{Verbosity: 9})
 }
 
 func (l *logLines) all() []string {
