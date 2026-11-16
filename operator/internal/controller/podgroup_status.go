@@ -288,7 +288,8 @@ func (a *podGroupAttempt) updateConditions(conditions *[]metav1.Condition, now t
 //	   hiddenStartReason included             a group-level one, otherwise
 //	                                          MemberFailed
 //	3  not committed, and reported            the named member's reason if it is
-//	                                          a group-level one, otherwise Refused
+//	                                          a group-level one, otherwise
+//	                                          Refused
 //	4  the deadline passed                    DeadlineExceeded
 //	5  deleted, and not committed             Cancelled
 //	6  every member final, some member Failed MemberFailed
