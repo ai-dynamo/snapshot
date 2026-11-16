@@ -772,20 +772,29 @@ func TestCheckGroupPin(t *testing.T) {
 		stale      func(*corev1.Pod)
 		wantReason string
 		pending    bool
+		// reads is how many times the check reads the Pod from the API server.
+		reads int
 	}{
 		"the pinned Pod and container": {},
 		"another Pod": {
 			modify:     func(_ *corev1.Pod, pin *snapshotv1alpha1.PodGroupRestoreMemberStatus) { pin.Pod.UID = "replaced" },
 			wantReason: snapshotv1alpha1.PodGroupReasonPodIPChanged,
+			reads:      1,
 		},
 		"another IP": {
 			modify:     func(pod *corev1.Pod, _ *snapshotv1alpha1.PodGroupRestoreMemberStatus) { pod.Status.PodIP = "10.9.9.9" },
 			wantReason: snapshotv1alpha1.PodGroupReasonPodIPChanged,
+			reads:      1,
 		},
 		"another container": {
 			modify: func(pod *corev1.Pod, _ *snapshotv1alpha1.PodGroupRestoreMemberStatus) {
 				pod.Status.ContainerStatuses[0].ContainerID = "containerd://restarted"
 			},
+			wantReason: snapshotv1alpha1.PodGroupReasonPodIPChanged,
+			reads:      1,
+		},
+		"a pin that names no container": {
+			modify:     func(_ *corev1.Pod, pin *snapshotv1alpha1.PodGroupRestoreMemberStatus) { pin.Containers = nil },
 			wantReason: snapshotv1alpha1.PodGroupReasonPodIPChanged,
 		},
 		"a destination that is not running": {
@@ -801,6 +810,17 @@ func TestCheckGroupPin(t *testing.T) {
 		"an IP the cache holds wrong, which the API server clears": {
 			stale:   func(pod *corev1.Pod) { pod.Status.PodIP = "10.9.9.9" },
 			pending: true,
+			reads:   1,
+		},
+		"a Pod UID the cache holds wrong, which the API server clears": {
+			stale:   func(pod *corev1.Pod) { pod.UID = "an-older-pod" },
+			pending: true,
+			reads:   1,
+		},
+		"a container ID the cache holds from before a restart, which the API server clears": {
+			stale:   func(pod *corev1.Pod) { pod.Status.ContainerStatuses[0].ContainerID = "containerd://before-the-restart" },
+			pending: true,
+			reads:   1,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -818,6 +838,7 @@ func TestCheckGroupPin(t *testing.T) {
 			}
 
 			containerID, err := w.checkGroupPin(within(t), pod, m)
+			assert.Equal(t, tc.reads, podReads(w), "a mismatch in the cache is confirmed with one read")
 			switch {
 			case tc.pending:
 				assert.Equal(t, reasonGroupPending, pendingRestoreReason(t, err))
@@ -833,9 +854,21 @@ func TestCheckGroupPin(t *testing.T) {
 	}
 }
 
-func TestCheckGroupPinConfirmsAnIPChange(t *testing.T) {
+// podReads counts w's reads of a Pod from the API server.
+func podReads(w *NodeController) int {
+	reads := 0
+	for _, action := range w.clientset.(*fake.Clientset).Actions() {
+		if action.GetVerb() == "get" && action.GetResource().Resource == "pods" {
+			reads++
+		}
+	}
+	return reads
+}
+
+func TestCheckGroupPinConfirmsAMismatch(t *testing.T) {
 	for name, tc := range map[string]struct {
-		// apiServer answers the agent's read of the Pod, or nil to read it.
+		// apiServer changes the Pod, or the answer to the agent's read of it,
+		// on the API server only.
 		apiServer  func(*fake.Clientset, *corev1.Pod)
 		wantReason string
 		wantWait   string
@@ -870,6 +903,26 @@ func TestCheckGroupPinConfirmsAnIPChange(t *testing.T) {
 			},
 			wantReason: snapshotv1alpha1.PodGroupReasonPodIPChanged,
 		},
+		"a Pod whose destination is not the pinned container": {
+			apiServer: func(clientset *fake.Clientset, pod *corev1.Pod) {
+				changed := pod.DeepCopy()
+				changed.Status.ContainerStatuses[0].ContainerID = "containerd://restarted"
+				require.NoError(t, clientset.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), changed, pod.Namespace))
+			},
+			wantReason: snapshotv1alpha1.PodGroupReasonPodIPChanged,
+		},
+		"a Pod that waits for its destination to run again": {
+			apiServer: func(clientset *fake.Clientset, pod *corev1.Pod) {
+				changed := pod.DeepCopy()
+				changed.Status.ContainerStatuses[0].ContainerID = ""
+				require.NoError(t, clientset.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), changed, pod.Namespace))
+			},
+			wantWait: "Waiting for container engine to run",
+		},
+		"a Pod that matches the pin": {
+			apiServer: func(*fake.Clientset, *corev1.Pod) {},
+			wantWait:  "Waiting for the node agent to see the pinned Pod",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			rg := newRestoreGroup(t)
@@ -882,6 +935,7 @@ func TestCheckGroupPinConfirmsAnIPChange(t *testing.T) {
 			cached.Status.PodIP = "10.9.9.9"
 
 			_, err = w.checkGroupPin(within(t), cached, m)
+			assert.Equal(t, 1, podReads(w), "one read decides")
 			if tc.wantWait != "" {
 				var pending *restorePendingError
 				require.ErrorAs(t, err, &pending)

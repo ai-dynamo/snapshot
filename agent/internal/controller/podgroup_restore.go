@@ -418,9 +418,26 @@ func (w *NodeController) preflightGroupRestore(ctx context.Context, pod *corev1.
 //
 // pod comes from the agent's cache, which can lag behind the update the
 // operator pinned from: an IP or a container ID the cache does not have yet is
-// waited for, and an IP that differs from the pin fails the member only once
-// the API server confirms it.
+// waited for, and a Pod, an IP or a container that differs from the pin fails
+// the member only once the API server confirms it.
 func (w *NodeController) checkGroupPin(ctx context.Context, pod *corev1.Pod, m *restoreMember) (string, error) {
+	pinned := pinnedContainerID(m)
+	if pinned == "" {
+		return "", groupCheckFailed(snapshotv1alpha1.PodGroupReasonPodIPChanged,
+			"PodGroupRestore %s pins no container %q", m.restore.Name, m.claim.Mapping.Destination)
+	}
+	containerID, err := w.matchPin(pod, m, pinned)
+	if !errors.As(err, new(*groupCheckError)) {
+		return containerID, err
+	}
+	return "", w.confirmPinMismatch(ctx, pod, m, pinned)
+}
+
+// matchPin compares pod with m's pin, whose destination container is pinned.
+// It returns the destination container's ID when they match, a
+// restorePendingError for an IP or a container ID that pod does not have yet,
+// and PodIPChanged for a Pod, an IP or a container that differs.
+func (w *NodeController) matchPin(pod *corev1.Pod, m *restoreMember, pinned string) (string, error) {
 	pin, destination := m.pin, m.claim.Mapping.Destination
 	if pin.Pod.UID != pod.UID {
 		return "", groupCheckFailed(snapshotv1alpha1.PodGroupReasonPodIPChanged,
@@ -428,14 +445,10 @@ func (w *NodeController) checkGroupPin(ctx context.Context, pod *corev1.Pod, m *
 	}
 	switch ip := pod.Status.PodIP; {
 	case ip == "":
-		return "", newRestorePendingError(reasonGroupPending, waitingForPodIP)
+		return "", newRestorePendingError(reasonGroupPending, "Waiting for the Pod's IP")
 	case ip != pin.TargetPodIP:
-		return "", w.confirmPodIPChanged(ctx, pod, pin)
-	}
-	pinned := pinnedContainerID(m)
-	if pinned == "" {
 		return "", groupCheckFailed(snapshotv1alpha1.PodGroupReasonPodIPChanged,
-			"PodGroupRestore %s pins no container %q", m.restore.Name, destination)
+			"the restore Pod's IP is %q, not the pinned %q", ip, pin.TargetPodIP)
 	}
 	current := restoreContainerIDFromStatus(pod, destination)
 	if current == "" {
@@ -453,31 +466,24 @@ func (w *NodeController) checkGroupPin(ctx context.Context, pod *corev1.Pod, m *
 	return current, nil
 }
 
-// waitingForPodIP is the wait of a target whose Pod IP the agent has not seen
-// yet.
-const waitingForPodIP = "Waiting for the Pod's IP"
-
-// confirmPodIPChanged reads the Pod from the API server, for a target whose
-// cached IP is not the pinned one. It fails the member with PodIPChanged only
-// when the API server confirms the change; a Pod there with the pinned IP
-// waits for the cache, and a read that fails is tried again.
-func (w *NodeController) confirmPodIPChanged(ctx context.Context, pod *corev1.Pod, pin *snapshotv1alpha1.PodGroupRestoreMemberStatus) error {
+// confirmPinMismatch reads the Pod from the API server, once, for a target
+// whose cached Pod differs from its pin. It fails the member with
+// PodIPChanged only when the API server's Pod differs too; a Pod there that
+// matches the pin waits for the cache, and a read that fails is tried again.
+func (w *NodeController) confirmPinMismatch(ctx context.Context, pod *corev1.Pod, m *restoreMember, pinned string) error {
 	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
 	switch {
 	case apierrors.IsNotFound(err):
-		return groupCheckFailed(snapshotv1alpha1.PodGroupReasonPodIPChanged, "the pinned restore Pod %s is gone", pin.Pod.UID)
+		return groupCheckFailed(snapshotv1alpha1.PodGroupReasonPodIPChanged, "the pinned restore Pod %s is gone", m.pin.Pod.UID)
 	case err != nil:
 		key := client.ObjectKeyFromObject(pod).String()
-		w.log.Error(err, "Failed to read a restore Pod whose cached IP is not the pinned one", "pod", key)
+		w.log.Error(err, "Failed to read a restore Pod whose cached state is not the pinned one", "pod", key)
 		return newRestorePendingError(reasonGroupPending, fmt.Sprintf("Unable to read Pod %s; retrying", key))
-	case live.UID != pin.Pod.UID:
-		return groupCheckFailed(snapshotv1alpha1.PodGroupReasonPodIPChanged,
-			"the restore Pod is %s, not the pinned %s", live.UID, pin.Pod.UID)
-	case live.Status.PodIP != pin.TargetPodIP:
-		return groupCheckFailed(snapshotv1alpha1.PodGroupReasonPodIPChanged,
-			"the restore Pod's IP is %q, not the pinned %q", live.Status.PodIP, pin.TargetPodIP)
 	}
-	return newRestorePendingError(reasonGroupPending, waitingForPodIP)
+	if _, err := w.matchPin(live, m, pinned); err != nil {
+		return err
+	}
+	return newRestorePendingError(reasonGroupPending, "Waiting for the node agent to see the pinned Pod")
 }
 
 // pinnedContainerID returns the ID, without its CRI scheme, of the
