@@ -110,6 +110,9 @@ type attempt struct {
 	// ending is set once recordEnd has started recording the session's end.
 	ending bool
 	ended  bool
+	// committed is set once FailUncommitted has seen every member arrive at
+	// session.BarrierAdmitted, and never cleared.
+	committed bool
 }
 
 // has reports whether member is a member of the attempt.
@@ -540,9 +543,11 @@ func (s *Server) Remove(ctx context.Context, uid types.UID) error {
 // resource's deletion has started, and with a member's reason once that member
 // has failed. It is best effort: members decide on their own that the barrier
 // is complete, so a member that saw it complete just before FailUncommitted
-// read the arrivals can still start. FailUncommitted returns nil once the
-// session has ended, however it ended, and when it leaves a committed session
-// open. It reports session.ErrNotFound for an attempt with no session.
+// read the arrivals can still start. The commit is final: once
+// FailUncommitted has seen it, it leaves the session open from then on, even if
+// an arrival is deleted. FailUncommitted returns nil once the session has
+// ended, however it ended, and when it leaves a committed session open. It
+// reports session.ErrNotFound for an attempt with no session.
 func (s *Server) FailUncommitted(ctx context.Context, uid types.UID, reason string) error {
 	if err := session.ValidateReason(reason); err != nil {
 		return err
@@ -562,8 +567,15 @@ func (s *Server) FailUncommitted(ctx context.Context, uid types.UID, reason stri
 
 // committed reports whether every member of a session has arrived at
 // session.BarrierAdmitted. It reads the arrivals one by one, as direct reads,
-// so it takes none of the consumers the bucket's members share.
+// so it takes none of the consumers the bucket's members share. It records the
+// commit the first time it sees it, and reads no arrivals from then on.
 func (s *Server) committed(ctx context.Context, a *attempt) (bool, error) {
+	s.mu.Lock()
+	seen := a.committed
+	s.mu.Unlock()
+	if seen {
+		return true, nil
+	}
 	for _, m := range a.members {
 		_, err := a.control.Get(ctx, session.BarrierKey(session.BarrierAdmitted, m.ID))
 		switch {
@@ -573,6 +585,9 @@ func (s *Server) committed(ctx context.Context, a *attempt) (bool, error) {
 			return false, fmt.Errorf("read the arrivals of attempt %s: %w", a.spec.UID, err)
 		}
 	}
+	s.mu.Lock()
+	a.committed = true
+	s.mu.Unlock()
 	return true, nil
 }
 

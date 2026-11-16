@@ -404,8 +404,9 @@ func TestRemove(t *testing.T) {
 // TestFailUncommitted covers failing a session before the commit, as the host
 // does once its group resource's deletion starts, or once a member fails: the
 // session fails with the reason unless every member has arrived at the
-// admitted barrier, and a session that ended keeps its end. What a member
-// makes of it is sessiontest's to test.
+// admitted barrier, or did when FailUncommitted last looked, and a session
+// that ended keeps its end. What a member makes of it is sessiontest's to
+// test.
 func TestFailUncommitted(t *testing.T) {
 	h := newHarness(t)
 	ctx := within(t)
@@ -435,6 +436,22 @@ func TestFailUncommitted(t *testing.T) {
 		for _, m := range members {
 			require.NoError(t, m.arrive(ctx, session.BarrierAdmitted))
 		}
+		require.NoError(t, h.srv.FailUncommitted(ctx, spec.UID, session.ReasonCancelled))
+		_, ok := h.ended(spec)
+		assert.False(t, ok)
+		assert.Equal(t, []string{"opened"}, h.events(spec))
+	})
+
+	t.Run("a commit once seen keeps the session open", func(t *testing.T) {
+		h := h.sub(t)
+		spec := h.ensure(2)
+		members := h.connectAll(spec)
+		for _, m := range members {
+			require.NoError(t, m.arrive(ctx, session.BarrierAdmitted))
+		}
+		require.NoError(t, h.srv.FailUncommitted(ctx, spec.UID, session.ReasonCancelled))
+		require.NoError(t, members[1].control.Delete(ctx, session.BarrierKey(session.BarrierAdmitted, members[1].id)),
+			"an arrival deleted after the commit")
 		require.NoError(t, h.srv.FailUncommitted(ctx, spec.UID, session.ReasonCancelled))
 		_, ok := h.ended(spec)
 		assert.False(t, ok)
