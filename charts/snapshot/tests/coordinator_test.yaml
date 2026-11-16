@@ -229,13 +229,10 @@ tests:
               resourceFieldRef:
                 resource: limits.memory
       # Only the coordinator's.
-      - notContains:
-          path: spec.template.spec.containers[?(@.name == "agent")].env
-          content:
-            name: GOMEMLIMIT
-            valueFrom:
-              resourceFieldRef:
-                resource: limits.memory
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "agent")].env[?(@.name == "GOMEMLIMIT")]
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].env[?(@.name == "GOMEMLIMIT")]
 
   - it: mounts tls.crt and tls.key from the optional issued Secret, and /tmp
     template: templates/daemonset.yaml
