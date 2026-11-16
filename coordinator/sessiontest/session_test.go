@@ -140,9 +140,9 @@ func TestBarrier(t *testing.T) {
 		sessions := h.session(t, 3).connectAll(t)
 		first, second := barrier(ctx, sessions[0], "admitted"), barrier(ctx, sessions[1], "admitted")
 		requireWaiting(t, first)
-		require.NoError(t, sessions[2].Fail(ctx, "Refused"))
-		require.ErrorIs(t, <-first, &session.AbortError{Reason: "Refused"})
-		require.ErrorIs(t, <-second, &session.AbortError{Reason: "Refused"})
+		require.NoError(t, sessions[2].Fail(ctx, session.ReasonRefused))
+		require.ErrorIs(t, <-first, &session.AbortError{Reason: session.ReasonRefused})
+		require.ErrorIs(t, <-second, &session.AbortError{Reason: session.ReasonRefused})
 	})
 
 	t.Run("every waiter returns when the session closes", func(t *testing.T) {
@@ -320,16 +320,16 @@ func TestSessionFail(t *testing.T) {
 	t.Run("failing again is no error", func(t *testing.T) {
 		ctx := within(t)
 		s := h.session(t, 1).connect(t, 0)
-		require.NoError(t, s.Fail(ctx, "Refused"))
-		require.NoError(t, s.Fail(ctx, "Refused"))
+		require.NoError(t, s.Fail(ctx, session.ReasonRefused))
+		require.NoError(t, s.Fail(ctx, session.ReasonRefused))
 	})
 
 	t.Run("every operation after the end reports it", func(t *testing.T) {
 		ctx := within(t)
 		sessions := h.session(t, 2).connectAll(t)
-		require.NoError(t, sessions[0].Fail(ctx, "Refused"))
+		require.NoError(t, sessions[0].Fail(ctx, session.ReasonRefused))
 		awaitDone(t, sessions[1])
-		abort := &session.AbortError{Reason: "Refused"}
+		abort := &session.AbortError{Reason: session.ReasonRefused}
 		require.ErrorIs(t, sessions[1].Snapshot().Insert(ctx, "k", nil), abort)
 		_, err := sessions[1].Library().Get(ctx, "k", time.Minute)
 		require.ErrorIs(t, err, abort)
@@ -574,11 +574,11 @@ func TestSessionsEndAtTheMemoryCap(t *testing.T) {
 	awaitDone(t, lateMember)
 	require.ErrorIs(t, lateMember.Err(), &session.AbortError{Reason: session.ReasonDeadlineExceeded})
 
-	require.NoError(t, members[2].Fail(ctx, "Refused"))
+	require.NoError(t, members[2].Fail(ctx, session.ReasonRefused))
 	for _, wait := range []<-chan error{arrived, waiting} {
 		select {
 		case err := <-wait:
-			require.ErrorIs(t, err, &session.AbortError{Reason: "Refused"})
+			require.ErrorIs(t, err, &session.AbortError{Reason: session.ReasonRefused})
 		case <-ctx.Done():
 			t.Fatal("a wait did not return")
 		}

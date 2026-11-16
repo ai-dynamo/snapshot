@@ -89,9 +89,9 @@ func TestDeadline(t *testing.T) {
 	t.Run("a session that ended first keeps its end", func(t *testing.T) {
 		h := newHarness(t)
 		s := h.session(t, 1).connect(t, 0)
-		require.NoError(t, s.Fail(within(t), "Refused"))
+		require.NoError(t, s.Fail(within(t), session.ReasonRefused))
 		h.clock.Step(time.Hour + coordinator.DeadlineSlack)
-		require.ErrorIs(t, s.Err(), &session.AbortError{Reason: "Refused"})
+		require.ErrorIs(t, s.Err(), &session.AbortError{Reason: session.ReasonRefused})
 	})
 }
 
@@ -144,7 +144,7 @@ func TestGrace(t *testing.T) {
 	t.Run("a session that ended starts none", func(t *testing.T) {
 		h := newHarness(t)
 		sessions := h.session(t, 2).connectAll(t)
-		require.NoError(t, sessions[0].Fail(within(t), "Refused"))
+		require.NoError(t, sessions[0].Fail(within(t), session.ReasonRefused))
 		for _, s := range sessions {
 			awaitDone(t, s)
 		}
@@ -188,7 +188,7 @@ func TestShutdown(t *testing.T) {
 	ctx := within(t)
 	open, finished := h.session(t, 2), h.session(t, 1)
 	sessions := open.connectAll(t)
-	require.NoError(t, finished.connect(t, 0).Fail(ctx, "Refused"))
+	require.NoError(t, finished.connect(t, 0).Fail(ctx, session.ReasonRefused))
 	assert.Equal(t, "failed Refused", finished.awaitOutcome(t))
 
 	addr := h.srv.Addr().String()
