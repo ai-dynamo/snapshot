@@ -73,6 +73,7 @@ type NodeController struct {
 	writePodControlSentinelFn  func(string, string, string, []byte) error
 	readPodControlFileFn       func(string, string, string, int64) ([]byte, error)
 	removePodControlFileFn     func(string, string, string) error
+	controlSentinelExistsFn    func(int, string) (bool, error)
 	podControlSentinelExistsFn func(string, string, string) (bool, error)
 	sendSignalFn               func(logr.Logger, int, syscall.Signal, string) error
 	// hostProcPath is where the agent reads the node's processes; tests point it elsewhere.
@@ -191,7 +192,7 @@ type restoreOperation struct {
 	skipCompatCheck   bool
 	destination       string
 	containerID       string
-	// nodeUID is the Pod's UID on the node, read when the pass starts.
+	// nodeUID is the Pod's UID on the node, read when the attempt starts.
 	nodeUID   string
 	startedAt time.Time
 	log       logr.Logger
@@ -295,6 +296,7 @@ func newDefaultController(
 		writePodControlSentinelFn:  snapshotruntime.WritePodControlSentinel,
 		readPodControlFileFn:       snapshotruntime.ReadPodControlFile,
 		removePodControlFileFn:     snapshotruntime.RemovePodControlFile,
+		controlSentinelExistsFn:    snapshotruntime.ControlSentinelExists,
 		podControlSentinelExistsFn: snapshotruntime.PodControlSentinelExists,
 		sendSignalFn:               snapshotruntime.SendSignalToPID,
 		hostProcPath:               snapshotruntime.HostProcPath,
@@ -1180,16 +1182,12 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 	defer recoverPanic(op.log, "restore", func(err error) {
 		retErr = op.failRestore(ctx, err)
 	}, "destination", destination)
-	op.nodeUID = op.nodePodUID(ctx)
 	if restoreStarted {
-		outcome, err := op.writtenOutcome()
+		completed, err := op.recoverCompletedRestore(ctx)
 		if err != nil {
 			return err
 		}
-		switch outcome {
-		case podcontract.RestoreFailedFile:
-			return op.alreadyFailed()
-		case podcontract.RestoreCompleteFile:
+		if completed {
 			return op.recoverPostRestore(ctx)
 		}
 	}
@@ -1219,16 +1217,15 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		if errors.As(err, &incompatible) {
 			// The placeholder is left running: killing it restarts the container
 			// straight back into the same refusal.
-			op.forgetAttempts(ctx)
+			if record.Limit > 0 {
+				op.forgetAttempts(ctx)
+			}
 			return incompatible
 		}
 
 		var cleanupErr *executor.RestoreCleanupError
 		if !errors.As(err, &cleanupErr) {
-			if stopped {
-				err = stoppedDuringAttempt(err)
-			}
-			return op.attemptFailed(ctx, restoreCtx, record, err)
+			return op.attemptFailed(ctx, restoreCtx, record, err, stopped)
 		}
 		logWithStep(op.log, err).Error(cleanupErr, "Restore completed with cleanup errors")
 		emitPodEvent(ctx, w.clientset, op.log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreCleanupFailed", cleanupErr.Error())
@@ -1261,22 +1258,26 @@ func (op *restoreOperation) recoverPostRestore(ctx context.Context) error {
 	return nil
 }
 
-// writtenOutcome returns the sentinel that a restore of the destination
-// already wrote, or "" for none, so that CRIU never runs again after an
-// outcome. It reads the node's path of the volume, which works while the
-// container has no process. restore-failed comes first: a failed
-// post-restore action writes it after restore-complete.
-func (op *restoreOperation) writtenOutcome() (string, error) {
-	for _, name := range []string{podcontract.RestoreFailedFile, podcontract.RestoreCompleteFile} {
-		exists, err := op.controller.podControlSentinelExistsFn(op.nodeUID, op.destination, name)
-		if err != nil {
-			return "", fmt.Errorf("check for %s: %w", name, err)
-		}
-		if exists {
-			return name, nil
-		}
+// recoverCompletedRestore avoids replaying CRIU when the destination-scoped
+// completion sentinel proves the operation already finished.
+func (op *restoreOperation) recoverCompletedRestore(ctx context.Context) (bool, error) {
+	condition := findRestoredCondition(op.pod)
+	if condition == nil || condition.Status != corev1.ConditionFalse || condition.Reason != podcontract.RestoreReasonInProgress {
+		return false, nil
 	}
-	return "", nil
+
+	hostPID, _, err := op.controller.runtime.ResolveContainer(ctx, op.containerID)
+	if err != nil {
+		return false, fmt.Errorf("resolve restore container before checking completion sentinel: %w", err)
+	}
+	exists, err := op.controller.controlSentinelExistsFn(hostPID, podcontract.RestoreCompleteFile)
+	if err != nil {
+		return false, fmt.Errorf("check restore completion sentinel: %w", err)
+	}
+	if !exists {
+		return false, nil
+	}
+	return true, nil
 }
 
 func (w *NodeController) newRestoreOperation(

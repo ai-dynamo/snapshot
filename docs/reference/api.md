@@ -180,7 +180,8 @@ the node agent and not set by the caller:
 |-----------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `nvidia.com/Restored` | Added to the pod by the node agent once a restore is under way; becomes `True` when the restore completes. Observe it alongside pod readiness to confirm a restore. |
 
-The node agent also writes this annotation once a restore attempt fails:
+With a retry limit above 0, the node agent also writes this annotation once a
+restore attempt fails:
 
 | Annotation                        | Description                                                                                                                                                                                                                                                                                                                  |
 |-----------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|

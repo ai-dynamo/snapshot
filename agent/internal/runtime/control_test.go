@@ -147,6 +147,46 @@ func TestWriteControlSentinelWithoutControlDir(t *testing.T) {
 	}
 }
 
+func TestControlSentinelExists(t *testing.T) {
+	procRoot, pid, controlDir := fakeContainer(t)
+	check := func(wantExists, wantErr bool) {
+		t.Helper()
+		exists, err := controlSentinelExists(procRoot, pid, "restore-complete")
+		if (err != nil) != wantErr {
+			t.Fatalf("err = %v, want error %v", err, wantErr)
+		}
+		if exists != wantExists {
+			t.Fatalf("exists = %v, want %v", exists, wantExists)
+		}
+	}
+
+	check(false, false) // nothing there
+
+	path := filepath.Join(controlDir, "restore-complete")
+	if err := os.Symlink(filepath.Join(t.TempDir(), "anything"), path); err != nil {
+		t.Fatal(err)
+	}
+	check(false, true) // not a regular file
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	check(true, false)
+}
+
+func TestControlSentinelExistsWithoutControlDir(t *testing.T) {
+	procRoot, pid, controlDir := fakeContainer(t)
+	if err := os.Remove(controlDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controlSentinelExists(procRoot, pid, "restore-complete"); err == nil {
+		t.Fatal("expected an error for a missing control mount")
+	}
+}
+
 func TestPodControlSentinelExists(t *testing.T) {
 	podsDir, volume := podsDirWithControlVolume(t)
 	controlDir := filepath.Join(volume, "main")

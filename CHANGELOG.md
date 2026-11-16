@@ -90,9 +90,8 @@ commit-level history for each release is on its
 ### Changed
 
 - A node agent that stops during a restore attempt, as in a DaemonSet roll, no
-  longer fails the restore. The next agent on the node runs the attempt again
-  within the same deadline. A failed attempt also sets
-  `nvidia.com/restore-retry-status`, at a retry limit of 0 too. See
+  longer fails the restore. The next agent on the node runs the attempt again.
+  With a retry limit above 0, the attempt keeps its deadline. See
   [Restore Retry](docs/design/restore-retry/README.md#agent-restarts).
 - **Breaking:** the agent timeout values lost their redundant prefixes.
   `config.checkpoint.checkpointTimeoutSeconds` is now

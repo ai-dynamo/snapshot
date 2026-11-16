@@ -25,21 +25,23 @@ the [Architecture](../../overview/architecture-overview.md#restore-flow).
 
 ## Attempts and the Deadline
 
-The agent restores each destination container on its own, and each keeps a
-record of its attempts. The record is the `restore-attempts` file in the
-container's directory of the `snapshot-control` volume. The agent reads it
-through the node's path of the volume, under the Pod's UID on the node, so the
-record outlives the container.
+The agent restores each destination container on its own. With a retry limit
+above 0, each keeps a record of its attempts. The record is the
+`restore-attempts` file in the container's directory of the `snapshot-control`
+volume. The agent reads it through the node's path of the volume, under the
+Pod's UID on the node, so the record outlives the container.
 
-The first attempt resolves two values and saves them in the record:
+The first attempt resolves two values:
 
 - The retry limit, from the Pod's `nvidia.com/restore-retry-limit`, or else
   `restore.retryLimit` in the agent configuration.
 - The deadline: the start of the first attempt plus `restore.timeoutSeconds`.
 
-Every later attempt keeps both, so a setting that changes during a restore does
-not change it. The deadline also bounds the post-restore action. Each attempt
-saves its number in the record before it starts.
+With a limit above 0, the first attempt saves both in the record. Every later
+attempt keeps both, so a setting that changes during a restore does not change
+them. A limit that changes to 0 is the exception: the next attempt runs as
+without retries. The deadline also bounds the post-restore action. Each
+attempt saves its number in the record before it starts.
 
 The Pod's containers can write the record, so the agent treats it as untrusted.
 It opens the record without following links and reads at most 8 KiB. A record
@@ -77,12 +79,12 @@ does not start one, so the restore ends. The `RestoreAttemptFailed` event says
 failure that no attempt can fix.
 
 The decision covers attempts only. A refusal by the compatibility gates is
-reported as before and removes the record. A failed preflight, a failed write
+reported as before and removes any record. A failed preflight, a failed write
 of `restore-complete`, or a failed post-restore action ends the restore.
 
 With a limit of 0, every failure ends the restore, as it did before retries.
-The agent then emits no `RestoreAttemptFailed` or `RestoreRetriesExhausted`
-event.
+The agent keeps no record, and emits no `RestoreAttemptFailed` or
+`RestoreRetriesExhausted` event.
 
 ## Waiting for the Next Attempt
 
@@ -104,15 +106,18 @@ before.
 
 ## Agent Restarts
 
-A pass after an agent restart first checks what the destination already
-wrote. A `restore-failed` reports the failure again. A `restore-complete` runs
-only the post-restore action, with a full `restore.timeoutSeconds` again. CRIU
-never runs again after either one.
+A pass after an agent restart first checks for `restore-complete` through the
+container's process, as before retries. When it is there, the pass runs only
+the post-restore action, with a full `restore.timeoutSeconds` again. CRIU does
+not run again.
 
 A record that shows an attempt with no retry saved is an attempt that no agent
-saw finish. At every limit, the attempt runs again within the same deadline and
-keeps its number, as it did before retries. It gets no `RestoreAttemptFailed`
-event, since no agent saw it fail.
+saw finish. The attempt runs again within the same deadline and keeps its
+number, as it did before retries. It gets no `RestoreAttemptFailed` event,
+since no agent saw it fail. This includes an attempt whose failure ended the
+restore just before the agent stopped, before the Pod's status said so. With a
+limit of 0 there is no record, so the attempt starts over with a full
+`restore.timeoutSeconds`, as before retries.
 
 An agent that is stopping does not decide anything for a failed attempt. It
 writes nothing and stops no container, and the next agent finds the attempt
@@ -125,7 +130,8 @@ annotation from the records of all the Pod's destinations. The destinations
 restore in parallel, so one write per pass keeps every entry. It is a
 server-side apply on the Pod with the field manager `snapshot-agent-restore`,
 and it is skipped when the value would not change. The agent never reads the
-annotation back.
+annotation back. With a limit of 0 there are no records, so the agent writes no
+annotation.
 
 A destination has an entry once an attempt has failed. The entry holds the
 current or last attempt, the retry limit, and the step and cause of the last
@@ -169,7 +175,7 @@ The code that implements restore retry is in these packages and files:
 | `agent/internal/controller/restore_recovery.go` | The recovery decision, the backoff, the check that the container stopped, and the events |
 | `agent/internal/controller/restore_retry_status.go` | The retry status annotation |
 | `agent/internal/controller/restore_again.go` | Finding the destinations that started again, and starting their restore over |
-| `agent/internal/controller/controller.go` | `runRestore`, which runs one attempt, and the check of a written outcome |
+| `agent/internal/controller/controller.go` | `runRestore`, which runs one attempt |
 | `agent/internal/executor/restore_failure.go` | `RestoreFailure`, which says where an attempt failed and whether it changed the container |
 | `agent/internal/executor/nsrestore_output.go` | Reading nsrestore's progress message and its PageBroker code |
 | `agent/internal/nri/plugin.go` | The report that a destination container stopped, and the removal of `restore-complete` for a container that starts again |
