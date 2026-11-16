@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -89,8 +90,14 @@ const (
 	reconnectJitter = 100 * time.Millisecond
 
 	// attemptTimeout bounds one round trip of an operation before the session
-	// sends it again. Only metadata crosses a session, so it is generous.
+	// sends it again: of every operation but a read, which only its caller's
+	// context and a disconnect bound.
 	attemptTimeout = 3 * time.Second
+
+	// noTimeout is how long nats.go lets a JetStream request run when the
+	// request carries no deadline, as only a read does: without end, where
+	// nats.go would stop it after 5 s.
+	noTimeout = time.Duration(math.MaxInt64)
 
 	// retryWait spaces the resends of an operation that failed transiently.
 	retryWait = 100 * time.Millisecond
@@ -230,7 +237,7 @@ func (s *client) join(ctx context.Context) error {
 		}
 		return fmt.Errorf("connect to the coordinator: %w", ctx.Err())
 	}
-	js, err := jetstream.New(s.nc)
+	js, err := jetstream.New(s.nc, jetstream.WithDefaultTimeout(noTimeout))
 	if err != nil {
 		return mapError(err)
 	}

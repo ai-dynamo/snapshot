@@ -318,8 +318,13 @@ func (s *client) Fail(ctx context.Context, reason string) error {
 // do runs op, sending it again while it fails transiently, until it succeeds,
 // fails for good, the session ends or is closed, or ctx is done, waiting longer
 // each time the coordinator says it is too busy. It never sends op once ctx is
-// done.
+// done. Each try is bounded by attemptTimeout and by a disconnect.
 func (s *client) do(ctx context.Context, op func(context.Context) error) error {
+	return s.retry(ctx, func(ctx context.Context) error { return s.try(ctx, op) })
+}
+
+// retry sends an operation through send, which tries it once, as do describes.
+func (s *client) retry(ctx context.Context, send func(context.Context) error) error {
 	var busy backoff
 	for {
 		if err := s.alive(); err != nil {
@@ -328,7 +333,7 @@ func (s *client) do(ctx context.Context, op func(context.Context) error) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		err := s.try(ctx, op)
+		err := send(ctx)
 		if err == nil {
 			return nil
 		}
@@ -398,26 +403,72 @@ func (s *client) try(ctx context.Context, op func(context.Context) error) error 
 	return err
 }
 
-// read runs op, which reads one value of at most size bytes with its reply's
-// headers and subject, once the connection's budget has room for it, and holds
-// those bytes until op returns. It returns how the session ended, or ctx's
-// error, if either comes first.
+// read runs op, which reads one value, the way do runs an operation, with two
+// differences. Each try first takes size bytes of the connection's budget, the
+// most its reply holds, and keeps them until the reply has arrived or the
+// connection has broken, even once ctx is done: until then, the reply may sit
+// in what the coordinator buffers for the connection. And a try is bounded by
+// ctx and by a disconnect only, never by attemptTimeout: a large value can take
+// longer than a round trip to arrive, and a read sent again while its first
+// reply is still buffered could take the connection past what the coordinator
+// holds for it. So a read is never sent again on the same connection.
 func (s *client) read(ctx context.Context, size int64, op func(context.Context) error) error {
+	return s.retry(ctx, func(ctx context.Context) error { return s.readOnce(ctx, size, op) })
+}
+
+// readOnce tries a read once, as read describes. op runs on its own, bounded by
+// a disconnect only, and holds its bytes until it returns, while readOnce
+// returns op's error, or ctx's error or how the session ended if either comes
+// first.
+func (s *client) readOnce(ctx context.Context, size int64, op func(context.Context) error) error {
 	if err := s.reserve(ctx, size); err != nil {
 		return err
 	}
-	defer s.budget.Release(size)
-	return s.do(ctx, op)
+	life, cancel := context.WithCancelCause(context.Background())
+	untrack := s.inflight.add(cancel)
+	release := func() {
+		cancel(nil)
+		untrack()
+		s.budget.Release(size)
+	}
+	result := make(chan error, 1)
+	if !s.spawn(func() {
+		err := op(life)
+		if err != nil && errors.Is(context.Cause(life), errRetry) {
+			err = errRetry
+		}
+		release()
+		result <- err
+	}) {
+		release()
+		return net.ErrClosed
+	}
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.done:
+		return s.Err()
+	case <-s.closing:
+		return net.ErrClosed
+	}
 }
 
 // reserve takes size bytes of the connection's budget, once the reads in
 // flight leave room for them. It returns how the session ended, or ctx's
-// error, if either comes first.
+// error, if either comes first, and then takes nothing.
 func (s *client) reserve(ctx context.Context, size int64) error {
 	bounded, cancel := context.WithCancel(ctx)
 	defer cancel()
 	defer context.AfterFunc(s.life, cancel)()
-	if err := s.budget.Acquire(bounded, size); err != nil {
+	err := s.budget.Acquire(bounded, size)
+	if err == nil && bounded.Err() != nil {
+		// Acquire may succeed although its context is done.
+		s.budget.Release(size)
+		err = bounded.Err()
+	}
+	if err != nil {
 		if ended := s.alive(); ended != nil {
 			return ended
 		}
@@ -520,20 +571,25 @@ func (s *client) await(ctx context.Context, kv jetstream.KeyValue, keys []string
 // time the connection has closed.
 func (s *client) stop(w watcher) {
 	w.cancel()
-	s.mu.Lock()
-	closed := s.closed
-	if !closed {
-		s.wg.Add(1)
-	}
-	s.mu.Unlock()
-	if closed {
+	if !s.spawn(func() { s.drain(w) }) {
 		s.drain(w)
-		return
 	}
+}
+
+// spawn runs f in a goroutine that Close waits for, and reports false, running
+// nothing, once Close has begun.
+func (s *client) spawn(f func()) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		s.drain(w)
+		f()
 	}()
+	return true
 }
 
 // drain consumes a cancelled watch until its channel closes, which happens once

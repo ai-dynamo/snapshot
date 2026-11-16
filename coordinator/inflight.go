@@ -11,7 +11,7 @@ import (
 // inflight tracks the operations waiting for the coordinator's answer. A
 // request sent just before the connection broke is lost with it, so a
 // disconnect makes every operation send its request again, which is safe for
-// every operation, instead of waiting out its timeout.
+// every operation, instead of waiting for an answer that never comes.
 type inflight struct {
 	mu   sync.Mutex
 	next uint64
