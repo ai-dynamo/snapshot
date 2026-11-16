@@ -467,7 +467,7 @@ func TestFailCheckpointOnContainerExit_IgnoresCleanExit(t *testing.T) {
 		{Name: "helper", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
 	}}}
 
-	handled, err := w.failCheckpointOnContainerExit(context.Background(), &snapshotv1alpha1.PodSnapshotContent{}, pod)
+	handled, err := w.failCheckpointOnContainerExit(context.Background(), &snapshotv1alpha1.PodSnapshotContent{}, pod, nil)
 	require.NoError(t, err)
 	assert.False(t, handled)
 }

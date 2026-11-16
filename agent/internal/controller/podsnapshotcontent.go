@@ -176,8 +176,7 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 		return nil
 	}
 
-	if handled, err := w.failCheckpointOnContainerExit(ctx, content, pod); handled {
-		w.leaveMemberSourceAsFound(ctx, member, pod)
+	if handled, err := w.failCheckpointOnContainerExit(ctx, content, pod, member); handled {
 		return err
 	}
 	if reason, msg := classifySourcePodLiveness(pod); reason != "" {
@@ -564,12 +563,18 @@ func classifySourcePodLiveness(pod *corev1.Pod) (string, string) {
 	return "", ""
 }
 
-// failCheckpointOnContainerExit fails the work order and force-terminates the pod's still-running
-// containers when any checkpoint container has terminated non-zero. The bool says the caller must
-// stop; the error is the status write's, so one that did not land is retried. Only call this for a
-// pod this work order owns — the sweep kills every running container in it. Init containers
-// (pod.Status.InitContainerStatuses) are intentionally out of scope.
-func (w *NodeController) failCheckpointOnContainerExit(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod) (bool, error) {
+// failCheckpointOnContainerExit fails the work order when any checkpoint container has terminated
+// non-zero. The bool says the caller must stop; the error is the status write's, so one that did
+// not land is retried. Init containers (pod.Status.InitContainerStatuses) are intentionally out of
+// scope.
+//
+// For a pod captured on its own, it also force-terminates the pod's still-running containers. Only
+// call this for a pod this work order owns — the sweep kills every running container in it. A pod
+// group member's source belongs to its owner, and a member that gets here has not started, so its
+// source is left as found, as every failure before the join leaves it (failBeforeJoin).
+func (w *NodeController) failCheckpointOnContainerExit(
+	ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod, member *captureMember,
+) (bool, error) {
 	failed := failedCheckpointContainer(pod)
 	if failed == nil {
 		return false, nil
@@ -583,8 +588,14 @@ func (w *NodeController) failCheckpointOnContainerExit(ctx context.Context, cont
 	logger := logr.FromContextOrDiscard(ctx).WithValues("container", failed.Name)
 	logger.Info("Checkpoint container failed", "exit_code", term.ExitCode, "reason", term.Reason)
 	emitPodEvent(ctx, w.clientset, logger, pod, snapshotEventComponent, corev1.EventTypeWarning, "CheckpointFailed", message)
-	w.killRunningContainers(ctx, logger, pod, fmt.Sprintf("checkpoint container %s failed", failed.Name))
-	if err := w.setSnapshotContentFailed(ctx, content, "CheckpointContainerFailed", errors.New(message)); err != nil {
+	var err error
+	if member != nil {
+		err = w.failBeforeJoin(ctx, content, pod, member, "CheckpointContainerFailed", errors.New(message))
+	} else {
+		w.killRunningContainers(ctx, logger, pod, fmt.Sprintf("checkpoint container %s failed", failed.Name))
+		err = w.setSnapshotContentFailed(ctx, content, "CheckpointContainerFailed", errors.New(message))
+	}
+	if err != nil {
 		return true, fmt.Errorf("write PodSnapshotContent failed status %q: %w", content.Name, err)
 	}
 	return true, nil

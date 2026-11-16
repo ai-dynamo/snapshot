@@ -575,6 +575,36 @@ func TestGroupCheckpointThatFailsBeforeItJoins(t *testing.T) {
 	}
 }
 
+func TestGroupCheckpointWhoseContainerFailedLeavesTheOtherContainersRunning(t *testing.T) {
+	g := newCaptureGroup()
+	source := g.pods[0]
+	source.Labels[snapshotv1alpha1.CaptureEligibleLabel] = "true"
+	source.Status.ContainerStatuses[0].State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}}
+	source.Status.ContainerStatuses = append(source.Status.ContainerStatuses, corev1.ContainerStatus{
+		Name: "sidecar", ContainerID: "containerd://sidecar", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	})
+	fc := &fakeCheckpointer{}
+	w, k := groupCaptureController(t, nil, g, fc.fn, nil)
+	rt := &fakeRuntime{resolveContainerPID: 7}
+	w.runtime = rt
+	joined := false
+	w.podGroups.joinFn = func(context.Context, coordinator.Config) (*group.Member, error) {
+		joined = true
+		return nil, errors.New("the member joined")
+	}
+
+	w.processCaptureQueueItem(within(t), "content-leader")
+
+	assert.Equal(t, "CheckpointContainerFailed",
+		condition(getContent(t, w, "content-leader"), snapshotv1alpha1.PodSnapshotConditionFailed).Reason)
+	assert.Empty(t, rt.resolvedContainerIDs, "a member's other containers are not swept: its source belongs to its owner")
+	assert.Empty(t, k.list())
+	assert.NotContains(t, getPod(t, w, "inference", "worker-0").Labels, snapshotv1alpha1.CaptureEligibleLabel,
+		"the source is left as found")
+	assert.False(t, joined, "a member that fails before it joins does not join to fail the attempt")
+	assert.False(t, fc.wasCalled())
+}
+
 func TestGroupCheckpointThatCannotJoin(t *testing.T) {
 	for name, tc := range map[string]struct {
 		deadlineSeconds int64
