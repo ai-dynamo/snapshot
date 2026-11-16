@@ -313,20 +313,32 @@ func (w *NodeController) runGroupCheckpoint(
 			uid: content.UID, ready: true, artifactPath: artifactPath, containerName: containerName, artifact: artifact,
 		})
 	}
-	failAttempt(ctx, logger, g)
-
 	failure, err := w.refineFullStaging(ctx, classifyCaptureFailure(err), err, containerPID)
 	attempt := settleAttempt(failure, err)
-	if recorded.Load() || attempt.suspendedSource {
-		w.recoverSourceAfterFailedDump(ctx, logger, pod, containerPID, attempt.suspended, false)
-	} else {
-		w.leaveSourceAsFound(ctx, pod)
-	}
 	reason := attempt.failure.reason
 	if ended := attemptEndReason(err, member.deadline, w.nowFn()); ended != "" {
 		reason = ended
 	}
-	return w.failGroupCheckpoint(ctx, logger, content, pod, reason, err)
+	return w.endFailedMember(ctx, logger, content, pod, g, containerPID,
+		recorded.Load() || attempt.suspendedSource, attempt.suspended, reason, err)
+}
+
+// endFailedMember ends a member whose capture failed after it joined its
+// attempt. It fails the attempt, which closes the session. It terminates the
+// source of a member that started, or that the failure left suspended, and
+// leaves any other source as found. Then it records the failure, with reason,
+// on the content.
+func (w *NodeController) endFailedMember(
+	ctx context.Context, logger logr.Logger, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod,
+	g *group.Member, containerPID int, terminate bool, suspended executor.SuspendedSource, reason string, cause error,
+) error {
+	failAttempt(ctx, logger, g)
+	if terminate {
+		w.recoverSourceAfterFailedDump(ctx, logger, pod, containerPID, suspended, false)
+	} else {
+		w.leaveSourceAsFound(ctx, pod)
+	}
+	return w.failGroupCheckpoint(ctx, logger, content, pod, reason, cause)
 }
 
 // failBeforeJoin fails content before its capture starts. A pod group member
@@ -397,10 +409,9 @@ func (w *NodeController) failGroupCheckpoint(
 }
 
 // failGroupCheckpointAfterPanic fails a member whose capture panicked after it
-// joined its attempt: it fails the attempt, which closes the session,
-// terminates the source of a member that started, leaves one that never
-// started as found, and records AgentPanic. A capture that had already
-// concluded keeps the outcome it holds, which the next reconcile records.
+// joined its attempt, as endFailedMember ends any failed member, and records
+// AgentPanic. A capture that had already concluded keeps the outcome it holds,
+// which the next reconcile records.
 func (w *NodeController) failGroupCheckpointAfterPanic(
 	ctx context.Context, logger logr.Logger, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod,
 	g *group.Member, started bool, containerPID int, cause error,
@@ -408,13 +419,7 @@ func (w *NodeController) failGroupCheckpointAfterPanic(
 	if w.pendingCaptureOutcome(content) != nil {
 		return cause
 	}
-	failAttempt(ctx, logger, g)
-	if started {
-		w.recoverSourceAfterFailedDump(ctx, logger, pod, containerPID, executor.SuspendedSource{}, false)
-	} else {
-		w.leaveSourceAsFound(ctx, pod)
-	}
-	return w.failGroupCheckpoint(ctx, logger, content, pod, reasonAgentPanic, cause)
+	return w.endFailedMember(ctx, logger, content, pod, g, containerPID, started, executor.SuspendedSource{}, reasonAgentPanic, cause)
 }
 
 // recordCaptureStarted sets the Started condition on a member's content: the
