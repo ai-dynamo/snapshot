@@ -74,7 +74,8 @@ type PodGroupRestoreReconciler struct {
 // through the API server and derives again from the persisted status, never
 // from the first derived one, whose final phases and pins would stick. It
 // records only the second pass, and acts on that pass's observation and
-// status. If a live read fails, it returns the error and records nothing.
+// status. If a confirming read fails, it returns the error and records
+// nothing.
 func (r *PodGroupRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	restore := &snapshotv1alpha1.PodGroupRestore{}
 	if err := r.Get(ctx, req.NamespacedName, restore); err != nil {
