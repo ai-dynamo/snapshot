@@ -19,9 +19,12 @@ const (
 	// False with reason Admitting while the members' work is created and
 	// admitted, and False with the wait's or the failure's reason otherwise.
 	PodGroupConditionAdmitted = "Admitted"
-	// PodGroupConditionReleased is True once a PodGroupRestore's attempt has
-	// reached release, from which point its released members run whatever
-	// happens to their peers. It applies to PodGroupRestore only.
+	// PodGroupConditionReleased turns True on a PodGroupRestore's first
+	// Released member, which proves that the agents' release barrier
+	// completed. A member's release point is its restore-complete, and the
+	// member is Released once any postRestore notification has also succeeded.
+	// Released members keep running whatever happens to their peers. It
+	// applies to PodGroupRestore only.
 	PodGroupConditionReleased = "Released"
 	// PodGroupConditionReady is True when every member of a PodGroupSnapshot is
 	// Checkpointed, or every member of a PodGroupRestore is Released.

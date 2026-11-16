@@ -136,10 +136,11 @@ func TestPodGroupSnapshotAdmission(t *testing.T) {
 		requireAdmission(t, cl.Update(t.Context(), snapshot), "spec is immutable")
 	})
 
-	// The status rules compare every entry with every member, so the largest
-	// group must stay within the API server's runtime cost limits. Its 256
-	// messages, each at the limit, must also fit in one object.
-	t.Run("status-256-entries-at-maximum-lengths", func(t *testing.T) {
+	// A group of 256 members, each at its longest, is accepted with a status
+	// entry per member. The status rules compare every entry with every
+	// member within the API server's runtime cost limits, and the 256
+	// messages, each at the limit, fit in one object.
+	t.Run("status-of-256-longest-members", func(t *testing.T) {
 		snapshot := newPodGroupSnapshot("status-256-entries", 0)
 		snapshot.Spec.Members = longestSnapshotMembers()
 		require.NoError(t, cl.Create(t.Context(), snapshot))
@@ -319,7 +320,11 @@ func TestPodGroupRestoreAdmission(t *testing.T) {
 		requireAdmission(t, cl.Update(t.Context(), restore), "spec is immutable")
 	})
 
-	t.Run("status-256-entries-at-maximum-lengths", func(t *testing.T) {
+	// A group of 256 targets, with IDs and Pod names at their longest, is
+	// accepted with a status entry per target. The status rules compare every entry with every
+	// target within the API server's runtime cost limits, and the 256
+	// messages, each at the limit, fit in one object.
+	t.Run("status-of-256-longest-targets", func(t *testing.T) {
 		restore := newPodGroupRestore("status-256-entries", 0)
 		restore.Spec.Targets = longestRestoreTargets()
 		require.NoError(t, cl.Create(t.Context(), restore))
