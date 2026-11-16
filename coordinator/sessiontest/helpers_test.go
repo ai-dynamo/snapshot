@@ -73,6 +73,7 @@ func newHarness(t *testing.T, modify ...func(*server.Config)) *harness {
 		clock: testclock.New(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)),
 		logs:  &logLines{},
 	}
+	t.Cleanup(func() { h.logs.dumpIfFailed(t, "client") })
 	// Every subject a client sends must be one its permissions allow. The check
 	// is best-effort: a refusal that races a closing connection can go unseen.
 	// The deterministic tests of the subjects whose refusal changes nothing a
@@ -112,8 +113,10 @@ func withTestMaxValue(cfg *server.Config) { cfg.MaxValue = testMaxValue }
 // shuts it down when the test ends.
 func (h *harness) start() {
 	h.t.Helper()
-	h.serverLogs = &logLines{}
-	h.cfg.Log = h.serverLogs.logger()
+	logs := &logLines{}
+	h.t.Cleanup(func() { logs.dumpIfFailed(h.t, "coordinator") })
+	h.serverLogs = logs
+	h.cfg.Log = logs.logger()
 	srv, err := server.New(h.cfg)
 	require.NoError(h.t, err)
 	h.t.Cleanup(func() { require.NoError(h.t, srv.Shutdown(context.Background())) })
@@ -438,6 +441,17 @@ func (l *logLines) all() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return slices.Clone(l.lines)
+}
+
+// dumpIfFailed logs every line to t, each marked with whose it is, if t has
+// failed, so a failure shows what led to it.
+func (l *logLines) dumpIfFailed(t *testing.T, whose string) {
+	if !t.Failed() {
+		return
+	}
+	for _, line := range l.all() {
+		t.Logf("%s: %s", whose, line)
+	}
 }
 
 // events returns what the current coordinator logged of the life of the

@@ -67,6 +67,7 @@ func startHarness(t *testing.T, modify ...func(*Config)) *harness {
 		logs:  &logLines{},
 		ca:    ca,
 	}
+	t.Cleanup(func() { h.logs.dumpIfFailed(t) })
 	h.cfg = Config{
 		Host:       "127.0.0.1",
 		Port:       natsserver.RANDOM_PORT,
@@ -424,4 +425,15 @@ func (l *logLines) all() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return append([]string(nil), l.lines...)
+}
+
+// dumpIfFailed logs every line to t if t has failed, so a failure shows what
+// the coordinator did before it.
+func (l *logLines) dumpIfFailed(t *testing.T) {
+	if !t.Failed() {
+		return
+	}
+	for _, line := range l.all() {
+		t.Logf("coordinator: %s", line)
+	}
 }
