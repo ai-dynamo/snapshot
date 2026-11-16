@@ -104,9 +104,8 @@ func TestRunRestoreRecordsTheLastFailure(t *testing.T) {
 	}
 }
 
-// The failure that ends a restore is saved after restore-failed. Saved
-// first, a crash between the two would leave what looks like an unfinished
-// attempt, and the next agent would retry a final failure.
+// The failure that ends a restore is saved after restore-failed, which ends
+// the restore whether or not the record is saved.
 func TestRunRestoreSavesTheEndingFailureAfterRestoreFailed(t *testing.T) {
 	for name, tc := range map[string]struct {
 		limit   string
