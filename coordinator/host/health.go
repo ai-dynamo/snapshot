@@ -25,7 +25,8 @@ var errNotReady = errors.New("the coordinator does not admit clients yet")
 // healthEndpoint is the health endpoint the Pod's probes read. /healthz is ok
 // while it serves, and /readyz once the coordinator it reports admits clients.
 // The operator holds new groups on a node whose agent is not ready, so the Pod
-// reports ready only then.
+// reports ready only then. A failed probe logs nothing, since the kubelet
+// probes every few seconds for as long as the coordinator is not ready.
 type healthEndpoint struct {
 	srv         *http.Server
 	served      chan error
@@ -40,10 +41,8 @@ func serveHealth(addr string) (*healthEndpoint, error) {
 	}
 	h := &healthEndpoint{served: make(chan error, 1)}
 	mux := http.NewServeMux()
-	mux.Handle("/healthz", http.StripPrefix("/healthz",
-		&healthz.Handler{Checks: map[string]healthz.Checker{"healthz": healthz.Ping}}))
-	mux.Handle("/readyz", http.StripPrefix("/readyz",
-		&healthz.Handler{Checks: map[string]healthz.Checker{"readyz": h.ready}}))
+	mux.Handle("/healthz", healthz.CheckHandler{Checker: healthz.Ping})
+	mux.Handle("/readyz", healthz.CheckHandler{Checker: h.ready})
 	h.srv = &http.Server{Handler: mux, ReadHeaderTimeout: healthHeaderTimeout}
 	go func() { h.served <- h.srv.Serve(l) }()
 	return h, nil

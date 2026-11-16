@@ -23,7 +23,6 @@ import (
 	"github.com/ai-dynamo/snapshot/coordinator"
 	"github.com/ai-dynamo/snapshot/coordinator/internal/testcert"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
-	"github.com/go-logr/logr"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,7 +37,6 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
-	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // The test runs Run against an envtest API server, which no operator runs
@@ -63,7 +61,6 @@ var agents = types.NamespacedName{Namespace: "snapshot-system", Name: "snapshot-
 // node only, a session cancelled by its resource's deletion, a rotated
 // certificate, and the shutdown.
 func TestRun(t *testing.T) {
-	ctrllog.SetLogger(logr.Discard())
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	t.Cleanup(cancel)
 	k := startCluster(t)
@@ -218,7 +215,6 @@ func TestRun(t *testing.T) {
 // open, and then either stops when its context ends, or becomes ready once the
 // files are written.
 func TestRunWaitsForTheCertificate(t *testing.T) {
-	ctrllog.SetLogger(logr.Discard())
 	k := startCluster(t)
 	k.grantRBAC(t)
 	// waiting is a Run that waits for its certificate.
