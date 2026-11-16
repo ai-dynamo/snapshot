@@ -125,6 +125,6 @@ func missing(err error) bool {
 		errors.Is(err, nats.ErrStreamNotFound)
 }
 
-// errRetry asks for an operation to be sent again at once, such as an Insert
-// whose key was deleted between its Create and its Get.
+// errRetry asks for an operation to be sent again: the connection broke while
+// it waited for the coordinator's answer.
 var errRetry = errors.New("retry")

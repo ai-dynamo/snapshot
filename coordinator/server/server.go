@@ -73,10 +73,6 @@ const (
 
 // The embedded server's limits beyond those Config sets.
 const (
-	// payloadHeadroom is what a message may carry beyond its value: the key in
-	// its subject does not count, but the headers of a write do.
-	payloadHeadroom = 64 << 10
-
 	// valueHeadroom is what a bucket's maximum message size adds to its
 	// maximum value, for the headers a write carries. Meta carries the exact
 	// value limits, which clients enforce themselves.
@@ -131,11 +127,11 @@ type Config struct {
 	// session.MaxMembers, so that every group's session can open.
 	//
 	// MaxBytes is not the coordinator's whole memory. The process also holds,
-	// for each connection, up to session.MaxConcurrentGets values of what the
-	// connection is sent and has not yet taken, each up to MaxValue plus 64
-	// KiB; and, for each bucket, an ingest queue of up to 128 MiB, which
-	// nats-server fills with the writes it has not stored yet. Size the
-	// container's memory limit for MaxBytes plus those.
+	// for each connection, up to session.MaxPending(MaxValue) bytes of what
+	// the connection is sent and has not yet taken, about twice MaxValue; and,
+	// for each bucket, an ingest queue of up to 128 MiB, which nats-server
+	// fills with the writes it has not stored yet. Size the container's memory
+	// limit for MaxBytes plus those.
 	MaxBytes int64
 
 	// MaxValue and MaxLibraryValue are the largest values of the Snapshot and
@@ -280,7 +276,6 @@ func New(cfg Config) (*Server, error) {
 
 // start starts the embedded server and the coordinator's own connections.
 func (s *Server) start() error {
-	maxPayload := int32(s.cfg.MaxValue + payloadHeadroom)
 	opts := &natsserver.Options{
 		ServerName: "snapshot-coordinator",
 		Host:       s.cfg.Host,
@@ -293,8 +288,8 @@ func (s *Server) start() error {
 		// The client speaks first, with its TLS handshake, so the server's INFO
 		// line, which names it, never goes out in plaintext.
 		TLSHandshakeFirst: true,
-		MaxPayload:        maxPayload,
-		MaxPending:        session.MaxConcurrentGets * int64(maxPayload),
+		MaxPayload:        int32(s.cfg.MaxValue + session.PayloadHeadroom),
+		MaxPending:        session.MaxPending(s.cfg.MaxValue),
 		WriteDeadline:     writeDeadline,
 		PingInterval:      serverPingInterval,
 		MaxPingsOut:       serverMaxPingsOut,

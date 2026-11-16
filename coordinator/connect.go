@@ -19,6 +19,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"golang.org/x/sync/semaphore"
 	"k8s.io/utils/clock"
 )
 
@@ -126,12 +127,12 @@ func Connect(ctx context.Context, cfg Config) (Session, error) {
 		clock:      cfg.Clock,
 		connected:  make(chan struct{}),
 		verify:     make(chan struct{}, 1),
-		reads:      make(chan struct{}, session.MaxConcurrentGets),
 		closing:    make(chan struct{}),
 		connClosed: make(chan struct{}),
 		done:       make(chan struct{}),
 		wake:       make(chan struct{}),
 	}
+	s.life, s.endLife = context.WithCancel(context.Background())
 	nc, err := nats.Connect(strings.Join(cfg.URLs, ","), s.options(cfg)...)
 	if err != nil {
 		return nil, fmt.Errorf("connect to the coordinator: %w", mapError(err))
@@ -256,6 +257,7 @@ func (s *client) join(ctx context.Context) error {
 	if _, ok := s.ranks[s.member]; !ok {
 		return fmt.Errorf("the session has no member %q: %w", s.member, session.ErrForbidden)
 	}
+	s.budget = semaphore.NewWeighted(session.MaxPending(s.meta.MaxValue))
 	s.stores = make(map[session.Namespace]*store)
 	for _, ns := range session.Namespaces() {
 		bucket, err := ns.Bucket(s.attempt)

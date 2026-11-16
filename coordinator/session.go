@@ -18,6 +18,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"golang.org/x/sync/semaphore"
 	"k8s.io/utils/clock"
 )
 
@@ -119,10 +120,15 @@ type client struct {
 	// verify holds a pending request to verify the session, so requests made
 	// while one is pending coalesce.
 	verify chan struct{}
-	// reads holds a slot for each value being read over the connection, so no
-	// more are in flight than the coordinator buffers for it.
-	reads   chan struct{}
+	// budget holds, in bytes, what the coordinator buffers for the connection:
+	// each value being read takes the largest its bucket holds, so no more are
+	// in flight than the coordinator holds. Set by join.
+	budget  *semaphore.Weighted
 	closing chan struct{}
+	// life ends once the session has ended or is closed, as done or closing
+	// does, to end a wait that takes a context.
+	life    context.Context
+	endLife context.CancelFunc
 	// connClosed is closed once the connection is, by Close or as the session
 	// ends; nats.go then delivers nothing more to any watch.
 	connClosed chan struct{}
@@ -176,6 +182,7 @@ func (s *client) finish(err error) {
 	s.end.Do(func() {
 		s.err = err
 		close(s.done)
+		s.endLife()
 		s.nc.Close()
 	})
 }
@@ -217,6 +224,7 @@ func (s *client) Close() error {
 	s.mu.Unlock()
 	if first {
 		close(s.closing)
+		s.endLife()
 		s.nc.Close()
 	}
 	s.wg.Wait()
@@ -390,21 +398,32 @@ func (s *client) try(ctx context.Context, op func(context.Context) error) error 
 	return err
 }
 
-// read runs op, which reads one value, once the connection has a slot for it,
-// and holds the slot until op returns. It returns how the session ended, or
-// ctx's error, if either comes first.
-func (s *client) read(ctx context.Context, op func(context.Context) error) error {
-	select {
-	case s.reads <- struct{}{}:
-		defer func() { <-s.reads }()
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-s.done:
-		return s.Err()
-	case <-s.closing:
-		return net.ErrClosed
+// read runs op, which reads one value of at most size bytes with its reply's
+// headers and subject, once the connection's budget has room for it, and holds
+// those bytes until op returns. It returns how the session ended, or ctx's
+// error, if either comes first.
+func (s *client) read(ctx context.Context, size int64, op func(context.Context) error) error {
+	if err := s.reserve(ctx, size); err != nil {
+		return err
 	}
+	defer s.budget.Release(size)
 	return s.do(ctx, op)
+}
+
+// reserve takes size bytes of the connection's budget, once the reads in
+// flight leave room for them. It returns how the session ended, or ctx's
+// error, if either comes first.
+func (s *client) reserve(ctx context.Context, size int64) error {
+	bounded, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer context.AfterFunc(s.life, cancel)()
+	if err := s.budget.Acquire(bounded, size); err != nil {
+		if ended := s.alive(); ended != nil {
+			return ended
+		}
+		return ctx.Err()
+	}
+	return nil
 }
 
 // watcher is a watch, and the cancellation that ends it: a watch lives as long

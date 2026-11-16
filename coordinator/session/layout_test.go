@@ -149,3 +149,12 @@ func TestMaxMetaBytes(t *testing.T) {
 		assert.Equal(t, len(encoded)+slack, MaxMetaBytes(members), "%d members", members)
 	}
 }
+
+// TestMaxPending checks that what the coordinator buffers for a connection
+// holds the replies of session.MaxConcurrentGets reads of the Snapshot
+// bucket's largest values, and of a library read beside them.
+func TestMaxPending(t *testing.T) {
+	assert.LessOrEqual(t, ReplyHeadroom, PayloadHeadroom)
+	replies := int64(MaxConcurrentGets*(MaxValue+ReplyHeadroom) + MaxLibraryValue + ReplyHeadroom)
+	assert.LessOrEqual(t, replies, MaxPending(MaxValue))
+}

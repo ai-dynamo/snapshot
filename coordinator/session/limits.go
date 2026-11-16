@@ -130,12 +130,35 @@ func MaxMetaBytes(members int) int {
 // communicator identifiers.
 const MaxConsumersPerMember = 8
 
-// MaxConcurrentGets is how many values a client reads at once over its
-// connection, and how many of the largest values the coordinator buffers for a
-// connection before it drops the connection as a slow consumer. The client
-// reads no more at once than the coordinator holds, so concurrent Gets never
-// cost a reconnect.
-const MaxConcurrentGets = 2
+// What the coordinator buffers for a connection, and how a client reads
+// within it: see MaxPending.
+const (
+	// MaxConcurrentGets is how many of the Snapshot bucket's largest values a
+	// client reads at once over its connection.
+	MaxConcurrentGets = 2
+
+	// PayloadHeadroom is what the coordinator's largest message may carry
+	// beyond the Snapshot bucket's largest value: the headers of a write, and
+	// what a read's reply adds, which ReplyHeadroom bounds. The key in a
+	// write's subject does not count.
+	PayloadHeadroom = 64 << 10
+
+	// ReplyHeadroom bounds what a read's reply carries beyond its value: the
+	// headers the value was written with, the headers the coordinator adds,
+	// which name the bucket's stream and repeat the key's subject, and the
+	// reply's own subject, which is the member's inbox. With the longest names
+	// and key, they take under 3 KiB.
+	ReplyHeadroom = 8 << 10
+)
+
+// MaxPending is how many bytes the coordinator buffers for a connection, of
+// what it has sent and the connection has not taken yet, before it drops the
+// connection as a slow consumer: MaxConcurrentGets of the largest messages it
+// accepts, for a Snapshot bucket whose largest value is maxValue. A client
+// budgets its reads within it, in bytes, each the largest value of its bucket
+// and ReplyHeadroom, so concurrent Gets never cost a reconnect, and a small
+// read goes on beside the largest ones.
+func MaxPending(maxValue int) int64 { return MaxConcurrentGets * int64(maxValue+PayloadHeadroom) }
 
 // MaxNameLength bounds a member ID and a barrier name.
 const MaxNameLength = 253

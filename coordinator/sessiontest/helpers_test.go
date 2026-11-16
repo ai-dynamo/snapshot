@@ -149,12 +149,19 @@ func (h *harness) session(t *testing.T, n int) *testSession {
 // sessionUntil ensures a session with n members and deadline for the test t.
 func (h *harness) sessionUntil(t *testing.T, n int, deadline time.Time) *testSession {
 	t.Helper()
-	ses := &testSession{h: h, spec: server.Spec{
-		UID:      types.UID(fmt.Sprintf("attempt-%d", time.Now().UnixNano())),
-		Deadline: deadline,
-	}}
+	spec := server.Spec{UID: types.UID(fmt.Sprintf("attempt-%d", time.Now().UnixNano())), Deadline: deadline}
 	for i := range n {
-		ses.spec.Members = append(ses.spec.Members, session.Member{ID: fmt.Sprintf("member-%d", i), Rank: i})
+		spec.Members = append(spec.Members, session.Member{ID: fmt.Sprintf("member-%d", i), Rank: i})
+	}
+	return h.open(t, spec)
+}
+
+// open ensures the session of spec for the test t, with a proxy for each
+// member, which stops when t ends.
+func (h *harness) open(t *testing.T, spec server.Spec) *testSession {
+	t.Helper()
+	ses := &testSession{h: h, spec: spec}
+	for range spec.Members {
 		p := newProxy(t, h.srv.Addr().String())
 		h.proxies = append(h.proxies, p)
 		ses.proxies = append(ses.proxies, p)
@@ -270,6 +277,17 @@ func (ses *testSession) raw(t *testing.T, member int) jetstream.KeyValue {
 // of member, as raw does.
 func (ses *testSession) rawBucket(t *testing.T, member int, bucket string) jetstream.KeyValue {
 	t.Helper()
+	js, err := jetstream.New(ses.rawConn(t, member))
+	require.NoError(t, err)
+	kv, err := js.KeyValue(within(t), bucket)
+	require.NoError(t, err)
+	return kv
+}
+
+// rawConn returns a plain NATS connection of member, made the way package
+// session defines, which closes when the test ends.
+func (ses *testSession) rawConn(t *testing.T, member int) *nats.Conn {
+	t.Helper()
 	uid, id := string(ses.spec.UID), ses.spec.Members[member].ID
 	nc, err := nats.Connect("tls://"+ses.h.srv.Addr().String(),
 		nats.Secure(&tls.Config{RootCAs: ses.h.ca, ServerName: "localhost", MinVersion: tls.VersionTLS12}),
@@ -280,11 +298,7 @@ func (ses *testSession) rawBucket(t *testing.T, member int, bucket string) jetst
 		nats.NoReconnect())
 	require.NoError(t, err)
 	t.Cleanup(nc.Close)
-	js, err := jetstream.New(nc)
-	require.NoError(t, err)
-	kv, err := js.KeyValue(within(t), bucket)
-	require.NoError(t, err)
-	return kv
+	return nc
 }
 
 // awaitWait waits until a wait of one member in namespace ns watches its keys:

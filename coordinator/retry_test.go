@@ -13,12 +13,18 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/semaphore"
 )
 
-// testClient returns a client that has joined, with no connection, which
-// retries an operation that fails as the test makes it.
-func testClient() *client {
-	return &client{closing: make(chan struct{}), done: make(chan struct{}), joined: true}
+// testClient returns a client that has joined a session of the default
+// limits, with no connection, which retries an operation that fails as the
+// test makes it.
+func testClient(t *testing.T) *client {
+	s := &client{closing: make(chan struct{}), done: make(chan struct{}), joined: true,
+		budget: semaphore.NewWeighted(session.MaxPending(session.MaxValue))}
+	s.life, s.endLife = context.WithCancel(context.Background())
+	t.Cleanup(s.endLife)
+	return s
 }
 
 // TestBackoff covers the waits between the resends of an operation the
@@ -46,7 +52,7 @@ func TestDoRetriesWhenTheCoordinatorIsBusy(t *testing.T) {
 		"a bucket at its limit": jsMaximumConsumers,
 	} {
 		t.Run(name, func(t *testing.T) {
-			s := testClient()
+			s := testClient(t)
 			var tries []time.Time
 			err := s.do(context.Background(), func(context.Context) error {
 				tries = append(tries, time.Now())
@@ -67,7 +73,7 @@ func TestDoRetriesWhenTheCoordinatorIsBusy(t *testing.T) {
 // TestDoStopsRetryingWhenContextEnds checks that a busy coordinator does not
 // keep a caller whose context is done.
 func TestDoStopsRetryingWhenContextEnds(t *testing.T) {
-	s := testClient()
+	s := testClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	err := s.do(ctx, func(context.Context) error { return &jetstream.APIError{ErrorCode: jsTooManyRequests} })
@@ -77,7 +83,7 @@ func TestDoStopsRetryingWhenContextEnds(t *testing.T) {
 // TestDoDoesNotRetryAFullBucket checks that an error that waiting does not
 // cure is reported at once.
 func TestDoDoesNotRetryAFullBucket(t *testing.T) {
-	s := testClient()
+	s := testClient(t)
 	tries := 0
 	err := s.do(context.Background(), func(context.Context) error {
 		tries++

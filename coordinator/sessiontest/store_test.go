@@ -6,6 +6,7 @@ package sessiontest
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // TestInsert covers Insert: the first value under a key wins, inserting the same
@@ -345,32 +347,36 @@ func TestStoreLimits(t *testing.T) {
 }
 
 // TestConcurrentLargeGets reads several of the largest values at once over one
-// connection. The coordinator drops a connection as a slow consumer once it
-// holds more unsent data than MaxPending, so the client reads no more than
-// session.MaxConcurrentGets values at once: every Get returns its value, and
-// the connection is never dropped.
+// connection, and library values beside them. The coordinator drops a
+// connection as a slow consumer once it holds more unsent data than
+// session.MaxPending, so the client reads within it, in bytes: every Get
+// returns its value, and the connection is never dropped.
 func TestConcurrentLargeGets(t *testing.T) {
 	h := newHarness(t)
 	ctx := within(t)
 	ses := h.session(t, 2)
 	sessions := ses.connectAll(t)
 	value := bytes.Repeat([]byte{'v'}, session.MaxValue-1<<20)
+	small := bytes.Repeat([]byte{'l'}, session.MaxLibraryValue)
 	const keys = 4
 	for i := range keys {
 		require.NoError(t, sessions[1].Snapshot().Insert(ctx, fmt.Sprintf("large.%d", i), value))
+		require.NoError(t, sessions[1].Library().Insert(ctx, fmt.Sprintf("small.%d", i), small))
 	}
 
-	got := make(chan error, keys)
-	for i := range keys {
-		go func() {
-			read, err := sessions[0].Snapshot().Get(ctx, fmt.Sprintf("large.%d", i), 0)
-			if err == nil && !bytes.Equal(read, value) {
-				err = errors.New("a Get returned another value")
-			}
-			got <- err
-		}()
+	got := make(chan error, 2*keys)
+	get := func(store coordinator.Store, key string, want []byte) {
+		read, err := store.Get(ctx, key, 0)
+		if err == nil && !bytes.Equal(read, want) {
+			err = errors.New("a Get returned another value")
+		}
+		got <- err
 	}
-	for range keys {
+	for i := range keys {
+		go get(sessions[0].Snapshot(), fmt.Sprintf("large.%d", i), value)
+		go get(sessions[0].Library(), fmt.Sprintf("small.%d", i), small)
+	}
+	for range 2 * keys {
 		require.NoError(t, <-got)
 	}
 	for _, line := range h.logs.all() {
@@ -413,4 +419,32 @@ func TestGetWaitsHoldNoReadSlot(t *testing.T) {
 	for _, line := range h.logs.all() {
 		assert.NotContains(t, line, "Lost the connection", "a Get must not cost the connection")
 	}
+}
+
+// TestReplyHeadroom checks that what a read's reply carries beyond its value
+// fits session.ReplyHeadroom with room to spare, with the longest attempt UID,
+// member ID, and key: a library key, which its encoding lengthens. The client
+// counts each read as its bucket's largest value and that headroom.
+func TestReplyHeadroom(t *testing.T) {
+	h := newHarness(t)
+	ctx := within(t)
+	longest := func(prefix string, n int) string { return prefix + strings.Repeat("x", n-len(prefix)) }
+	ses := h.open(t, server.Spec{
+		UID:      types.UID(longest(fmt.Sprintf("attempt-%d-", time.Now().UnixNano()), session.MaxAttemptLength)),
+		Members:  []session.Member{{ID: longest("member-", session.MaxNameLength)}},
+		Deadline: h.clock.Now().Add(time.Hour),
+	})
+	key := strings.Repeat("\xff", coordinator.MaxKeyLength)
+	value := bytes.Repeat([]byte{'v'}, session.MaxLibraryValue)
+	require.NoError(t, ses.connect(t, 0).Library().Insert(ctx, key, value))
+
+	bucket := ses.bucket(t, session.NamespaceLibrary)
+	subject := "$KV." + bucket + "." + string(session.NamespaceLibrary) + "." +
+		base64.RawURLEncoding.EncodeToString([]byte(key))
+	reply, err := ses.rawConn(t, 0).RequestWithContext(ctx, "$JS.API.DIRECT.GET.KV_"+bucket+"."+subject, nil)
+	require.NoError(t, err)
+	require.Equal(t, value, reply.Data)
+	headroom := reply.Size() - len(reply.Data)
+	assert.Less(t, headroom, session.ReplyHeadroom/2)
+	t.Logf("the reply carries %d bytes beyond its value", headroom)
 }
