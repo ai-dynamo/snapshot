@@ -90,7 +90,6 @@ func (op *restoreOperation) writeRestoreAttempts(nodeUID string, record *restore
 // retries.
 func (op *restoreOperation) startAttempt(ctx context.Context) (*restoreAttempts, error) {
 	now := op.controller.nowFn()
-	op.nodeUID = op.nodePodUID(ctx)
 	limit, err := op.retryLimit()
 	if err != nil {
 		return nil, err
@@ -113,6 +112,7 @@ func (op *restoreOperation) startAttempt(ctx context.Context) (*restoreAttempts,
 // the limit and deadline resolved now; an agent that restarted during an
 // attempt repeats it within the record's limit and deadline.
 func (op *restoreOperation) saveAttempt(ctx context.Context, first *restoreAttempts, now time.Time) (*restoreAttempts, error) {
+	op.nodeUID = op.nodePodUID(ctx)
 	record, found, err := op.readRestoreAttempts(op.nodeUID)
 	if err != nil {
 		return nil, err
