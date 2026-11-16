@@ -68,6 +68,18 @@ reviews:
         Open a follow-up PR containing only the needed documentation changes.
         Do not edit CHANGELOG.md or published release notes, commit directly
         to main, or merge the follow-up PR.
+    - name: "Track agreed follow-up work"
+      prompt: |
+        After a merge into main, identify follow-up work explicitly agreed
+        by a maintainer in the PR discussion. Check existing open and closed
+        issues before creating an issue. If the task is already tracked,
+        do not create another issue.
+        For each untracked agreed task, create a GitHub issue in this
+        repository with a short title, the task, and a link to the source
+        PR discussion and relevant files.
+        Do not treat an unresolved thread alone as agreement. Skip rejected
+        findings and unaccepted suggestions. Do not assign issues, apply
+        approval or priority labels, close issues, change code, or open PRs.
 
   finishing_touches:
     docstrings:
