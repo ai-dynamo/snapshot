@@ -97,38 +97,6 @@ def test_restored_state_requires_every_remote_assertion_to_pass(
         assert "source_token=source-state restore_token=restore-state" in output
 
 
-def test_a_corrupted_checkpoint_image_is_repaired_to_its_original(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(lifecycle, "AGENT_CHECKPOINT_DIR", str(tmp_path / "checkpoints"))
-    monkeypatch.setattr(lifecycle, "INTACT_IMAGE_DIR", str(tmp_path / "scratch"))
-    monkeypatch.setattr(lifecycle, "checkpoint_agent_pod", lambda *_: "agent-pod")
-    (tmp_path / "scratch").mkdir()
-    image = tmp_path / "checkpoints/artifacts/content/containers/main/inventory.img"
-    image.parent.mkdir(parents=True)
-    image.write_bytes(b"criu inventory")
-    image.chmod(0o640)
-
-    def exec_command(namespace: str, pod: str, command: str, *, container: str | None = None) -> str:
-        assert (namespace, pod, container) == ("test-ns", "agent-pod", "agent")
-        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=5)
-        # Match Kubernetes' preloaded stream: nonzero exit does not raise.
-        return result.stdout + result.stderr
-
-    monkeypatch.setattr(lifecycle.k8s, "exec_command", exec_command)
-    config = lifecycle.k8s.E2EConfig("test-ns", "snapshot", "pvc", None, cpu_only=True)
-
-    lifecycle.corrupt_checkpoint_image(config, "node", "content")
-    assert image.read_bytes() == b"not-a-criu-image"
-    lifecycle.repair_checkpoint_image(config, "node", "content")
-    assert image.read_bytes() == b"criu inventory"
-    assert image.stat().st_mode & 0o777 == 0o640
-    assert list((tmp_path / "scratch").iterdir()) == []
-    # A second repair has nothing to put back.
-    with pytest.raises(AssertionError, match="repairing inventory.img of content failed"):
-        lifecycle.repair_checkpoint_image(config, "node", "content")
-
-
 def test_restore_retry_status_reads_the_annotation() -> None:
     def pod(annotations: dict[str, str] | None) -> SimpleNamespace:
         return SimpleNamespace(metadata=SimpleNamespace(

@@ -7,11 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 How the node agent retries a failed restore attempt: when it retries, and how
 it keeps count across agent restarts. The settings are in the
-[API Reference](../../reference/api.md#restore), and what a restore Pod can
-expect is in the
-[Restore Pod Contract](../../reference/restore-pod-contract.md#restore-retries).
-This page is for contributors changing the mechanism. For where it fits, see
-the [Architecture](../../overview/architecture-overview.md#restore-flow).
+[API Reference](../../reference/api.md#restore). This page is for contributors
+changing the mechanism. For where it fits, see the
+[Architecture](../../overview/architecture-overview.md#restore-flow).
 
 <!-- toc -->
 - [Attempts and the Deadline](#attempts-and-the-deadline)
@@ -25,27 +23,11 @@ the [Architecture](../../overview/architecture-overview.md#restore-flow).
 
 ## Attempts and the Deadline
 
-The agent restores each destination container on its own. With a retry limit
-above 0, each keeps a record of its attempts. The record is the
-`restore-attempts` file in the container's directory of the `snapshot-control`
-volume. The agent reads it through the node's path of the volume, under the
-Pod's UID on the node, so the record outlives the container.
-
-The first attempt resolves two values:
-
-- The retry limit, from the Pod's `nvidia.com/restore-retry-limit`, or else
-  `restore.retryLimit` in the agent configuration.
-- The deadline: the start of the first attempt plus `restore.timeoutSeconds`.
-
-With a limit above 0, the first attempt saves both in the record. Every later
-attempt keeps both, so a setting that changes during a restore does not change
-them. A limit that changes to 0 is the exception: the next attempt runs as
-without retries. The deadline also bounds the post-restore action. Each
-attempt saves its number in the record before it starts.
-
-The Pod's containers can write the record, so the agent treats it as untrusted.
-It opens the record without following links and reads at most 8 KiB. A record
-it cannot parse or save ends the restore.
+The retry limit is how many times the agent retries a destination after its
+first attempt fails. It defaults to 0. All attempts of a destination share one
+deadline: the start of the first attempt plus `restore.timeoutSeconds`. With a
+limit above 0, the agent keeps the count in the destination's
+`restore-attempts` record.
 
 ## Recovery After a Failed Attempt
 
@@ -77,6 +59,9 @@ Another attempt after such a failure needs a new container, and the agent
 does not start one, so the restore ends. The `RestoreAttemptFailed` event says
 `another attempt needs a new container`, which tells this ending apart from a
 failure that no attempt can fix.
+
+The Pod's `restartPolicy` does not change which failures are retried. Retries
+also work on nodes without the restore proxy.
 
 The decision covers attempts only. A refusal by the compatibility gates is
 reported as before and removes any record. A failed preflight, a failed write
@@ -131,13 +116,7 @@ restore in parallel, so one write per pass keeps every entry. It is a
 server-side apply on the Pod with the field manager `snapshot-agent-restore`,
 and it is skipped when the value would not change. The agent never reads the
 annotation back. With a limit of 0 there are no records, so the agent writes no
-annotation.
-
-A destination has an entry once an attempt has failed. The entry holds the
-current or last attempt, the retry limit, and the step and cause of the last
-failed attempt, with the cause cut to 1024 bytes. `snapshotUnusable` marks the
-PageBroker codes that name the snapshot: `ARTIFACT_NOT_FOUND`,
-`ARTIFACT_CORRUPT`, and `UNSUPPORTED_ARTIFACT`.
+annotation. Its fields are in the [API Reference](../../reference/api.md#restore).
 
 ## Restoring Again After a Restart
 

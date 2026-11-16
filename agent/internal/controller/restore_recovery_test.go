@@ -7,10 +7,12 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -449,4 +451,136 @@ func TestRestorePodContainersReportsAFinishedDestinationWhileASiblingWaits(t *te
 	assert.Len(t, eventsForReason(clientset, restoreAttemptFailedReason), 1)
 	assert.Equal(t, 2, volume.record(t, "host-uid", "engine-1").Attempt)
 	assert.Equal(t, 1, volume.record(t, "host-uid", "engine-0").Attempt)
+}
+
+func TestFailureSummary(t *testing.T) {
+	long := strings.Repeat("a", podcontract.FailureCauseMaxBytes-1) + "é and more"
+	for name, tc := range map[string]struct {
+		err  error
+		want podcontract.FailureSummary
+	}{
+		"the cause beneath the step": {
+			err:  &executor.StepError{Step: executor.StepPrepareRestore, Err: storeUnreachable},
+			want: podcontract.FailureSummary{Step: "preparing PageBroker restore", Cause: "PageBroker STORAGE_UNAVAILABLE: store unreachable"},
+		},
+		"a code that names the checkpoint": {
+			err:  untouched(pagebroker.NewFailureError(pagebroker.Failure_ARTIFACT_CORRUPT, "bad index")),
+			want: podcontract.FailureSummary{Step: "preparing PageBroker restore", Cause: "PageBroker ARTIFACT_CORRUPT: bad index", SnapshotUnusable: true},
+		},
+		"a final code that names this node": {
+			err:  untouched(pagebroker.NewFailureError(pagebroker.Failure_ACCESS_DENIED, "no access")),
+			want: podcontract.FailureSummary{Step: "preparing PageBroker restore", Cause: "PageBroker ACCESS_DENIED: no access"},
+		},
+		"a container that stopped during the attempt": {
+			err: stoppedDuringAttempt(untouched(storeUnreachable)),
+			want: podcontract.FailureSummary{
+				Step: "preparing PageBroker restore", Cause: "the container stopped during the attempt: PageBroker STORAGE_UNAVAILABLE: store unreachable",
+			},
+		},
+		"a cause longer than the limit": {
+			err:  errors.New(long),
+			want: podcontract.FailureSummary{Cause: strings.Repeat("a", podcontract.FailureCauseMaxBytes-1)},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := failureSummary(restoreFailureOf(tc.err))
+
+			assert.Equal(t, tc.want, *got)
+			assert.True(t, utf8.ValidString(got.Cause))
+		})
+	}
+}
+
+func TestRunRestoreRecordsTheLastFailure(t *testing.T) {
+	for name, tc := range map[string]struct {
+		limit   string
+		failure error
+		wantErr error
+		want    podcontract.FailureSummary
+	}{
+		"retried in place": {
+			limit: "2", failure: untouched(storeUnreachable), wantErr: errRetryScheduled,
+			want: podcontract.FailureSummary{Step: "preparing PageBroker restore", Cause: "PageBroker STORAGE_UNAVAILABLE: store unreachable"},
+		},
+		"ended by a changed container": {
+			limit: "2", failure: changedByCRIU,
+			want: podcontract.FailureSummary{Step: "restoring with CRIU", Cause: "criu restore failed"},
+		},
+		"ended by a final failure": {
+			limit: "2", failure: untouched(pagebroker.NewFailureError(pagebroker.Failure_ARTIFACT_NOT_FOUND, "gone")),
+			want: podcontract.FailureSummary{Step: "preparing PageBroker restore", Cause: "PageBroker ARTIFACT_NOT_FOUND: gone", SnapshotUnusable: true},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, run := newAttemptHarness(t, retryLimit(tc.limit), nil)
+			h.failAttempts(tc.failure)
+
+			err := run()
+
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+			} else {
+				require.Error(t, err)
+			}
+			record := h.volume.record(t, "host-uid", "main")
+			require.NotNil(t, record.LastFailure)
+			assert.Equal(t, tc.want, *record.LastFailure)
+		})
+	}
+}
+
+// The failure that ends a restore is saved after restore-failed, which ends
+// the restore whether or not the record is saved.
+func TestRunRestoreSavesTheEndingFailureAfterRestoreFailed(t *testing.T) {
+	for name, tc := range map[string]struct {
+		limit   string
+		record  func(*attemptHarness) restoreAttempts
+		failure error
+	}{
+		"not retried": {limit: "2", failure: untouched(pagebroker.NewFailureError(pagebroker.Failure_ARTIFACT_CORRUPT, "bad index"))},
+		"no retries left": {limit: "1", failure: untouched(storeUnreachable), record: func(h *attemptHarness) restoreAttempts {
+			return restoreAttempts{Limit: 1, Attempt: 1, Deadline: h.now.Add(10 * time.Minute), ContainerID: "ctr-abc", RetryAt: h.now.Add(-time.Second)}
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, run := newAttemptHarness(t, retryLimit(tc.limit), nil)
+			if tc.record != nil {
+				h.volume.put(t, "host-uid", "main", tc.record(h))
+			}
+			h.failAttempts(tc.failure)
+			var order []string
+			writeSentinel := h.w.writeControlSentinelFn
+			h.w.writeControlSentinelFn = func(pid int, name string, data []byte) error {
+				order = append(order, name)
+				return writeSentinel(pid, name, data)
+			}
+			writeFile := h.w.writePodControlSentinelFn
+			h.w.writePodControlSentinelFn = func(uid, container, name string, data []byte) error {
+				if name == podcontract.RestoreAttemptsFile && strings.Contains(string(data), `"lastFailure"`) {
+					order = append(order, "record with the failure")
+				}
+				return writeFile(uid, container, name, data)
+			}
+
+			require.Error(t, run())
+
+			assert.Equal(t, []string{podcontract.RestoreFailedFile, "record with the failure"}, order)
+		})
+	}
+}
+
+// The next attempt and its success keep the failure before them, so the
+// annotation still says why a retry was needed.
+func TestRunRestoreKeepsTheLastFailureThroughTheNextAttempt(t *testing.T) {
+	h, run := newAttemptHarness(t, retryLimit("2"), nil)
+	h.failAttempts(untouched(storeUnreachable))
+	require.ErrorIs(t, run(), errRetryScheduled)
+
+	h.now = h.volume.record(t, "host-uid", "main").RetryAt
+	require.NoError(t, run())
+
+	assert.Equal(t, 2, h.seen.Attempt)
+	require.NotNil(t, h.seen.LastFailure)
+	assert.Equal(t, "PageBroker STORAGE_UNAVAILABLE: store unreachable", h.seen.LastFailure.Cause)
+	assert.Equal(t, h.seen.LastFailure, h.volume.record(t, "host-uid", "main").LastFailure)
 }

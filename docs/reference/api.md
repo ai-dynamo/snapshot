@@ -189,7 +189,8 @@ restore attempt fails:
 
 All attempts of a restore share one deadline, `config.restore.timeoutSeconds`,
 from the start of the first. Only a failure that left the container untouched
-is retried; see [Restore Retries](restore-pod-contract.md#restore-retries).
+is retried; see
+[Restore Retry](../design/restore-retry/README.md#recovery-after-a-failed-attempt).
 
 ## Labels
 

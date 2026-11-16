@@ -9,10 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
@@ -478,7 +480,7 @@ func TestReadRestoreAttempts(t *testing.T) {
 			}
 			volume.readErr = tc.readErr
 
-			got, found, err := op.readRestoreAttempts("host-uid")
+			got, found, err := op.controller.readRestoreAttempts("host-uid", op.destination)
 
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
@@ -620,4 +622,37 @@ func TestNodePodUID(t *testing.T) {
 			assert.Equal(t, tc.want, op.nodePodUID(context.Background()))
 		})
 	}
+}
+
+func TestRestoreAttemptsHoldTheLongestCause(t *testing.T) {
+	for name, cause := range map[string]string{
+		"control characters": strings.Repeat("\x01", podcontract.FailureCauseMaxBytes),
+		"HTML characters":    strings.Repeat("<", podcontract.FailureCauseMaxBytes),
+		"invalid UTF-8":      strings.Repeat("\xff", podcontract.FailureCauseMaxBytes),
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, _ := newAttemptHarness(t, retryLimit("2"), nil)
+			op := &restoreOperation{controller: h.w, destination: "main", log: logr.Discard()}
+			record := &restoreAttempts{
+				Limit: 2, Attempt: 3, Deadline: h.now, RetryAt: h.now, ContainerID: strings.Repeat("c", 64),
+				LastFailure: &podcontract.FailureSummary{Step: string(executor.StepValidateManifest), Cause: cause, SnapshotUnusable: true},
+			}
+
+			require.NoError(t, op.writeRestoreAttempts("host-uid", record))
+
+			got := h.volume.record(t, "host-uid", "main")
+			require.NotNil(t, got.LastFailure)
+			assert.Equal(t, utf8.RuneCountInString(cause), utf8.RuneCountInString(got.LastFailure.Cause))
+		})
+	}
+}
+
+func TestWriteRestoreAttemptsRefusesARecordAPassCannotRead(t *testing.T) {
+	h, _ := newAttemptHarness(t, retryLimit("2"), nil)
+	op := &restoreOperation{controller: h.w, destination: "main", log: logr.Discard()}
+
+	err := op.writeRestoreAttempts("host-uid", &restoreAttempts{Limit: 2, Attempt: 1, ContainerID: strings.Repeat("c", restoreAttemptsMaxBytes)})
+
+	require.ErrorContains(t, err, "a pass reads")
+	assert.Empty(t, h.volume.writes)
 }
