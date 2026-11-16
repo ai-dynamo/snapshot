@@ -128,7 +128,9 @@ func TestRunRestoreEndsOnlyTheAttemptInTheStoppedContainer(t *testing.T) {
 
 func TestRunRestoreDoesNotTakeTheDeadlineForAStop(t *testing.T) {
 	h, run := newAttemptHarness(t, retryLimit("2"), nil)
-	h.volume.put(t, "host-uid", "main", restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(50 * time.Millisecond), ContainerID: "ctr-abc"})
+	// The attempt starts by the agent's clock, and its context has already ended by the real one.
+	h.now = h.now.Add(-time.Minute)
+	h.volume.put(t, "host-uid", "main", restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(time.Second), ContainerID: "ctr-abc"})
 	h.w.restoreFn = func(ctx context.Context, _ snapshotruntime.Runtime, _ logr.Logger, _ executor.RestoreRequest, _ executor.RestoreMounter) (executor.RestoreResult, error) {
 		<-ctx.Done()
 		return executor.RestoreResult{}, untouched(ctx.Err())
