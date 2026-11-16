@@ -29,6 +29,8 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	natsserver "github.com/nats-io/nats-server/v2/server"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -99,16 +101,22 @@ type host struct {
 	clock    *clocktesting.FakePassiveClock
 	cache    client.Reader
 	attempts *Attempts
+	// logs holds what the host's manager logs, its reconciles included.
+	logs *logLines
 }
 
 // startHost runs NewAttempts and Setup for coord, the coordinator of node, in
 // a manager of its own, configured by modify, with a fake clock that starts
-// now, and stops the manager when the test ends.
+// now, and stops the manager when the test ends. The manager logs to the
+// host's logs.
 func startHost(t *testing.T, node string, coord *coordinatortest.Coordinator,
 	modify ...func(*manager.Options)) *host {
 	t.Helper()
-	mgr := newManager(t, modify...)
-	h := &host{node: node, coord: coord, clock: clocktesting.NewFakePassiveClock(time.Now()), cache: mgr.GetCache()}
+	logs := &logLines{}
+	logTo := func(opts *manager.Options) { opts.Logger = logs.logger() }
+	mgr := newManager(t, append([]func(*manager.Options){logTo}, modify...)...)
+	h := &host{node: node, coord: coord, clock: clocktesting.NewFakePassiveClock(time.Now()), cache: mgr.GetCache(),
+		logs: logs}
 	var err error
 	h.attempts, err = NewAttempts(context.Background(), mgr)
 	require.NoError(t, err)
@@ -283,6 +291,45 @@ func (h *host) awaitSeen(t *testing.T, uid types.UID, seen func(*attempt) bool) 
 	}, timeout, 10*time.Millisecond)
 }
 
+// touchedAnnotation is the annotation awaitReconciled changes on a group
+// resource, which makes its host reconcile it.
+const touchedAnnotation = "groups.coordinator.test/touched"
+
+// reconcileIDPattern finds the ID that the controller logs each reconcile
+// with.
+var reconcileIDPattern = regexp.MustCompile(`"reconcileID"="([^"]+)"`)
+
+// awaitReconciled waits until h's cache shows what seen reports true of the
+// attempt of obj, then until h's reconciler has run on obj since: it changes
+// an annotation of obj, and waits for a reconcile that started after the
+// change to succeed, as the controller logs the start and the end of each.
+// That reconcile read the attempt as the cache showed it, or later.
+func (h *host) awaitReconciled(t *testing.T, obj client.Object, seen func(*attempt) bool) {
+	t.Helper()
+	h.awaitSeen(t, obj.GetUID(), seen)
+	mark := len(h.logs.all())
+	patch := client.MergeFrom(obj.DeepCopyObject().(client.Object))
+	obj.SetAnnotations(map[string]string{touchedAnnotation: time.Now().Format(time.RFC3339Nano)})
+	require.NoError(t, k8s.Patch(within(t), obj, patch))
+	attempt := fmt.Sprintf(`"attempt"=%q`, obj.GetUID())
+	require.Eventually(t, func() bool {
+		started := make(map[string]bool)
+		for _, line := range h.logs.all()[mark:] {
+			id := reconcileIDPattern.FindStringSubmatch(line)
+			if id == nil || !strings.Contains(line, attempt) {
+				continue
+			}
+			switch {
+			case strings.Contains(line, `"msg"="Reconciling"`):
+				started[id[1]] = true
+			case strings.Contains(line, `"msg"="Reconcile successful"`) && started[id[1]]:
+				return true
+			}
+		}
+		return false
+	}, timeout, 10*time.Millisecond, "a reconcile of %s after the change", obj.GetUID())
+}
+
 // requireNotHeld fails the test if h's coordinator holds the session of uid
 // within a moment.
 func (h *host) requireNotHeld(t *testing.T, uid types.UID) {
@@ -302,6 +349,32 @@ func (h *host) connect(t *testing.T, uid types.UID, id string) coordinator.Sessi
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	return s
+}
+
+// awaitArrival waits until member of the attempt uid has arrived at the
+// admitted barrier, as another member, peer, reads it over a plain NATS
+// connection made the way package session defines. The connection closes when
+// the test ends.
+func (h *host) awaitArrival(t *testing.T, uid types.UID, member, peer string) {
+	t.Helper()
+	ctx := within(t)
+	nc, err := nats.Connect("tls://"+h.coord.Addr().String(),
+		nats.Secure(&tls.Config{RootCAs: h.coord.RootCAs, ServerName: "localhost", MinVersion: tls.VersionTLS12}),
+		nats.TLSHandshakeFirst(),
+		nats.UserInfo(session.UserName(string(uid), peer), ""),
+		nats.Token(coordinatortest.Token),
+		nats.CustomInboxPrefix(session.InboxPrefix(string(uid), peer)),
+		nats.NoReconnect())
+	require.NoError(t, err)
+	t.Cleanup(nc.Close)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+	control, err := js.KeyValue(ctx, session.ControlBucket(string(uid)))
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		_, err := control.Get(ctx, session.BarrierKey(session.BarrierAdmitted, member))
+		return err == nil
+	}, timeout, 10*time.Millisecond, "member %s arriving at the admitted barrier", member)
 }
 
 // awaitEnd waits until s's session has ended, and returns how.
@@ -572,11 +645,13 @@ func TestMemberFailed(t *testing.T) {
 	names := nodes(t, 1)
 	h := startHost(t, names[0], coordinatortest.Start(t))
 	pair := []member{{"a", names[0]}, {"b", names[0]}}
-	// admit makes member a of the attempt uid wait at the admitted barrier.
+	// admit makes member a of the attempt uid wait at the admitted barrier,
+	// and returns once its arrival is recorded.
 	admit := func(t *testing.T, uid types.UID) <-chan error {
 		a := h.connect(t, uid, "a")
 		arrived := make(chan error, 1)
 		go func() { arrived <- a.Barrier(within(t), session.BarrierAdmitted) }()
+		h.awaitArrival(t, uid, "a", "b")
 		return arrived
 	}
 
@@ -624,7 +699,7 @@ func TestMemberFailed(t *testing.T) {
 		g.Status.Members[1].Phase = v1alpha1.CheckpointPhaseFailed
 		g.Status.Members[1].Reason = v1alpha1.ReasonPodSnapshotDeleted
 		require.NoError(t, k8s.Status().Update(within(t), g))
-		h.awaitSeen(t, g.UID, func(a *attempt) bool { return a.failure != "" })
+		h.awaitReconciled(t, g, func(a *attempt) bool { return a.failure != "" })
 		h.requireNotEnded(t, g.UID)
 	})
 }
@@ -804,12 +879,14 @@ type logLines struct {
 	lines []string
 }
 
+// logger returns a logger that records every line up to V(5), at which
+// controller-runtime logs each reconcile.
 func (l *logLines) logger() logr.Logger {
 	return funcr.New(func(prefix, args string) {
 		l.mu.Lock()
 		defer l.mu.Unlock()
 		l.lines = append(l.lines, prefix+" "+args)
-	}, funcr.Options{})
+	}, funcr.Options{Verbosity: 5})
 }
 
 func (l *logLines) all() []string {
