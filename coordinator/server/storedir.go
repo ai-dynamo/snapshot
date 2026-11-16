@@ -16,7 +16,6 @@ const storeDirPrefix = "snapshot-coordinator-"
 // newStoreDir returns the directory of the embedded server's file store, which
 // holds the control buckets, empty: dir, emptied, or created if it does not
 // exist, or a new directory under the temporary directory when dir is empty.
-// Only its entries are removed, so dir may be a mount point.
 func newStoreDir(dir string) (string, error) {
 	if dir == "" {
 		dir, err := os.MkdirTemp("", storeDirPrefix)

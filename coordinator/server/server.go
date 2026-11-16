@@ -150,9 +150,10 @@ type Config struct {
 
 	// StoreDir is the directory of the file store that holds the sessions'
 	// control keys. The server owns it: New empties it, creating it if it
-	// does not exist, and Shutdown removes it. It defaults to a new directory
-	// under the temporary directory, which a process that crashes leaves
-	// behind, so a host that restarts names a fixed one.
+	// does not exist, and Shutdown removes it, so it must not be a mount
+	// point. It defaults to a new directory under the temporary directory,
+	// which a process that crashes leaves behind, so a host that restarts
+	// names a fixed one.
 	StoreDir string
 
 	// Clock times deadlines and grace periods. It defaults to the real clock.
