@@ -38,6 +38,16 @@ reviews:
       - "github-actions[bot]"
 
   suggested_labels: false
+  auto_apply_labels: true
+  labeling_instructions:
+    - label: bug
+      instructions: "Apply when the PR fixes incorrect behavior."
+    - label: enhancement
+      instructions: "Apply when the PR adds or improves a capability."
+    - label: documentation
+      instructions: "Apply only when the PR changes prose documentation without changing executable code, examples, manifests, or configuration."
+    - label: dependencies
+      instructions: "Apply when the PR updates dependencies."
   suggested_reviewers: false
   sequence_diagrams: true
   related_issues: false
