@@ -58,12 +58,12 @@ func (s *client) CuInterpose() Store { return s.stores[session.NamespaceCuInterp
 // Library implements Session.
 func (s *client) Library() Store { return s.stores[session.NamespaceLibrary] }
 
-// newStore returns the Store of a namespace, whose keys bucket holds, bound as
-// kv. Meta carries the library bucket's largest value apart from the Snapshot
-// bucket's, and the library bucket limits its number of keys.
-func (s *client) newStore(ns session.Namespace, bucket string, kv jetstream.KeyValue) *store {
-	st := &store{s: s, kv: kv, ns: ns, maxValue: s.meta.MaxValue}
-	if bucket == session.LibraryBucket(s.attempt) {
+// newStore returns the Store of a namespace, whose keys the bucket name holds,
+// bound as b. Meta carries the library bucket's largest value apart from the
+// Snapshot bucket's, and the library bucket limits its number of keys.
+func (s *client) newStore(ns session.Namespace, name string, b bucket) *store {
+	st := &store{s: s, b: b, ns: ns, maxValue: s.meta.MaxValue}
+	if name == session.LibraryBucket(s.attempt) {
 		st.maxValue, st.limitsKeys = s.meta.MaxLibraryValue, true
 	}
 	st.readSize = readSize(st.maxValue)
@@ -77,7 +77,7 @@ func readSize(maxValue int) int64 { return int64(maxValue) + session.ReplyHeadro
 // store is one namespace of a session.
 type store struct {
 	s        *client
-	kv       jetstream.KeyValue
+	b        bucket
 	ns       session.Namespace
 	maxValue int
 	// readSize is what each read takes of the connection's budget.
@@ -134,31 +134,16 @@ func (st *store) Insert(ctx context.Context, key string, value []byte) error {
 		return fmt.Errorf("a value of %d bytes is over the %d-byte limit: %w", len(value), st.maxValue,
 			session.ErrTooLarge)
 	}
-	for {
-		err := st.s.do(ctx, func(ctx context.Context) error {
-			_, err := st.kv.Create(ctx, k, value)
-			if errors.Is(err, jetstream.ErrKeyExists) {
-				return session.ErrExists
-			}
-			return err
-		})
-		if !errors.Is(err, session.ErrExists) {
-			return err
-		}
+	created, held, err := st.s.create(ctx, st.b, k, value, st.readSize)
+	switch {
+	case err != nil:
+		return err
+	case created, bytes.Equal(held, value):
 		// Inserting the value a key holds succeeds, such as when this
 		// Insert's first write landed before its connection broke.
-		held, err := st.read(ctx, k)
-		switch {
-		case errors.Is(err, session.ErrNotFound):
-			// Deleted since: create it again.
-			continue
-		case err != nil:
-			return err
-		case !bytes.Equal(held, value):
-			return session.ErrExists
-		}
 		return nil
 	}
+	return session.ErrExists
 }
 
 // Get implements Store.
@@ -183,18 +168,14 @@ func (st *store) Get(ctx context.Context, key string, wait time.Duration) ([]byt
 // read reads the value of k, or reports session.ErrNotFound, within the
 // connection's budget. Every value a store reads goes through it.
 func (st *store) read(ctx context.Context, k string) ([]byte, error) {
-	var value []byte
-	err := st.s.read(ctx, st.readSize, func(ctx context.Context) error {
-		entry, err := st.kv.Get(ctx, k)
-		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return session.ErrNotFound
-		}
-		if err == nil {
-			value = entry.Value()
-		}
-		return err
-	})
-	return value, err
+	var r record
+	if err := st.s.read(ctx, st.readSize, latest(st.b, k, &r)); err != nil {
+		return nil, err
+	}
+	if r.deleted {
+		return nil, session.ErrNotFound
+	}
+	return r.value, nil
 }
 
 // readWhenPresent waits up to wait for k to be present, then reads it, or
@@ -205,7 +186,7 @@ func (st *store) readWhenPresent(ctx context.Context, k string, wait time.Durati
 	waitCtx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	for {
-		err := st.s.await(waitCtx, st.kv, []string{k}, func(_ string, _ []byte, present bool) bool { return present },
+		err := st.s.await(waitCtx, st.b.kv, []string{k}, func(_ string, _ []byte, present bool) bool { return present },
 			jetstream.MetaOnly())
 		if err == nil {
 			// Read within the caller's context: the key is there, whatever
@@ -238,5 +219,5 @@ func (st *store) Delete(ctx context.Context, key string) error {
 			return err
 		}
 	}
-	return st.s.do(ctx, func(ctx context.Context) error { return st.kv.Delete(ctx, k) })
+	return st.s.do(ctx, func(ctx context.Context) error { return st.b.kv.Delete(ctx, k) })
 }

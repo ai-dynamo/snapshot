@@ -104,7 +104,7 @@ type client struct {
 
 	// Set by join, and read-only afterwards. joined is set last, as the
 	// verifier starts.
-	control jetstream.KeyValue
+	control bucket
 	stores  map[session.Namespace]*store
 	meta    session.Meta
 	ranks   map[string]int
@@ -157,7 +157,7 @@ type client struct {
 func (s *client) followEnd() {
 	defer s.wg.Done()
 	for {
-		err := s.await(context.Background(), s.control, nil, func(string, []byte, bool) bool { return false })
+		err := s.await(context.Background(), s.control.kv, nil, func(string, []byte, bool) bool { return false })
 		var abort *session.AbortError
 		switch {
 		case errors.As(err, &abort), errors.Is(err, session.ErrClosed):
@@ -255,14 +255,14 @@ func (s *client) Barrier(ctx context.Context, name string) error {
 	}
 	arrival := session.BarrierKey(name, s.member)
 	if err := s.do(ctx, func(ctx context.Context) error {
-		_, err := s.control.Put(ctx, arrival, nil)
+		_, err := s.control.kv.Put(ctx, arrival, nil)
 		return err
 	}); err != nil {
 		return err
 	}
 	prefix := session.BarrierKey(name, "")
 	arrived := make(map[string]bool, len(s.ranks))
-	if err := s.await(ctx, s.control, []string{session.BarrierKey(name, "*")}, func(key string, _ []byte,
+	if err := s.await(ctx, s.control.kv, []string{session.BarrierKey(name, "*")}, func(key string, _ []byte,
 		present bool) bool {
 		member := strings.TrimPrefix(key, prefix)
 		if _, ok := s.ranks[member]; ok && present {
@@ -281,7 +281,7 @@ func (s *client) Barrier(ctx context.Context, name string) error {
 func (s *client) Leave(ctx context.Context) error {
 	left := session.LeftKey(s.member)
 	err := s.do(ctx, func(ctx context.Context) error {
-		_, err := s.control.Put(ctx, left, nil)
+		_, err := s.control.kv.Put(ctx, left, nil)
 		return err
 	})
 	if errors.Is(err, session.ErrClosed) {
@@ -296,11 +296,11 @@ func (s *client) Fail(ctx context.Context, reason string) error {
 		return err
 	}
 	err := s.do(ctx, func(ctx context.Context) error {
-		_, err := s.control.Create(ctx, session.KeyEnded, []byte(reason))
+		_, err := s.control.kv.Create(ctx, session.KeyEnded, []byte(reason))
 		if !errors.Is(err, jetstream.ErrKeyExists) {
 			return err
 		}
-		entry, err := s.control.Get(ctx, session.KeyEnded)
+		entry, err := s.control.kv.Get(ctx, session.KeyEnded)
 		if err != nil {
 			return err
 		}
@@ -501,7 +501,7 @@ func (s *client) watch(ctx context.Context, kv jetstream.KeyValue, keys []string
 // watch's, such as jetstream.MetaOnly, which delivers entries with no values.
 func (s *client) await(ctx context.Context, kv jetstream.KeyValue, keys []string,
 	visit func(key string, value []byte, present bool) bool, opts ...jetstream.WatchOpt) error {
-	watchesEnd := kv == s.control
+	watchesEnd := kv == s.control.kv
 	if watchesEnd {
 		keys = append(slices.Clone(keys), session.KeyEnded)
 	}

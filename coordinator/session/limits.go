@@ -77,13 +77,13 @@ func ControlBytes(members int) int64 {
 // subject is shorter than an arrival's by more than they take.
 func maxControlRecord() int {
 	name := strings.Repeat("n", MaxNameLength)
-	return recordFraming + len(subject(ControlBucket(longestAttempt()), BarrierKey(name, name))) + MaxControlValue
+	return recordFraming + len(Subject(ControlBucket(longestAttempt()), BarrierKey(name, name))) + MaxControlValue
 }
 
 // metaRecord is the most Meta's record takes in the control bucket of a
 // session of members members.
 func metaRecord(members int) int {
-	return recordFraming + len(subject(ControlBucket(longestAttempt()), KeyMeta)) + MaxMetaBytes(members)
+	return recordFraming + len(Subject(ControlBucket(longestAttempt()), KeyMeta)) + MaxMetaBytes(members)
 }
 
 // longestAttempt returns the longest attempt UID ValidateAttempt accepts.

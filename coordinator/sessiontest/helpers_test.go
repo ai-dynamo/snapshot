@@ -461,12 +461,14 @@ func (h *harness) events(spec server.Spec) []string {
 }
 
 // proxy forwards TCP connections to the coordinator, so a test can break them
-// as a network would, and move them to another coordinator. TLS passes through
-// it untouched.
+// as a network would, and move them to another coordinator, and counts what
+// the coordinator sends through it. TLS passes through it untouched.
 type proxy struct {
 	ln       net.Listener
 	accepted chan struct{}
 	wg       sync.WaitGroup
+	// sent counts the bytes the coordinator has sent through the proxy.
+	sent atomic.Int64
 
 	mu     sync.Mutex
 	target string
@@ -522,9 +524,27 @@ func (p *proxy) forward(in net.Conn, target string) {
 		_, _ = io.Copy(out, in)
 		_ = out.Close()
 	}()
-	_, _ = io.Copy(in, out)
+	p.toClient(in, out)
 	_ = in.Close()
 	<-done
+}
+
+// toClient carries what the coordinator sends from out to in, counting it,
+// until either side closes.
+func (p *proxy) toClient(in, out net.Conn) {
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := out.Read(buf)
+		if n > 0 {
+			p.sent.Add(int64(n))
+			if _, err := in.Write(buf[:n]); err != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 // drop closes a connection and forgets it.

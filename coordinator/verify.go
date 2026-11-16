@@ -70,10 +70,10 @@ func (s *client) check() {
 		target := s.target()
 		s.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), attemptTimeout)
-		_, err := s.control.Status(ctx)
+		_, err := s.control.kv.Status(ctx)
 		var meta session.Meta
 		if err == nil {
-			meta, err = readMeta(ctx, s.control)
+			meta, err = readMeta(ctx, s.control.kv)
 		}
 		cancel()
 		switch {

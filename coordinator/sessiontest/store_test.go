@@ -111,6 +111,24 @@ func TestNamespacesAreSeparate(t *testing.T) {
 	}
 }
 
+// TestInsertReceivesTheHeldValueOnce checks that inserting the value a key
+// already holds receives that value once, as the read that compares it: the
+// write that finds the key taken reads nothing.
+func TestInsertReceivesTheHeldValueOnce(t *testing.T) {
+	h := newHarness(t, withTestMaxValue)
+	ctx := within(t)
+	ses := h.session(t, 2)
+	sessions := ses.connectAll(t)
+	value := bytes.Repeat([]byte{'v'}, testMaxValue)
+	require.NoError(t, sessions[0].Snapshot().Insert(ctx, "k", value))
+	before := ses.proxies[1].sent.Load()
+	require.NoError(t, sessions[1].Snapshot().Insert(ctx, "k", value), "inserting the value a key holds")
+	received := ses.proxies[1].sent.Load() - before
+	assert.GreaterOrEqual(t, received, int64(len(value)))
+	assert.Less(t, received, int64(len(value))*3/2, "the Insert must receive the value once")
+	t.Logf("the Insert received %d bytes, for a value of %d", received, len(value))
+}
+
 // TestKeys covers the keys a Store refuses before sending anything.
 func TestKeys(t *testing.T) {
 	h := newHarness(t)

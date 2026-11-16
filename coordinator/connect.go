@@ -234,9 +234,9 @@ func (s *client) join(ctx context.Context) error {
 	if err != nil {
 		return mapError(err)
 	}
-	buckets := make(map[string]jetstream.KeyValue)
-	for _, bucket := range session.Buckets(s.attempt) {
-		if buckets[bucket], err = s.bind(ctx, js, bucket); err != nil {
+	buckets := make(map[string]bucket)
+	for _, name := range session.Buckets(s.attempt) {
+		if buckets[name], err = s.bind(ctx, js, name); err != nil {
 			return err
 		}
 	}
@@ -245,7 +245,7 @@ func (s *client) join(ctx context.Context) error {
 	target := s.target()
 	s.mu.Unlock()
 	if err := s.do(ctx, func(ctx context.Context) error {
-		s.meta, err = readMeta(ctx, s.control)
+		s.meta, err = readMeta(ctx, s.control.kv)
 		return err
 	}); err != nil {
 		return err
@@ -260,11 +260,11 @@ func (s *client) join(ctx context.Context) error {
 	s.budget = semaphore.NewWeighted(session.MaxPending(s.meta.MaxValue))
 	s.stores = make(map[session.Namespace]*store)
 	for _, ns := range session.Namespaces() {
-		bucket, err := ns.Bucket(s.attempt)
+		name, err := ns.Bucket(s.attempt)
 		if err != nil {
 			return err
 		}
-		s.stores[ns] = s.newStore(ns, bucket, buckets[bucket])
+		s.stores[ns] = s.newStore(ns, name, buckets[name])
 	}
 	s.epoch.Store(s.meta.Epoch)
 	// Reading Meta verified every reconnect before it.
@@ -278,15 +278,23 @@ func (s *client) join(ctx context.Context) error {
 	return nil
 }
 
-// bind binds one of the attempt's buckets.
-func (s *client) bind(ctx context.Context, js jetstream.JetStream, bucket string) (jetstream.KeyValue, error) {
-	var kv jetstream.KeyValue
+// bind binds one of the attempt's buckets, as a key-value bucket and as the
+// stream that holds it.
+func (s *client) bind(ctx context.Context, js jetstream.JetStream, name string) (bucket, error) {
+	var b bucket
 	err := s.do(ctx, func(ctx context.Context) error {
-		var err error
-		kv, err = js.KeyValue(ctx, bucket)
-		return err
+		kv, err := js.KeyValue(ctx, name)
+		if err != nil {
+			return err
+		}
+		stream, err := js.Stream(ctx, "KV_"+name)
+		if err != nil {
+			return err
+		}
+		b = bucket{kv: kv, stream: stream}
+		return nil
 	})
-	return kv, err
+	return b, err
 }
 
 // readMeta reads and decodes the meta key.

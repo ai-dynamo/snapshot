@@ -37,9 +37,9 @@ func Buckets(attempt string) []string {
 	return []string{ControlBucket(attempt), SnapshotBucket(attempt), LibraryBucket(attempt)}
 }
 
-// subject is the subject a write of key in bucket publishes to, and its
+// Subject is the subject a write of key in bucket publishes to, and its
 // record in the bucket's stream has.
-func subject(bucket, key string) string { return "$KV." + bucket + "." + key }
+func Subject(bucket, key string) string { return "$KV." + bucket + "." + key }
 
 // The keys of the control bucket, ControlBucket(attempt), which the session
 // itself uses:
@@ -221,10 +221,10 @@ func MemberPermissions(attempt, member string) Permissions {
 		}
 	}
 	for _, key := range controlKeys {
-		publish = append(publish, subject(ControlBucket(attempt), key))
+		publish = append(publish, Subject(ControlBucket(attempt), key))
 	}
 	for _, n := range namespaces {
-		publish = append(publish, subject(n.bucket(attempt), string(n.ns)+".>"))
+		publish = append(publish, Subject(n.bucket(attempt), string(n.ns)+".>"))
 	}
 	return Permissions{Publish: publish, Subscribe: []string{InboxPrefix(attempt, member) + ".>"}}
 }
