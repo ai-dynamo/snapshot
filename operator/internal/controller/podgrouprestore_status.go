@@ -194,7 +194,7 @@ func derivePodGroupRestoreStatus(
 		if isRestorePhaseFinal(m.Phase) {
 			continue
 		}
-		if cause := attempt.memberCause(&podGroupMemberView{hasWork: m.Pod != nil}); cause != nil {
+		if cause := attempt.memberCause(m.Pod != nil); cause != nil {
 			m.Phase, m.Reason, m.Message = snapshotv1alpha1.RestorePhaseFailed, cause.reason, cause.message
 		}
 	}
