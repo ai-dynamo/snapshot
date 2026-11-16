@@ -32,10 +32,7 @@ reviews:
       - "do not merge"
       - "dnm"
       - "[skip review]"
-    ignore_usernames:
-      - "dependabot[bot]"
-      - "renovate[bot]"
-      - "github-actions[bot]"
+    ignore_usernames: []
 
   suggested_labels: false
   suggested_reviewers: false
