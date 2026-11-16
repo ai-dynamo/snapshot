@@ -74,6 +74,14 @@ var finalCodes = map[pagebroker.Failure_Code]bool{
 	pagebroker.Failure_INVALID_REQUEST:      true,
 }
 
+// snapshotUnusableCodes are the final codes that name the snapshot. The others
+// name this node's access or configuration, or the request.
+var snapshotUnusableCodes = map[pagebroker.Failure_Code]bool{
+	pagebroker.Failure_ARTIFACT_NOT_FOUND:   true,
+	pagebroker.Failure_ARTIFACT_CORRUPT:     true,
+	pagebroker.Failure_UNSUPPORTED_ARTIFACT: true,
+}
+
 func failureCode(err error) pagebroker.Failure_Code {
 	var failure *pagebroker.FailureError
 	if errors.As(err, &failure) {
@@ -184,14 +192,6 @@ func (op *restoreOperation) recordLastFailure(record *restoreAttempts, f *execut
 	if err := op.writeRestoreAttempts(op.nodeUID, record); err != nil {
 		op.log.Error(err, "Failed to save the failed attempt in the restore attempt record")
 	}
-}
-
-// snapshotUnusableCodes are the final codes that name the snapshot. The others
-// name this node's access or configuration, or the request.
-var snapshotUnusableCodes = map[pagebroker.Failure_Code]bool{
-	pagebroker.Failure_ARTIFACT_NOT_FOUND:   true,
-	pagebroker.Failure_ARTIFACT_CORRUPT:     true,
-	pagebroker.Failure_UNSUPPORTED_ARTIFACT: true,
 }
 
 // failureSummary is a failed attempt as the retry status annotation reports
