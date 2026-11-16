@@ -58,7 +58,6 @@ pathlib.Path(metadata).write_text(json.dumps({
         "CACHE_BRANCH": "main",
         "CACHE_REF_PREFIX": "registry.example/cache",
         "CACHE_TAG_SUFFIX": "",
-        "CACHE_VARIANT": "",
         "BUILD_ARGS": "",
         "PHASE": "",
         "RUNNER_TEMP": str(tmp_path),
@@ -78,20 +77,18 @@ def build(env):
 
 
 @pytest.mark.parametrize("mode", ["read", "write"])
-def test_variant_cache_falls_back_without_writing_the_standard_cache(build_env, mode):
-    build_env.update(CACHE_VARIANT="snapshot-e2e", CACHE_MODE=mode)
+def test_builds_only_write_the_branch_cache_when_requested(build_env, mode):
+    build_env.update(CACHE_MODE=mode)
     result = build(build_env)
     assert result.returncode == 0, result.stderr
     args = json.loads(Path(build_env["MAKE_RECORD"]).read_text())
     flags = next(arg for arg in args if arg.startswith("DOCKER_BUILD_ARGS="))
     prefix = "type=registry,ref=registry.example/cache:operator"
-    assert f"--cache-from={prefix}-snapshot-e2e-main" in flags
     assert f"--cache-from={prefix}-main" in flags
     if mode == "write":
-        assert f"--cache-to={prefix}-snapshot-e2e-main," in flags
+        assert f"--cache-to={prefix}-main," in flags
     else:
         assert "--cache-to=" not in flags
-    assert f"--cache-to={prefix}-main," not in flags
     assert Path(build_env["GITHUB_OUTPUT"]).read_text() == f"digest={DIGEST}\n"
 
 
@@ -121,7 +118,6 @@ def test_push_mode_preserves_the_make_contract_and_cleans_metadata(build_env, pu
         ({"BUILD_DIGEST": ""}, 1),
         ({"PUSH": "invalid"}, 2),
         ({"CACHE_MODE": "invalid"}, 2),
-        ({"CACHE_VARIANT": "bad variant"}, 2),
     ],
 )
 def test_failed_builds_do_not_report_a_digest(build_env, overrides, expected):
@@ -135,11 +131,11 @@ def test_failed_builds_do_not_report_a_digest(build_env, overrides, expected):
 def cpu_workers(tmp_path):
     hack = tmp_path / "hack"
     hack.mkdir()
-    worker = """import json, os, pathlib, sys, time
+    worker = """import json, os, pathlib, subprocess, sys, time
 name = os.environ.get('IMAGE', 'cluster')
 root = pathlib.Path(os.environ['WORKERS_DIR'])
 (root / (name + '.config.json')).write_text(json.dumps({
-    key: os.environ.get(key) for key in ('CACHE_VARIANT', 'BUILD_ARGS', 'CACHE_MODE')
+    key: os.environ.get(key) for key in ('BUILD_ARGS', 'CACHE_MODE')
 }))
 (root / (name + '.started')).touch()
 deadline = time.monotonic() + 5
@@ -148,12 +144,10 @@ while len(list(root.glob('*.started'))) != 4:
         sys.exit(9)
     time.sleep(.01)
 if os.environ.get('BLOCK_WORKERS'):
-    subprocess = __import__('subprocess')
     child = subprocess.Popen(['sleep', '30'])
     (root / (name + '.pid')).write_text(str(child.pid))
     child.wait()
 else:
-    time.sleep(.05)
     (root / (name + '.finished')).touch()
     sys.exit(7 if name == os.environ.get('FAIL_WORKER') else 0)
 """
@@ -191,15 +185,10 @@ def test_cpu_builds_overlap_and_wait_for_every_worker(cpu_workers, failure):
     assert result.returncode == (1 if failure else 0), result.stderr
     assert len(list(directory.glob("*.finished"))) == 4
     operator = json.loads((directory / "operator.config.json").read_text())
-    workflow = yaml.safe_load((ROOT / ".github/workflows/push-artifacts.yaml").read_text())
-    producer = next(
-        s for s in workflow["jobs"]["build-image"]["steps"]
-        if s.get("name") == "Warm CPU operator cache"
-    )
-    assert operator["CACHE_VARIANT"] == producer["with"]["cache_variant"]
-    assert operator["BUILD_ARGS"] == producer["with"]["build_args"]
-    assert operator["CACHE_MODE"] == "read"
-    assert producer["with"]["cache_mode"] == "write"
+    assert operator == {
+        "BUILD_ARGS": "--build-arg GO_BUILD_TAGS=snapshot_e2e",
+        "CACHE_MODE": "read",
+    }
 
 
 @pytest.mark.skipif(shutil.which("setsid") is None, reason="CPU workflow requires Linux setsid")

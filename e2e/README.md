@@ -55,16 +55,9 @@ and pagebroker images are built from the mirrored commit and pushed to GHCR as
 framework suites in `e2e-frameworks.yaml` run only once both succeed, and
 install those images rather than main's. Each suite receives the digests the
 build recorded in `SNAPSHOT_E2E_IMAGE_DIGESTS`, a JSON object keyed `operator`,
-`agent`, and `pagebroker`. With it set, `setup.py` uses `imagePullPolicy: Always`
-and checks each running Snapshot image against the recorded build. If the
-runtime reports a different image index, setup uses the matching container's
-desired image in the Pod spec to resolve both immutable digests in GHCR and compares their runnable manifests for the node's OS and architecture.
-Indexes with identical runnable content can differ in their provenance
-attestations. Runtime image names may refer to a registry mirror or an older
-cached tag. Different runnable content or a failed lookup still fails setup;
-the candidate record retains the original build digest.
+`agent`, and `pagebroker`. With it set, `setup.py` uses `imagePullPolicy: Always` and verifies the running image content. The Pod spec identifies the repository; the runtime image ID identifies the content. When provenance indexes differ, setup compares their runnable manifests for the node's OS and architecture. This also handles mirrored runtime image names. Registry reads allow three attempts for transient failures. Different content or a failed lookup fails setup.
 
-The native GPU workflow runs independent lifecycle tests with two workers, then runs `serial` tests alone after both workers finish. This keeps the node-wide artifact sweep and operator restart cases isolated. Both phases report test durations and upload JUnit results. The framework workflow reuses the caller's successful `make check` only for the same commit; scheduled and manual runs still validate the repository themselves.
+The native GPU workflow runs independent lifecycle tests with two workers, then runs `serial` tests alone. Both phases report test durations and upload JUnit results. Framework tests reuse the caller's successful `make check` only for the same commit; scheduled and manual runs validate locally.
 
 The `PR E2E` check passes only when every suite the change needed passed, or
 when the change needed none of them. The scheduled registry prune deletes
@@ -72,9 +65,9 @@ pull request images seven days after they are pushed.
 
 ### CPU Mode (k3d)
 
-`e2e-cpu.yaml` runs from `e2e-pr.yaml`, where no GPU cluster is available. It builds the operator, agent, and PageBroker images while creating a k3d cluster. All builds push to the cluster's disposable registry. The workflow waits for every build and cluster startup to succeed, installs the chart through the same `setup.py` phases the GPU workflow uses, and runs `pytest -m cpu`. The ordinary tests use three workers; serial tests run alone. The older-runtime tests without the restore proxy still run afterwards.
+`e2e-cpu.yaml` builds the operator, agent, and PageBroker images while creating a k3d cluster. It pushes the images to the cluster's disposable registry and waits for all four tasks before installing the chart and running `pytest -m cpu`. Ordinary CPU tests use three workers; serial tests run alone. Older-runtime tests without the restore proxy run afterwards.
 
-`hack/ci-prepare-cpu-e2e.sh` starts the concurrent tasks, collects their logs, and terminates their child processes on cancellation. CPU builds and the shared build action use `hack/ci-build-image.sh`. The test-enabled operator has a separate cache warmed by successful main builds. Pull requests only read caches, with the standard operator cache as a fallback. The optional cache warm does not change the published image or digest. Backport the build action and this helper together to supported release branches before their next artifact publication.
+`hack/ci-prepare-cpu-e2e.sh` starts and waits for these tasks, collects their logs, and stops their child processes on cancellation. Image builds use `hack/ci-build-image.sh`, shared with the build action. PR builds only read the standard image caches. Backport the action and build helper together before a supported release branch uses the revised action.
 
 The CPU workflow and local runner set `SNAPSHOT_E2E_CPU_ONLY=true`. This
 explicit mode requires direct setup and exactly one ready, schedulable node.

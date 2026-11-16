@@ -227,8 +227,7 @@ def test_framework_workflow_checks_repository_before_using_gpu_cluster() -> None
     assert check["steps"][0]["with"]["persist-credentials"] is False
     assert "continue-on-error" not in check
     assert all("continue-on-error" not in step for step in check["steps"])
-    # Standalone runs validate here. Reusable calls may reuse a successful
-    # caller validation only when it covers the same commit.
+    # Standalone runs validate here; reusable calls must cover the same commit.
     assert check["if"] == "${{ inputs.validated_sha != github.sha }}"
     assert framework_jobs["e2e"]["needs"] == "check"
     assert framework_jobs["e2e"]["if"] == (

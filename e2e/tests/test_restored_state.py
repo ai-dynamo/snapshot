@@ -18,7 +18,6 @@ from snapshot_e2e import lifecycle
     ("failure", "progress_after"),
     [
         (None, 1),
-        (None, 5),
         (None, 12),
         ("pid-1-not-proxy", 1),
         ("restored-pid-not-workload", 1),

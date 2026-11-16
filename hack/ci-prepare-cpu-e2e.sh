@@ -30,13 +30,12 @@ start_worker() {
 }
 
 start_image_build() {
-  local image="$1" variant="" args=""
+  local image="$1" args=""
   if [ "${image}" = operator ]; then
-    variant=snapshot-e2e
     args="--build-arg GO_BUILD_TAGS=snapshot_e2e"
   fi
   start_worker "build-${image}" env \
-    IMAGE="${image}" BUILD_ARGS="${args}" CACHE_VARIANT="${variant}" \
+    IMAGE="${image}" BUILD_ARGS="${args}" \
     PHASE="Build ${image} image" \
     GITHUB_OUTPUT="${RUNNER_TEMP}/cpu-build-${image}.outputs" \
     bash hack/ci-build-image.sh

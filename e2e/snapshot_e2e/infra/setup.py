@@ -552,11 +552,28 @@ def verify_running_images(*, namespace: str, release: str, expected: dict[str, s
     pods = client.CoreV1Api().list_namespaced_pod(
         namespace=namespace, label_selector=selector
     ).items
+
+    def registry_read(request: str | urllib.request.Request) -> bytes:
+        # Retry transient read failures. Digest and JSON checks stay outside
+        # this loop so invalid content fails immediately.
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    return response.read()
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+                permanent_http_error = isinstance(exc, urllib.error.HTTPError) and exc.code not in (
+                    408, 429, 500, 502, 503, 504
+                )
+                if permanent_http_error or attempt == 2:
+                    raise
+            log(f"Retrying image registry read after transient failure, attempt {attempt + 2}/3")
+            time.sleep(attempt + 1)
+        raise AssertionError("registry read exhausted without a result")
+
     @cache
     def registry_token(repository: str) -> str:
         query = urllib.parse.urlencode({"service": "ghcr.io", "scope": f"repository:{repository}:pull"})
-        with urllib.request.urlopen(f"https://ghcr.io/token?{query}", timeout=30) as response:
-            return json.load(response)["token"]
+        return json.loads(registry_read(f"https://ghcr.io/token?{query}"))["token"]
 
     @cache
     def read_manifest(repository: str, digest: str) -> dict:
@@ -572,8 +589,7 @@ def verify_running_images(*, namespace: str, release: str, expected: dict[str, s
                 ]),
             },
         )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            raw = response.read()
+        raw = registry_read(request)
         if "sha256:" + hashlib.sha256(raw).hexdigest() != digest:
             raise SetupError(f"registry manifest bytes do not match {digest}")
         manifest = json.loads(raw)
@@ -593,9 +609,8 @@ def verify_running_images(*, namespace: str, release: str, expected: dict[str, s
     lookup_errors: dict[tuple[str, str, str], SetupError] = {}
 
     def equivalent(pod: client.V1Pod, image: str, running: str, recorded: str) -> bool:
-        # containerd can report an older index for identical runnable content.
-        # Keep the recorded provenance index and compare the platform image
-        # underneath each index, rather than accepting a matching tag/config.
+        # containerd can report an older index for the same runnable image.
+        # Compare platform manifests and keep the recorded provenance index.
         key = (image, running, recorded)
         if key in lookup_errors:
             raise lookup_errors[key]

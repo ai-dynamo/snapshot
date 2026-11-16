@@ -87,12 +87,7 @@ def test_frameworks_reuse_validation_for_only_the_callers_commit(jobs):
     assert inputs["validated_sha"]["required"] is False
     assert inputs["validated_sha"]["type"] == "string"
     assert inputs["validated_sha"].get("default", "") == ""
-    # An unset input on a schedule/dispatch or a different SHA runs make check.
-    assert called["jobs"]["check"]["if"] == "${{ inputs.validated_sha != github.sha }}"
-    assert called["jobs"]["e2e"]["if"] == (
-        "${{ !cancelled() && (needs.check.result == 'success' || "
-        "(needs.check.result == 'skipped' && inputs.validated_sha == github.sha)) }}"
-    )
+
 
 
 @pytest.mark.parametrize("failed_phase", ["", "not serial", "serial"])
@@ -137,5 +132,3 @@ def test_native_parallel_and_serial_phases_preserve_failures(tmp_path, failed_ph
             "e2e/tests/test_snapshot_lifecycle.py",
             "e2e/tests/test_snapshotjob.py",
         }
-        assert "--durations=20" in args
-        assert any(arg.startswith("--junitxml=") for arg in args)

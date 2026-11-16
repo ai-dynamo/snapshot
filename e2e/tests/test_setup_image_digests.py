@@ -187,6 +187,7 @@ def registry(monkeypatch):
         return io.BytesIO(blobs[digest])
 
     monkeypatch.setattr(setup.urllib.request, "urlopen", fetch)
+    monkeypatch.setattr(setup.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(setup.k8s, "read_node", lambda name: client.V1Node(
         metadata=client.V1ObjectMeta(labels={"kubernetes.io/os": "linux", "kubernetes.io/arch": "amd64"})
     ))
@@ -240,11 +241,9 @@ def test_different_runnable_content_still_fails(monkeypatch, registry, mirrored)
 
 
 @pytest.mark.parametrize("runtime_kind", ["mirror", "bare", "docker-pullable"])
-def test_mirrored_status_names_resolve_content_from_the_desired_repository(monkeypatch, registry, runtime_kind):
-    register, _, calls = registry
-    image = register({"mediaType": MANIFEST, "layers": [{"digest": AGENT}]})
-    old = register({"mediaType": INDEX, "manifests": [descriptor(image)], "annotations": {"build": "old"}})
-    new = register({"mediaType": INDEX, "manifests": [descriptor(image)], "annotations": {"build": "new"}})
+def test_mirrored_status_names_resolve_content_from_the_desired_repository(monkeypatch, registry, equivalent_indexes, runtime_kind):
+    _, _, calls = registry
+    new, old = equivalent_indexes
     aliases = {
         "mirror": f"dynamoci.azurecr.io/ghcr.io/ai-dynamo/snapshot/pagebroker@{old}",
         "bare": old,
@@ -285,20 +284,21 @@ def test_missing_ambiguous_or_malformed_platforms_fail(monkeypatch, registry, en
         verify_pagebroker(monkeypatch, OPERATOR, index)
 
 
-def test_registry_errors_fail_closed(monkeypatch, registry):
-    def unavailable(*args, **kwargs):
-        raise urllib.error.URLError("registry unavailable")
-    monkeypatch.setattr(setup.urllib.request, "urlopen", unavailable)
-    with pytest.raises(setup.SetupError, match="registry unavailable"):
-        verify_pagebroker(monkeypatch, PAGEBROKER, AGENT)
-
-
-def test_manifest_bytes_must_match_the_requested_digest(monkeypatch, registry):
-    register, blobs, _ = registry
-    image = register({"mediaType": MANIFEST})
-    blobs[image] = b'{}'
-    with pytest.raises(setup.SetupError, match="bytes do not match"):
-        verify_pagebroker(monkeypatch, PAGEBROKER, image)
+@pytest.mark.parametrize(
+    ("raw", "valid_digest", "message"),
+    [(b"{}", False, "bytes do not match"),
+     (b"not JSON", True, "image identity lookup failed")],
+)
+def test_invalid_manifest_content_is_not_retried(monkeypatch, registry, raw, valid_digest, message):
+    _, blobs, calls = registry
+    sleeps = []
+    monkeypatch.setattr(setup.time, "sleep", sleeps.append)
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest() if valid_digest else OPERATOR
+    blobs[digest] = raw
+    with pytest.raises(setup.SetupError, match=message):
+        verify_pagebroker(monkeypatch, PAGEBROKER, digest)
+    assert len([url for url in calls if "/manifests/" in url]) == 1
+    assert sleeps == []
 
 
 def test_matching_digests_do_not_contact_the_registry(monkeypatch, registry):
@@ -329,3 +329,84 @@ def test_missing_pod_assignment_is_a_setup_error(monkeypatch, registry):
     with pytest.raises(setup.SetupError, match="has no assigned node"):
         setup.verify_running_images(namespace="test", release="snapshot", expected=EXPECTED)
     assert calls == []
+
+
+@pytest.fixture
+def equivalent_indexes(registry):
+    register, _, _ = registry
+    image = register({"mediaType": MANIFEST, "layers": [{"digest": AGENT}]})
+    old = register({"mediaType": INDEX, "manifests": [descriptor(image)], "annotations": {"build": "old"}})
+    new = register({"mediaType": INDEX, "manifests": [descriptor(image)], "annotations": {"build": "new"}})
+    return new, old
+
+
+@pytest.mark.parametrize("endpoint", ["token", "manifest"])
+@pytest.mark.parametrize(
+    "failure",
+    [TimeoutError("opening timed out"), ConnectionError("connection reset"),
+     urllib.error.URLError("temporary failure"), "read-timeout", 429, 503, 401, 404],
+)
+def test_registry_read_retries_only_transient_failures(monkeypatch, equivalent_indexes, endpoint, failure):
+    fetch = setup.urllib.request.urlopen
+    attempts = []
+    sleeps = []
+
+    class TimedOutResponse(io.BytesIO):
+        def read(self, *args, **kwargs):
+            raise TimeoutError("response read timed out")
+
+    def flaky(request, timeout):
+        url = request if isinstance(request, str) else request.full_url
+        selected = ("/token?" in url) if endpoint == "token" else ("/manifests/" in url)
+        if selected:
+            attempts.append(url)
+            assert timeout == 30
+            if len(attempts) == 1:
+                if failure == "read-timeout":
+                    return TimedOutResponse()
+                if isinstance(failure, int):
+                    raise urllib.error.HTTPError(url, failure, "registry failure", {}, None)
+                raise failure
+        return fetch(request, timeout)
+
+    monkeypatch.setattr(setup.urllib.request, "urlopen", flaky)
+    monkeypatch.setattr(setup.time, "sleep", sleeps.append)
+    if failure in (401, 404):
+        with pytest.raises(setup.SetupError, match=f"HTTP Error {failure}"):
+            verify_pagebroker(monkeypatch, *equivalent_indexes)
+        assert len(attempts) == 1
+        assert sleeps == []
+    else:
+        verify_pagebroker(monkeypatch, *equivalent_indexes)
+        assert attempts.count(attempts[0]) == 2
+        assert sleeps == [1]
+
+
+@pytest.mark.parametrize("endpoint", ["token", "manifest"])
+def test_exhausted_registry_retries_are_cached_across_pods(monkeypatch, equivalent_indexes, endpoint):
+    recorded, actual = equivalent_indexes
+    fetch = setup.urllib.request.urlopen
+    attempts = []
+    sleeps = []
+    pods = running(pagebroker=actual) + [running(pagebroker=actual)[-1]]
+    pods[-1].metadata.name = "snapshot-agent-b"
+    for item in pods:
+        item.spec.node_name = "worker"
+    monkeypatch.setattr(client.CoreV1Api, "list_namespaced_pod", lambda *args, **kwargs: client.V1PodList(items=pods))
+
+    def failing(request, timeout):
+        url = request if isinstance(request, str) else request.full_url
+        selected = ("/token?" in url) if endpoint == "token" else ("/manifests/" in url)
+        if selected:
+            attempts.append(url)
+            raise TimeoutError("registry read timed out")
+        return fetch(request, timeout)
+
+    monkeypatch.setattr(setup.urllib.request, "urlopen", failing)
+    monkeypatch.setattr(setup.time, "sleep", sleeps.append)
+    with pytest.raises(setup.SetupError, match="registry read timed out") as error:
+        setup.verify_running_images(namespace="test", release="snapshot", expected={**EXPECTED, "pagebroker": recorded})
+    assert "snapshot-agent-a/pagebroker" in str(error.value)
+    assert "snapshot-agent-b/pagebroker" in str(error.value)
+    assert len(attempts) == 3
+    assert sleeps == [1, 2]
