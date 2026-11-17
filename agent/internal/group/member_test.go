@@ -11,9 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/clock"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/coordinator"
@@ -136,12 +138,45 @@ func TestFailAfterAnAdmittedWaitThatEndedEarlyCountsAsCommitted(t *testing.T) {
 	require.ErrorIs(t, <-waiting, &session.AbortError{Reason: session.ReasonMemberFailed})
 }
 
+func TestFailFromTheDeadlineOnLeavesTheAttemptToTheDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		committed bool
+	}{
+		{name: "before the attempt commits"},
+		{name: "after the attempt commits", committed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The coordinator's clock runs behind the members', so it ends the
+			// session a moment past the deadline the members see.
+			members := joinUntil(t, 2, time.Now().Add(time.Second), 500*time.Millisecond)
+			if tc.committed {
+				each(t, members, func(ctx context.Context, m *Member) error { return m.Barrier(ctx, Admitted) })
+			}
+			time.Sleep(time.Until(members[1].session.Meta().Deadline))
+
+			require.NoError(t, members[1].Fail(within(t)))
+			for _, m := range members {
+				<-m.session.Done()
+				assert.ErrorIs(t, m.session.Err(), &session.AbortError{Reason: session.ReasonDeadlineExceeded})
+			}
+		})
+	}
+}
+
 // joinAll starts a coordinator with the session of one attempt of n members,
 // and joins each of them.
 func joinAll(t *testing.T, n int) []*Member {
 	t.Helper()
-	srv := coordinatortest.Start(t)
-	spec := server.Spec{UID: k8stypes.UID("attempt-1"), Deadline: time.Now().Add(time.Hour)}
+	return joinUntil(t, n, time.Now().Add(time.Hour), 0)
+}
+
+// joinUntil is joinAll for an attempt with deadline, whose coordinator's clock
+// runs lag behind the members'.
+func joinUntil(t *testing.T, n int, deadline time.Time, lag time.Duration) []*Member {
+	t.Helper()
+	srv := coordinatortest.Start(t, func(cfg *server.Config) { cfg.Clock = laggingClock{lag: lag} })
+	spec := server.Spec{UID: k8stypes.UID("attempt-1"), Deadline: deadline}
 	// Listed out of rank order: a member takes its rank from the session.
 	for rank := n - 1; rank >= 0; rank-- {
 		spec.Members = append(spec.Members, session.Member{ID: fmt.Sprintf("member-%d", rank), Rank: rank})
@@ -169,6 +204,15 @@ func each(t *testing.T, members []*Member, op func(context.Context, *Member) err
 	}
 	require.NoError(t, g.Wait())
 }
+
+// laggingClock runs lag behind the real clock, as a coordinator's clock may run
+// behind a member's.
+type laggingClock struct {
+	clock.RealClock
+	lag time.Duration
+}
+
+func (c laggingClock) Now() time.Time { return time.Now().Add(-c.lag) }
 
 // metaSession is a member's session of rank 0 that has only its Meta.
 type metaSession struct {

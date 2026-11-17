@@ -185,18 +185,42 @@ func (m *Member) Barrier(ctx context.Context, name string) error {
 // every member as Snapshot found it, until the member calls the Admitted
 // barrier, and session.ReasonMemberFailed after, since the attempt may then
 // have committed.
+//
+// From the session's deadline on, Fail waits for the session to end instead.
+// The coordinator ends it then with session.ReasonDeadlineExceeded, by its own
+// clock, which may run behind this member's, so a reason of the member's own
+// would replace the deadline's only because of how the clocks differ.
 func (m *Member) Fail(ctx context.Context) error {
 	reason := session.ReasonRefused
 	if m.committed.Load() {
 		reason = session.ReasonMemberFailed
 	}
-	err := m.session.Fail(ctx, reason)
+	var err error
+	if deadline := m.session.Meta().Deadline; time.Now().Before(deadline) {
+		err = m.session.Fail(ctx, reason)
+	} else {
+		err = m.awaitEnd(ctx, deadline)
+	}
 	var abort *session.AbortError
 	if errors.As(err, &abort) || errors.Is(err, session.ErrClosed) {
 		// The attempt had ended already.
 		err = nil
 	}
 	return errors.Join(err, m.session.Close())
+}
+
+// awaitEnd returns how the session ended. The member learns that at the latest
+// DeadlineSlack past deadline, unless its connection was closed first, so the
+// wait gives up a second past that.
+func (m *Member) awaitEnd(ctx context.Context, deadline time.Time) error {
+	ctx, cancel := context.WithDeadline(ctx, deadline.Add(coordinator.DeadlineSlack+time.Second))
+	defer cancel()
+	select {
+	case <-m.session.Done():
+		return m.session.Err()
+	case <-ctx.Done():
+		return fmt.Errorf("wait for the session to end: %w", ctx.Err())
+	}
 }
 
 // Leave records that this member is done, then keeps the connection until the
