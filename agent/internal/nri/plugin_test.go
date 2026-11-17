@@ -263,12 +263,12 @@ func TestCreateContainerFailsClosed(t *testing.T) {
 func TestCreateContainerRestoresAgainAfterTheRestoreEnded(t *testing.T) {
 	restoreFrom := map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"}
 	for name, tc := range map[string]struct {
-		ended     bool
-		earlier   bool
-		wantAgain bool
+		ended         bool
+		earlier       bool
+		wantRestarted bool
 	}{
 		"container starts again during the restore": {ended: false, earlier: true},
-		"container starts again after the restore":  {ended: true, earlier: true, wantAgain: true},
+		"container starts again after the restore":  {ended: true, earlier: true, wantRestarted: true},
 		"first container after the restore ended":   {ended: true},
 		"first container before the restore":        {},
 	} {
@@ -292,13 +292,13 @@ func TestCreateContainerRestoresAgainAfterTheRestoreEnded(t *testing.T) {
 			assert.FileExists(t, filepath.Join(dir, podcontract.RestoreProxyBinaryName))
 			for _, result := range results {
 				switch {
-				case tc.wantAgain:
+				case tc.wantRestarted:
 					assert.NoFileExists(t, filepath.Join(dir, result))
 				case tc.earlier:
 					assert.FileExists(t, filepath.Join(dir, result), "the running restore may be done with this destination")
 				}
 			}
-			if !tc.wantAgain {
+			if !tc.wantRestarted {
 				assert.Empty(t, restorer.again)
 				return
 			}

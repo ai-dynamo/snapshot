@@ -254,18 +254,19 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 		return nil, nil, nil
 	}
 
-	again := p.restorer.RestoreEnded(restorePod)
+	restoreEnded := p.restorer.RestoreEnded(restorePod)
+	restarted := false
 	// kubelet's directories use the UID of the Pod on the node.
 	dir, err := p.openControlDir(pod.GetUid(), ctr.GetName())
 	if err == nil {
-		again, err = prepareControlDir(p.proxyPath, dir, again)
+		restarted, err = prepareControlDir(p.proxyPath, dir, restoreEnded)
 		_ = dir.Close()
 	}
 	if err != nil {
 		log.Error(err, "Cannot install restore proxy")
 		return nil, nil, fmt.Errorf("snapshot: install restore proxy: %w", err)
 	}
-	if again {
+	if restarted {
 		againCtx, cancelAgain := context.WithTimeout(ctx, restoreAgainTimeout)
 		defer cancelAgain()
 		if err := p.restorer.RestoreAgain(againCtx, restorePod, ctr.GetName()); err != nil {
@@ -337,17 +338,17 @@ func podIdentity(pod *api.PodSandbox) (namespace, name, uid string) {
 // container that starts again, it removes the restore-complete or
 // restore-failed that the earlier container left.
 func prepareControlDir(proxyPath string, dir *os.File, restoreEnded bool) (bool, error) {
-	again := false
+	restarted := false
 	if restoreEnded {
 		var err error
-		if again, err = snapshotruntime.FileExistsInDir(dir, podcontract.RestoreProxyBinaryName); err != nil {
+		if restarted, err = snapshotruntime.FileExistsInDir(dir, podcontract.RestoreProxyBinaryName); err != nil {
 			return false, err
 		}
 	}
 	if err := installProxy(proxyPath, dir); err != nil {
 		return false, err
 	}
-	if !again {
+	if !restarted {
 		return false, nil
 	}
 	for _, name := range []string{podcontract.RestoreCompleteFile, podcontract.RestoreFailedFile} {
