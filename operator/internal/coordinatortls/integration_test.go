@@ -201,6 +201,21 @@ func TestIssuer(t *testing.T) {
 		})
 	}
 
+	t.Run("a CA restricted to client authentication", func(t *testing.T) {
+		f := newFixture(t, cl)
+		template := caTemplate(f.clock.Now().AddDate(10, 0, 0))
+		template.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
+		ca := mint(t, template, nil)
+		secret := caSecret(ca)
+		secret.Namespace, secret.Name = f.cfg.Namespace, f.cfg.CASecret
+		require.NoError(t, cl.Create(t.Context(), secret))
+
+		f.requireWrites(f.ensure(), f.cfg.CASecret, f.cfg.CABundle, f.cfg.TLSSecret)
+		after := f.read()
+		assert.NotEqual(t, serials(parseOne(t, ca.cert)), serials(after.caCert(t)))
+		f.requireServes(after, after.caCert(t))
+	})
+
 	t.Run("a changed server name", func(t *testing.T) {
 		f := newFixture(t, cl)
 		f.ensure()
