@@ -114,7 +114,7 @@ func (au authenticator) Check(c natsserver.ClientAuthentication) bool {
 	if !admissible(log, a, member, epoch) || !s.authorize(ctx, log, a, uid, member, opts.Token) {
 		return false
 	}
-	p, ok := s.admit(ctx, log, uid, member, epoch)
+	p, ok := s.admit(ctx, log, uid, member, epoch, a)
 	if !ok {
 		return false
 	}
@@ -211,10 +211,14 @@ func admissible(log logr.Logger, a *attempt, member string, epoch uint64) bool {
 // It gets session.ReadOnlyPermissions, so the server keeps it from writing to a
 // session the host creates for the attempt later, under the same bucket names.
 // Every other member gets session.MemberPermissions.
+// A session the Authorizer did not see requires a new authorization.
 func (s *Server) admit(ctx context.Context, log logr.Logger, uid types.UID, member string,
-	epoch uint64) (session.Permissions, bool) {
+	epoch uint64, authorized *attempt) (session.Permissions, bool) {
 	a := s.lookup(uid)
 	switch {
+	case a != nil && a != authorized:
+		log.V(1).Info("Refused a member whose session changed during authorization")
+		return session.Permissions{}, false
 	case !admissible(log, a, member, epoch):
 		return session.Permissions{}, false
 	case a == nil:
