@@ -180,12 +180,16 @@ the node agent and not set by the caller:
 |-----------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `nvidia.com/Restored` | Added to the pod by the node agent once a restore is under way; becomes `True` when the restore completes. Observe it alongside pod readiness to confirm a restore. |
 
-With a retry limit above 0, the node agent also writes this annotation once a
-restore attempt fails:
+With a retry limit above 0, the node agent also writes this annotation when a
+restore attempt starts and when one fails:
 
-| Annotation                        | Description                                                                                                                                                                                                                                                                                                                  |
-|-----------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `nvidia.com/restore-retry-status` | JSON with one entry per destination container that had a failed attempt. Each entry holds `attempt`, the current or last attempt from 1; `retryLimit`; and `lastFailure`, the `step` and `cause` of the last failed attempt. `lastFailure.snapshotUnusable` is `true` when the snapshot is missing, corrupt, or unsupported. |
+| Annotation                        | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+|-----------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `nvidia.com/restore-retry-status` | JSON with one entry per destination container that started an attempt. Each entry holds `attempt`, the current or last attempt from 1; `retryLimit`; `deadline`, when the restore times out; `retryAt`, when a waiting retry falls due; `containerID`, the container of the last attempt; `podUID`, the Pod the entry belongs to; and `lastFailure`, the `step` and `cause` of the last failed attempt. `lastFailure.snapshotUnusable` is `true` when the snapshot is missing, corrupt, or unsupported. |
+
+The agent writes the annotation in the background, so it can change after
+the `nvidia.com/Restored` condition. An agent that restarts continues the
+restore from it.
 
 All attempts of a restore share one deadline, `config.restore.timeoutSeconds`,
 from the start of the first. Only a failure that left the container untouched

@@ -25,8 +25,10 @@ changing the mechanism. For where it fits, see the
 The retry limit is how many times the agent retries a destination after its
 first attempt fails. It defaults to 0. All attempts of a destination share one
 deadline: the start of the first attempt plus `restore.timeoutSeconds`. With a
-limit above 0, the agent keeps the count in the destination's
-`restore-attempts` record.
+limit above 0, the agent keeps the count, the deadline, and the last failure in
+memory, in the destination's attempt record, keyed by the Pod's UID and the
+container. It copies the record to the Pod's `nvidia.com/restore-retry-status`
+annotation, as [Retry Status](#retry-status) describes.
 
 ## Recovery After a Failed Attempt
 
@@ -95,6 +97,12 @@ container's process, as before retries. When it is there, the pass runs only
 the post-restore action, with a full `restore.timeoutSeconds` again. CRIU does
 not run again.
 
+A new agent remembers no attempt. The first pass for a Pod reads every entry
+of its `nvidia.com/restore-retry-status` annotation whose `podUID` is the Pod's
+UID, and ignores the others, such as entries copied with a Pod manifest. An
+annotation the agent cannot parse ends the restore, rather than grant attempts
+the agent cannot count.
+
 A record that shows an attempt with no retry saved is an attempt that no agent
 saw finish. The attempt runs again within the same deadline and keeps its
 number, as it did before retries. It gets no `RestoreAttemptFailed` event,
@@ -107,14 +115,29 @@ An agent that is stopping does not decide anything for a failed attempt. It
 writes nothing and stops no container, and the next agent finds the attempt
 unfinished.
 
+The annotation can lag the record, since the agent writes it in the
+background. An agent that restarts before its last write lands leaves an older
+entry. The next agent then repeats an attempt or waits a backoff again, at most
+once for each restart, on the node and GPUs the Pod already holds.
+
 ## Retry Status
 
-After each pass, the agent writes the `nvidia.com/restore-retry-status`
-annotation from the records of all the Pod's destinations. The destinations
-restore in parallel, so one write per pass keeps every entry. It is a
-server-side apply on the Pod with the field manager `snapshot-agent-restore`,
-and it is skipped when the value would not change. The agent never reads the
-annotation back. With a limit of 0 there are no records, so the agent writes no
+With a limit above 0, the agent writes the `nvidia.com/restore-retry-status`
+annotation when an attempt starts and when one fails. The restore does not wait
+for the write. The agent adds the Pod to a queue, and one goroutine writes the
+records of all the Pod's destinations in one server-side apply. The
+destinations restore in parallel, and a write from each would drop the
+others' entries. Updates queued before a write go out in that write.
+
+The apply has the field manager `snapshot-agent-restore` and a precondition on
+the Pod's UID. The agent skips it when the value would not change, and drops it
+when the Pod is gone. A failed write is tried 5 times with a backoff, and then
+the agent emits `RestoreStatusUpdateFailed` on the Pod. The record in memory
+stays correct, and the next update writes it again.
+
+While the agent runs, it reads only its records in memory. The Pod that the
+agent sees can lag its own writes, so the agent reads the annotation only after
+a restart. With a limit of 0 there are no records, so the agent writes no
 annotation. Its fields are in the [API Reference](../../reference/api.md#restore).
 
 ## Code Map
@@ -123,13 +146,13 @@ The code that implements restore retry is in these packages and files:
 
 | Path | Holds |
 | --- | --- |
-| `agent/internal/controller/restore_attempts.go` | The attempt record, the retry limit, the deadline, and the start of each attempt |
+| `agent/internal/controller/restore_attempts.go` | The attempt record in memory and its copy from the annotation, the retry limit, the deadline, and the start of each attempt |
 | `agent/internal/controller/restore_recovery.go` | The recovery decision, the backoff, the check that the container stopped, and the events |
-| `agent/internal/controller/restore_retry_status.go` | The retry status annotation |
+| `agent/internal/controller/restore_retry_status.go` | The queue and the goroutine that write the retry status annotation |
 | `agent/internal/controller/controller.go` | `runRestore`, which runs one attempt |
 | `agent/internal/executor/restore_failure.go` | `RestoreFailure`, which says where an attempt failed and whether it changed the container |
 | `agent/internal/executor/nsrestore_output.go` | Reading nsrestore's progress message and its PageBroker code |
 | `agent/internal/nri/plugin.go` | The report that a destination container stopped |
 | `agent/internal/runtime/container_state.go` | Whether the runtime still runs a container |
 | `api/podcontract/restore_status.go` | The retry status annotation and its type |
-| `api/podcontract/protocol.go` | The retry limit annotation and the `restore-attempts` file name |
+| `api/podcontract/protocol.go` | The retry limit annotation |
