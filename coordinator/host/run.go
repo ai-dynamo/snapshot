@@ -86,6 +86,9 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 	auth, err := newAuthorizer(ctx, cfg, attempts)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	}
 	certs, err := waitForCertificate(ctx, cfg.TLSDir, certPoll, cfg.Log)

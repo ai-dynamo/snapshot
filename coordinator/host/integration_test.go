@@ -355,6 +355,32 @@ func TestRunServesHealthFirst(t *testing.T) {
 	require.True(t, closed(health), "the health port is still open")
 }
 
+// TestRunStoppedWhileReadingIssuer stops Run while the issuer request is
+// pending. Stopping the coordinator is not a startup error.
+func TestRunStoppedWhileReadingIssuer(t *testing.T) {
+	k := startCluster(t)
+	issuer := k.holdIssuer(t)
+	r := start(t, Config{
+		RESTConfig:     issuer.config,
+		Node:           node,
+		ServiceAccount: agents,
+		Audience:       audience,
+		Host:           "127.0.0.1",
+		Port:           freePort(t),
+		HealthPort:     freePort(t),
+		TLSDir:         t.TempDir(),
+		Log:            logr.Discard(),
+	})
+	select {
+	case <-issuer.requested:
+	case <-r.done:
+		t.Fatalf("Run returned: %v", r.err)
+	case <-time.After(timeout):
+		t.Fatal("Run did not read the issuer")
+	}
+	require.NoError(t, r.stop(t))
+}
+
 // cluster is the test's API server.
 type cluster struct {
 	cfg   *rest.Config
