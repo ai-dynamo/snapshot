@@ -33,6 +33,7 @@ import (
 	clientgotesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
@@ -971,10 +972,6 @@ func TestRunChecksThatPodGroupRestoresAreReadable(t *testing.T) {
 		err  error
 		want string
 	}{
-		"a CRD that is not installed": {
-			err:  apierrors.NewNotFound(podGroupRestoreGVR.GroupResource(), ""),
-			want: "pod groups need the podgrouprestores.nvidia.com CRD, which the API server does not serve",
-		},
 		"a permission the agent lacks": {
 			err:  apierrors.NewForbidden(podGroupRestoreGVR.GroupResource(), "", errors.New("RBAC denied the list")),
 			want: "pod groups need permission to list and watch podgrouprestores.nvidia.com in every namespace",
@@ -1000,16 +997,58 @@ func TestRunChecksThatPodGroupRestoresAreReadable(t *testing.T) {
 	}
 }
 
+func TestRunWithoutGroupRestoreCRDServesStandaloneCapture(t *testing.T) {
+	g := newCaptureGroup()
+	g.snaps[0].Labels, g.snaps[0].OwnerReferences = nil, nil
+	w := makeTestController(t, nil)
+	w.client = crfake.NewClientBuilder().WithScheme(contentScheme(t)).
+		WithObjects(g.snaps[0], g.contents[0], g.pods[0]).
+		WithStatusSubresource(&snapshotv1alpha1.PodSnapshotContent{}).Build()
+	w.config.NodeName = "node-a"
+	w.podGroups = &podGroups{}
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
+	fc := &fakeCheckpointer{}
+	w.checkpointFn = fc.fn
+	content := mustUnstructured(t, getContent(t, w, g.contents[0].Name))
+	content.SetGroupVersionKind(snapshotv1alpha1.GroupVersion.WithKind("PodSnapshotContent"))
+	dynClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{
+			podSnapshotContentGVR: "PodSnapshotContentList", podGroupRestoreGVR: "PodGroupRestoreList",
+		}, content)
+	dynClient.PrependReactor("list", "podgrouprestores", func(clientgotesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewNotFound(podGroupRestoreGVR.GroupResource(), "")
+	})
+	w.dynClient = dynClient
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			assert.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Error("the controller did not stop")
+		}
+	})
+
+	require.Eventually(t, func() bool {
+		return isContentReady(getContent(t, w, content.GetName()))
+	}, 5*time.Second, 10*time.Millisecond, "a missing group CRD does not hold standalone work")
+	assert.True(t, fc.wasCalled())
+}
+
 func TestCheckPodGroupRestoresReadable(t *testing.T) {
 	for name, tc := range map[string]struct {
-		err     error
-		wantErr bool
+		err      error
+		wantErr  bool
+		wantSync bool
 	}{
-		"readable":                           {},
-		"a CRD that is not installed":        {err: apierrors.NewNotFound(podGroupRestoreGVR.GroupResource(), ""), wantErr: true},
+		"readable":                           {wantSync: true},
+		"a CRD that is not installed":        {err: apierrors.NewNotFound(podGroupRestoreGVR.GroupResource(), "")},
 		"a permission the agent lacks":       {err: apierrors.NewForbidden(podGroupRestoreGVR.GroupResource(), "", errors.New("denied")), wantErr: true},
 		"credentials the API server refuses": {err: apierrors.NewUnauthorized("expired"), wantErr: true},
-		"an API server briefly unavailable":  {err: apierrors.NewServiceUnavailable("starting")},
+		"an API server briefly unavailable":  {err: apierrors.NewServiceUnavailable("starting"), wantSync: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			w := makeTestController(t, nil)
@@ -1022,11 +1061,12 @@ func TestCheckPodGroupRestoresReadable(t *testing.T) {
 			}
 			w.dynClient = dynClient
 
-			err := w.checkPodGroupRestoresReadable(within(t))
+			waitForSync, err := w.checkPodGroupRestoresReadable(within(t))
+			assert.Equal(t, tc.wantSync, waitForSync)
 			if tc.wantErr {
 				require.ErrorIs(t, err, tc.err)
 			} else {
-				require.NoError(t, err, "a failure that is neither a missing CRD nor a missing permission is left to the informer")
+				require.NoError(t, err, "the informer retries while standalone work stays available")
 			}
 		})
 	}

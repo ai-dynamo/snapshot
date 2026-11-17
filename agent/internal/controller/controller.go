@@ -324,8 +324,11 @@ func (w *NodeController) Run(ctx context.Context) error {
 
 	w.log.Info("Watching pods cluster-wide (all namespaces)")
 
+	waitForGroupRestores := false
 	if w.podGroups != nil {
-		if err := w.checkPodGroupRestoresReadable(ctx); err != nil {
+		var err error
+		waitForGroupRestores, err = w.checkPodGroupRestoresReadable(ctx)
+		if err != nil {
 			return err
 		}
 	}
@@ -416,7 +419,9 @@ func (w *NodeController) Run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		syncFuncs = append(syncFuncs, synced)
+		if waitForGroupRestores {
+			syncFuncs = append(syncFuncs, synced)
+		}
 	}
 
 	// Close stopCh on cancellation so a stalled cache sync (below) is unblocked by ctx, not only on

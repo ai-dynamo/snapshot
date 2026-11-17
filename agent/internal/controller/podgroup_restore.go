@@ -41,27 +41,26 @@ const uidIndex = "byUID"
 // target whose pin arrived while its Pod was not in the cache yet.
 const podGroupRestoreResync = 30 * time.Second
 
-// checkPodGroupRestoresReadable lists one PodGroupRestore, so that an agent
-// with pod groups on fails at once when the API server does not serve the
-// CRD, refuses the agent's credentials, or does not let the agent read it,
-// rather than waiting on an informer that never syncs, which would hold up
-// every capture and restore on the node. Any other failure is left to the
-// informer, which retries it.
-func (w *NodeController) checkPodGroupRestoresReadable(ctx context.Context) error {
+// checkPodGroupRestoresReadable lists one PodGroupRestore and reports whether
+// startup must wait for its informer. A missing CRD leaves standalone work
+// available while the informer retries. Credentials and permissions stay fatal;
+// any other failure is left to the informer's retry and cache sync.
+func (w *NodeController) checkPodGroupRestoresReadable(ctx context.Context) (bool, error) {
 	resource := podGroupRestoreGVR.GroupResource().String()
 	_, err := w.dynClient.Resource(podGroupRestoreGVR).List(ctx, metav1.ListOptions{Limit: 1})
 	switch {
 	case err == nil:
-		return nil
+		return true, nil
 	case apierrors.IsNotFound(err):
-		return fmt.Errorf("pod groups need the %s CRD, which the API server does not serve: %w", resource, err)
+		w.log.Info("Waiting for the PodGroupRestore CRD; standalone work remains available", "resource", resource)
+		return false, nil
 	case apierrors.IsUnauthorized(err):
-		return fmt.Errorf("the API server refused the agent's credentials when it listed %s: %w", resource, err)
+		return false, fmt.Errorf("the API server refused the agent's credentials when it listed %s: %w", resource, err)
 	case apierrors.IsForbidden(err):
-		return fmt.Errorf("pod groups need permission to list and watch %s in every namespace: %w", resource, err)
+		return false, fmt.Errorf("pod groups need permission to list and watch %s in every namespace: %w", resource, err)
 	}
 	w.log.Error(err, "Cannot check that PodGroupRestores are readable; the informer tries again", "resource", resource)
-	return nil
+	return true, nil
 }
 
 // startPodGroupRestoreInformer watches the PodGroupRestores, cluster-wide, and
