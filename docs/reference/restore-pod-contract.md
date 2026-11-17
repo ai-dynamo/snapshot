@@ -239,15 +239,16 @@ no annotation: do not set `nvidia.com/restore-from`,
 `nvidia.com/restore-container-map`, or `nvidia.com/restore-group-uid` on a
 group target.
 
-The probe of a group target allows 86,400 consecutive one-second failures, a
-day: the longest `deadlineSeconds` of a `PodGroupRestore`. A target's container
-starts only after the `PodGroupRestore` exists, so the probe cannot expire
-before the restore's deadline. That is safe because the probe never decides the
-outcome: the node agent fails a member at its deadline and stops the workload,
-and the probe only holds the container back until the agent releases it. The
-operator and the agent require a group target's `failureThreshold` multiplied
-by `periodSeconds` to allow at least the longest group deadline. Every other
-field must match the restore probe. The builder uses 86,400 one-second failures.
+A group target's probe checks every second and allows 86,401 consecutive
+failures. The first check can run when the container starts, leaving 86,400
+seconds before the last failure: the longest `deadlineSeconds` of a
+`PodGroupRestore`. A target's container starts only after the `PodGroupRestore`
+exists, so the probe cannot expire before the restore's deadline. The node
+agent decides the outcome and stops the workload at the deadline. The probe
+holds the container back until the agent releases it. The operator and the
+agent require `failureThreshold` to be at least
+`PodGroupMaxDeadlineSeconds + 1`. Every other field, including
+`periodSeconds: 1`, must match the restore probe.
 
 Name the destination container in the `PodGroupRestore`, in the target's
 `containerMappings`. The operator claims no target until every target passes

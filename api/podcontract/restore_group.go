@@ -14,6 +14,11 @@ import (
 	"github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
+// groupRestoreStartupFailureThreshold allows the longest group deadline even
+// when the first startup probe runs immediately, leaving one fewer period
+// than failures before the container can be stopped.
+const groupRestoreStartupFailureThreshold = v1alpha1.PodGroupMaxDeadlineSeconds + 1
+
 // GroupTargetRequest names the container of a group restore target that
 // receives the member's processes.
 type GroupTargetRequest struct {
@@ -27,8 +32,8 @@ type GroupTargetRequest struct {
 // restore: the control volume, mount and environment, and the seccomp profile
 // when options.SeccompProfile is set. It always adds the restore startup
 // probe, which a group target needs whatever options.EnableStartupGate says.
-// The probe allows PodGroupMaxDeadlineSeconds failures, so it cannot expire
-// before the restore's deadline.
+// The probe checks every second and allows one more failure than the longest
+// group deadline, since its first check can run as soon as the container starts.
 //
 // It writes no annotation: the operator writes the claim. It therefore
 // refuses a Pod that carries RestoreFromAnnotation, RestoreGroupUIDAnnotation
@@ -56,7 +61,7 @@ func BuildGroupTarget(pod *corev1.Pod, request GroupTargetRequest, options Optio
 	}
 	destinations := []string{destination}
 	if err := ensureRestorePodSpec(&result.Spec, destinations, options,
-		v1alpha1.PodGroupMaxDeadlineSeconds); err != nil {
+		groupRestoreStartupFailureThreshold); err != nil {
 		return nil, err
 	}
 	if err := validateGroupTarget(&result.Spec, destinations, options); err != nil {
@@ -111,14 +116,12 @@ func validateGroupTarget(spec *corev1.PodSpec, destinations []string, options Op
 }
 
 // validateGroupRestoreStartupProbe keeps the restore probe's canonical fields
-// except its failure threshold and period, whose product must allow the
-// longest group deadline.
+// except its failure threshold, which must exceed the longest group deadline.
+// The first check can run immediately; every later check is one second apart.
 func validateGroupRestoreStartupProbe(container *corev1.Container) error {
 	probe := container.StartupProbe
-	if probe != nil && probe.FailureThreshold > 0 && probe.PeriodSeconds > 0 &&
-		int64(probe.FailureThreshold)*int64(probe.PeriodSeconds) >= int64(v1alpha1.PodGroupMaxDeadlineSeconds) {
+	if probe != nil && probe.FailureThreshold >= groupRestoreStartupFailureThreshold {
 		expected := canonicalRestoreStartupProbe(probe.FailureThreshold)
-		expected.PeriodSeconds = probe.PeriodSeconds
 		if reflect.DeepEqual(probe, expected) {
 			return nil
 		}
