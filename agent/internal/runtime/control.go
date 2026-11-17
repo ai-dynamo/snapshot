@@ -77,17 +77,11 @@ func openContainerControlDir(procRoot string, hostPID int) (*os.File, error) {
 // medium: Memory.
 const KubeletPodsDir = HostProcPath + "/1/root/var/lib/kubelet/pods"
 
-// plainName reports whether name is one entry in a directory, never a path
-// that leaves it.
-func plainName(name string) bool {
-	return name != "" && name == filepath.Base(name) && name != ".."
-}
-
 // podControlVolumeDir is the Pod's snapshot-control emptyDir under podsDir. It
 // also checks containerName, which callers open inside it.
 func podControlVolumeDir(podsDir, podUID, containerName string) (string, error) {
 	for _, part := range []string{podUID, containerName} {
-		if !plainName(part) {
+		if part == "" || part != filepath.Base(part) || part == ".." {
 			return "", fmt.Errorf("invalid control directory part %q", part)
 		}
 	}
@@ -133,7 +127,7 @@ func openPodControlDir(podsDir, podUID, containerName string) (*os.File, error) 
 // name, which is then renamed over name. Readers never see a partial file, and
 // the rename replaces whatever name was, without following it.
 func WriteFileInDir(dir *os.File, name string, perm os.FileMode, write func(io.Writer) error) (retErr error) {
-	if !plainName(name) {
+	if name == "" || name != filepath.Base(name) || name == ".." {
 		return fmt.Errorf("invalid file name %q", name)
 	}
 	dfd := int(dir.Fd())
@@ -187,71 +181,6 @@ func WritePodControlSentinel(podUID, containerName, name string, contents []byte
 	})
 }
 
-// ReadPodControlFile reads name from OpenPodControlDir. The Pod can write
-// anything there, so name is opened without following it, must be a regular
-// file, and is refused when larger than maxBytes. A missing volume or file is
-// an error that matches os.ErrNotExist.
-func ReadPodControlFile(podUID, containerName, name string, maxBytes int64) ([]byte, error) {
-	return readPodControlFile(KubeletPodsDir, podUID, containerName, name, maxBytes)
-}
-
-func readPodControlFile(podsDir, podUID, containerName, name string, maxBytes int64) ([]byte, error) {
-	if !plainName(name) {
-		return nil, fmt.Errorf("invalid file name %q", name)
-	}
-	dir, err := openPodControlDir(podsDir, podUID, containerName)
-	if err != nil {
-		return nil, err
-	}
-	defer dir.Close()
-	// O_NONBLOCK keeps a FIFO from holding the open until a writer comes.
-	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open %s in %s: %w", name, dir.Name(), err)
-	}
-	f := os.NewFile(uintptr(fd), filepath.Join(dir.Name(), name))
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", f.Name())
-	}
-	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", f.Name(), err)
-	}
-	if int64(len(data)) > maxBytes {
-		return nil, fmt.Errorf("%s is larger than %d bytes", f.Name(), maxBytes)
-	}
-	return data, nil
-}
-
-// RemovePodControlFile removes name from OpenPodControlDir, without following
-// it. A file or volume that is already gone is not an error.
-func RemovePodControlFile(podUID, containerName, name string) error {
-	return removePodControlFile(KubeletPodsDir, podUID, containerName, name)
-}
-
-func removePodControlFile(podsDir, podUID, containerName, name string) error {
-	if !plainName(name) {
-		return fmt.Errorf("invalid file name %q", name)
-	}
-	dir, err := openPodControlDir(podsDir, podUID, containerName)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	if err := unix.Unlinkat(int(dir.Fd()), name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
-		return fmt.Errorf("remove %s in %s: %w", name, dir.Name(), err)
-	}
-	return nil
-}
-
 // ControlSentinelExists reports whether a sentinel exists in the workload
 // container's snapshot-control volume. It returns an error when the container's
 // control mount cannot be inspected, so callers do not mistake an inaccessible
@@ -262,7 +191,7 @@ func ControlSentinelExists(hostPID int, name string) (bool, error) {
 }
 
 func controlSentinelExists(procRoot string, hostPID int, name string) (bool, error) {
-	if !plainName(name) {
+	if name == "" || name != filepath.Base(name) || name == ".." {
 		return false, fmt.Errorf("invalid control sentinel name %q", name)
 	}
 	dir, err := openContainerControlDir(procRoot, hostPID)
