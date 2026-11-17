@@ -203,7 +203,9 @@ certificates leaves these resources, including the CA's private key.
 After the operator stops issuing certificates, delete the three resources by
 name. Use the namespace from `--coordinator-tls-namespace` and the names from
 `--coordinator-ca-secret`, `--coordinator-tls-secret`, and
-`--coordinator-ca-bundle`:
+`--coordinator-ca-bundle`. The chart uses the release namespace and the names
+`<fullname>-coordinator-ca`, `<fullname>-coordinator-tls`, and
+`<fullname>-coordinator-ca-bundle`:
 
 ```bash
 kubectl delete --namespace <tls-namespace> \
