@@ -21,6 +21,11 @@ import (
 // restore failed, which may have to wait for the coordinator.
 const groupFailTimeout = 30 * time.Second
 
+// inspectWithRelayFunc is overridden in tests: cuda.InspectCuInterpose runs
+// the cuInterpose coordinator in the source's namespaces, which a unit test
+// cannot satisfy.
+var inspectWithRelayFunc = cuda.InspectCuInterpose
+
 // admitCapture runs a capture's admission: the member publishes its Pod IP, its
 // Pod's UID, its captured container and whether it runs a cuInterpose relay,
 // reads every other member's, inspects with the other relays, whose leader
@@ -38,7 +43,7 @@ func admitCapture(ctx context.Context, g *group.Member, podIP, podUID, container
 	}
 	if runsRelay {
 		err := withRelay(ctx, g, func(relay *cuda.CuInterposeRelay) error {
-			return cuda.InspectCuInterpose(ctx, coordinatorTarget(state.PID, state.CuInterpose.PIDs, relay))
+			return inspectWithRelayFunc(ctx, coordinatorTarget(state.PID, state.CuInterpose.PIDs, relay))
 		})
 		if err != nil {
 			return fmt.Errorf("inspect cuinterpose: %w", err)

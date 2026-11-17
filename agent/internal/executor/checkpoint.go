@@ -283,7 +283,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		return nil, failStep(StepPrepareCheckpoint, err)
 	}
 
-	state.CuInterpose, err = inspectCuInterpose(ctx, state, req.CuInterposeRequested, req.Group == nil)
+	state.CuInterpose, err = inspectCuInterposeFunc(ctx, state, req.CuInterposeRequested, req.Group == nil)
 	if err != nil {
 		return nil, failStep(StepInspectCuInterpose, err)
 	}
@@ -488,6 +488,10 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 		GPUs:           gpus,
 	}, gpuDeviceMapDuration, nil
 }
+
+// inspectCuInterposeFunc is overridden in tests: inspectCuInterpose reads the
+// CUDA processes through /host/proc, which only exists on a real node.
+var inspectCuInterposeFunc = inspectCuInterpose
 
 // inspectCuInterpose verifies the shim libraries in every CUDA process and their
 // delivery mount. When a coordinator is in use, it also checks every participant

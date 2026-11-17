@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/group"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
@@ -167,6 +168,47 @@ func TestGroupCheckpointFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
 			require.ErrorIs(t, outcome.err, &session.AbortError{Reason: tc.wantReason})
 		})
 	}
+}
+
+func TestGroupCheckpointThatCuInterposeRefusesNeverCommits(t *testing.T) {
+	member, peer := joinMembers(t)
+	peerEnded := runPeer(t, peer, group.Admission{PodIP: netip.MustParseAddr("10.0.0.2")}, group.NetFreeze)
+	socket := serveCheckpointStaging(t, t.TempDir())
+	// The relays' leader finds the group's topology invalid, and the member's
+	// coordinator exits with an error.
+	var inspected cuda.CuInterposeTarget
+	stubCuInterpose(t, func(target cuda.CuInterposeTarget) error {
+		inspected = target
+		return errors.New("cuinterpose coordinator: exit status 1: the group's topology is invalid")
+	})
+	captured := false
+	stubCapture(t, func(*types.CheckpointManifest) (*checkpointPhaseTimings, error) {
+		captured = true
+		return nil, errors.New("the capture started")
+	})
+	cfg := &types.AgentConfig{
+		Storage:    types.StorageSpec{BasePath: t.TempDir()},
+		PageBroker: types.PageBrokerSpec{ControlSocketPath: socket},
+	}
+	recorded := false
+	req := CheckpointRequest{
+		ContentUID: "content-uid", ContainerName: "main", PodIP: "10.0.0.1", Group: member,
+		Committed: func(context.Context) error {
+			recorded = true
+			return nil
+		},
+	}
+	_, err := checkpoint(groupTestContext(t), nil, testr.New(t), req, cfg, inspectCUDA(t))
+
+	assert.Equal(t, StepAdmitGroup, StepOf(err), "%v", err)
+	assert.ErrorContains(t, err, "the group's topology is invalid")
+	require.NotNil(t, inspected.Relay, "the coordinator inspects as the member's relay")
+	assert.Equal(t, []string{"--rank", "0", "--relay-ranks", "0"}, inspected.Relay.Args[:4])
+	assert.False(t, recorded, "the commit was recorded")
+	assert.False(t, captured, "the capture started")
+	outcome := <-peerEnded
+	assert.False(t, outcome.committed, "the peer passed the admitted barrier")
+	require.ErrorIs(t, outcome.err, &session.AbortError{Reason: session.ReasonRefused})
 }
 
 func TestGroupRestoreFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
@@ -702,6 +744,29 @@ func inspectNothing(t *testing.T) func(context.Context, snapshotruntime.Runtime,
 	return func(context.Context, snapshotruntime.Runtime, logr.Logger, CheckpointRequest) (*types.CheckpointContainerSnapshot, time.Duration, error) {
 		return &types.CheckpointContainerSnapshot{PID: -1, RootFS: t.TempDir()}, 0, nil
 	}
+}
+
+// inspectCUDA inspects a source with one CUDA process, and without anything
+// else a capture's later steps would read.
+func inspectCUDA(t *testing.T) func(context.Context, snapshotruntime.Runtime, logr.Logger, CheckpointRequest) (*types.CheckpointContainerSnapshot, time.Duration, error) {
+	return func(context.Context, snapshotruntime.Runtime, logr.Logger, CheckpointRequest) (*types.CheckpointContainerSnapshot, time.Duration, error) {
+		return &types.CheckpointContainerSnapshot{PID: -1, RootFS: t.TempDir(), CUDAHostPIDs: []int{1001}, CUDANSPIDs: []int{1}}, 0, nil
+	}
+}
+
+// stubCuInterpose has every CUDA process of the source load cuInterpose's
+// core, so its coordinator runs, and replaces that coordinator's inspection,
+// in the group's admission, with inspect.
+func stubCuInterpose(t *testing.T, inspect func(cuda.CuInterposeTarget) error) {
+	t.Helper()
+	originalLibraries, originalCoordinator := inspectCuInterposeFunc, inspectWithRelayFunc
+	t.Cleanup(func() { inspectCuInterposeFunc, inspectWithRelayFunc = originalLibraries, originalCoordinator })
+	inspectCuInterposeFunc = func(_ context.Context, state *types.CheckpointContainerSnapshot, _, _ bool) (*types.CuInterposeManifest, error) {
+		manifest := testCuInterposeIdentity()
+		manifest.PIDs = state.CUDANSPIDs
+		return manifest, nil
+	}
+	inspectWithRelayFunc = func(_ context.Context, target cuda.CuInterposeTarget) error { return inspect(target) }
 }
 
 // stubCapture replaces the GPU checkpoint and the dump, the first steps after
