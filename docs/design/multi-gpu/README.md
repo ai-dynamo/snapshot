@@ -1139,7 +1139,7 @@ The handle records the requested size separately from the rounded backing extent
 #### Decoded state example
 
 ```yaml
-version: 1
+version: 2
 body:
   41:
     - allocation:
