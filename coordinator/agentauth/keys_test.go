@@ -5,6 +5,9 @@ package agentauth
 
 import (
 	"context"
+	"crypto/mldsa"
+	"crypto/rand"
+	"crypto/rsa"
 	"fmt"
 	"io"
 	"net/http"
@@ -209,6 +212,24 @@ func TestKeySetsMayHoldKeysOfOtherKinds(t *testing.T) {
 	})
 	h.clock.Step(minKeyFetchInterval)
 	require.NoError(t, h.authorize(member, h.signedWith("key-1")))
+	assert.EqualValues(t, 2, h.issuer.keyFetches.Load())
+}
+
+func TestKeySetIgnoresUnsupportedPublicKeys(t *testing.T) {
+	h := newHarness(t)
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	akpKey, err := mldsa.GenerateKey(mldsa.MLDSA44())
+	require.NoError(t, err)
+	h.issuer.publish("rsa", jose.SigningKey{Algorithm: jose.RS256, Key: rsaKey})
+	h.issuer.respondWith(func(w http.ResponseWriter, _ jose.JSONWebKeySet) {
+		writeJSON(w, jose.JSONWebKeySet{Keys: []jose.JSONWebKey{
+			{Key: akpKey.Public(), KeyID: "akp", Algorithm: string(jose.MLDSA44), Use: "sig"},
+			{Key: &rsaKey.PublicKey, KeyID: "rsa", Algorithm: string(jose.RS256), Use: "sig"},
+		}})
+	})
+	h.clock.Step(minKeyFetchInterval)
+	require.NoError(t, h.authorize(member, h.signedWith("rsa")))
 	assert.EqualValues(t, 2, h.issuer.keyFetches.Load())
 }
 
