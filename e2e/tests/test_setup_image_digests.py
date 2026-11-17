@@ -4,6 +4,7 @@
 """Cluster-free checks that an install runs the images a candidate recorded."""
 
 import hashlib
+import http.client
 import io
 import json
 import urllib.error
@@ -344,15 +345,17 @@ def equivalent_indexes(registry):
 @pytest.mark.parametrize(
     "failure",
     [TimeoutError("opening timed out"), ConnectionError("connection reset"),
-     urllib.error.URLError("temporary failure"), "read-timeout", 429, 503, 401, 404],
+     urllib.error.URLError("temporary failure"), "read-timeout", "truncated-body", 429, 503, 401, 404],
 )
 def test_registry_read_retries_only_transient_failures(monkeypatch, equivalent_indexes, endpoint, failure):
     fetch = setup.urllib.request.urlopen
     attempts = []
     sleeps = []
 
-    class TimedOutResponse(io.BytesIO):
+    class FailedReadResponse(io.BytesIO):
         def read(self, *args, **kwargs):
+            if failure == "truncated-body":
+                raise http.client.IncompleteRead(b"partial", 10)
             raise TimeoutError("response read timed out")
 
     def flaky(request, timeout):
@@ -362,8 +365,8 @@ def test_registry_read_retries_only_transient_failures(monkeypatch, equivalent_i
             attempts.append(url)
             assert timeout == 30
             if len(attempts) == 1:
-                if failure == "read-timeout":
-                    return TimedOutResponse()
+                if failure in ("read-timeout", "truncated-body"):
+                    return FailedReadResponse()
                 if isinstance(failure, int):
                     raise urllib.error.HTTPError(url, failure, "registry failure", {}, None)
                 raise failure
@@ -383,7 +386,8 @@ def test_registry_read_retries_only_transient_failures(monkeypatch, equivalent_i
 
 
 @pytest.mark.parametrize("endpoint", ["token", "manifest"])
-def test_exhausted_registry_retries_are_cached_across_pods(monkeypatch, equivalent_indexes, endpoint):
+@pytest.mark.parametrize("truncated", [False, True])
+def test_exhausted_registry_retries_are_cached_across_pods(monkeypatch, equivalent_indexes, endpoint, truncated):
     recorded, actual = equivalent_indexes
     fetch = setup.urllib.request.urlopen
     attempts = []
@@ -394,17 +398,24 @@ def test_exhausted_registry_retries_are_cached_across_pods(monkeypatch, equivale
         item.spec.node_name = "worker"
     monkeypatch.setattr(client.CoreV1Api, "list_namespaced_pod", lambda *args, **kwargs: client.V1PodList(items=pods))
 
+    class TruncatedResponse(io.BytesIO):
+        def read(self, *args, **kwargs):
+            raise http.client.IncompleteRead(b"partial", 10)
+
     def failing(request, timeout):
         url = request if isinstance(request, str) else request.full_url
         selected = ("/token?" in url) if endpoint == "token" else ("/manifests/" in url)
         if selected:
             attempts.append(url)
+            if truncated:
+                return TruncatedResponse()
             raise TimeoutError("registry read timed out")
         return fetch(request, timeout)
 
     monkeypatch.setattr(setup.urllib.request, "urlopen", failing)
     monkeypatch.setattr(setup.time, "sleep", sleeps.append)
-    with pytest.raises(setup.SetupError, match="registry read timed out") as error:
+    message = "IncompleteRead" if truncated else "registry read timed out"
+    with pytest.raises(setup.SetupError, match=message) as error:
         setup.verify_running_images(namespace="test", release="snapshot", expected={**EXPECTED, "pagebroker": recorded})
     assert "snapshot-agent-a/pagebroker" in str(error.value)
     assert "snapshot-agent-b/pagebroker" in str(error.value)

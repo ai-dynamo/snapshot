@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 from functools import cache
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -560,7 +561,7 @@ def verify_running_images(*, namespace: str, release: str, expected: dict[str, s
             try:
                 with urllib.request.urlopen(request, timeout=30) as response:
                     return response.read()
-            except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as exc:
                 permanent_http_error = isinstance(exc, urllib.error.HTTPError) and exc.code not in (
                     408, 429, 500, 502, 503, 504
                 )
@@ -621,7 +622,7 @@ def verify_running_images(*, namespace: str, release: str, expected: dict[str, s
             return platform_image_digest(image, running, platform, read_manifest) == platform_image_digest(
                 image, recorded, platform, read_manifest
             )
-        except (OSError, ValueError, KeyError, TypeError, ApiException) as exc:
+        except (OSError, ValueError, KeyError, TypeError, ApiException, http.client.IncompleteRead) as exc:
             error = SetupError(f"image identity lookup failed: {exc}")
             lookup_errors[key] = error
             raise error from exc
