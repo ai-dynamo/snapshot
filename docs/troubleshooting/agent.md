@@ -65,26 +65,55 @@ what that means for an upgrade, see
 [Pod Groups](../operate/upgrade.md#pod-groups). Check these in order.
 `<fullname>` is `snapshot` for a release named `snapshot`.
 
-1. The serving Secret, `<fullname>-coordinator-tls` or
-   `coordinator.tls.serving.secretName`. Until it exists, the coordinator waits
-   for it, unready, and logs `Waiting for the serving certificate`. After the
-   Secret appears, the kubelet can take about a minute to fill the
-   coordinator's volume. With the operator's issuer, the operator log says why
-   the Secret is missing:
+1. The serving Secret, `<serving-secret>`: `coordinator.tls.serving.secretName`,
+   or `<fullname>-coordinator-tls` when that is empty. Until it exists, the
+   coordinator waits for it, unready, and logs
+   `Waiting for the serving certificate`. After the Secret appears, the kubelet
+   can take about a minute to fill the coordinator's volume. With the
+   operator's issuer, the operator log says why the Secret is missing:
 
    ```bash
-   kubectl get secret <fullname>-coordinator-tls -n <namespace>
+   kubectl get secret <serving-secret> -n <namespace>
    kubectl logs deployment/<fullname>-operator -n <namespace> | grep coordinator-tls
    ```
 
-2. RBAC. The agents' ServiceAccount, `<fullname>` by default, must be able to
-   list pod groups and create TokenReviews. With `rbac.create=false`, grant
-   both yourself:
+2. RBAC. The coordinator runs as the agents' ServiceAccount. It must be able to
+   list and watch both group kinds in every namespace, and to create
+   TokenReviews. Read the ServiceAccount from the agent DaemonSet, and check
+   its rights:
 
    ```bash
-   kubectl auth can-i list podgroupsnapshots.nvidia.com -n <namespace> --as system:serviceaccount:<namespace>:<fullname>
-   kubectl auth can-i create tokenreviews.authentication.k8s.io --as system:serviceaccount:<namespace>:<fullname>
+   AGENT_SA=$(kubectl get daemonset <fullname>-agent -n <namespace> -o jsonpath='{.spec.template.spec.serviceAccountName}')
+   kubectl auth can-i list podgroupsnapshots.nvidia.com --all-namespaces --as=system:serviceaccount:<namespace>:$AGENT_SA
+   kubectl auth can-i watch podgroupsnapshots.nvidia.com --all-namespaces --as=system:serviceaccount:<namespace>:$AGENT_SA
+   kubectl auth can-i list podgrouprestores.nvidia.com --all-namespaces --as=system:serviceaccount:<namespace>:$AGENT_SA
+   kubectl auth can-i watch podgrouprestores.nvidia.com --all-namespaces --as=system:serviceaccount:<namespace>:$AGENT_SA
+   kubectl auth can-i create tokenreviews.authentication.k8s.io --as=system:serviceaccount:<namespace>:$AGENT_SA
    ```
+
+   With the operator's issuer, the operator's ServiceAccount,
+   `<fullname>-operator`, also needs these rights in the release namespace:
+
+   - `create` on `secrets` and `configmaps`.
+   - `get` and `update` on the Secrets `<fullname>-coordinator-ca` and
+     `<fullname>-coordinator-tls`.
+   - `get` and `update` on the ConfigMap `<fullname>-coordinator-ca-bundle`.
+
+   These commands check them:
+
+   ```bash
+   kubectl auth can-i create secrets -n <namespace> --as=system:serviceaccount:<namespace>:<fullname>-operator
+   kubectl auth can-i create configmaps -n <namespace> --as=system:serviceaccount:<namespace>:<fullname>-operator
+   kubectl auth can-i get secrets/<fullname>-coordinator-ca -n <namespace> --as=system:serviceaccount:<namespace>:<fullname>-operator
+   kubectl auth can-i get secrets/<fullname>-coordinator-tls -n <namespace> --as=system:serviceaccount:<namespace>:<fullname>-operator
+   kubectl auth can-i get configmaps/<fullname>-coordinator-ca-bundle -n <namespace> --as=system:serviceaccount:<namespace>:<fullname>-operator
+   kubectl auth can-i update secrets/<fullname>-coordinator-ca -n <namespace> --as=system:serviceaccount:<namespace>:<fullname>-operator
+   kubectl auth can-i update secrets/<fullname>-coordinator-tls -n <namespace> --as=system:serviceaccount:<namespace>:<fullname>-operator
+   kubectl auth can-i update configmaps/<fullname>-coordinator-ca-bundle -n <namespace> --as=system:serviceaccount:<namespace>:<fullname>-operator
+   ```
+
+   With `rbac.create=false`, the chart grants none of these rights. Grant them
+   yourself.
 
 3. The coordinator's log, which names what it failed to do:
 

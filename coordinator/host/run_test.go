@@ -59,6 +59,7 @@ func TestWaitForCertificate(t *testing.T) {
 		logs := &logLines{}
 		certs, err := waitForCertificate(t.Context(), dir, interval, logs.logger())
 		require.NoError(t, err)
+		runUntilCleanup(t, certs)
 		served, err := certs.GetCertificate(nil)
 		require.NoError(t, err)
 		assert.Equal(t, cert.Certificate[0], served.Certificate[0])
@@ -83,6 +84,7 @@ func TestWaitForCertificate(t *testing.T) {
 		move(corev1.TLSPrivateKeyKey)
 		r := <-done
 		require.NoError(t, r.err)
+		runUntilCleanup(t, r.certs)
 		served, err := r.certs.GetCertificate(nil)
 		require.NoError(t, err)
 		assert.Equal(t, cert.Certificate[0], served.Certificate[0])
@@ -109,6 +111,17 @@ func TestWaitForCertificate(t *testing.T) {
 		require.ErrorIs(t, r.err, context.Canceled)
 		assert.Equal(t, 0, count(logs.all(), foundLine))
 	})
+}
+
+// runUntilCleanup runs certs, as Run's manager does, until the test ends:
+// certwatcher.New opens a file watcher that only the end of Start's ctx
+// closes. The cleanup waits for Start to return, before the certificate's
+// temporary directory is removed.
+func runUntilCleanup(t *testing.T, certs *certwatcher.CertWatcher) {
+	t.Helper()
+	started := make(chan error, 1)
+	go func() { started <- certs.Start(t.Context()) }()
+	t.Cleanup(func() { assert.NoError(t, <-started) })
 }
 
 // count returns how many of lines contain s.

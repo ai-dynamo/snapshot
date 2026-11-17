@@ -11,6 +11,10 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 )
 
 // renewalWindow is how long before it expires a certificate is replaced.
@@ -28,10 +32,13 @@ const (
 // A plan names what ensure must write. Each error is nil when its resource is
 // valid, and otherwise says why ensure must write it. A write of the CA Secret
 // issues a new CA when newCA is set, and otherwise keeps the CA and drops its
-// previous.crt.
+// previous.crt. relabel holds each resource that is valid but lacks the
+// operator's labels, in the order ensure writes them, which ensure updates as
+// read with only its labels set.
 type plan struct {
 	newCA               bool
 	ca, bundle, serving error
+	relabel             []client.Object
 }
 
 // errNewCA is why a new CA replaces the bundle and the serving certificate.
@@ -48,12 +55,21 @@ func decide(ca *corev1.Secret, bundle *corev1.ConfigMap, serving *corev1.Secret,
 		return plan{newCA: true, ca: err, bundle: errNewCA, serving: errNewCA}
 	}
 	previous, err := validPrevious(ca.Data[previousKey], now)
-	return plan{
+	p := plan{
 		ca:     err,
 		bundle: validBundle(bundle, current.cert, previous),
 		serving: validServing(serving.Data[corev1.TLSCertKey], serving.Data[corev1.TLSPrivateKeyKey],
 			current.cert, serverName, now, renewalWindow),
 	}
+	for _, r := range []struct {
+		obj   client.Object
+		write error
+	}{{ca, p.ca}, {bundle, p.bundle}, {serving, p.serving}} {
+		if r.write == nil && !labeled(r.obj) {
+			p.relabel = append(p.relabel, r.obj)
+		}
+	}
+	return p
 }
 
 // validCA returns the CA that ca.crt and ca.key hold when it may sign: the two
@@ -136,6 +152,12 @@ func validServing(certPEM, keyPEM []byte, ca *x509.Certificate, serverName strin
 		}
 	}
 	return nil
+}
+
+// labeled reports whether obj carries the operator's labels, with their
+// values. Its other labels do not matter.
+func labeled(obj client.Object) bool {
+	return labels.SelectorFromSet(operatortypes.Labels()).Matches(labels.Set(obj.GetLabels()))
 }
 
 func signsCertificates(cert *x509.Certificate) bool {

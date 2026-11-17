@@ -219,20 +219,39 @@ type Permissions struct {
 // attempt's buckets under its own subjects, which count against that attempt's
 // limits. Such a delivery keeps its own subject, so it never changes a key.
 func MemberPermissions(attempt, member string) Permissions {
-	buckets := Buckets(attempt)
 	controlKeys := []string{KeyEnded, BarrierKey("*", member), LeftKey(member)}
-	publish := make([]string, 0, len(buckets)*len(bucketAPI)+len(controlKeys)+len(namespaces))
+	writes := make([]string, 0, len(controlKeys)+len(namespaces))
+	for _, key := range controlKeys {
+		writes = append(writes, Subject(ControlBucket(attempt), key))
+	}
+	for _, n := range namespaces {
+		writes = append(writes, Subject(n.bucket(attempt), string(n.ns)+".>"))
+	}
+	return permissions(attempt, member, writes)
+}
+
+// ReadOnlyPermissions returns MemberPermissions without a subject that writes
+// a key: the connection may still bind its attempt's buckets, Get keys, and
+// Watch them. The coordinator grants them to a member it admits while it holds
+// no session for the attempt. Such a member learns that its session is gone,
+// and cannot write to a session created for the attempt later, whose buckets
+// have the same names.
+func ReadOnlyPermissions(attempt, member string) Permissions {
+	return permissions(attempt, member, nil)
+}
+
+// permissions returns the permissions of a member's connection that may make
+// the JetStream API requests bucketAPI lists, on each of its attempt's
+// buckets, and publish to writes.
+func permissions(attempt, member string, writes []string) Permissions {
+	buckets := Buckets(attempt)
+	publish := make([]string, 0, len(buckets)*len(bucketAPI)+len(writes))
 	for _, bucket := range buckets {
 		for _, api := range bucketAPI {
 			publish = append(publish, api.prefix+"KV_"+bucket+api.suffix)
 		}
 	}
-	for _, key := range controlKeys {
-		publish = append(publish, Subject(ControlBucket(attempt), key))
-	}
-	for _, n := range namespaces {
-		publish = append(publish, Subject(n.bucket(attempt), string(n.ns)+".>"))
-	}
+	publish = append(publish, writes...)
 	return Permissions{Publish: publish, Subscribe: []string{InboxPrefix(attempt, member) + ".>"}}
 }
 

@@ -129,7 +129,8 @@ type Config struct {
 	//
 	// MaxBytes is not the coordinator's whole memory. The process also holds,
 	// for each connection, up to session.MaxPending(MaxValue) bytes of what
-	// the connection is sent and has not yet taken, about twice MaxValue; and,
+	// the connection is sent and has not yet taken, twice the largest message
+	// it accepts, session.MaxPayload(MaxValue); and,
 	// for each bucket, an ingest queue of up to 128 MiB, which nats-server
 	// fills with the writes it has not stored yet. Size the container's memory
 	// limit for MaxBytes plus those.
@@ -214,13 +215,16 @@ func setDefault[T comparable](v *T, def T) {
 // member's connection gets.
 //
 // The server starts refusing every client, and admits them only once the host
-// calls MarkReady, which it does once it has ensured the session of every
-// unfinished attempt. A coordinator restart loses every session, so until then
-// a member reconnecting with the epoch it read from the session it joined would
-// find nothing, fail nothing, and leave the members that had not connected yet
-// to join the recreated session and wait for its deadline. Once ready, such a
-// member finds the recreated session's other epoch, which fails it with
-// session.ReasonCoordinatorLost at once.
+// calls MarkReady. The host does so once it has tried to ensure the session of
+// every unfinished attempt. A coordinator restart loses every session. A member
+// that reconnects with the epoch it read from the session it joined may find
+// the recreated session, with another epoch. The server then fails that
+// session with session.ReasonCoordinatorLost at once, so the members that had
+// not connected yet learn it too. A member that reconnects to an attempt whose
+// session is not ensured yet finds no session, so its admission fails nothing.
+// The server admits it read-only. The member learns session.ErrCoordinatorLost
+// itself, and cannot write to the session the host ensures later. That session
+// cannot commit without it.
 //
 // A Server is safe for concurrent use.
 type Server struct {
@@ -298,7 +302,7 @@ func (s *Server) start() error {
 		// The client speaks first, with its TLS handshake, so the server's INFO
 		// line, which names it, never goes out in plaintext.
 		TLSHandshakeFirst: true,
-		MaxPayload:        int32(s.cfg.MaxValue + session.PayloadHeadroom),
+		MaxPayload:        int32(session.MaxPayload(s.cfg.MaxValue)),
 		MaxPending:        session.MaxPending(s.cfg.MaxValue),
 		WriteDeadline:     writeDeadline,
 		PingInterval:      serverPingInterval,
@@ -369,8 +373,8 @@ func (s *Server) natsError(_ *nats.Conn, _ *nats.Subscription, err error) {
 	s.log.Error(err, "A connection of the coordinator's reported an error")
 }
 
-// MarkReady starts admitting clients. The host calls it once it has ensured
-// the session of every unfinished attempt; see Server.
+// MarkReady starts admitting clients. The host calls it once it has tried to
+// ensure the session of every unfinished attempt; see Server.
 func (s *Server) MarkReady() {
 	if !s.ready.Swap(true) {
 		s.log.Info("Coordinator ready; admitting clients")

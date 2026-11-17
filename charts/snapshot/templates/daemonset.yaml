@@ -381,13 +381,10 @@ spec:
               path: /readyz
               port: health
             periodSeconds: 10
-          # The health endpoint starts once the coordinator has read the API
-          # server's ServiceAccount issuer, which may take up to 30 seconds.
           livenessProbe:
             httpGet:
               path: /healthz
               port: health
-            initialDelaySeconds: 30
             periodSeconds: 10
           resources:
             {{- toYaml .Values.coordinator.resources | nindent 12 }}

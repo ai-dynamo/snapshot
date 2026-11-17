@@ -311,13 +311,8 @@ the node's local services, and any cloud metadata endpoint, to that code. The
 coordinator is the only process of the agent pod that listens on the network,
 and the host firewall advice above applies to it.
 
-The operator replaces its CA near expiry, or when the CA Secret is lost or
-damaged. After a replacement near expiry, the trust bundle keeps the replaced
-CA until it expires; a lost or damaged CA Secret loses it. A replacement can
-disrupt group attempts that reconnect while it propagates. Recovery needs both
-sides to reload from their mounted files: each coordinator its serving
-certificate, and each agent its trust in `ca.crt`. The kubelet refreshes those
-files on each node's own schedule.
+The operator replaces its CA, which can disrupt group attempts while the
+replacement propagates. See [Pod Groups](../reference/helm-values.md#pod-groups).
 
 ## Multi-GPU
 
