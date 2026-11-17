@@ -17,6 +17,7 @@ import (
 	"github.com/ai-dynamo/snapshot/coordinator"
 	"github.com/ai-dynamo/snapshot/coordinator/server"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
+	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
@@ -391,6 +392,44 @@ func TestConcurrentLargeGets(t *testing.T) {
 	}
 	for _, line := range h.logs.all() {
 		assert.NotContains(t, line, "Lost the connection", "a Get must not cost the connection")
+	}
+}
+
+func TestFullSizeGetsFitTheClientBuffer(t *testing.T) {
+	const bound = nats.DefaultSubPendingBytesLimit/session.MaxConcurrentGets - session.PayloadHeadroom
+	h := newHarness(t, func(cfg *server.Config) { cfg.MaxValue = bound })
+	ses := h.session(t, 2)
+	sessions := ses.connectAll(t)
+	reader := sessions[0].Snapshot()
+	value := bytes.Repeat([]byte{'v'}, bound)
+	require.NoError(t, sessions[1].Snapshot().Insert(within(t), "large", value))
+
+	for round := range 10 {
+		ctx := within(t)
+		start := make(chan struct{})
+		results := make(chan error, session.MaxConcurrentGets+1)
+		for range session.MaxConcurrentGets {
+			go func() {
+				<-start
+				got, err := reader.Get(ctx, "large", 0)
+				if err == nil && !bytes.Equal(got, value) {
+					err = errors.New("a Get returned another value")
+				}
+				results <- err
+			}()
+		}
+		go func() {
+			<-start
+			results <- reader.Insert(ctx, fmt.Sprintf("write.%d", round), value)
+		}()
+		close(start)
+		for range session.MaxConcurrentGets + 1 {
+			require.NoError(t, <-results)
+		}
+	}
+	for _, line := range h.logs.all() {
+		assert.NotContains(t, strings.ToLower(line), "slow consumer", "no reply may be dropped")
+		assert.NotContains(t, line, "Lost the connection", "reads must not cost a reconnect")
 	}
 }
 

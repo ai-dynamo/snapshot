@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -74,7 +75,7 @@ func decide(ca *corev1.Secret, bundle *corev1.ConfigMap, serving *corev1.Secret,
 
 // validCA returns the CA that ca.crt and ca.key hold when it may sign: the two
 // load together, the certificate is a CA whose key signs certificates, and it
-// is valid from now until past now plus window.
+// permits server authentication, and is valid from now until past now plus window.
 func validCA(certPEM, keyPEM []byte, now time.Time, window time.Duration) (*authority, error) {
 	if len(certPEM) == 0 || len(keyPEM) == 0 {
 		return nil, errors.New("ca.crt or ca.key is missing")
@@ -86,6 +87,10 @@ func validCA(certPEM, keyPEM []byte, now time.Time, window time.Duration) (*auth
 	switch {
 	case !signsCertificates(pair.Leaf):
 		return nil, errors.New("ca.crt is not a CA that signs certificates")
+	case (len(pair.Leaf.ExtKeyUsage) != 0 || len(pair.Leaf.UnknownExtKeyUsage) != 0) &&
+		!slices.Contains(pair.Leaf.ExtKeyUsage, x509.ExtKeyUsageServerAuth) &&
+		!slices.Contains(pair.Leaf.ExtKeyUsage, x509.ExtKeyUsageAny):
+		return nil, errors.New("ca.crt does not permit server authentication")
 	case now.Before(pair.Leaf.NotBefore):
 		return nil, fmt.Errorf("ca.crt is not valid until %s", pair.Leaf.NotBefore.Format(time.RFC3339))
 	case now.Add(window).After(pair.Leaf.NotAfter):

@@ -301,6 +301,43 @@ func TestValidateGroupTarget(t *testing.T) {
 	}
 }
 
+func TestGroupTargetStartupProbeBudget(t *testing.T) {
+	const longestDeadline = v1alpha1.PodGroupMaxDeadlineSeconds
+
+	for _, tc := range []struct {
+		name      string
+		failures  int32
+		period    int32
+		timeout   int32
+		wantError bool
+	}{
+		{name: "the longest deadline", failures: longestDeadline, period: 1, timeout: 1},
+		{name: "a longer budget", failures: longestDeadline + 1, period: 1, timeout: 1},
+		{name: "the same budget with a longer period", failures: longestDeadline / 2, period: 2, timeout: 1},
+		{name: "a budget exceeding int32", failures: longestDeadline, period: 1 << 20, timeout: 1},
+		{name: "a shorter budget", failures: longestDeadline - 1, period: 1, timeout: 1, wantError: true},
+		{name: "a shorter product", failures: longestDeadline/2 - 1, period: 2, timeout: 1, wantError: true},
+		{name: "a different canonical field", failures: longestDeadline + 1, period: 1, timeout: 2, wantError: true},
+		{name: "a zero period", failures: longestDeadline, timeout: 1, wantError: true},
+		{name: "negative budget fields", failures: -longestDeadline, period: -1, timeout: 1, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := gatedGroupTarget(t)
+			probe := pod.Spec.Containers[0].StartupProbe
+			probe.FailureThreshold, probe.PeriodSeconds, probe.TimeoutSeconds = tc.failures, tc.period, tc.timeout
+			if err := ValidateGroupTarget(pod, toServer()); (err != nil) != tc.wantError {
+				t.Errorf("ValidateGroupTarget() = %v, want error %t", err, tc.wantError)
+			}
+			_, err := ClaimGroupTarget(pod, RestoreGroupClaim{
+				UID: "uid-r1", Mapping: ContainerMapping{Source: "main", Destination: "server"},
+			})
+			if (err != nil) != tc.wantError {
+				t.Errorf("ClaimGroupTarget() = %v, want error %t", err, tc.wantError)
+			}
+		})
+	}
+}
+
 func TestClaimGroupTarget(t *testing.T) {
 	claim := RestoreGroupClaim{UID: "uid-r1", Mapping: ContainerMapping{Source: "main", Destination: "server"}}
 
