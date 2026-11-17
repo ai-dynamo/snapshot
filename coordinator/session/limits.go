@@ -128,8 +128,8 @@ func MaxMetaBytes(members int) int {
 // Eight is twice four, the most keys a member is sized to watch at once on one
 // bucket. Every watch is an ordered consumer, and a reconnect replaces each one
 // with a new consumer while the old one is still being deleted, so a member's
-// share is twice what it watches at once. On the control bucket, the client
-// watches the session's end and the Barrier in progress: two. On the Snapshot
+// share is twice what it watches at once. On the control bucket, one watch
+// follows barrier arrivals and the session's end together. On the Snapshot
 // bucket, it watches each Get with a wait of a key that is absent, such as one
 // by the agent and one by its cuInterpose relay: two. On the library bucket,
 // the agent's library endpoint waits through Get for the keys its Pod's

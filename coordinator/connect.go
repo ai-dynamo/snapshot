@@ -239,7 +239,7 @@ func (s *client) disconnected(nc *nats.Conn) {
 
 // join waits until the coordinator admits the connection, binds the buckets,
 // reads Meta, makes the Store of each namespace, and starts verifying the
-// session when asked, following its end, and timing its deadline.
+// session when asked, watching its control keys, and timing its deadline.
 func (s *client) join(ctx context.Context) error {
 	select {
 	case <-s.connected:
@@ -294,11 +294,12 @@ func (s *client) join(ctx context.Context) error {
 	s.epoch.Store(s.meta.Epoch)
 	// Reading Meta verified every reconnect before it.
 	s.settled(target)
+	s.events = newControlWatcher(s)
 	s.joined = true
 
 	s.wg.Add(3)
 	go s.verifier()
-	go s.followEnd()
+	go s.events.run()
 	go s.expire()
 	return nil
 }
