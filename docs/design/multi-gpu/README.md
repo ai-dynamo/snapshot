@@ -338,7 +338,7 @@ Imports from processes without CuInterpose must be released, together with their
 
 Processes on other nodes import memory through a FABRIC handle, so their imports cannot go through a creator's socket.
 FABRIC handles therefore stay real at runtime.
-An export returns the driver's handle and an import goes to the driver, so CuInterpose is never on the application's import path.
+An export returns the driver's handle and an import passes the application's handle to the driver, so a FABRIC import never uses the creator's socket.
 
 Instead, the shim records every FABRIC handle that a process exports or imports, and the handle joins each importer to its creator.
 A handle does not name the process that created its memory.
@@ -351,6 +351,7 @@ During restore, each creator exports a new handle for its recreated backing or m
 Each importer then imports the new handle that replaces the one it recorded, wherever the creator runs.
 Each process keeps every replacement that it receives or exports, and maps a handle replaced in several restores to its newest replacement.
 An import translates its handle through that table first, so a handle that the application kept from before the checkpoint imports the restored memory.
+Restoring a FABRIC import needs a newer CUDA user-mode driver, listed in [FABRIC Memory Sharing](../../get-started/prerequisites.md#fabric-memory-sharing).
 
 #### Creator and checkpoint holder
 
@@ -928,7 +929,8 @@ Restore needs to know which processes shared each allocation and verify that rec
 CuInterpose records that information in two checkpoint files:
 
 - `cuinterpose.state` is versioned MessagePack metadata mapping namespace PIDs to captured allocation, mapping, and multicast records.
-  It contains no allocation contents, persistent driver handles, or socket paths.
+  It contains no allocation contents or socket paths.
+  Its only driver handles are the FABRIC handles recorded before the checkpoint, which restore uses to match each import to the new handle that replaces it.
 - `manifest.yaml` records the PIDs that participate in coordinator operations and both library hashes alongside Snapshot's full list of native CUDA participants.
 
 ```yaml

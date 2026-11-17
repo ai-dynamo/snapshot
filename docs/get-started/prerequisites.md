@@ -63,6 +63,16 @@ driver, see
 [Check the CUDA User-Mode Driver](../operate/cuda-driver.md). See also
 [Multi-GPU Workloads](../reference/workload-contract.md#multi-gpu-workloads).
 
+### FABRIC Memory Sharing
+
+Requires [Multi-GPU Workloads](#multi-gpu-workloads), and CUDA user-mode driver
+(`libcuda.so`) 620.58 or newer in each process that imports memory through a
+`CU_MEM_HANDLE_TYPE_FABRIC` handle. An older user-mode driver does not recreate
+the import's fabric event after CUDA restore, so the restore fails when it
+imports the memory again, with `CUDA_ERROR_INVALID_VALUE` on an r620 driver
+older than 620.58. To select a newer user-mode driver, see
+[Check the CUDA User-Mode Driver](../operate/cuda-driver.md).
+
 ### Restore Proxy
 
 Requires a container runtime with NRI v0.10 or newer, enabled: containerd 2.2 or
