@@ -61,9 +61,11 @@ The change has four steps, in the order they run:
    workload still runs keeps it, and only its post-restore action runs again.
    The destination that started again will be restored into its new container.
 
-A container that starts again while the Pod's restore still runs will keep the
-earlier result and exit 112, as today, and kubelet will create it again after
-its back-off.
+A container that starts again while the Pod's restore still runs will not start
+a new restore. If its destination already has a result, its proxy will exit
+112, as today, and kubelet will create it again after its back-off. Otherwise
+its proxy will wait for the running restore's result, as a first container
+does.
 
 ## Files That Change
 
