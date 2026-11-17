@@ -6,6 +6,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
@@ -25,6 +27,27 @@ var changedByCRIU = &executor.RestoreFailure{Step: executor.StepRestoreCRIU, Cau
 // interrupted is the record an agent leaves when it stops during attempt 1.
 func (h *attemptHarness) interrupted(containerID string) restoreAttempts {
 	return restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(time.Minute), ContainerID: containerID}
+}
+
+// leaveAttempts sets the retry status an agent left for the destination
+// before it stopped.
+func (h *attemptHarness) leaveAttempts(t *testing.T, record restoreAttempts) {
+	t.Helper()
+	leaveRetryStatus(t, h.pod, podcontract.RestoreRetryStatus{"main": record.status(h.pod.UID)})
+}
+
+// restartAgent stands in for an agent restart: the Pod keeps the retry status
+// the old agent wrote, and the new agent remembers no attempt.
+func (h *attemptHarness) restartAgent(t *testing.T) {
+	t.Helper()
+	writeQueuedRetryStatus(h.w)
+	live, err := h.w.clientset.CoreV1().Pods(h.pod.Namespace).Get(context.Background(), h.pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	h.pod.Annotations = live.Annotations
+	for _, memory := range []*sync.Map{&h.w.restoreAttemptRecords, &h.w.attemptSeeds, &h.w.retryStatusWritten} {
+		memory.Clear()
+	}
+	h.recovering = true
 }
 
 // runStopping runs a pass whose agent starts stopping during the attempt,
@@ -76,7 +99,7 @@ func TestRunRestoreRepeatsAnInterruptedAttempt(t *testing.T) {
 			h, run := newAttemptHarness(t, retryLimit("2"), nil)
 			h.recovering = true
 			record := tc.record(h)
-			h.volume.put(t, "host-uid", "main", record)
+			h.leaveAttempts(t, record)
 
 			require.NoError(t, run())
 
@@ -95,7 +118,7 @@ func TestRunRestoreRepeatsAnInterruptedAttempt(t *testing.T) {
 func TestRunRestoreEndsAnInterruptedAttemptPastItsDeadline(t *testing.T) {
 	h, run := newAttemptHarness(t, retryLimit("2"), nil)
 	h.recovering = true
-	h.volume.put(t, "host-uid", "main", restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(-time.Second), ContainerID: "ctr-abc"})
+	h.leaveAttempts(t, restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(-time.Second), ContainerID: "ctr-abc"})
 
 	err := run()
 
@@ -117,13 +140,13 @@ func TestRunRestoreDoesNotRepeatACompletedRestore(t *testing.T) {
 		Reason: podcontract.RestoreReasonInProgress,
 	})
 	h.w.controlSentinelExistsFn = func(_ int, name string) (bool, error) { return name == podcontract.RestoreCompleteFile, nil }
-	h.volume.put(t, "host-uid", "main", h.interrupted("ctr-abc"))
+	h.leaveAttempts(t, h.interrupted("ctr-abc"))
 
 	require.NoError(t, run())
 
 	assert.Equal(t, 0, h.restores)
 	assert.Empty(t, h.calls)
-	assert.Empty(t, h.volume.writes, "the pass changed the attempt record")
+	assert.Zero(t, h.w.retryStatusQueue.Len(), "the pass changed the attempt record")
 	assert.Empty(t, h.events(restoreAttemptFailedReason))
 }
 
@@ -141,14 +164,15 @@ func TestRunRestoreLeavesAnAttemptToTheNextAgent(t *testing.T) {
 
 			assert.Equal(t, 1, h.restores)
 			assert.Empty(t, h.calls, "a stopping agent wrote restore-failed or killed the container")
-			record := h.volume.record(t, "host-uid", "main")
-			assert.Equal(t, 1, record.Attempt)
-			assert.True(t, record.RetryAt.IsZero(), "a stopping agent scheduled a retry")
 			assert.Empty(t, h.events(restoreAttemptFailedReason))
 			_, running := h.w.runningAttempts.Load("ctr-abc")
 			assert.False(t, running)
 
-			h.recovering = true
+			h.restartAgent(t)
+			status, found := publishedRetryStatus(t, h.w, h.pod)
+			require.True(t, found)
+			assert.Equal(t, 1, status["main"].Attempt)
+			assert.True(t, status["main"].RetryAt.IsZero(), "a stopping agent scheduled a retry")
 			require.NoError(t, run())
 
 			assert.Equal(t, []string{"write " + podcontract.RestoreCompleteFile}, h.calls)
@@ -173,13 +197,36 @@ func TestRunRestoreWithoutRetriesLeavesTheRestoreToTheNextAgent(t *testing.T) {
 			assert.Equal(t, 1, h.restores)
 			assert.Empty(t, h.calls, "a stopping agent wrote restore-failed or killed the container")
 
-			h.recovering = true
+			h.restartAgent(t)
 			require.NoError(t, run())
 
 			assert.Equal(t, []string{"write " + podcontract.RestoreCompleteFile}, h.calls)
 			assert.Equal(t, 2, h.restores)
-			assert.Empty(t, h.volume.reads)
-			assert.Empty(t, h.volume.writes)
+			assert.Nil(t, savedAttempts(h.w, h.pod.UID, "main"))
+			assert.Empty(t, retryStatusApplies(h.w))
 		})
 	}
+}
+
+// An agent that restarts while a retry waits starts it when it falls due, as
+// the next attempt, within the first attempt's deadline.
+func TestRunRestorePicksUpAWaitingRetryAfterARestart(t *testing.T) {
+	h, run := newAttemptHarness(t, retryLimit("2"), nil)
+	h.w.config.Restore.TimeoutSeconds = 600
+	h.failAttempts(untouched(storeUnreachable))
+	started := h.now
+	require.ErrorIs(t, run(), errRetryScheduled)
+
+	h.restartAgent(t)
+	h.now = started.Add(29 * time.Second)
+	require.ErrorIs(t, run(), errRetryScheduled)
+	assert.Equal(t, 1, h.restores, "a retry started before it was due")
+
+	h.now = started.Add(30 * time.Second)
+	require.NoError(t, run())
+
+	assert.Equal(t, 2, h.restores)
+	assert.Equal(t, 2, h.seen.Attempt)
+	assert.True(t, started.Add(10*time.Minute).Equal(h.deadline), "the retry got %s, not the first attempt's deadline", h.deadline)
+	assert.Equal(t, []string{"write " + podcontract.RestoreCompleteFile}, h.calls)
 }
