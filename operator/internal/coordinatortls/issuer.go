@@ -117,7 +117,9 @@ func (i *Issuer) ensure(ctx context.Context) error {
 				if replaced, err := validCA(ca.Data[caCertKey], ca.Data[caKeyKey], now, 0); err == nil {
 					data[previousKey] = encodeCertificate(replaced.cert.Raw)
 				}
-				ca.Type = corev1.SecretTypeOpaque
+				if ca.ResourceVersion == "" {
+					ca.Type = corev1.SecretTypeOpaque
+				}
 				ca.Data = data
 			} else {
 				delete(ca.Data, previousKey)
@@ -157,7 +159,9 @@ func (i *Issuer) ensure(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("sign a serving certificate: %w", err)
 			}
-			serving.Type = corev1.SecretTypeTLS
+			if serving.ResourceVersion == "" {
+				serving.Type = corev1.SecretTypeTLS
+			}
 			serving.Data = map[string][]byte{corev1.TLSCertKey: certPEM, corev1.TLSPrivateKeyKey: keyPEM}
 			if err := i.write(ctx, serving); err != nil {
 				return err

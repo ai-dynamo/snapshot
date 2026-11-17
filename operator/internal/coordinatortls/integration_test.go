@@ -162,6 +162,45 @@ func TestIssuer(t *testing.T) {
 		f.requireServes(after, before.caCert(t))
 	})
 
+	for _, tc := range []struct {
+		name   string
+		ca     bool
+		typeOf corev1.SecretType
+	}{
+		{name: "adopted Opaque serving Secret", typeOf: corev1.SecretTypeOpaque},
+		{name: "adopted CA Secret", ca: true, typeOf: "example.com/ca"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, cl)
+			f.ensure()
+			before := f.read()
+			adopted := before.serving
+			renewAt := before.servingCert(t).NotAfter
+			if tc.ca {
+				adopted = before.ca
+				renewAt = before.caCert(t).NotAfter
+			}
+			require.NoError(t, cl.Delete(t.Context(), adopted))
+			adopted.ResourceVersion = ""
+			adopted.UID = ""
+			adopted.Type = tc.typeOf
+			require.NoError(t, cl.Create(t.Context(), adopted))
+			f.clock.SetTime(renewAt.Add(-renewalWindow).Add(time.Second))
+
+			f.ensure()
+			after := f.read()
+			if tc.ca {
+				assert.Equal(t, tc.typeOf, after.ca.Type)
+				assert.NotEqual(t, serials(before.caCert(t)), serials(after.caCert(t)))
+			} else {
+				f.requireSameCA(before, after)
+				assert.Equal(t, tc.typeOf, after.serving.Type)
+				assert.NotEqual(t, serials(before.servingCert(t)), serials(after.servingCert(t)))
+			}
+			f.requireServes(after, after.caCert(t))
+		})
+	}
+
 	t.Run("a changed server name", func(t *testing.T) {
 		f := newFixture(t, cl)
 		f.ensure()
