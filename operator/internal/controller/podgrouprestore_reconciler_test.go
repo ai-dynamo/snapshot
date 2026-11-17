@@ -1493,6 +1493,11 @@ func TestPodGroupRestoreReconciler_Deletion(t *testing.T) {
 		assert.Positive(t, res.RequeueAfter, "the deadline still applies")
 
 		t.Run("still held once Failed while a member is Restoring", func(t *testing.T) {
+			r := setup(t)
+			rgReport(t, r, "a", prStarted)
+			deleteRestore(t, r)
+			reconcileRestore(t, r)
+
 			rgReport(t, r, "b", prRestoreError)
 			reconcileRestore(t, r)
 			got := getRestore(t, r)
@@ -1501,7 +1506,13 @@ func TestPodGroupRestoreReconciler_Deletion(t *testing.T) {
 		})
 
 		t.Run("released once no member is Restoring", func(t *testing.T) {
+			r := setup(t)
+			rgReport(t, r, "a", prStarted)
+			deleteRestore(t, r)
+			reconcileRestore(t, r)
+
 			rgReport(t, r, "a", prStarted, prRestoreError, prGroupFailed(snapshotv1alpha1.PodGroupReasonMemberFailed))
+			rgReport(t, r, "b", prRestoreError)
 			reconcileRestore(t, r)
 			assert.True(t, restoreGone(t, r))
 		})
