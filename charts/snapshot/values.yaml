@@ -217,23 +217,25 @@ coordinator:
   # The port of the health endpoint the probes read, /healthz and /readyz, also
   # on the node's IP.
   healthPort: 4225
-  # The memory, in bytes, that every session's data shares. A group's writes
-  # fail once it is full. Keep resources.limits.memory at about twice this. The
-  # coordinator refuses to start with less than a group of 256 members needs,
-  # about 8 MiB. It also bounds the control buckets' file store in the
-  # coordinator's /tmp, an emptyDir in memory sized to this plus 64 MiB.
+  # The bytes every session's data shares, at least maxValueBytes and about
+  # 8 MiB. A group's writes fail once it is full. This also bounds the control
+  # store in /tmp, a memory-backed emptyDir sized to this plus 64 MiB.
+  # Size limits.memory for both stores, reply buffers per concurrently reading
+  # member, and runtime overhead. See the sizing notes in helm-values.md.
   maxMemoryBytes: 1073741824
-  # The largest value, in bytes, an agent may write to a session.
+  # The largest value, in bytes, an agent may write to a session. Each reading
+  # member can buffer MaxPending(maxValueBytes), about 62 MiB at this default,
+  # in addition to the data and control stores and runtime overhead.
   maxValueBytes: 32505856
   # The largest value, in bytes, a communication library may write to a session.
   maxLibraryValueBytes: 4096
   # How many keys communication libraries may write to a session, deleted ones
   # included.
   maxLibraryKeys: 4096
-  # The Go runtime takes limits.memory as its soft memory limit, GOMEMLIMIT, so
-  # it collects garbage as the heap nears it. At about twice maxMemoryBytes, the
-  # sessions' live data stays well below it. Without a memory limit, GOMEMLIMIT
-  # is the node's allocatable memory, and does nothing.
+  # The coordinator gives Go 90% of limits.memory as a soft limit. This leaves
+  # headroom but cannot prevent an OOM. Without a limit it leaves Go unchanged.
+  # Budget data, the memory-backed control store, concurrent reply buffers,
+  # and runtime overhead; twice maxMemoryBytes is not a worst-case guarantee.
   resources:
     requests:
       cpu: 100m

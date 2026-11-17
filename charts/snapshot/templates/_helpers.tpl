@@ -361,10 +361,9 @@ true
 
 {{/* The sizeLimit of the coordinator's /tmp, in bytes. /tmp holds the control
      buckets' file store, which coordinator.maxMemoryBytes bounds, and
-     JetStream's own files, which the margin covers. So the coordinator refuses
-     a write before the kubelet would evict the Pod. Only an agent that
-     misbehaves on purpose can write consumer files outside that bound, and
-     eviction stays the backstop. */}}
+     JetStream's own files, which the margin covers for realistic load.
+     The coordinator normally refuses writes before eviction; the kubelet
+     remains the backstop, not a strict bound. */}}
 {{- define "snapshot.coordinatorTmpSizeLimit" -}}
 {{- $jetStreamMargin := include "snapshot.quantityBytes" "64Mi" | int64 -}}
 {{- add (int64 .Values.coordinator.maxMemoryBytes) $jetStreamMargin -}}

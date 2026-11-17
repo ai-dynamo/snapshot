@@ -68,7 +68,8 @@ rolls out with it:
   [An Agent Pod Stays Unready with Pod Groups Enabled](../troubleshooting/agent.md#an-agent-pod-stays-unready-with-pod-groups-enabled).
 - A pod that already holds `coordinator.port` or `coordinator.healthPort` on a
   node keeps the whole agent pod off that node, single-pod snapshots included.
-- Changing any `coordinator.*` value restarts the agent pod on every node,
+- Changing `podGroups.enabled` or any `coordinator.*` value restarts the agent
+  pod on every node,
   which interrupts single-pod work in flight. Change those values in a quiet
   window.
 

@@ -140,11 +140,11 @@ Kubernetes than the baseline; see
 | `coordinator.runAsGroup`              | `47293`                                     | Dedicated coordinator GID. Pick an ID that no workload on the nodes uses. |
 | `coordinator.port`                    | `4224`                                      | Port agents connect to over TLS, on the node's IP. 1024 to 65535.                                                                  |
 | `coordinator.healthPort`              | `4225`                                      | Port of the coordinator's health endpoint, on the node's IP. 1024 to 65535. The agent pod is ready only once the coordinator is.   |
-| `coordinator.maxMemoryBytes`          | `1073741824`                                | Memory, in bytes, that every group's session shares, at least about 8 MiB. A group's writes fail once it is full.                  |
-| `coordinator.maxValueBytes`           | `32505856`                                  | Largest value, in bytes, an agent may write to a session.                                                                          |
+| `coordinator.maxMemoryBytes`          | `1073741824`                                | Shared data cap in bytes, at least `maxValueBytes` and about 8 MiB. Also bounds control storage and session count; size memory for both stores and reply buffers below.                  |
+| `coordinator.maxValueBytes`           | `32505856`                                  | Largest value an agent may write, in bytes. Each concurrently reading member also needs a reply buffer, about 62 MiB at this default; see sizing below.                                                                          |
 | `coordinator.maxLibraryValueBytes`    | `4096`                                      | Largest value, in bytes, a communication library may write to a session.                                                           |
 | `coordinator.maxLibraryKeys`          | `4096`                                      | How many keys communication libraries may write to a session, deleted ones included.                                               |
-| `coordinator.resources`               | 100m CPU / 128Mi request, 1 CPU / 2Gi limit | Coordinator resources. The memory limit is also its `GOMEMLIMIT`. Keep it at about twice `coordinator.maxMemoryBytes`.             |
+| `coordinator.resources`               | 100m CPU / 128Mi request, 1 CPU / 2Gi limit | Coordinator resources. Go's soft limit is 90% of the memory limit, when set; see sizing below.             |
 | `coordinator.tls.serving.secretName`  | `""`                                        | Your own `kubernetes.io/tls` Secret with `tls.crt` and `tls.key`, in the release namespace. Empty: the operator issues one.        |
 | `coordinator.tls.trust.configMapName` | `""`                                        | Your own ConfigMap holding the CA bundle agents trust, in the release namespace.                                                   |
 | `coordinator.tls.trust.secretName`    | `""`                                        | Your own Secret holding that CA bundle, in the release namespace.                                                                  |
@@ -162,6 +162,25 @@ With `podGroups.enabled`, the chart also deploys these:
 The coordinator's `/tmp` is an `emptyDir` in memory, sized to
 `coordinator.maxMemoryBytes` plus 64 MiB. It holds the control buckets' file
 store, which `coordinator.maxMemoryBytes` also bounds.
+
+Size `coordinator.resources.limits.memory` for all of these:
+
+- The data cap, `coordinator.maxMemoryBytes`.
+- The control store in memory, also capped by `coordinator.maxMemoryBytes`,
+  with the volume's 64 MiB margin.
+- `MaxPending(maxValueBytes)` of reply buffer per concurrently reading member,
+  about 62 MiB per member at the default. For large values, this is twice the
+  largest value plus 64 KiB of framing per reply.
+- Runtime and ingest-queue overhead, with headroom for garbage collection.
+
+The default 2 GiB limit is not a worst-case guarantee. Go's 90% soft limit helps
+with garbage collection but cannot prevent an out-of-memory kill.
+
+Each session reserves its worst-case control storage. The sum of those
+reservations cannot exceed `coordinator.maxMemoryBytes`. At the defaults, a
+256-member session reserves 8,036,589 bytes, so one coordinator can hold 133 such
+sessions at once. Smaller groups reserve less. A coordinator that cannot fit
+all unfinished attempts remains unready.
 
 By default, the operator issues the coordinator's certificate under a private
 CA, and writes three resources in the release namespace:
