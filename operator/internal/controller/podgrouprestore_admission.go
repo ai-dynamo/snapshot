@@ -44,8 +44,8 @@ type targetClaim struct {
 // is the cache or, when Reconcile confirms an irreversible decision, the API
 // server. In each stage, every refusal is checked before any wait, so a
 // restore that can never pass is refused at once rather than after its Pods
-// or agents are ready, and a refusal before the claim leaves every target
-// gated. Both stages start from readRestoreTargets: the PodGroupSnapshot, the
+// or agents are ready, and a refusal before the claim leaves every target as
+// it found it. Both stages start from readRestoreTargets: the PodGroupSnapshot, the
 // spec, and each target's Pod, its UID and its row in the claim table.
 //
 //  1. Claim, while any target is not claimed in what reader shows. This stage
