@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from typing import Any
@@ -963,7 +964,7 @@ def restore_retries_once_the_checkpoint_is_repaired(
         snap.wait_for_pod_event(config.namespace, run.restore_pod, "RestoreAttemptFailed")
         snap.repair_checkpoint_image(config, source_node, content_uid, MANIFEST)
 
-        restored_pod = snap.wait_for_restored_condition(
+        snap.wait_for_restored_condition(
             config.namespace, run.restore_pod, "True", "RestoreSucceeded"
         )
         snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
@@ -988,7 +989,8 @@ def restore_retries_once_the_checkpoint_is_repaired(
         restarts = k8s.read_pod(config.namespace, run.restore_pod).status.container_statuses[0]
         assert restarts.restart_count == 0
         assert_retry_status(
-            restored_pod,
+            config.namespace,
+            run.restore_pod,
             attempt=len(failed) + 1,
             retry_limit=REPAIRED_RETRY_LIMIT,
             step="reading checkpoint manifest",
@@ -1036,7 +1038,13 @@ def test_restore_from_an_unreadable_manifest_ends_once_its_retries_run_out(
         assert failed[0].endswith("; retrying in place in 30s")
         assert failed[1].startswith(f"Attempt 2 of 2 for destination {snap.CONTAINER} failed: ")
         assert failed[1].endswith("; no retries left")
-        assert_retry_status(restored_pod, attempt=2, retry_limit=1, step="reading checkpoint manifest")
+        assert_retry_status(
+            config.namespace,
+            run.restore_pod,
+            attempt=2,
+            retry_limit=1,
+            step="reading checkpoint manifest",
+        )
 
         # Running out of retries is still a failure of the pod, not of the
         # capture.
@@ -1069,7 +1077,7 @@ def test_restore_from_a_damaged_checkpoint_ends_on_the_attempt_that_changed_the_
         k8s.create_pod(
             retrying_restore_pod(config, run, gpu=False, source_node=source_node, retry_limit=2)
         )
-        restored_pod = snap.wait_for_restored_condition(
+        snap.wait_for_restored_condition(
             config.namespace, run.restore_pod, "False", "RestoreFailed"
         )
 
@@ -1085,7 +1093,7 @@ def test_restore_from_a_damaged_checkpoint_ends_on_the_attempt_that_changed_the_
         assert "RestoreRetriesExhausted" not in restore_event_reasons(
             config.namespace, run.restore_pod
         )
-        assert_retry_status(restored_pod, attempt=1, retry_limit=2)
+        assert_retry_status(config.namespace, run.restore_pod, attempt=1, retry_limit=2)
     except Exception:
         snap.debug_dump(config, run)
         raise
@@ -1105,19 +1113,40 @@ def retrying_restore_pod(
 
 
 def assert_retry_status(
-    pod: client.V1Pod,
+    namespace: str,
+    pod_name: str,
     *,
     attempt: int,
     retry_limit: int,
     step: str = "restoring with CRIU",
 ) -> None:
     """The damaged file is the restore's only failure, and nothing reports the
-    snapshot unusable, since only PageBroker can."""
+    snapshot unusable, since only PageBroker can.
+
+    The agent writes the annotation in the background, so it can land after
+    the Restored condition that ends the restore.
+    """
+
+    def written() -> client.V1Pod | None:
+        pod = k8s.read_pod(namespace, pod_name)
+        raw = (pod.metadata.annotations or {}).get(snap.RESTORE_RETRY_STATUS_ANNOTATION)
+        entry = json.loads(raw).get(snap.CONTAINER, {}) if raw else {}
+        if entry.get("attempt") == attempt and "lastFailure" in entry:
+            return pod
+        return None
+
+    pod = snap.wait_for(
+        f"{snap.RESTORE_RETRY_STATUS_ANNOTATION} on {pod_name} to show attempt {attempt}",
+        written,
+        timeout=60,
+        poll_interval=2,
+    )
     status = snap.restore_retry_status(pod)
     assert set(status) == {snap.CONTAINER}, status
     entry = status[snap.CONTAINER]
     assert entry["attempt"] == attempt, status
     assert entry["retryLimit"] == retry_limit, status
+    assert entry["podUID"] == pod.metadata.uid, status
     assert entry["lastFailure"]["step"] == step, status
     assert entry["lastFailure"]["cause"], status
     assert "snapshotUnusable" not in entry["lastFailure"], status
