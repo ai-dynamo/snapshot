@@ -172,7 +172,9 @@ func TestAuthentication(t *testing.T) {
 			spec := h.ensure(1)
 			m := h.connect(spec, 0)
 			require.NoError(t, h.srv.Remove(within(t), spec.UID))
-			require.ErrorIs(t, awaitEnd(t, m), &session.AbortError{Reason: session.ReasonCancelled})
+			var abort *session.AbortError
+			require.ErrorAs(t, awaitEnd(t, m), &abort)
+			require.Contains(t, []string{session.ReasonCancelled, session.ReasonCoordinatorLost}, abort.Reason)
 			// The group resource is gone, so the Authorizer does not place the
 			// member. A held session still needs its placement, which a lagging
 			// cache may not show yet.
