@@ -203,9 +203,9 @@ certificates leaves these resources, including the CA's private key.
 Once the operator is uninstalled, or runs without its coordinator TLS flags,
 delete the three resources by name. Use the namespace from
 `--coordinator-tls-namespace` and the names from `--coordinator-ca-secret`,
-`--coordinator-tls-secret`, and `--coordinator-ca-bundle`. The chart uses the
-release namespace and the names `<fullname>-coordinator-ca`,
-`<fullname>-coordinator-tls`, and `<fullname>-coordinator-ca-bundle`:
+`--coordinator-tls-secret`, and `--coordinator-ca-bundle`. With the chart, they
+are in the release namespace, named as [Pod
+Groups](../reference/helm-values.md#pod-groups) lists.
 
 ```bash
 kubectl delete --namespace <tls-namespace> \
