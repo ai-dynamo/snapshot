@@ -374,7 +374,7 @@ A multicast team can therefore have devices in several Pods.
 POSIX sharing cannot cross Pods, because a POSIX import names its creator by PID in the importer's own namespace.
 The creator always saves a FABRIC allocation, because its importers do not know its size.
 The coordinator refuses a FABRIC import whose creator is not in the group or no longer holds the allocation.
-A coordinator started without a session runs its Pod alone, as a group of one, so FABRIC sharing between the processes of one Pod checkpoints and restores, and a Pod that imports FABRIC memory from another Pod is refused at inspection, before anything changes.
+A coordinator started without a session runs its Pod alone, as a group of one, so FABRIC sharing between the processes of its one container checkpoints and restores, and a Pod that imports FABRIC memory from another Pod is refused at inspection, before anything changes.
 
 #### Multicast tracking
 
