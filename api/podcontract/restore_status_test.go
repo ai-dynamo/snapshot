@@ -6,6 +6,7 @@ package podcontract
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
@@ -88,29 +89,39 @@ func TestClassifyRestoreOutcome(t *testing.T) {
 }
 
 func TestRestoreRetryStatusRoundTrip(t *testing.T) {
+	deadline := time.Date(2026, time.November, 17, 12, 0, 0, 0, time.UTC)
 	status := RestoreRetryStatus{
 		"worker": {
 			Attempt:    2,
 			RetryLimit: 3,
-			LastFailure: FailureSummary{
+			LastFailure: &FailureSummary{
 				Step:  "preparing PageBroker restore",
 				Cause: "PageBroker UNAVAILABLE: too many GPU connections",
 			},
+			RetryAt:     deadline.Add(-time.Hour),
+			Deadline:    deadline,
+			ContainerID: "containerd://worker",
+			PodUID:      "pod-uid",
 		},
 		"sidecar": {
 			Attempt:     1,
 			RetryLimit:  0,
-			LastFailure: FailureSummary{Step: "staging artifact", Cause: "corrupt", SnapshotUnusable: true},
+			LastFailure: &FailureSummary{Step: "staging artifact", Cause: "corrupt", SnapshotUnusable: true},
 		},
+		"loader": {Attempt: 1, RetryLimit: 2, Deadline: deadline, ContainerID: "containerd://loader", PodUID: "pod-uid"},
 	}
 	value, err := FormatRestoreRetryStatus(status)
 	if err != nil {
 		t.Fatalf("FormatRestoreRetryStatus() failed: %v", err)
 	}
-	const want = `{"sidecar":{"attempt":1,"retryLimit":0,` +
+	const want = `{"loader":{"attempt":1,"retryLimit":2,"deadline":"2026-11-17T12:00:00Z",` +
+		`"containerID":"containerd://loader","podUID":"pod-uid"},` +
+		`"sidecar":{"attempt":1,"retryLimit":0,` +
 		`"lastFailure":{"step":"staging artifact","cause":"corrupt","snapshotUnusable":true}},` +
 		`"worker":{"attempt":2,"retryLimit":3,` +
-		`"lastFailure":{"step":"preparing PageBroker restore","cause":"PageBroker UNAVAILABLE: too many GPU connections"}}}`
+		`"lastFailure":{"step":"preparing PageBroker restore","cause":"PageBroker UNAVAILABLE: too many GPU connections"},` +
+		`"retryAt":"2026-11-17T11:00:00Z","deadline":"2026-11-17T12:00:00Z",` +
+		`"containerID":"containerd://worker","podUID":"pod-uid"}}`
 	if value != want {
 		t.Fatalf("FormatRestoreRetryStatus() = %s\nwant %s", value, want)
 	}
@@ -138,7 +149,18 @@ func TestRestoreRetryStatusFromAnnotations(t *testing.T) {
 			value:     ptr.To(`{"main":{"attempt":1,"retryLimit":2,"lastFailure":{"step":"s","cause":"c"},"future":true}}`),
 			wantFound: true,
 		},
+		{
+			name:      "attempt that has not failed",
+			value:     ptr.To(`{"main":{"attempt":1,"retryLimit":2,"deadline":"2026-11-17T12:00:00Z","containerID":"c"}}`),
+			wantFound: true,
+		},
 		{name: "not JSON", value: ptr.To("attempt 2"), wantFound: true, wantErr: true},
+		{
+			name:      "deadline not a time",
+			value:     ptr.To(`{"main":{"attempt":1,"retryLimit":2,"deadline":"soon"}}`),
+			wantFound: true,
+			wantErr:   true,
+		},
 		{name: "wrong shape", value: ptr.To(`["main"]`), wantFound: true, wantErr: true},
 		{name: "attempt zero", value: ptr.To(`{"main":{"attempt":0,"retryLimit":2}}`), wantFound: true, wantErr: true},
 		{name: "negative limit", value: ptr.To(`{"main":{"attempt":1,"retryLimit":-1}}`), wantFound: true, wantErr: true},

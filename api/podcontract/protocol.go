@@ -101,12 +101,6 @@ const (
 	// Pod's one restore was already used.
 	RestoreFailedFile = "restore-failed"
 
-	// RestoreAttemptsFile is the Snapshot agent's record of a destination
-	// container's restore attempts: how many it made and when the restore's
-	// time runs out. It outlives container restarts, so a restarted container
-	// continues the same restore.
-	RestoreAttemptsFile = "restore-attempts"
-
 	// RestoreCompletePIDKey names the restored process's PID, relative to the
 	// destination container's PID namespace, in RestoreCompleteFile.
 	RestoreCompletePIDKey = "pid"
@@ -126,7 +120,7 @@ const (
 // action must not name one: writing it would act as Snapshot's own signal.
 func IsReservedControlFile(name string) bool {
 	switch name {
-	case RestoreCompleteFile, RestoreFailedFile, RestoreAttemptsFile, RestoreProxyBinaryName, CUDAJobFileName:
+	case RestoreCompleteFile, RestoreFailedFile, RestoreProxyBinaryName, CUDAJobFileName:
 		return true
 	}
 	return false
