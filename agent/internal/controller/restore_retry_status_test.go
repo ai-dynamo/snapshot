@@ -12,8 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ktypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	clientgotesting "k8s.io/client-go/testing"
@@ -21,49 +23,19 @@ import (
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
-// retryStatusHarness publishes the retry status of a Pod restoring two
-// destination containers.
-type retryStatusHarness struct {
-	w       *NodeController
-	pod     *corev1.Pod
-	volume  *fakeControlVolume
-	plan    *restorePlan
-	results []restoreResult
-}
-
-func newRetryStatusHarness(t *testing.T) *retryStatusHarness {
-	t.Helper()
-	pod := multiRestorePod()
-	pod.Annotations[podcontract.RestoreRetryLimitAnnotation] = "2"
-	w := makeTestController(t, pod)
-	w.runtime = &fakeRuntime{resolveContainerPID: 4242, podUID: "host-uid"}
-	return &retryStatusHarness{
-		w:      w,
-		pod:    pod,
-		volume: newFakeControlVolume(w),
-		plan: &restorePlan{
-			artifact: &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"},
-			mappings: []podcontract.ContainerMapping{{Source: "main", Destination: "engine-0"}, {Source: "main", Destination: "engine-1"}},
-		},
-		results: []restoreResult{
-			{destination: "engine-0", state: restoreResultPending, containerID: "engine-0-id"},
-			{destination: "engine-1", state: restoreResultPending, containerID: "engine-1-id"},
-		},
+// writeQueuedRetryStatus makes the retry status writes queued so far, as the
+// agent's worker does outside the restore.
+func writeQueuedRetryStatus(w *NodeController) {
+	for w.retryStatusQueue.Len() > 0 {
+		w.processRetryStatusQueueItem(context.Background())
 	}
 }
 
-func failedRecord(attempt, limit int, cause string) restoreAttempts {
-	return restoreAttempts{Limit: limit, Attempt: attempt, ContainerID: "ctr", LastFailure: &podcontract.FailureSummary{Step: "restoring with CRIU", Cause: cause}}
-}
-
-func (h *retryStatusHarness) publish() {
-	h.w.publishRetryStatus(context.Background(), h.pod, h.plan, h.results)
-}
-
-// applies returns the server-side applies to the Pod itself, not its status.
-func (h *retryStatusHarness) applies() []clientgotesting.PatchAction {
+// retryStatusApplies returns the server-side applies to the Pod itself, not
+// its status.
+func retryStatusApplies(w *NodeController) []clientgotesting.PatchAction {
 	var applies []clientgotesting.PatchAction
-	for _, action := range h.w.clientset.(*fake.Clientset).Actions() {
+	for _, action := range w.clientset.(*fake.Clientset).Actions() {
 		patch, ok := action.(clientgotesting.PatchAction)
 		if ok && patch.GetSubresource() == "" && patch.GetPatchType() == ktypes.ApplyPatchType {
 			applies = append(applies, patch)
@@ -79,189 +51,209 @@ func fieldManager(t *testing.T, action clientgotesting.PatchAction) string {
 	return withOptions.GetPatchOptions().FieldManager
 }
 
-func (h *retryStatusHarness) published(t *testing.T) podcontract.RestoreRetryStatus {
-	t.Helper()
-	live, err := h.w.clientset.CoreV1().Pods(h.pod.Namespace).Get(context.Background(), h.pod.Name, metav1.GetOptions{})
-	require.NoError(t, err)
-	status, found, err := podcontract.RestoreRetryStatusFromAnnotations(live.Annotations)
-	require.NoError(t, err)
-	require.True(t, found, "no retry status on the Pod")
-	assert.Equal(t, "snapshot-a", live.Annotations[podcontract.RestoreFromAnnotation], "the apply dropped another annotation")
-	return status
-}
-
-func appliedRetryStatus(t *testing.T, action clientgotesting.PatchAction) (string, podcontract.RestoreRetryStatus) {
+// appliedMetadata returns the metadata one apply sets.
+func appliedMetadata(t *testing.T, action clientgotesting.PatchAction) metav1.ObjectMeta {
 	t.Helper()
 	var patch struct {
-		Metadata struct {
-			Annotations map[string]string `json:"annotations"`
-		} `json:"metadata"`
+		Metadata metav1.ObjectMeta `json:"metadata"`
 	}
 	require.NoError(t, json.Unmarshal(action.GetPatch(), &patch))
-	status, found, err := podcontract.RestoreRetryStatusFromAnnotations(patch.Metadata.Annotations)
-	require.NoError(t, err)
-	require.True(t, found, "the apply carries no retry status")
-	return patch.Metadata.Annotations[podcontract.RestoreRetryStatusAnnotation], status
+	return patch.Metadata
 }
 
-func TestPublishRetryStatusWritesEveryDestinationOnce(t *testing.T) {
-	h := newRetryStatusHarness(t)
-	h.volume.put(t, "host-uid", "engine-0", failedRecord(2, 3, "criu restore failed"))
-	h.volume.put(t, "host-uid", "engine-1", failedRecord(1, 3, "cuda-checkpoint failed"))
+// publishedRetryStatus returns the retry status on the Pod in the API, and
+// false when it has none.
+func publishedRetryStatus(t *testing.T, w *NodeController, pod *corev1.Pod) (podcontract.RestoreRetryStatus, bool) {
+	t.Helper()
+	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "snapshot-a", live.Annotations[podcontract.RestoreFromAnnotation], "the apply dropped another annotation")
+	status, found, err := podcontract.RestoreRetryStatusFromAnnotations(live.Annotations)
+	require.NoError(t, err)
+	return status, found
+}
 
-	h.publish()
+func retryStatusPlan() *restorePlan {
+	return &restorePlan{artifact: &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}}
+}
 
-	applies := h.applies()
+func newRetryStatusController(t *testing.T) (*NodeController, *corev1.Pod) {
+	t.Helper()
+	pod := multiRestorePod()
+	pod.Annotations[podcontract.RestoreRetryLimitAnnotation] = "2"
+	return makeTestController(t, pod), pod
+}
+
+// The destinations of a Pod restore in parallel. Every update queued before a
+// write goes out in that one write, with every destination's entry.
+func TestWriteRetryStatusWritesEveryDestinationOnce(t *testing.T) {
+	w, pod := newRetryStatusController(t)
+	putAttempts(w, pod.UID, "engine-0", restoreAttempts{Limit: 2, Attempt: 2, ContainerID: "engine-0-id"})
+	w.queueRetryStatus(pod)
+	putAttempts(w, pod.UID, "engine-1", restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "engine-1-id"})
+	w.queueRetryStatus(pod)
+	putAttempts(w, "another-pod-uid", "engine-0", restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "other-id"})
+
+	writeQueuedRetryStatus(w)
+
+	applies := retryStatusApplies(w)
 	require.Len(t, applies, 1)
 	assert.Equal(t, restoreStatusFieldManager, fieldManager(t, applies[0]))
-	var patch struct {
-		Metadata struct {
-			Annotations map[string]string `json:"annotations"`
-		} `json:"metadata"`
-	}
-	require.NoError(t, json.Unmarshal(applies[0].GetPatch(), &patch))
-	assert.Len(t, patch.Metadata.Annotations, 1, "the apply owns more than the retry status")
+	metadata := appliedMetadata(t, applies[0])
+	assert.Equal(t, pod.UID, metadata.UID, "the apply could land on a new Pod of the same name")
+	assert.Len(t, metadata.Annotations, 1, "the apply owns more than the retry status")
+	status, found := publishedRetryStatus(t, w, pod)
+	require.True(t, found)
 	assert.Equal(t, podcontract.RestoreRetryStatus{
-		"engine-0": {Attempt: 2, RetryLimit: 3, LastFailure: podcontract.FailureSummary{Step: "restoring with CRIU", Cause: "criu restore failed"}},
-		"engine-1": {Attempt: 1, RetryLimit: 3, LastFailure: podcontract.FailureSummary{Step: "restoring with CRIU", Cause: "cuda-checkpoint failed"}},
-	}, h.published(t))
+		"engine-0": {Attempt: 2, RetryLimit: 2, ContainerID: "engine-0-id", PodUID: pod.UID},
+		"engine-1": {Attempt: 1, RetryLimit: 2, ContainerID: "engine-1-id", PodUID: pod.UID},
+	}, status)
 }
 
-func TestPublishRetryStatusLeavesOutADestinationWithoutAFailure(t *testing.T) {
-	for name, setup := range map[string]func(*testing.T, *retryStatusHarness){
-		"no record": func(*testing.T, *retryStatusHarness) {},
-		"a record, no failure": func(t *testing.T, h *retryStatusHarness) {
-			h.volume.put(t, "host-uid", "engine-1", restoreAttempts{Attempt: 1, ContainerID: "ctr"})
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			h := newRetryStatusHarness(t)
-			h.volume.put(t, "host-uid", "engine-0", failedRecord(1, 2, "criu restore failed"))
-			setup(t, h)
+func TestWriteRetryStatusSkipsAValueAlreadyWritten(t *testing.T) {
+	w, pod := newRetryStatusController(t)
+	putAttempts(w, pod.UID, "engine-0", restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "engine-0-id"})
+	w.queueRetryStatus(pod)
+	writeQueuedRetryStatus(w)
 
-			h.publish()
+	w.queueRetryStatus(pod)
+	writeQueuedRetryStatus(w)
 
-			status := h.published(t)
-			assert.Contains(t, status, "engine-0")
-			assert.NotContains(t, status, "engine-1")
-		})
-	}
+	assert.Len(t, retryStatusApplies(w), 1)
 }
 
-func TestPublishRetryStatusWritesNothing(t *testing.T) {
-	for name, setup := range map[string]func(*testing.T, *retryStatusHarness){
-		"without a failure": func(t *testing.T, h *retryStatusHarness) {
-			h.volume.put(t, "host-uid", "engine-0", restoreAttempts{Attempt: 1, ContainerID: "ctr"})
-		},
-		"when the Pod already says it": func(t *testing.T, h *retryStatusHarness) {
-			h.volume.put(t, "host-uid", "engine-0", failedRecord(1, 2, "criu restore failed"))
-			value, err := podcontract.FormatRestoreRetryStatus(podcontract.RestoreRetryStatus{
-				"engine-0": {Attempt: 1, RetryLimit: 2, LastFailure: podcontract.FailureSummary{Step: "restoring with CRIU", Cause: "criu restore failed"}},
-			})
-			require.NoError(t, err)
-			h.pod.Annotations[podcontract.RestoreRetryStatusAnnotation] = value
-		},
-		"when the pass found no container": func(t *testing.T, h *retryStatusHarness) {
-			for _, uid := range []string{"host-uid", "restore-pod-uid"} {
-				h.volume.put(t, uid, "engine-0", failedRecord(1, 2, "criu restore failed"))
-			}
-			for i := range h.results {
-				h.results[i].containerID = ""
-			}
-		},
-		"when a record cannot be read": func(t *testing.T, h *retryStatusHarness) {
-			h.volume.put(t, "host-uid", "engine-0", failedRecord(1, 2, "criu restore failed"))
-			h.volume.put(t, "host-uid", "engine-1", []byte("attempt=1"))
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			h := newRetryStatusHarness(t)
-			setup(t, h)
+func TestWriteRetryStatusRemovesTheAnnotationWithNoRecordsLeft(t *testing.T) {
+	w, pod := newRetryStatusController(t)
+	putAttempts(w, pod.UID, "engine-0", restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "engine-0-id"})
+	w.queueRetryStatus(pod)
+	writeQueuedRetryStatus(w)
 
-			h.publish()
+	w.restoreAttemptRecords.Delete(restoreContainerKey(pod.UID, "engine-0"))
+	w.queueRetryStatus(pod)
+	writeQueuedRetryStatus(w)
 
-			assert.Empty(t, h.applies())
-		})
-	}
+	applies := retryStatusApplies(w)
+	require.Len(t, applies, 2)
+	assert.Empty(t, appliedMetadata(t, applies[1]).Annotations)
+	_, found := publishedRetryStatus(t, w, pod)
+	assert.False(t, found)
 }
 
-// A restore without retries keeps no record, so the pass reads none.
-func TestPublishRetryStatusReadsNothingWithoutRetries(t *testing.T) {
-	h := newRetryStatusHarness(t)
-	h.pod.Annotations[podcontract.RestoreRetryLimitAnnotation] = "0"
+// A restarted agent removes an entry an earlier agent wrote once it forgets
+// the record, as after a refusal.
+func TestWriteRetryStatusRemovesAnEntryAnEarlierAgentWrote(t *testing.T) {
+	w, pod := newRetryStatusController(t)
+	leaveRetryStatus(t, pod, podcontract.RestoreRetryStatus{
+		"engine-0": {Attempt: 1, RetryLimit: 2, ContainerID: "engine-0-id", PodUID: pod.UID},
+	})
+	op := w.newRestoreOperation(pod, retryStatusPlan(), "engine-0", "engine-0-id", w.nowFn())
+	_, found, err := op.loadAttempts()
+	require.NoError(t, err)
+	require.True(t, found)
 
-	h.publish()
+	op.forgetAttempts()
+	writeQueuedRetryStatus(w)
 
-	assert.Empty(t, h.volume.reads)
-	assert.Empty(t, h.applies())
+	applies := retryStatusApplies(w)
+	require.Len(t, applies, 1)
+	assert.Empty(t, appliedMetadata(t, applies[0]).Annotations)
 }
 
-func TestPublishRetryStatusReadsUnderThePodsNodeUID(t *testing.T) {
-	for name, tc := range map[string]struct {
-		runtime       *fakeRuntime
-		onlyTheSecond bool
-		uid           string
-	}{
-		"the runtime names it":                     {runtime: &fakeRuntime{podUID: "host-uid"}, uid: "host-uid"},
-		"the runtime cannot name it":               {runtime: &fakeRuntime{}, uid: "restore-pod-uid"},
-		"the pass found only the second container": {runtime: &fakeRuntime{podUID: "host-uid"}, onlyTheSecond: true, uid: "host-uid"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			h := newRetryStatusHarness(t)
-			h.w.runtime = tc.runtime
-			if tc.onlyTheSecond {
-				h.results[0].containerID = ""
-			}
-			h.volume.put(t, tc.uid, "engine-0", failedRecord(1, 2, "criu restore failed"))
+func TestWriteRetryStatusWritesNothingForAPodWithNoRecords(t *testing.T) {
+	w, pod := newRetryStatusController(t)
 
-			h.publish()
+	w.queueRetryStatus(pod)
+	writeQueuedRetryStatus(w)
 
-			assert.Contains(t, h.published(t), "engine-0")
-		})
-	}
+	assert.Empty(t, retryStatusApplies(w))
 }
 
-func TestRestorePodNodeUID(t *testing.T) {
-	for name, tc := range map[string]struct {
-		runtime      *fakeRuntime
-		containerIDs []string
-		wantUID      string
-		wantOK       bool
-	}{
-		"no container found":         {runtime: &fakeRuntime{podUID: "host-uid"}, containerIDs: []string{"", ""}},
-		"a UID from the runtime":     {runtime: &fakeRuntime{podUID: "host-uid"}, containerIDs: []string{"", "engine-1-id"}, wantUID: "host-uid", wantOK: true},
-		"the runtime cannot name it": {runtime: &fakeRuntime{}, containerIDs: []string{"engine-0-id", "engine-1-id"}, wantUID: "restore-pod-uid", wantOK: true},
-	} {
-		t.Run(name, func(t *testing.T) {
-			h := newRetryStatusHarness(t)
-			h.w.runtime = tc.runtime
-			for i, containerID := range tc.containerIDs {
-				h.results[i].containerID = containerID
-			}
-
-			uid, ok := h.w.restorePodNodeUID(context.Background(), h.pod, h.results)
-
-			assert.Equal(t, tc.wantOK, ok)
-			if tc.wantOK {
-				assert.Equal(t, tc.wantUID, uid)
-			}
-		})
-	}
-}
-
-func TestPublishRetryStatusReportsAFailedWrite(t *testing.T) {
-	h := newRetryStatusHarness(t)
-	h.volume.put(t, "host-uid", "engine-0", failedRecord(1, 2, "criu restore failed"))
-	h.w.clientset.(*fake.Clientset).PrependReactor("patch", "pods", func(action clientgotesting.Action) (bool, runtime.Object, error) {
+func TestWriteRetryStatusRetriesAFailedWriteThenReportsIt(t *testing.T) {
+	w, pod := newRetryStatusController(t)
+	putAttempts(w, pod.UID, "engine-0", restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "engine-0-id"})
+	writes := 0
+	w.clientset.(*fake.Clientset).PrependReactor("patch", "pods", func(action clientgotesting.Action) (bool, runtime.Object, error) {
 		if action.GetSubresource() != "" {
 			return false, nil, nil
 		}
+		writes++
 		return true, nil, errors.New("apiserver unavailable")
 	})
 
-	h.publish()
+	w.queueRetryStatus(pod)
+	for range retryStatusWriteAttempts {
+		w.processRetryStatusQueueItem(context.Background())
+	}
 
-	event := eventForReason(h.w.clientset.(*fake.Clientset), restoreStatusUpdateFailedReason)
-	require.NotNil(t, event)
-	assert.Equal(t, "Failed to record the restore retry status: apiserver unavailable", event.Message)
+	assert.Equal(t, retryStatusWriteAttempts, writes)
+	assert.Zero(t, w.retryStatusQueue.Len())
+	assert.Zero(t, w.retryStatusQueue.NumRequeues(retryStatusKey{namespace: pod.Namespace, name: pod.Name, uid: pod.UID}))
+	events := eventsForReason(w.clientset.(*fake.Clientset), restoreStatusUpdateFailedReason)
+	require.Len(t, events, 1)
+	assert.Equal(t, "Failed to record the restore retry status: apiserver unavailable", events[0].Message)
+	assert.Equal(t, pod.UID, events[0].InvolvedObject.UID)
+}
+
+func TestWriteRetryStatusDropsAPodThatIsGone(t *testing.T) {
+	w, pod := newRetryStatusController(t)
+	putAttempts(w, pod.UID, "engine-0", restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "engine-0-id"})
+	w.clientset.(*fake.Clientset).PrependReactor("patch", "pods", func(clientgotesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, pod.Name)
+	})
+
+	w.queueRetryStatus(pod)
+	writeQueuedRetryStatus(w)
+
+	assert.Zero(t, w.retryStatusQueue.Len())
+	assert.Empty(t, eventsForReason(w.clientset.(*fake.Clientset), restoreStatusUpdateFailedReason))
+}
+
+func TestWriteRetryStatusGivesUpOnShutdown(t *testing.T) {
+	w, pod := newRetryStatusController(t)
+	putAttempts(w, pod.UID, "engine-0", restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "engine-0-id"})
+	ctx, cancel := context.WithCancel(context.Background())
+	w.clientset.(*fake.Clientset).PrependReactor("patch", "pods", func(clientgotesting.Action) (bool, runtime.Object, error) {
+		cancel()
+		return true, nil, context.Canceled
+	})
+
+	w.queueRetryStatus(pod)
+	w.processRetryStatusQueueItem(ctx)
+
+	assert.Zero(t, w.retryStatusQueue.Len())
+	assert.Empty(t, eventsForReason(w.clientset.(*fake.Clientset), restoreStatusUpdateFailedReason))
+}
+
+func TestRunRetryStatusQueueStopsWhenTheQueueShutsDown(t *testing.T) {
+	w, _ := newRetryStatusController(t)
+	done := make(chan struct{})
+	go func() {
+		w.runRetryStatusQueue(context.Background())
+		close(done)
+	}()
+
+	w.retryStatusQueue.ShutDown()
+
+	<-done
+}
+
+// A deleted Pod takes its records with it, so a new Pod of the same name
+// starts a new restore.
+func TestForgetRestorePodForgetsItsAttempts(t *testing.T) {
+	w, pod := newRetryStatusController(t)
+	putAttempts(w, pod.UID, "engine-0", restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "engine-0-id"})
+	putAttempts(w, "another-pod-uid", "engine-0", restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "other-id"})
+	op := w.newRestoreOperation(pod, retryStatusPlan(), "engine-0", "engine-0-id", w.nowFn())
+	_, _, err := op.loadAttempts()
+	require.NoError(t, err)
+	w.retryStatusWritten.Store(pod.UID, "written")
+
+	w.forgetRestorePod(pod)
+
+	assert.Nil(t, savedAttempts(w, pod.UID, "engine-0"))
+	assert.NotNil(t, savedAttempts(w, "another-pod-uid", "engine-0"))
+	_, seeded := w.attemptSeeds.Load(pod.UID)
+	assert.False(t, seeded)
+	_, written := w.retryStatusWritten.Load(pod.UID)
+	assert.False(t, written)
 }

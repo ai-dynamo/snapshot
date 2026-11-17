@@ -36,7 +36,8 @@ func TestRunRestoreEndsAnAttemptWhoseContainerStopped(t *testing.T) {
 	err := run()
 
 	require.ErrorIs(t, err, errContainerStopped)
-	record := h.volume.record(t, "host-uid", "main")
+	record := savedAttempts(h.w, h.pod.UID, "main")
+	require.NotNil(t, record)
 	assert.True(t, record.RetryAt.IsZero(), "a stopped container was retried in place")
 	failed := h.events(restoreAttemptFailedReason)
 	require.Len(t, failed, 1)
@@ -131,7 +132,7 @@ func TestRunRestoreEndsOnlyTheAttemptInTheStoppedContainer(t *testing.T) {
 func TestRunRestoreDoesNotTakeTheDeadlineForAStop(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		h, run := newAttemptHarness(t, retryLimit("2"), nil)
-		h.volume.put(t, "host-uid", "main", restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(50 * time.Millisecond), ContainerID: "ctr-abc"})
+		putAttempts(h.w, h.pod.UID, "main", restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(50 * time.Millisecond), ContainerID: "ctr-abc"})
 		h.w.restoreFn = func(ctx context.Context, _ snapshotruntime.Runtime, _ logr.Logger, _ executor.RestoreRequest, _ executor.RestoreMounter) (executor.RestoreResult, error) {
 			<-ctx.Done()
 			return executor.RestoreResult{}, untouched(ctx.Err())

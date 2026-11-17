@@ -71,8 +71,6 @@ type NodeController struct {
 	restoreFn                 func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error)
 	writeControlSentinelFn    func(int, string, []byte) error
 	writePodControlSentinelFn func(string, string, string, []byte) error
-	readPodControlFileFn      func(string, string, string, int64) ([]byte, error)
-	removePodControlFileFn    func(string, string, string) error
 	controlSentinelExistsFn   func(int, string) (bool, error)
 	sendSignalFn              func(logr.Logger, int, syscall.Signal, string) error
 	// hostProcPath is where the agent reads the node's processes; tests point it elsewhere.
@@ -120,6 +118,17 @@ type NodeController struct {
 	// runningAttempts holds, per container ID, the context.CancelCauseFunc of
 	// a restore attempt running in that container.
 	runningAttempts sync.Map
+
+	// restoreAttemptRecords holds, per restoreContainerKey, the restoreAttempts
+	// of a destination whose restore allows retries, and attemptSeeds, per Pod
+	// UID, the *attemptSeed that copied the Pod's retry status annotation in.
+	restoreAttemptRecords sync.Map
+	attemptSeeds          sync.Map
+	// retryStatusQueue holds the Pods whose retry status annotation lags
+	// their records, and retryStatusWritten, per Pod UID, the value the agent
+	// last wrote.
+	retryStatusQueue   workqueue.TypedRateLimitingInterface[retryStatusKey]
+	retryStatusWritten sync.Map
 
 	// contentIndexer is the PodSnapshotContent informer's indexer, indexed by source pod
 	// (podRefIndex). The source-pod informer uses it to map a pod event back to its work order.
@@ -169,8 +178,6 @@ type restoreResult struct {
 	state       restoreResultState
 	// reason explains a failed or incompatible outcome.
 	reason string
-	// containerID is the destination container the pass found, if any.
-	containerID string
 }
 
 type restorePendingError struct {
@@ -191,10 +198,8 @@ type restoreOperation struct {
 	skipCompatCheck   bool
 	destination       string
 	containerID       string
-	// nodeUID is the Pod's UID on the node, read when the attempt starts.
-	nodeUID   string
-	startedAt time.Time
-	log       logr.Logger
+	startedAt         time.Time
+	log               logr.Logger
 }
 
 const (
@@ -289,12 +294,11 @@ func newDefaultController(
 			workqueue.DefaultTypedControllerRateLimiter[string](),
 			workqueue.TypedRateLimitingQueueConfig[string]{Name: "capture-contents"},
 		),
+		retryStatusQueue: newRetryStatusQueue(retryStatusRetryDelay),
 
 		restoreFn:                 executor.Restore,
 		writeControlSentinelFn:    snapshotruntime.WriteControlSentinel,
 		writePodControlSentinelFn: snapshotruntime.WritePodControlSentinel,
-		readPodControlFileFn:      snapshotruntime.ReadPodControlFile,
-		removePodControlFileFn:    snapshotruntime.RemovePodControlFile,
 		controlSentinelExistsFn:   snapshotruntime.ControlSentinelExists,
 		sendSignalFn:              snapshotruntime.SendSignalToPID,
 		hostProcPath:              snapshotruntime.HostProcPath,
@@ -325,6 +329,7 @@ func (w *NodeController) RestoreWithoutProxy() {
 func (w *NodeController) Run(ctx context.Context) error {
 	defer w.restoreQueue.ShutDown()
 	defer w.captureQueue.ShutDown()
+	defer w.retryStatusQueue.ShutDown()
 	// Seed the agent logger onto ctx so the capture path resolves it via log.FromContext.
 	ctx = logr.NewContext(ctx, w.log)
 	w.log.Info("Starting snapshot node controller",
@@ -421,6 +426,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 		<-ctx.Done()
 		w.restoreQueue.ShutDown()
 		w.captureQueue.ShutDown()
+		w.retryStatusQueue.ShutDown()
 		stopOnce.Do(func() { close(w.stopCh) })
 	}()
 
@@ -430,6 +436,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 
 	go w.runRestoreQueue(ctx)
 	go w.runCaptureQueue(ctx)
+	go w.runRetryStatusQueue(ctx)
 	w.log.Info("PodSnapshot node controller started and caches synced")
 	<-ctx.Done()
 	stopOnce.Do(func() { close(w.stopCh) })
@@ -465,6 +472,9 @@ func (w *NodeController) forgetRestorePod(obj interface{}) {
 	w.handledRestores.Delete(string(pod.UID))
 	forgetPodContainers(&w.startedRestoreContainers, pod.UID)
 	forgetPodContainers(&w.finishedRestoreDestinations, pod.UID)
+	forgetPodContainers(&w.restoreAttemptRecords, pod.UID)
+	w.attemptSeeds.Delete(pod.UID)
+	w.retryStatusWritten.Delete(pod.UID)
 }
 
 // forgetPodContainers deletes every restoreContainerKey of one Pod.
@@ -897,7 +907,6 @@ func (w *NodeController) restorePodContainers(ctx context.Context, pod *corev1.P
 	}
 	workers.Wait()
 
-	w.publishRetryStatus(ctx, pod, plan, results)
 	return w.recordRestoreResults(ctx, pod, plan.artifact, results)
 }
 
@@ -1069,7 +1078,6 @@ func (w *NodeController) restoreDestinationOnce(
 	if containerID == "" {
 		return result
 	}
-	result.containerID = containerID
 
 	startedAt := time.Now()
 	log := w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "destination", destination)
@@ -1206,7 +1214,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 			// The placeholder is left running: killing it restarts the container
 			// straight back into the same refusal.
 			if record.Limit > 0 {
-				op.forgetAttempts(ctx)
+				op.forgetAttempts()
 			}
 			return incompatible
 		}
@@ -1365,9 +1373,18 @@ func (op *restoreOperation) markRestoreFailed(ctx context.Context, placeholderHo
 
 // markRestoreFailedThroughNode writes the restore-failed sentinel for a
 // container with no process to write through, using the node's path of the
-// control volume.
+// control volume. kubelet names that path after the Pod's UID on the node,
+// which in a vCluster differs from this Pod's; the runtime knows it while the
+// container exists.
 func (op *restoreOperation) markRestoreFailedThroughNode(ctx context.Context) {
-	if markErr := op.controller.writePodControlSentinelFn(op.nodePodUID(ctx), op.destination, podcontract.RestoreFailedFile, restoreFailedSentinelContents); markErr != nil {
+	w := op.controller
+	podUID := string(op.pod.UID)
+	if nodeUID, uidErr := w.runtime.ResolveContainerPodUID(ctx, op.containerID); uidErr == nil {
+		podUID = nodeUID
+	} else {
+		op.log.V(1).Info("Cannot read the Pod's UID on the node; using its own", "error", uidErr.Error())
+	}
+	if markErr := w.writePodControlSentinelFn(podUID, op.destination, podcontract.RestoreFailedFile, restoreFailedSentinelContents); markErr != nil {
 		op.log.Error(markErr, "Failed to write restore-failed sentinel through the host path")
 	}
 }
