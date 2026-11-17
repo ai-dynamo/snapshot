@@ -132,12 +132,30 @@ func (s *client) settle(ctx context.Context) error {
 	return s.verifiedTo(ctx, target)
 }
 
+// settleToWrite returns once a write may be sent: the client is not
+// reconnecting, and the session has been verified up to its latest reconnect
+// and request. A write sent while the client reconnects fails at once, unless
+// the next attempt to reconnect begins first. That send then waits on the
+// connection through the handshake, and goes out over the new connection
+// before its verification. Waiting for the reconnect, and for its
+// verification, closes that gap.
+func (s *client) settleToWrite(ctx context.Context) error {
+	return s.waitFor(ctx, func() bool { return s.verified >= s.target() && !s.nc.IsReconnecting() })
+}
+
 // verifiedTo returns nil once a verification that reached target has found
 // the session still there, and how the session ended if it ends first.
 func (s *client) verifiedTo(ctx context.Context, target uint64) error {
+	return s.waitFor(ctx, func() bool { return s.verified >= target })
+}
+
+// waitFor returns nil once ready, which it calls holding s.mu, reports true,
+// and how the session ended if it ends first. It asks ready again each time a
+// verification finds the session still there.
+func (s *client) waitFor(ctx context.Context, ready func() bool) error {
 	for {
 		s.mu.Lock()
-		ok, wake := s.verified >= target, s.wake
+		ok, wake := ready(), s.wake
 		s.mu.Unlock()
 		if ok {
 			return nil

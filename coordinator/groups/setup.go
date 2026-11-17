@@ -51,9 +51,10 @@ func (cfg Config) validate() error {
 // Setup registers with mgr the reconciler and the startup that keep
 // cfg.Server's sessions in step with the group resources in attempts' cache.
 // attempts is what NewAttempts returned for mgr. The startup marks the server
-// ready once it has ensured the session of every unfinished attempt cfg.Node
-// serves. mgr's scheme must hold package v1alpha1's kinds. The reconciler and
-// the startup log through mgr's logger, named "coordination-session".
+// ready once it has tried to ensure the session of every unfinished attempt
+// cfg.Node serves. mgr's scheme must hold package v1alpha1's kinds. The
+// reconciler and the startup log through mgr's logger, named
+// "coordination-session".
 func Setup(mgr manager.Manager, attempts *Attempts, cfg Config) error {
 	if attempts == nil {
 		return fmt.Errorf("the coordinator's groups need the attempts NewAttempts returns: %w", session.ErrInvalid)
@@ -74,7 +75,7 @@ func Setup(mgr manager.Manager, attempts *Attempts, cfg Config) error {
 			if req == nil {
 				return log
 			}
-			return log.WithValues("kind", req.kind, "namespace", req.Namespace, "name", req.Name, "attempt", req.uid)
+			return req.logger(log)
 		}).
 		WatchesRawSource(source.TypedKind(cache, &v1alpha1.PodGroupSnapshot{},
 			handler.TypedEnqueueRequestsFromMapFunc(snapshotRequests(attempts.reader, log)))).

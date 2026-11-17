@@ -13,7 +13,8 @@ import (
 
 // bucket is one of the attempt's buckets, bound twice: kv writes and watches
 // its keys, and stream reads a key's latest record, which tells a value from a
-// delete marker and carries the revision a write over the marker expects.
+// delete marker and carries the revision that a write over the marker, or the
+// deletion of the value, expects.
 type bucket struct {
 	kv     jetstream.KeyValue
 	stream jetstream.Stream
@@ -63,7 +64,7 @@ func (s *client) create(ctx context.Context, b bucket, key string, value []byte,
 	cost readCost) (bool, []byte, error) {
 	var revision uint64
 	for {
-		err := s.do(ctx, func(ctx context.Context) error {
+		err := s.write(ctx, func(ctx context.Context) error {
 			_, err := b.kv.Update(ctx, key, value, revision)
 			if errors.Is(err, jetstream.ErrKeyExists) {
 				return session.ErrExists

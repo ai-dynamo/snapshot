@@ -93,8 +93,8 @@ func snapshotRequests(reader client.Reader, log logr.Logger) handler.TypedMapFun
 		var restores v1alpha1.PodGroupRestoreList
 		if err := reader.List(ctx, &restores, client.InNamespace(snapshot.Namespace),
 			client.MatchingFields{snapshotRefField: string(snapshot.UID)}); err != nil {
-			log.Error(err, "Listing the PodGroupRestores of a PodGroupSnapshot failed; reconciling the snapshot alone",
-				"namespace", snapshot.Namespace, "name", snapshot.Name)
+			reqs[0].logger(log).Error(err,
+				"Listing the PodGroupRestores of a PodGroupSnapshot failed; reconciling the snapshot alone")
 			return reqs
 		}
 		for i := range restores.Items {
