@@ -22,12 +22,17 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/group"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/coordinator"
 	"github.com/ai-dynamo/snapshot/coordinator/coordinatortest"
@@ -507,6 +512,24 @@ func TestGroupCheckpointThatFailsBeforeItJoins(t *testing.T) {
 		fail func(*NodeController)
 		want string
 	}{
+		"the group deadline while waiting for readiness": {
+			modify: func(g *captureGroup) {
+				g.group.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Minute))
+				g.group.Spec.DeadlineSeconds = 1
+				g.pods[0].Status.ContainerStatuses[0].Ready = false
+				g.pods[0].Labels[snapshotv1alpha1.CaptureEligibleLabel] = "true"
+			},
+			want: session.ReasonDeadlineExceeded,
+		},
+		"a misconfigured launcher after the source was labeled": {
+			modify: func(g *captureGroup) {
+				g.pods[0].Annotations = map[string]string{podcontract.CuInterposeAnnotation: "enabled"}
+				g.pods[0].Spec.Containers = []corev1.Container{{Name: "main", Command: []string{"worker"}}}
+				g.pods[0].Status.ContainerStatuses[0].Ready = false
+				g.pods[0].Labels[snapshotv1alpha1.CaptureEligibleLabel] = "true"
+			},
+			want: "CuInterposeMisconfigured",
+		},
 		"a readiness probe that can never run": {
 			modify: func(g *captureGroup) {
 				g.contents[0].Spec.Containers = []snapshotv1alpha1.ContainerSnapshotConfig{{Name: "main",
@@ -564,8 +587,9 @@ func TestGroupCheckpointThatFailsBeforeItJoins(t *testing.T) {
 
 			w.processCaptureQueueItem(within(t), "content-leader")
 
-			assert.Equal(t, tc.want, condition(getContent(t, w, "content-leader"), snapshotv1alpha1.PodSnapshotConditionFailed).Reason,
-				"the member reports its own failure")
+			failed := condition(getContent(t, w, "content-leader"), snapshotv1alpha1.PodSnapshotConditionFailed)
+			require.NotNil(t, failed, "the member reports its own failure")
+			assert.Equal(t, tc.want, failed.Reason)
 			assert.False(t, joined, "a member that fails before it joins does not join to fail the attempt")
 			assert.False(t, fc.wasCalled())
 			assert.NotContains(t, getPod(t, w, "inference", "worker-0").Labels, snapshotv1alpha1.CaptureEligibleLabel,
@@ -731,4 +755,108 @@ func TestAttemptEndReason(t *testing.T) {
 	assert.Empty(t, attemptEndReason(errors.New("CRIU failed"), deadline, deadline.Add(-time.Minute)),
 		"a member that failed on its own reports its own reason")
 	assert.Equal(t, session.ReasonDeadlineExceeded, attemptEndReason(context.DeadlineExceeded, deadline, deadline))
+}
+
+func TestDeletedCaptureMemberLeavesSourceAsFound(t *testing.T) {
+	for _, finalizing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("finalizing-%t", finalizing), func(t *testing.T) {
+			g := newCaptureGroup()
+			g.pods[0].Status.ContainerStatuses[0].Ready = false
+			var objects []runtime.Object
+			for _, obj := range g.objects() {
+				objects = append(objects, obj)
+			}
+			w := makeTestController(t, nil, objects...)
+			w.config.NodeName = "node-a"
+			w.podGroups = &podGroups{}
+			content := mustUnstructured(t, g.contents[0])
+			content.SetGroupVersionKind(snapshotv1alpha1.GroupVersion.WithKind("PodSnapshotContent"))
+			dynClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+				map[schema.GroupVersionResource]string{
+					podSnapshotContentGVR: "PodSnapshotContentList", podGroupRestoreGVR: "PodGroupRestoreList",
+				}, content)
+			w.dynClient = dynClient
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan error, 1)
+			go func() { done <- w.Run(ctx) }()
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case err := <-done:
+					assert.NoError(t, err)
+				case <-time.After(5 * time.Second):
+					t.Error("the controller did not stop")
+				}
+			})
+			require.Eventually(t, func() bool {
+				return getPod(t, w, "inference", "worker-0").Labels[snapshotv1alpha1.CaptureEligibleLabel] == "true"
+			}, 5*time.Second, 10*time.Millisecond, "the member waits at its readiness gate")
+
+			if finalizing {
+				content.SetFinalizers([]string{"test.example.com/artifact-cleanup"})
+				now := metav1.Now()
+				content.SetDeletionTimestamp(&now)
+				_, err := dynClient.Resource(podSnapshotContentGVR).Update(ctx, content, metav1.UpdateOptions{})
+				require.NoError(t, err)
+				require.Eventually(t, func() bool {
+					_, cached := w.podGroups.captureMembers.Load(content.GetName())
+					return !cached
+				}, 5*time.Second, 10*time.Millisecond, "the deleting update was reconciled")
+				require.NoError(t, w.client.Delete(ctx, g.snaps[0]))
+				require.NoError(t, w.client.Delete(ctx, g.group))
+			}
+
+			require.NoError(t, dynClient.Resource(podSnapshotContentGVR).Delete(ctx, content.GetName(), metav1.DeleteOptions{}))
+			require.Eventually(t, func() bool {
+				_, labeled := getPod(t, w, "inference", "worker-0").Labels[snapshotv1alpha1.CaptureEligibleLabel]
+				return !labeled
+			}, 5*time.Second, 10*time.Millisecond, "the delete event releases the source label")
+		})
+	}
+}
+
+func TestGroupReadinessWaitRequeuesAtDeadline(t *testing.T) {
+	g := newCaptureGroup()
+	g.pods[0].Status.ContainerStatuses[0].Ready = false
+	fc := &fakeCheckpointer{}
+	w, _ := groupCaptureController(t, nil, g, fc.fn, nil)
+	now := g.group.CreationTimestamp.Time.Truncate(time.Second)
+	w.nowFn = func() time.Time { return now }
+	var delay time.Duration
+	w.requeueCaptureFn = func(name string, after time.Duration) {
+		assert.Equal(t, "content-leader", name)
+		delay = after
+	}
+
+	require.NoError(t, w.reconcileCapture(within(t), "content-leader"))
+	assert.Equal(t, 600*time.Second, delay)
+	assert.False(t, fc.wasCalled())
+}
+
+func TestCaptureDeleteAfterCacheEviction(t *testing.T) {
+	for _, started := range []bool{false, true} {
+		t.Run(fmt.Sprintf("started-%t", started), func(t *testing.T) {
+			g := newCaptureGroup()
+			g.pods[0].Labels[snapshotv1alpha1.CaptureEligibleLabel] = "true"
+			if started {
+				meta.SetStatusCondition(&g.contents[0].Status.Conditions, metav1.Condition{
+					Type: snapshotv1alpha1.PodSnapshotConditionStarted, Status: metav1.ConditionTrue, Reason: "Started",
+				})
+			}
+			w, _ := groupCaptureController(t, nil, g, nil, nil)
+			member, err := w.captureMemberOf(t.Context(), g.contents[0])
+			require.NoError(t, err)
+			require.NotNil(t, member)
+			content := mustUnstructured(t, g.contents[0])
+			require.NoError(t, w.contentIndexer.Delete(content))
+			require.NoError(t, w.client.Delete(t.Context(), g.snaps[0]))
+			require.NoError(t, w.client.Delete(t.Context(), g.group))
+
+			require.NoError(t, w.reconcileCapture(t.Context(), content.GetName()))
+			w.forgetContent(t.Context(), cache.DeletedFinalStateUnknown{Key: content.GetName(), Obj: content})
+
+			_, labeled := getPod(t, w, "inference", "worker-0").Labels[snapshotv1alpha1.CaptureEligibleLabel]
+			assert.Equal(t, started, labeled, "only an unstarted member's source is released")
+		})
+	}
 }

@@ -372,13 +372,14 @@ func (w *NodeController) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to add snapshot-content podRef indexer: %w", err)
 	}
 	w.contentIndexer = contentInformer.GetIndexer()
-	// Handlers only enqueue: reconciling inline would block delivery for the length of a dump.
+	// Adds and updates only enqueue; deletion releases an unstarted member's source label.
 	// The resync re-enqueues everything, which is the backstop for a not-yet-quiesced source.
 	if _, err := contentInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: w.enqueueContent,
 		UpdateFunc: func(_, newObj interface{}) {
 			w.enqueueContent(newObj)
 		},
+		DeleteFunc: func(obj any) { w.forgetContent(ctx, obj) },
 	}); err != nil {
 		return fmt.Errorf("failed to add snapshot-content informer handler: %w", err)
 	}
@@ -1507,6 +1508,16 @@ func (w *NodeController) handleRestorePreflightError(ctx context.Context, pod *c
 func (w *NodeController) enqueueContent(obj interface{}) {
 	if name, ok := contentNameFromInformerObj(obj); ok {
 		w.captureQueue.Add(name)
+	}
+}
+
+// forgetContent releases an unstarted member's source before discarding the
+// validated identity that cleanup needs after its parents are gone.
+func (w *NodeController) forgetContent(ctx context.Context, obj any) {
+	if content, ok := contentFromInformerObj(obj); ok {
+		w.leaveUnstartedMemberSource(ctx, content)
+		w.checkpointGates.Delete(content.Name)
+		w.forgetCaptureMember(content.Name)
 	}
 }
 

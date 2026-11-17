@@ -69,7 +69,7 @@ func (w *NodeController) failCaptureAfterPanic(ctx context.Context, name string,
 		}
 		err := w.setSnapshotContentFailed(ctx, content, reasonAgentPanic, errors.New(cause.Error()))
 		if err == nil {
-			w.leaveSourceAsFoundAfterPanic(ctx, content)
+			w.leaveUnstartedMemberSource(ctx, content)
 			return
 		}
 		if attempt == panicStatusRetries-1 {

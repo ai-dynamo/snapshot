@@ -29,6 +29,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/coordinator/session"
 )
 
 // CheckpointParams carries everything the node driver needs to dump one container.
@@ -96,8 +97,15 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	}
 	if content == nil || content.Spec.Source.NodeName != w.config.NodeName ||
 		!content.DeletionTimestamp.IsZero() || isContentTerminal(content) {
+		if content != nil && content.Spec.Source.NodeName == w.config.NodeName &&
+			!content.DeletionTimestamp.IsZero() {
+			w.leaveUnstartedMemberSource(ctx, content)
+		}
 		w.checkpointGates.Delete(name)
-		w.forgetCaptureMember(name)
+		// A queued delete still needs the identity after the index drops its content.
+		if content != nil {
+			w.forgetCaptureMember(name)
+		}
 		return nil
 	}
 	// A pod group member's capture runs once: what this agent already
@@ -185,11 +193,16 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 		return err
 	}
 
+	if member != nil && !w.nowFn().Before(member.deadline) {
+		return w.failBeforeJoin(ctx, content, pod, member, session.ReasonDeadlineExceeded,
+			context.DeadlineExceeded)
+	}
+
 	// Check the opt-in before labeling the source and waiting for readiness, so a misconfigured
 	// Pod fails without waiting for its workload to become ready.
 	cuInterposeRequested, err := preflightCuInterpose(pod, containerName)
 	if err != nil {
-		return w.setSnapshotContentFailed(ctx, content, "CuInterposeMisconfigured", err)
+		return w.failBeforeJoin(ctx, content, pod, member, "CuInterposeMisconfigured", err)
 	}
 
 	// The source-pod informer keys on this label, so the patch is what makes pod status changes
@@ -208,6 +221,9 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	if !ready {
 		// Pod events wake the work order more often than the period, so the
 		// gate paces the checks and says when the next one is due.
+		if member != nil && (next.IsZero() || member.deadline.Before(next)) {
+			next = member.deadline
+		}
 		if !next.IsZero() {
 			w.requeueCaptureFn(name, next.Sub(now))
 		}
