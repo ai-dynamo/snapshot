@@ -5,19 +5,15 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"os"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
-	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	ktypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
@@ -26,145 +22,47 @@ import (
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
-// fakeControlVolume stands in for the Pod's snapshot-control volume as the
-// node sees it, keyed by "<node UID>/<container>/<file>".
-type fakeControlVolume struct {
-	mu        sync.Mutex
-	files     map[string][]byte
-	readErr   error
-	removeErr error
-	writeErrs map[string]error // by file name
-	reads     []string
-	writes    []string
-	removes   []string
+// putAttempts keeps record in the agent's memory, as it holds a destination's
+// record once an attempt started.
+func putAttempts(w *NodeController, uid ktypes.UID, container string, record restoreAttempts) {
+	w.restoreAttemptRecords.Store(restoreContainerKey(uid, container), record)
 }
 
-func newFakeControlVolume(w *NodeController) *fakeControlVolume {
-	v := &fakeControlVolume{files: map[string][]byte{}, writeErrs: map[string]error{}}
-	w.readPodControlFileFn = v.read
-	w.writePodControlSentinelFn = v.write
-	w.removePodControlFileFn = v.remove
-	return v
-}
-
-func (v *fakeControlVolume) remove(uid, container, name string) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.removes = append(v.removes, uid+"/"+container+"/"+name)
-	if v.removeErr != nil {
-		return v.removeErr
-	}
-	delete(v.files, uid+"/"+container+"/"+name)
-	return nil
-}
-
-func (v *fakeControlVolume) read(uid, container, name string, maxBytes int64) ([]byte, error) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.reads = append(v.reads, uid+"/"+container+"/"+name)
-	if v.readErr != nil {
-		return nil, v.readErr
-	}
-	data, ok := v.files[uid+"/"+container+"/"+name]
-	if !ok {
-		return nil, fmt.Errorf("open %s: %w", name, os.ErrNotExist)
-	}
-	if int64(len(data)) > maxBytes {
-		return nil, fmt.Errorf("%s is larger than %d bytes", name, maxBytes)
-	}
-	return data, nil
-}
-
-func (v *fakeControlVolume) write(uid, container, name string, data []byte) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.writes = append(v.writes, uid+"/"+container+"/"+name)
-	if err := v.writeErrs[name]; err != nil {
-		return err
-	}
-	v.files[uid+"/"+container+"/"+name] = append([]byte(nil), data...)
-	return nil
-}
-
-func (v *fakeControlVolume) put(t *testing.T, uid, container string, record any) {
-	t.Helper()
-	data, ok := record.([]byte)
-	if !ok {
-		var err error
-		data, err = json.Marshal(record)
-		require.NoError(t, err)
-	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.files[uid+"/"+container+"/"+podcontract.RestoreAttemptsFile] = data
-}
-
-func (v *fakeControlVolume) record(t *testing.T, uid, container string) *restoreAttempts {
-	t.Helper()
-	v.mu.Lock()
-	data, ok := v.files[uid+"/"+container+"/"+podcontract.RestoreAttemptsFile]
-	v.mu.Unlock()
-	require.True(t, ok, "no attempt record for %s/%s", uid, container)
-	record, err := parseRestoreAttempts(data)
-	require.NoError(t, err)
-	return record
-}
-
-func (v *fakeControlVolume) saved(uid, container string) *restoreAttempts {
-	v.mu.Lock()
-	data, ok := v.files[uid+"/"+container+"/"+podcontract.RestoreAttemptsFile]
-	v.mu.Unlock()
+// savedAttempts returns the destination's record in the agent's memory, nil
+// when it has none.
+func savedAttempts(w *NodeController, uid ktypes.UID, container string) *restoreAttempts {
+	value, ok := w.restoreAttemptRecords.Load(restoreContainerKey(uid, container))
 	if !ok {
 		return nil
 	}
-	record, _ := parseRestoreAttempts(data)
-	return record
+	record := value.(restoreAttempts)
+	return &record
 }
 
-func TestParseRestoreAttempts(t *testing.T) {
-	deadline := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
-	for name, tc := range map[string]struct {
-		data    string
-		want    *restoreAttempts
-		wantErr string
-	}{
-		"a full record": {
-			data: `{"limit":2,"attempt":1,"deadline":"2026-11-09T12:00:00Z","containerID":"ctr-abc"}`,
-			want: &restoreAttempts{Limit: 2, Attempt: 1, Deadline: deadline, ContainerID: "ctr-abc"},
-		},
-		"no deadline": {data: `{"limit":0,"attempt":1,"containerID":"ctr-abc"}`, want: &restoreAttempts{Attempt: 1, ContainerID: "ctr-abc"}},
-		"fields from a newer agent": {
-			data: `{"limit":1,"attempt":2,"containerID":"ctr-abc","fromANewerAgent":{"x":1}}`,
-			want: &restoreAttempts{Limit: 1, Attempt: 2, ContainerID: "ctr-abc"},
-		},
-		"not JSON":            {data: `limit=2`, wantErr: "invalid character"},
-		"empty":               {data: ``, wantErr: "unexpected end of JSON input"},
-		"attempt 0":           {data: `{"limit":2,"attempt":0,"containerID":"ctr-abc"}`, wantErr: "attempt 0 is not positive"},
-		"a negative limit":    {data: `{"limit":-1,"attempt":1,"containerID":"ctr-abc"}`, wantErr: "retry limit -1 is negative"},
-		"no container":        {data: `{"limit":2,"attempt":1}`, wantErr: "no container ID"},
-		"a string attempt":    {data: `{"limit":2,"attempt":"1","containerID":"ctr-abc"}`, wantErr: "cannot unmarshal"},
-		"a deadline not time": {data: `{"limit":2,"attempt":1,"deadline":"soon","containerID":"ctr-abc"}`, wantErr: "cannot parse"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			got, err := parseRestoreAttempts([]byte(tc.data))
-			if tc.wantErr != "" {
-				require.ErrorContains(t, err, tc.wantErr)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tc.want.Limit, got.Limit)
-			assert.Equal(t, tc.want.Attempt, got.Attempt)
-			assert.True(t, tc.want.Deadline.Equal(got.Deadline), "deadline = %s, want %s", got.Deadline, tc.want.Deadline)
-			assert.Equal(t, tc.want.ContainerID, got.ContainerID)
-		})
-	}
+// leaveRetryStatus sets the retry status annotation an earlier agent left on
+// the Pod.
+func leaveRetryStatus(t *testing.T, pod *corev1.Pod, status podcontract.RestoreRetryStatus) {
+	t.Helper()
+	value, err := podcontract.FormatRestoreRetryStatus(status)
+	require.NoError(t, err)
+	pod.Annotations[podcontract.RestoreRetryStatusAnnotation] = value
 }
 
-// attemptHarness runs one restore attempt against a fake control volume. The
-// runtime names the Pod "host-uid" on the node, as a vCluster would.
+func TestRestoreAttemptsStatusRoundTrip(t *testing.T) {
+	record := restoreAttempts{Limit: 2, Attempt: 1, Deadline: time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC), ContainerID: "ctr-abc"}
+
+	status := record.status("restore-pod-uid")
+
+	assert.Equal(t, podcontract.ContainerRetryStatus{
+		Attempt: 1, RetryLimit: 2, Deadline: record.Deadline, ContainerID: "ctr-abc", PodUID: "restore-pod-uid",
+	}, status)
+	assert.Equal(t, record, attemptsFromStatus(status))
+}
+
+// attemptHarness runs one restore attempt of the Pod's "main" container.
 type attemptHarness struct {
-	w      *NodeController
-	volume *fakeControlVolume
+	w   *NodeController
+	pod *corev1.Pod
 	// now is the agent's clock. It starts at the real time, since an
 	// attempt's context ends by the real clock at the record's deadline.
 	now      time.Time
@@ -180,13 +78,13 @@ func newAttemptHarness(t *testing.T, annotations map[string]string, restoreErr e
 	pod := restorePod(annotations)
 	w := makeTestController(t, pod)
 	w.config.Restore.TimeoutSeconds = 60
-	w.runtime = &fakeRuntime{resolveContainerPID: 4242, podUID: "host-uid"}
-	h := &attemptHarness{w: w, volume: newFakeControlVolume(w), now: time.Now().UTC().Truncate(time.Second)}
+	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
+	h := &attemptHarness{w: w, pod: pod, now: time.Now().UTC().Truncate(time.Second)}
 	w.nowFn = func() time.Time { return h.now }
 	w.restoreFn = func(ctx context.Context, _ snapshotruntime.Runtime, _ logr.Logger, _ executor.RestoreRequest, _ executor.RestoreMounter) (executor.RestoreResult, error) {
 		h.restores++
 		h.deadline, _ = ctx.Deadline()
-		h.seen = h.volume.saved("host-uid", "main")
+		h.seen = savedAttempts(w, pod.UID, "main")
 		return executor.RestoreResult{PlaceholderHostPID: 4242, RestoredPID: 77}, restoreErr
 	}
 	w.writeControlSentinelFn = func(_ int, name string, _ []byte) error {
@@ -226,20 +124,17 @@ func TestRunRestoreSavesTheFirstAttemptBeforeRunningIt(t *testing.T) {
 
 			require.NoError(t, run())
 
-			want := &restoreAttempts{Limit: tc.wantRetryLimit, Attempt: 1, Deadline: h.now.Add(time.Minute), ContainerID: "ctr-abc"}
+			want := restoreAttempts{Limit: tc.wantRetryLimit, Attempt: 1, Deadline: h.now.Add(time.Minute), ContainerID: "ctr-abc"}
 			require.NotNil(t, h.seen, "the record must be saved before the attempt runs")
-			assert.Equal(t, want.Limit, h.seen.Limit)
-			assert.Equal(t, want.Attempt, h.seen.Attempt)
-			assert.Equal(t, want.ContainerID, h.seen.ContainerID)
-			assert.True(t, want.Deadline.Equal(h.seen.Deadline), "deadline = %s, want %s", h.seen.Deadline, want.Deadline)
+			assert.Equal(t, want, *h.seen)
 			assert.True(t, want.Deadline.Equal(h.deadline), "the attempt's context ends at %s, want the record's %s", h.deadline, want.Deadline)
-			assert.Equal(t, []string{"host-uid/main/" + podcontract.RestoreAttemptsFile}, h.volume.writes)
+			assert.Equal(t, 1, h.w.retryStatusQueue.Len(), "the attempt did not queue the retry status")
 		})
 	}
 }
 
-// Without retries the restore keeps no record: it reads and writes nothing
-// through the node's path, and every pass gets a full timeout.
+// Without retries the restore keeps no record: it reads no retry status,
+// writes none, and every pass gets a full timeout.
 func TestRunRestoreKeepsNoRecordWithoutRetries(t *testing.T) {
 	for name, tc := range map[string]struct {
 		annotation   string
@@ -253,7 +148,10 @@ func TestRunRestoreKeepsNoRecordWithoutRetries(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			annotations := map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"}
+			annotations := map[string]string{
+				podcontract.RestoreFromAnnotation:        "snapshot-a",
+				podcontract.RestoreRetryStatusAnnotation: "not the retry status",
+			}
 			if tc.annotation != "" {
 				annotations[podcontract.RestoreRetryLimitAnnotation] = tc.annotation
 			}
@@ -264,22 +162,20 @@ func TestRunRestoreKeepsNoRecordWithoutRetries(t *testing.T) {
 
 			assert.Equal(t, 1, h.restores)
 			assert.True(t, h.now.Add(time.Minute).Equal(h.deadline), "the attempt's context ends at %s, want a full timeout", h.deadline)
-			assert.Empty(t, h.volume.reads)
-			assert.Empty(t, h.volume.writes)
-			assert.Empty(t, h.volume.removes)
+			assert.Nil(t, savedAttempts(h.w, h.pod.UID, "main"))
+			assert.Zero(t, h.w.retryStatusQueue.Len())
 		})
 	}
 }
 
 // An agent that restarted during an attempt repeats it, as today, but the
-// record keeps the first attempt's limit and deadline.
+// retry status it left keeps the first attempt's limit and deadline.
 func TestRunRestoreRepeatsAnInterruptedAttemptWithinItsDeadline(t *testing.T) {
-	h, run := newAttemptHarness(t, map[string]string{
-		podcontract.RestoreFromAnnotation:       "snapshot-a",
-		podcontract.RestoreRetryLimitAnnotation: "5",
-	}, nil)
+	h, run := newAttemptHarness(t, retryLimit("5"), nil)
 	first := h.now.Add(-50 * time.Second).Add(time.Minute)
-	h.volume.put(t, "host-uid", "main", restoreAttempts{Limit: 2, Attempt: 1, Deadline: first, ContainerID: "ctr-abc"})
+	leaveRetryStatus(t, h.pod, podcontract.RestoreRetryStatus{
+		"main": {Attempt: 1, RetryLimit: 2, Deadline: first, ContainerID: "ctr-abc", PodUID: h.pod.UID},
+	})
 
 	require.NoError(t, run())
 
@@ -290,6 +186,20 @@ func TestRunRestoreRepeatsAnInterruptedAttemptWithinItsDeadline(t *testing.T) {
 	assert.True(t, first.Equal(h.seen.Deadline))
 }
 
+// Annotations copied from another Pod, such as from a Pod manifest, carry
+// that Pod's attempts, not this one's.
+func TestRunRestoreIgnoresTheRetryStatusOfAnotherPod(t *testing.T) {
+	h, run := newAttemptHarness(t, retryLimit("2"), nil)
+	leaveRetryStatus(t, h.pod, podcontract.RestoreRetryStatus{
+		"main": {Attempt: 3, RetryLimit: 2, Deadline: h.now.Add(-time.Hour), ContainerID: "ctr-abc", PodUID: "another-pod-uid"},
+	})
+
+	require.NoError(t, run())
+
+	require.Equal(t, 1, h.restores)
+	assert.Equal(t, restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(time.Minute), ContainerID: "ctr-abc"}, *h.seen)
+}
+
 func TestRunRestoreEndsWhenItsDeadlinePassedBeforeTheAttempt(t *testing.T) {
 	for name, before := range map[string]time.Duration{
 		"passed":      time.Second,
@@ -297,7 +207,7 @@ func TestRunRestoreEndsWhenItsDeadlinePassedBeforeTheAttempt(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			h, run := newAttemptHarness(t, retryLimit("2"), nil)
-			h.volume.put(t, "host-uid", "main", restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(-before), ContainerID: "ctr-abc"})
+			putAttempts(h.w, h.pod.UID, "main", restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(-before), ContainerID: "ctr-abc"})
 
 			err := run()
 
@@ -321,7 +231,7 @@ func TestRunRestoreStartsOverAfterARefusal(t *testing.T) {
 	var incompatible *compat.IncompatibleError
 	require.ErrorAs(t, run(), &incompatible)
 	assert.Empty(t, h.calls, "a refusal wrote restore-failed or killed the container")
-	assert.NotContains(t, h.volume.files, "host-uid/main/"+podcontract.RestoreAttemptsFile, "the refused attempt is still recorded")
+	assert.Nil(t, savedAttempts(h.w, h.pod.UID, "main"), "the refused attempt is still recorded")
 
 	h.w.restoreFn = restore
 	h.now = h.now.Add(10 * time.Minute)
@@ -332,26 +242,24 @@ func TestRunRestoreStartsOverAfterARefusal(t *testing.T) {
 	assert.True(t, h.now.Add(time.Minute).Equal(h.seen.Deadline), "the reopened restore kept the refused attempt's deadline")
 }
 
-// The Pod can rewrite its record. One the agent cannot count from ends the
-// restore instead of granting attempts.
-func TestRunRestoreEndsOnARecordItCannotUse(t *testing.T) {
+// Anyone who can update the Pod can rewrite its retry status. One the agent
+// cannot count from ends the restore instead of granting attempts.
+func TestRunRestoreEndsOnARetryStatusItCannotUse(t *testing.T) {
 	for name, tc := range map[string]struct {
-		record  []byte
-		readErr error
-		want    string
+		value string
+		want  string
 	}{
-		"not JSON":         {record: []byte("attempt=1"), want: "restore attempt record \"restore-attempts\" is invalid"},
-		"attempt 0":        {record: []byte(`{"limit":2,"attempt":0,"containerID":"ctr-abc"}`), want: "attempt 0 is not positive"},
-		"a negative limit": {record: []byte(`{"limit":-5,"attempt":1,"containerID":"ctr-abc"}`), want: "retry limit -5 is negative"},
-		"a link":           {readErr: fmt.Errorf("open restore-attempts: %w", syscall.ELOOP), want: "read restore attempt record"},
-		"too large":        {record: make([]byte, restoreAttemptsMaxBytes+1), want: "larger than"},
+		"not JSON":         {value: "attempt=1", want: "parse " + podcontract.RestoreRetryStatusAnnotation},
+		"attempt 0":        {value: `{"main":{"attempt":0,"retryLimit":2}}`, want: "has attempt 0"},
+		"a negative limit": {value: `{"main":{"attempt":1,"retryLimit":-5}}`, want: "retry limit -5"},
+		"no container ID": {
+			value: `{"main":{"attempt":1,"retryLimit":2,"podUID":"restore-pod-uid"}}`,
+			want:  `entry for container "main" has no container ID`,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h, run := newAttemptHarness(t, retryLimit("2"), nil)
-			if tc.record != nil {
-				h.volume.put(t, "host-uid", "main", tc.record)
-			}
-			h.volume.readErr = tc.readErr
+			h.pod.Annotations[podcontract.RestoreRetryStatusAnnotation] = tc.value
 
 			err := run()
 
@@ -362,43 +270,15 @@ func TestRunRestoreEndsOnARecordItCannotUse(t *testing.T) {
 	}
 }
 
-func TestRunRestoreEndsWhenTheAttemptCannotBeSaved(t *testing.T) {
-	h, run := newAttemptHarness(t, retryLimit("2"), nil)
-	h.volume.writeErrs[podcontract.RestoreAttemptsFile] = syscall.ENOSPC
-
-	err := run()
-
-	require.ErrorIs(t, err, syscall.ENOSPC)
-	require.ErrorContains(t, err, "save restore attempt record")
-	assert.Equal(t, 0, h.restores)
-	assert.Equal(t, []string{"write " + podcontract.RestoreFailedFile, "kill"}, h.calls)
-}
-
-// The record goes under the Pod's own UID when the runtime cannot name the
-// one on the node, as the restore-failed marker does.
-func TestRunRestoreKeepsTheRecordUnderThePodsUIDWithoutTheNodes(t *testing.T) {
-	h, run := newAttemptHarness(t, retryLimit("2"), errors.New("criu restore failed"))
-	h.w.runtime = &fakeRuntime{resolveContainerPID: 4242}
-	h.w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
-		return executor.RestoreResult{}, errors.New("criu restore failed")
-	}
-
-	require.Error(t, run())
-
-	require.NotEmpty(t, h.volume.writes)
-	for _, path := range h.volume.writes {
-		assert.Equal(t, "restore-pod-uid/main/"+podcontract.RestoreAttemptsFile, path)
-	}
-}
-
-func newAttemptOperation(t *testing.T, annotations map[string]string) (*restoreOperation, *fakeControlVolume) {
+func newAttemptOperation(t *testing.T, annotations map[string]string) *restoreOperation {
 	t.Helper()
 	pod := restorePod(annotations)
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
 	w := makeTestController(t, pod)
-	w.runtime = &fakeRuntime{podUID: "host-uid"}
-	volume := newFakeControlVolume(w)
 	artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}
-	return w.newRestoreOperation(pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Now()), volume
+	return w.newRestoreOperation(pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Now())
 }
 
 func TestRetryLimit(t *testing.T) {
@@ -416,7 +296,7 @@ func TestRetryLimit(t *testing.T) {
 		"a negative Pod limit":                  {annotation: "-1", wantErr: "must be a non-negative integer"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			op, _ := newAttemptOperation(t, map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+			op := newAttemptOperation(t, map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 			if tc.annotation != "" {
 				op.pod.Annotations[podcontract.RestoreRetryLimitAnnotation] = tc.annotation
 			}
@@ -434,42 +314,59 @@ func TestRetryLimit(t *testing.T) {
 	}
 }
 
-func TestReadRestoreAttempts(t *testing.T) {
-	saved := restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "ctr-abc"}
+func TestLoadAttempts(t *testing.T) {
+	inMemory := restoreAttempts{Limit: 2, Attempt: 2, ContainerID: "ctr-abc"}
+	left := podcontract.ContainerRetryStatus{Attempt: 1, RetryLimit: 3, ContainerID: "ctr-old", PodUID: "restore-pod-uid"}
 	for name, tc := range map[string]struct {
-		record    any
-		readErr   error
+		memory    *restoreAttempts
+		status    podcontract.RestoreRetryStatus
+		want      *restoreAttempts
 		wantFound bool
-		wantErr   string
 	}{
-		"no record":          {},
-		"a record":           {record: saved, wantFound: true},
-		"a record not JSON":  {record: []byte("attempt=1"), wantErr: `restore attempt record "restore-attempts" is invalid`},
-		"an invalid record":  {record: []byte(`{"limit":2,"attempt":0,"containerID":"ctr-abc"}`), wantErr: "attempt 0 is not positive"},
-		"a record too large": {record: make([]byte, restoreAttemptsMaxBytes+1), wantErr: "read restore attempt record"},
-		"a read error":       {readErr: syscall.ELOOP, wantErr: "read restore attempt record"},
+		"no record":                  {},
+		"a record in memory":         {memory: &inMemory, want: &inMemory, wantFound: true},
+		"a record the Pod carries":   {status: podcontract.RestoreRetryStatus{"main": left}, want: &restoreAttempts{Limit: 3, Attempt: 1, ContainerID: "ctr-old"}, wantFound: true},
+		"memory over the Pod":        {memory: &inMemory, status: podcontract.RestoreRetryStatus{"main": left}, want: &inMemory, wantFound: true},
+		"another container's record": {status: podcontract.RestoreRetryStatus{"sidecar": left}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			op, volume := newAttemptOperation(t, nil)
-			if tc.record != nil {
-				volume.put(t, "host-uid", "main", tc.record)
+			op := newAttemptOperation(t, nil)
+			if tc.memory != nil {
+				putAttempts(op.controller, op.pod.UID, "main", *tc.memory)
 			}
-			volume.readErr = tc.readErr
-
-			got, found, err := op.readRestoreAttempts("host-uid")
-
-			if tc.wantErr != "" {
-				require.ErrorContains(t, err, tc.wantErr)
-				assert.False(t, found)
-				return
+			if tc.status != nil {
+				leaveRetryStatus(t, op.pod, tc.status)
 			}
+
+			got, found, err := op.loadAttempts()
+
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantFound, found)
-			if tc.wantFound {
-				assert.Equal(t, &saved, got)
-			}
+			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+// The agent reads a Pod's retry status once, the first time it loads one of
+// the Pod's records, and copies every entry, so its own writes keep the
+// entries of destinations it has not restored since.
+func TestLoadAttemptsReadsThePodOnce(t *testing.T) {
+	op := newAttemptOperation(t, nil)
+	leaveRetryStatus(t, op.pod, podcontract.RestoreRetryStatus{
+		"main":    {Attempt: 2, RetryLimit: 3, ContainerID: "ctr-main", PodUID: op.pod.UID},
+		"sidecar": {Attempt: 4, RetryLimit: 3, ContainerID: "ctr-sidecar", PodUID: op.pod.UID},
+	})
+
+	_, found, err := op.loadAttempts()
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, &restoreAttempts{Limit: 3, Attempt: 4, ContainerID: "ctr-sidecar"}, savedAttempts(op.controller, op.pod.UID, "sidecar"))
+
+	op.pod.Annotations[podcontract.RestoreRetryStatusAnnotation] = "not the retry status"
+	got, found, err := op.loadAttempts()
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, &restoreAttempts{Limit: 3, Attempt: 2, ContainerID: "ctr-main"}, got)
 }
 
 func TestStartAttempt(t *testing.T) {
@@ -478,7 +375,6 @@ func TestStartAttempt(t *testing.T) {
 		annotation string
 		timeout    int
 		record     *restoreAttempts
-		saveErr    error
 		want       *restoreAttempts
 		wantErr    string
 	}{
@@ -511,91 +407,42 @@ func TestStartAttempt(t *testing.T) {
 			wantErr: "restore timed out at",
 		},
 		"an invalid Pod limit": {annotation: "two", timeout: 60, wantErr: "must be a non-negative integer"},
-		"the attempt cannot be saved": {
-			annotation: "1", timeout: 60, saveErr: syscall.ENOSPC,
-			wantErr: "save restore attempt record",
-		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			op, volume := newAttemptOperation(t, map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+			op := newAttemptOperation(t, map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 			if tc.annotation != "" {
 				op.pod.Annotations[podcontract.RestoreRetryLimitAnnotation] = tc.annotation
 			}
 			op.controller.config.Restore.TimeoutSeconds = tc.timeout
 			op.controller.nowFn = func() time.Time { return now }
 			if tc.record != nil {
-				volume.put(t, "host-uid", "main", tc.record)
-			}
-			if tc.saveErr != nil {
-				volume.writeErrs[podcontract.RestoreAttemptsFile] = tc.saveErr
+				putAttempts(op.controller, op.pod.UID, "main", *tc.record)
 			}
 
-			got, err := op.startAttempt(context.Background())
+			got, err := op.startAttempt()
 
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
-				if tc.saveErr == nil {
-					assert.Empty(t, volume.writes, "a refused attempt was saved")
-				}
-				if tc.record != nil {
-					assert.Equal(t, tc.record, volume.record(t, "host-uid", "main"), "a refused attempt rewrote the record")
-				}
+				assert.Zero(t, op.controller.retryStatusQueue.Len(), "a refused attempt was saved")
+				assert.Equal(t, tc.record, savedAttempts(op.controller, op.pod.UID, "main"), "a refused attempt rewrote the record")
 				return
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
-			assert.Equal(t, tc.want, volume.record(t, "host-uid", "main"))
+			assert.Equal(t, tc.want, savedAttempts(op.controller, op.pod.UID, "main"))
+			assert.Equal(t, 1, op.controller.retryStatusQueue.Len())
 		})
 	}
 }
 
 func TestForgetAttempts(t *testing.T) {
-	for name, tc := range map[string]struct {
-		record    bool
-		removeErr error
-		wantKept  bool
-		wantLog   string
-	}{
-		"a record":         {record: true},
-		"no record":        {},
-		"a failed removal": {record: true, removeErr: syscall.EBUSY, wantKept: true, wantLog: "Failed to remove the restore attempt record after the refusal"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			op, volume := newAttemptOperation(t, nil)
-			var lines []string
-			op.log = funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{})
-			if tc.record {
-				volume.put(t, "host-uid", "main", restoreAttempts{Limit: 1, Attempt: 1, ContainerID: "ctr-abc"})
-			}
-			volume.removeErr = tc.removeErr
+	op := newAttemptOperation(t, nil)
+	putAttempts(op.controller, op.pod.UID, "main", restoreAttempts{Limit: 1, Attempt: 1, ContainerID: "ctr-abc"})
+	putAttempts(op.controller, op.pod.UID, "sidecar", restoreAttempts{Limit: 1, Attempt: 1, ContainerID: "ctr-sidecar"})
 
-			op.forgetAttempts(context.Background())
+	op.forgetAttempts()
 
-			_, kept := volume.files["host-uid/main/"+podcontract.RestoreAttemptsFile]
-			assert.Equal(t, tc.wantKept, kept)
-			if tc.wantLog == "" {
-				assert.Empty(t, lines)
-				return
-			}
-			require.Len(t, lines, 1)
-			assert.Contains(t, lines[0], tc.wantLog)
-		})
-	}
-}
-
-func TestNodePodUID(t *testing.T) {
-	for name, tc := range map[string]struct {
-		runtime *fakeRuntime
-		want    string
-	}{
-		"the runtime names the Pod on the node": {runtime: &fakeRuntime{podUID: "host-uid"}, want: "host-uid"},
-		"the runtime cannot name it":            {runtime: &fakeRuntime{}, want: "restore-pod-uid"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			op, _ := newAttemptOperation(t, nil)
-			op.controller.runtime = tc.runtime
-
-			assert.Equal(t, tc.want, op.nodePodUID(context.Background()))
-		})
-	}
+	assert.Nil(t, savedAttempts(op.controller, op.pod.UID, "main"))
+	assert.NotNil(t, savedAttempts(op.controller, op.pod.UID, "sidecar"), "another destination's record went too")
+	assert.Equal(t, 1, op.controller.retryStatusQueue.Len(), "the Pod's retry status still names the forgotten attempt")
 }
