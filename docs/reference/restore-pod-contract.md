@@ -273,7 +273,8 @@ While the restore waits, its `Admitted` condition gives one of these reasons:
 The restore fails with `TargetInUse` when another `PodGroupRestore` claimed a
 target Pod, and with `Refused` when a target Pod cannot be claimed, for example
 a Pod created without the gate. A restore refused before the claim leaves every
-target gated, so you can name them in a new `PodGroupRestore`.
+target as it found it. You can name its valid gated targets in a new
+`PodGroupRestore`.
 
 - Do not add an init container that waits for the Pod's peers. No member
   restores until every target's destination container exists.
