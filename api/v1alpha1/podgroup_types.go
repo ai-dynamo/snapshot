@@ -7,7 +7,8 @@ import "k8s.io/apimachinery/pkg/types"
 
 // PodGroupMaxDeadlineSeconds is the longest deadlineSeconds of a
 // PodGroupSnapshot or PodGroupRestore: the Maximum marker on both fields. A
-// group restore target's startup probe allows this many one-second failures.
+// group restore target's startup probe allows one more one-second failure,
+// since its first check can run immediately.
 const PodGroupMaxDeadlineSeconds = 86400
 
 // PodGroupSnapshot and PodGroupRestore condition types. Only the operator sets
