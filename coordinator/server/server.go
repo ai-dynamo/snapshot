@@ -125,7 +125,9 @@ type Config struct {
 	// ending: the control keys are in file storage, which MaxBytes also bounds,
 	// for the control buckets of every session together. It defaults to
 	// DefaultMaxBytes, and must hold the control bucket of a session of
-	// session.MaxMembers, so that every group's session can open.
+	// session.MaxMembers. Concurrent sessions reserve their control buckets, so
+	// MaxBytes divided by session.ControlBytes(members) bounds how many sessions
+	// of that size can open.
 	//
 	// MaxBytes is not the coordinator's whole memory. The process also holds,
 	// for each connection, up to session.MaxPending(MaxValue) bytes of what
