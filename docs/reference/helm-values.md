@@ -173,6 +173,27 @@ sides to reload from their mounted files: each coordinator its serving
 certificate, and each agent its trust in `ca.crt`. The kubelet refreshes those
 files on each node's own schedule.
 
+### Turn Pod Groups Off
+
+To turn pod groups off, delete the group resources before you change the
+value. With pod groups off, their finalizers keep group resources from being
+deleted:
+
+1. Delete every `PodGroupSnapshot` and `PodGroupRestore`. `kubectl delete`
+   waits until they are gone:
+
+   ```bash
+   kubectl delete podgroupsnapshots,podgrouprestores --all --all-namespaces
+   ```
+
+2. Check that none is left. The command prints `No resources found`:
+
+   ```bash
+   kubectl get podgroupsnapshots,podgrouprestores --all-namespaces
+   ```
+
+3. Set `podGroups.enabled=false` with `helm upgrade`.
+
 ## Agent Config (`config.*`)
 
 `config.*` renders into the agent ConfigMap.
