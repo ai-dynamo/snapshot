@@ -96,7 +96,7 @@ flowchart TD
 
 The retry limit defaults to 0, can be set for the whole cluster, and can be overridden on a restore Pod. One restore timeout covers all attempts together. Each failed attempt shows as a warning event, and the Pod shows the current attempt and where and why the last one failed. The restore stays in progress while attempts remain, and a restore that runs out of retries says so.
 
-The agent will keep each container's attempt count, deadline, and last failure in a record on the Pod's own volume. Every pass, including the first after an agent restart or upgrade, will pick the restore up from that record, so an agent restart does not reset the count or the timeout. An attempt the restart cut off runs again with the same number, as an interrupted restore runs again today. With the default of 0, the agent keeps no record and adds no events or retry status, so the restore runs as it does today.
+The agent will keep each container's attempt count, deadline, and last failure in memory, and copy them to an annotation on the restore Pod when an attempt starts and when it fails. An agent that restarts or is upgraded will pick the restore up from that annotation, so an agent restart does not reset the count or the timeout. An attempt the restart cut off runs again with the same number, as an interrupted restore runs again today. With the default of 0, the agent keeps no record and adds no events or retry status, so the restore runs as it does today.
 
 ### User Stories
 
@@ -117,6 +117,8 @@ Today neither can retry. With this proposal the first team's restore Pods set a 
 **CRIU and CUDA failures are not retried.** They happen after the restore started changing the container, so each ends the restore on its first attempt, even one that would not recur. The failure is marked as one that changed the container, so a later fallback can tell it apart from one no attempt can fix.
 
 **An unrecognized error is retried.** An error while preparing that would repeat every time still spends every attempt before the restore fails.
+
+**An agent restart can repeat an attempt or restart the timeout.** The agent copies a record to the annotation in the background, so the agent can restart before the copy lands. A restarted agent that finds the annotation one step behind runs the attempt it shows again, and one that finds no entry starts over at the first attempt with a new deadline. Each such restart costs at most one more attempt, on the node and GPUs the Pod already holds.
 
 ## Design Details
 
@@ -256,24 +258,13 @@ default:
 
 ### Attempt record
 
-Each container will keep one record in a `restore-attempts` file on the Pod's snapshot-control volume, next to the restore sentinels. The volume has a directory named after each container and is reachable from the node when the container has no process ([control.go](https://github.com/ai-dynamo/snapshot/blob/b6343d0641aac414c9b51876ee579723f63e1801/agent/internal/runtime/control.go#L80-L124)). It is discarded with the Pod, so a new Pod starts a new restore with a fresh budget.
+Each container's record will live in the agent's memory, keyed by the Pod's UID and the container's name, until the Pod is deleted. It holds the same fields as the container's entry in the retry status annotation below.
 
-```go
-type restoreAttempts struct {
-	Limit       int                         `json:"limit"`       // resolved once, at the first attempt
-	Attempt     int                         `json:"attempt"`     // the current or last attempt, from 1
-	Deadline    time.Time                   `json:"deadline"`    // set at the first attempt, ends every attempt
-	ContainerID string                      `json:"containerID"` // the container the attempt ran in
-	RetryAt     time.Time                   `json:"retryAt"`     // an in-place retry's due time, zero otherwise
-	LastFailure *podcontract.FailureSummary `json:"lastFailure"` // the source of the retry status annotation
-}
-```
+The agent will update the record before each attempt, with the new `Attempt` and `ContainerID` and `RetryAt` cleared, and after each failure, with its `LastFailure` and, for an in-place retry, its `RetryAt`.
 
-The agent will write the record before each attempt, with the new `Attempt` and `ContainerID` and `RetryAt` cleared, and after each failure, with its `LastFailure` and, for an in-place retry, its `RetryAt`.
+Each update will also queue the Pod for a write of the `nvidia.com/restore-retry-status` annotation, so a user or a controller can read which attempt a restore is on and why the last one failed, without parsing messages, and a restarted agent can pick the restore up. One goroutine in the agent will make the queued writes, outside the restore, and each write will take every record of the Pod as it is when the write runs. The containers of a Pod restore in parallel, so no container's write will drop another's entry, and updates queued while a write waits will go out as one write. A write that fails will be retried a few times and then reported as a warning event, without failing the restore.
 
-After each pass with a failed attempt, the agent will also write the `nvidia.com/restore-retry-status` annotation on the restore Pod, so a user or a controller can read which attempt a restore is on and why the last one failed, without parsing messages. It holds one entry per container with a failed attempt. The containers of a Pod restore in parallel within a pass, so the pass will write the annotation once, from the `LastFailure` in every container's record, and no container's write will drop another's entry.
-
-The agent never reads the annotation back. A restore that succeeds on its first attempt gets none, and the outcome leaves it on the Pod. `podcontract` gains the annotation's name, its type, and a parser.
+The annotation holds one entry per container that started an attempt with a nonzero limit, so a restore that succeeds on its first attempt gets one too, and the outcome leaves it on the Pod. It is discarded with the Pod, so a new Pod starts a new restore with a fresh budget. `podcontract` gains the annotation's name, its type, and a parser.
 
 ```go
 const RestoreRetryStatusAnnotation = "nvidia.com/restore-retry-status"
@@ -281,9 +272,13 @@ const RestoreRetryStatusAnnotation = "nvidia.com/restore-retry-status"
 type RestoreRetryStatus map[string]ContainerRetryStatus // keyed by container name
 
 type ContainerRetryStatus struct {
-	Attempt     int            `json:"attempt"`     // the current or last attempt, from 1
-	RetryLimit  int            `json:"retryLimit"`  // the limit resolved at the first attempt
-	LastFailure FailureSummary `json:"lastFailure"` // the last failed attempt
+	Attempt     int             `json:"attempt"`               // the current or last attempt, from 1
+	RetryLimit  int             `json:"retryLimit"`            // the limit resolved at the first attempt
+	LastFailure *FailureSummary `json:"lastFailure,omitempty"` // the last failed attempt
+	RetryAt     time.Time       `json:"retryAt,omitzero"`      // an in-place retry's due time
+	Deadline    time.Time       `json:"deadline,omitzero"`     // set at the first attempt, ends every attempt
+	ContainerID string          `json:"containerID,omitempty"` // the container the attempt ran in
+	PodUID      types.UID       `json:"podUID,omitempty"`      // the Pod the entry was written for
 }
 
 type FailureSummary struct {
@@ -296,6 +291,8 @@ type FailureSummary struct {
 ### Picking up a pending restore
 
 On every pass, including the first after an agent restart, the agent will read each destination container's record and decide from it whether to start an attempt, wait, or end the restore.
+
+A record missing from memory, as on the first pass after an agent restart or upgrade, will be read from the container's entry in the retry status annotation. The agent will take the entry only when its `PodUID` is the Pod's own, so an annotation copied from another Pod does not carry that Pod's attempts over, and it will end the restore if the annotation does not parse. While the agent runs, it reads only its memory, since the Pod cache can lag the agent's own writes ([controller.go](https://github.com/ai-dynamo/snapshot/blob/b6343d0641aac414c9b51876ee579723f63e1801/agent/internal/controller/controller.go#L482)).
 
 - **`restore-complete` exists.** The restore already succeeded, so the agent reports it again, as an agent restart does today ([controller.go](https://github.com/ai-dynamo/snapshot/blob/b6343d0641aac414c9b51876ee579723f63e1801/agent/internal/controller/controller.go#L1100-L1119)).
 - **No record.** The first attempt starts, and the agent resolves the limit and the deadline.
@@ -325,7 +322,7 @@ restoreCtx, cancel := context.WithDeadline(ctx, record.Deadline)
 
 ### Security
 
-The attempt record sits on a volume the Pod's containers can write, so the agent will treat it as untrusted input. It will open the record without following links, as it opens the restore sentinels, cap the size it reads, and end the restore if the record does not parse. A container that rewrites the record can reset its own attempt count, which gives it no more than the retry limit annotation already allows, or move its own deadline. Either way the extra attempts restore only its own Pod, on the node and GPUs that Pod already holds.
+Anyone who can update the restore Pod can rewrite its retry status annotation, so the agent will treat the annotation as untrusted input and end the restore if it does not parse. The agent reads it only after a restart, so a rewrite takes effect only then. A rewrite can reset the Pod's attempt count, which gives it no more than the retry limit annotation already lets the same writer set, or move its deadline. Either way the extra attempts restore only that Pod, on the node and GPUs it already holds.
 
 ### Configuration
 
@@ -338,7 +335,7 @@ The default of 0 keeps every restore at one attempt after an upgrade.
 
 ### Performance and Scalability
 
-With a nonzero limit, a restore that succeeds on its first attempt adds one read and one write of the attempt record.
+With a nonzero limit, each attempt adds up to two writes of the restore Pod, one when it starts and one when it fails, so a restore that succeeds on its first attempt adds one. The writes run outside the restore, and the updates of a Pod queued while a write waits go out as one write. Each write is a Pod update sent to all of the Pod's watchers.
 
 A retried restore is slower by design. An in-place retry costs its backoff, or up to 30 seconds more until the agent's next pass, and the preparation again. The limit and the shared deadline bound it.
 
@@ -348,6 +345,7 @@ A retried restore is slower by design. An in-place retry costs its backoff, or u
 - **Warning events on the restore Pod.**
   - `RestoreAttemptFailed` for each failed attempt, naming the container, the attempt, the step, the cause, and the recovery.
   - `RestoreRetriesExhausted` when retries run out, before the final `RestoreFailed`.
+  - `RestoreStatusUpdateFailed` when the agent cannot write the retry status annotation, as it reports a failed write of the `Restored` condition today.
 - **The retry status annotation**, showing the current attempt and why the last one failed ([Attempt record](#attempt-record)).
 
 ### Dependencies
@@ -364,7 +362,7 @@ N/A
 - A restore that fails after the rootfs diff and ends on that attempt, with `restore-failed` and the kill, as today.
 - A container that stops during an attempt, which ends the restore.
 - A restore that uses up its retries and ends `RestoreFailed` after `RestoreRetriesExhausted`.
-- An agent restart during an attempt, and an agent shutdown that leaves its attempt to the restarted agent.
+- An agent restart during an attempt, picked up from the annotation, and an agent shutdown that leaves its attempt to the restarted agent.
 - Two containers of one Pod that fail in the same pass, each keeping its entry in the annotation.
 
 **End-to-end.** In the lifecycle suite ([test_snapshot_lifecycle.py](../../../e2e/tests/test_snapshot_lifecycle.py)), on CPU and GPU nodes, a restore Pod whose staged manifest is damaged and repaired after the first attempt fails. The next attempt runs in the same container, with no restart, and the restored workload matches the source. A damaged inventory, which CRIU reads after the rootfs diff, ends the restore on its first attempt.
@@ -377,12 +375,15 @@ N/A
 
 **Retry in a new container after a change.** The agent could kill a container the failed attempt changed, without writing `restore-failed`, so kubelet restarts it and the next attempt restores into the new one. A retry would then restart a container that nothing else asked to restart. It would also work only for Pods whose restart policy restarts containers, while the restore Pod contract recommends `restartPolicy: Never`, and only on nodes with the restore proxy. Recreating the Pod instead would give up the node and GPUs the restore was placed on, work only for Pods with an owner, and overlap the cold-start fallback of [#244](https://github.com/ai-dynamo/snapshot/issues/244).
 
-**Keep the retry status and the attempt record in the Pod's status.** The agent could write both as Pod conditions next to `Restored`, instead of the `nvidia.com/restore-retry-status` annotation and the `restore-attempts` file. Only writers with `pods/status` access could change them, and they would outlive container restarts as the file does, since kubelet keeps the conditions it does not own ([status_manager.go](https://github.com/kubernetes/kubernetes/blob/3c690c189e5d367715dbd056a5c2009a476c8d77/pkg/kubelet/status/status_manager.go#L1452-L1459)). The annotation and the file fit better:
+**Keep the attempt record in a file on the Pod's volume.** The agent could write each record to a `restore-attempts` file on the Pod's snapshot-control volume, next to the restore sentinels, where it would outlive an agent restart and be written before each attempt goes on. The annotation fits better:
 
-- A condition carries data only as text ([types.go](https://github.com/kubernetes/kubernetes/blob/3c690c189e5d367715dbd056a5c2009a476c8d77/staging/src/k8s.io/api/core/v1/types.go#L3940-L3963)), which consumers must parse.
-- The file's format stays private, so it can change between agent versions.
-- Status is read from a cache that can lag the agent's writes ([controller.go](https://github.com/ai-dynamo/snapshot/blob/b6343d0641aac414c9b51876ee579723f63e1801/agent/internal/controller/controller.go#L482)).
-- Every status write is a Pod update sent to all its watchers.
+- The Pod's containers can write that volume, so the agent would open the file as untrusted input on the node, without following links and with a cap on its size.
+- The node names the volume's path after the Pod's UID on the node, which in a vCluster differs from the Pod's own, so every read would first ask the container runtime for it.
+- The retry status annotation already holds most of the record, so the file would add a second copy in a format of its own.
+
+**Keep the attempt record only in the annotation.** The agent could read the annotation on every pass instead of keeping the record in memory. The agent reads the Pod from a cache that can lag its own writes ([controller.go](https://github.com/ai-dynamo/snapshot/blob/b6343d0641aac414c9b51876ee579723f63e1801/agent/internal/controller/controller.go#L482)), so a pass could start from an attempt older than the last one, and each attempt would wait for its write to land.
+
+**Keep the retry status in the Pod's status.** The agent could write it as a Pod condition next to `Restored`, instead of the `nvidia.com/restore-retry-status` annotation. Only writers with `pods/status` access could change it, and it would outlive container restarts, since kubelet keeps the conditions it does not own ([status_manager.go](https://github.com/kubernetes/kubernetes/blob/3c690c189e5d367715dbd056a5c2009a476c8d77/pkg/kubelet/status/status_manager.go#L1452-L1459)). A condition carries data only as text ([types.go](https://github.com/kubernetes/kubernetes/blob/3c690c189e5d367715dbd056a5c2009a476c8d77/staging/src/k8s.io/api/core/v1/types.go#L3940-L3963)), which consumers and a restarted agent would have to parse.
 
 ## Appendix
 
