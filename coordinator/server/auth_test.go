@@ -4,6 +4,7 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // pending is how long a test watches a call to check that it has not returned.
@@ -213,6 +215,39 @@ func TestAuthentication(t *testing.T) {
 		require.NoError(t, h.srv.Ensure(within(t), spec))
 		require.NoError(t, <-connected)
 	})
+}
+
+func TestSessionAppearsDuringAuthorization(t *testing.T) {
+	var h *harness
+	var spec Spec
+	lookups := make(chan bool, 2)
+	auth := authorizeFunc(func(ctx context.Context, _ types.UID, _, _ string, held bool) error {
+		lookups <- held
+		if held {
+			return ErrPermissionDenied
+		}
+		return h.srv.Ensure(ctx, spec)
+	})
+	h = newHarness(t, func(cfg *Config) { cfg.Authorizer = auth })
+	spec = h.spec(1)
+	nc, err := h.dial(spec, spec.Members[0].ID, agentToken, 1)
+	if nc != nil {
+		defer nc.Close()
+	}
+	require.ErrorIs(t, err, nats.ErrAuthorization, "placement was not checked for the session that appeared")
+	assert.False(t, <-lookups)
+	nc, err = h.dial(spec, spec.Members[0].ID, agentToken, 1)
+	if nc != nil {
+		defer nc.Close()
+	}
+	require.ErrorIs(t, err, nats.ErrAuthorization, "a retry must check placement")
+	assert.True(t, <-lookups)
+}
+
+type authorizeFunc func(context.Context, types.UID, string, string, bool) error
+
+func (f authorizeFunc) Authorize(ctx context.Context, uid types.UID, member, token string, held bool) error {
+	return f(ctx, uid, member, token, held)
 }
 
 // TestReadiness covers the gate: until MarkReady, every client is refused, and
