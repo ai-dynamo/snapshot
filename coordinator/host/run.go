@@ -62,8 +62,8 @@ const (
 // reports the process live from its start, and ready once the coordinator
 // admits clients. Before server.New, it waits for the serving certificate's
 // files if they are missing. It returns nil once ctx is done, also while it
-// waits for those files, unless the manager, the health endpoint, or the
-// shutdown fails.
+// waits for those files, unless the manager, the certificate watcher, the health
+// endpoint, or the shutdown fails.
 func Run(ctx context.Context, cfg Config) (err error) {
 	if err := cfg.validate(); err != nil {
 		return err
@@ -86,6 +86,9 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 	auth, err := newAuthorizer(ctx, cfg, attempts)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	}
 	certs, err := waitForCertificate(ctx, cfg.TLSDir, certPoll, cfg.Log)
@@ -96,9 +99,16 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		}
 		return err
 	}
-	if err := mgr.Add(certs); err != nil {
-		return fmt.Errorf("watch the serving certificate: %w", err)
-	}
+	watchCtx, stopWatch := context.WithCancel(ctx)
+	watchDone := make(chan error, 1)
+	go func() {
+		watchDone <- certs.Start(watchCtx)
+		stopWatch()
+	}()
+	defer func() {
+		stopWatch()
+		err = errors.Join(err, <-watchDone)
+	}()
 	srv, err := server.New(server.Config{
 		Host:            cfg.Host,
 		Port:            cfg.Port,
@@ -119,7 +129,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	if err := groups.Setup(mgr, attempts, groups.Config{Server: srv, Node: cfg.Node}); err != nil {
 		return err
 	}
-	if err := mgr.Start(ctx); err != nil {
+	if err := mgr.Start(watchCtx); err != nil {
 		return fmt.Errorf("run the manager: %w", err)
 	}
 	return nil
