@@ -541,9 +541,9 @@ func (s *Server) Remove(ctx context.Context, uid types.UID) error {
 // session.BarrierAdmitted, which commits the attempt. The host fails a session
 // this way before the commit: with session.ReasonCancelled once its group
 // resource's deletion has started, and with session.ReasonRefused once one of
-// its members has failed. It is best effort: members decide on their own that
-// the barrier is complete, so a member that saw it complete just before
-// FailUncommitted read the arrivals can still start. The commit is final: once
+// its members has failed. The control stream's sequence fences the read of
+// the arrivals: any intervening write makes it read again before recording
+// the end. A commit recorded first keeps the session open. Once
 // FailUncommitted has seen it, it leaves the session open from then on, even if
 // an arrival is deleted. FailUncommitted returns nil once the session has
 // ended, however it ended, and when it leaves a committed session open. It
@@ -556,13 +556,44 @@ func (s *Server) FailUncommitted(ctx context.Context, uid types.UID, reason stri
 	if a == nil {
 		return fmt.Errorf("attempt %s: %w", uid, session.ErrNotFound)
 	}
-	if committed, err := s.committed(ctx, a); err != nil || committed {
-		return err
+	bucket := a.control.Bucket()
+	for {
+		s.mu.Lock()
+		finished := a.ended || a.committed
+		s.mu.Unlock()
+		if finished {
+			return nil
+		}
+		// Stream fetches fresh info. Capture its sequence before reading any
+		// arrivals, so the conditional publish also fences a missing arrival.
+		stream, err := s.js.Stream(ctx, "KV_"+bucket)
+		if err != nil {
+			return err
+		}
+		sequence := stream.CachedInfo().State.LastSeq
+		if committed, err := s.committed(ctx, a); err != nil || committed {
+			return err
+		}
+		_, err = s.js.Publish(ctx, session.Subject(bucket, session.KeyEnded), []byte(reason),
+			jetstream.WithExpectLastSequence(sequence), jetstream.WithExpectLastSequencePerSubject(0))
+		if err == nil {
+			s.end(a, []byte(reason))
+			return nil
+		}
+		var conflict *jetstream.APIError
+		if !errors.As(err, &conflict) || (conflict.ErrorCode != jetstream.JSErrCodeStreamWrongLastSequence &&
+			conflict.ErrorCode != jetstream.JSErrCodeStreamWrongLastSequenceConstant) {
+			return err
+		}
+		entry, err := a.control.Get(ctx, session.KeyEnded)
+		if err == nil {
+			s.end(a, entry.Value())
+			return nil
+		}
+		if !errors.Is(err, jetstream.ErrKeyNotFound) {
+			return err
+		}
 	}
-	if err := s.endWith(ctx, a, []byte(reason)); err != nil && !ended(err) {
-		return err
-	}
-	return nil
 }
 
 // committed reports whether every member of a session has arrived at
