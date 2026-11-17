@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 )
 
 func TestClassifyRestoreOutcome(t *testing.T) {
@@ -131,16 +132,16 @@ func TestRestoreRetryStatusFromAnnotations(t *testing.T) {
 		wantErr   bool
 	}{
 		{name: "absent"},
-		{name: "empty object", value: ptr("{}"), wantFound: true},
+		{name: "empty object", value: ptr.To("{}"), wantFound: true},
 		{
 			name:      "unknown fields are ignored",
-			value:     ptr(`{"main":{"attempt":1,"retryLimit":2,"lastFailure":{"step":"s","cause":"c"},"future":true}}`),
+			value:     ptr.To(`{"main":{"attempt":1,"retryLimit":2,"lastFailure":{"step":"s","cause":"c"},"future":true}}`),
 			wantFound: true,
 		},
-		{name: "not JSON", value: ptr("attempt 2"), wantFound: true, wantErr: true},
-		{name: "wrong shape", value: ptr(`["main"]`), wantFound: true, wantErr: true},
-		{name: "attempt zero", value: ptr(`{"main":{"attempt":0,"retryLimit":2}}`), wantFound: true, wantErr: true},
-		{name: "negative limit", value: ptr(`{"main":{"attempt":1,"retryLimit":-1}}`), wantFound: true, wantErr: true},
+		{name: "not JSON", value: ptr.To("attempt 2"), wantFound: true, wantErr: true},
+		{name: "wrong shape", value: ptr.To(`["main"]`), wantFound: true, wantErr: true},
+		{name: "attempt zero", value: ptr.To(`{"main":{"attempt":0,"retryLimit":2}}`), wantFound: true, wantErr: true},
+		{name: "negative limit", value: ptr.To(`{"main":{"attempt":1,"retryLimit":-1}}`), wantFound: true, wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
