@@ -208,8 +208,9 @@ To turn pod groups off, delete the group resources before you change the
 value. With pod groups off, their finalizers keep group resources from being
 deleted:
 
-1. Delete every `PodGroupSnapshot` and `PodGroupRestore`. `kubectl delete`
-   waits until they are gone:
+1. Delete every `PodGroupSnapshot` and `PodGroupRestore`.
+   A deleted `PodGroupSnapshot` can no longer be restored.
+   `kubectl delete` waits until they are gone:
 
    ```bash
    kubectl delete podgroupsnapshots,podgrouprestores --all --all-namespaces
