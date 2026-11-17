@@ -5,6 +5,9 @@ package agentauth
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -131,7 +134,7 @@ func (s *keySet) update(ctx context.Context, done chan struct{}) {
 	close(done)
 }
 
-// fetch gets the key set, within ctx, and returns the keys in it that can
+// fetch gets the key set, within ctx, and returns the keys go-oidc can use to
 // verify a signature. It fails when there is none.
 func (s *keySet) fetch(ctx context.Context) (*oidc.StaticKeySet, error) {
 	var set struct {
@@ -146,7 +149,11 @@ func (s *keySet) fetch(ctx context.Context) (*oidc.StaticKeySet, error) {
 		// says to ignore.
 		var k jose.JSONWebKey
 		if json.Unmarshal(raw, &k) == nil && k.IsPublic() && k.Valid() && (k.Use == "" || k.Use == "sig") {
-			keys.PublicKeys = append(keys.PublicKeys, k.Key)
+			// StaticKeySet rejects an unsupported key before trying the rest.
+			switch k.Key.(type) {
+			case *rsa.PublicKey, *ecdsa.PublicKey, ed25519.PublicKey:
+				keys.PublicKeys = append(keys.PublicKeys, k.Key)
+			}
 		}
 	}
 	if len(keys.PublicKeys) == 0 {

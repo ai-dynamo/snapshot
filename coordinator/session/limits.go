@@ -9,6 +9,8 @@ import (
 	"math"
 	"strings"
 	"time"
+
+	"github.com/nats-io/nats.go"
 )
 
 // The limits a session's buckets have unless the coordinator is configured
@@ -16,14 +18,14 @@ import (
 // size of its values, the library bucket also its number of keys, none reserves
 // memory, and every session shares the coordinator's memory cap. The control
 // bucket lives in file storage, outside that cap, and has a size of its own:
-// see ControlBytes. MaxValue is SNEP-324's default, to revisit once
-// the largest cuInterpose record has been measured on the largest supported
-// topology. Meta carries the value limits a session actually has, and the
-// client refuses a larger value itself.
+// see ControlBytes. MaxValue also bounds configured values so concurrent reads
+// fit the client's shared reply subscription. Meta carries the value limits a
+// session actually has, and the client refuses a larger value itself.
 const (
 	// MaxValue is the largest value the Snapshot bucket holds: agent and relay
-	// records, which can describe a whole topology.
-	MaxValue = 32 << 20
+	// records, which can describe a whole topology. Concurrent replies must fit
+	// the client's shared reply subscription, including their framing.
+	MaxValue = nats.DefaultSubPendingBytesLimit/MaxConcurrentGets - PayloadHeadroom
 
 	// MaxLibraryValue is the largest value the library bucket holds. NCCL's
 	// communicator identifiers take 128 bytes.
@@ -126,8 +128,8 @@ func MaxMetaBytes(members int) int {
 // Eight is twice four, the most keys a member is sized to watch at once on one
 // bucket. Every watch is an ordered consumer, and a reconnect replaces each one
 // with a new consumer while the old one is still being deleted, so a member's
-// share is twice what it watches at once. On the control bucket, the client
-// watches the session's end and the Barrier in progress: two. On the Snapshot
+// share is twice what it watches at once. On the control bucket, one watch
+// follows barrier arrivals and the session's end together. On the Snapshot
 // bucket, it watches each Get with a wait of a key that is absent, such as one
 // by the agent and one by its cuInterpose relay: two. On the library bucket,
 // the agent's library endpoint waits through Get for the keys its Pod's

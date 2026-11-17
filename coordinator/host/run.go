@@ -68,6 +68,9 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	if err := cfg.validate(); err != nil {
 		return err
 	}
+	if err := setMemoryLimit(); err != nil {
+		return err
+	}
 	health, err := serveHealth(net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.HealthPort)))
 	if err != nil {
 		return err
