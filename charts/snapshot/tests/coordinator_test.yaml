@@ -203,7 +203,6 @@ tests:
             httpGet:
               path: /healthz
               port: health
-            initialDelaySeconds: 30
             periodSeconds: 10
       - equal:
           path: spec.template.spec.containers[?(@.name == "coordinator")].resources
