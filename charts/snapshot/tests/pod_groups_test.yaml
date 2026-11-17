@@ -39,6 +39,30 @@ tests:
             resources: ["podgrouprestores"]
             verbs: ["get", "list", "watch", "update", "patch"]
 
+  - it: leaves pod groups off with values without a podGroups key
+    template: templates/operator-deployment.yaml
+    set:
+      podGroups: null
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --enable-pod-groups=true
+
+  - it: grants no group access with values without a podGroups key
+    template: templates/operator-rbac.yaml
+    documentSelector:
+      path: kind
+      value: ClusterRole
+    set:
+      podGroups: null
+    asserts:
+      - notContains:
+          path: rules
+          content:
+            apiGroups: ["nvidia.com"]
+            resources: ["podgroupsnapshots"]
+            verbs: ["get", "list", "watch", "update", "patch"]
+
   - it: grants no patch on Pods by default
     template: templates/operator-rbac.yaml
     documentSelector:

@@ -97,7 +97,7 @@ spec:
             {{- if .Values.operator.bindNewContents }}
             - --bind-new-contents=true
             {{- end }}
-            {{- if .Values.podGroups.enabled }}
+            {{- if (.Values.podGroups).enabled }}
             # Pod-group admission checks the node agent Pods of this release
             # on each member's node, selected as the agent DaemonSet selects them.
             {{- /* Inert until the node agent supports pod groups: this chart does
