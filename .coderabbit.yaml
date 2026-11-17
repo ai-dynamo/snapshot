@@ -87,6 +87,9 @@ reviews:
       - name: "RBAC Least Privilege"
         mode: "warning"
         instructions: "Warn if any kubebuilder RBAC marker or Helm RBAC manifest grants wildcard verbs ('*') or resources ('*') without an explicit justification comment."
+      - name: "Docs Updated"
+        mode: "warning"
+        instructions: "Warn if the PR changes public APIs, CRDs, Helm values, annotations, environment variables, CLI flags, prerequisites, or user-facing behavior, and does not update the matching page in docs/ to describe each changed behavior. An unrelated edit to the matching page does not count. Use the 'Where Facts Live' table in docs/development/writing-docs.md to find the page. If the PR changes baseline prerequisites, also require an update to the Prerequisites section of README.md, even when the matching page in docs/ is updated. Do not warn for internal-only changes, tests, CI, or CHANGELOG.md. Do not warn if the PR description states why no docs change is needed."
 
   path_filters:
     - "!**/zz_generated*.go"
