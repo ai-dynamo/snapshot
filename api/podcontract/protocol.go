@@ -295,11 +295,11 @@ func RestoreRetryLimitFromAnnotations(annotations map[string]string) (limit int,
 }
 
 func parseRestoreRetryLimit(raw string) (int, error) {
-	limit, err := strconv.Atoi(strings.TrimSpace(raw))
-	if err != nil || limit < 0 {
-		return 0, fmt.Errorf("%s value %q must be a non-negative integer", RestoreRetryLimitAnnotation, raw)
+	limit, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 31)
+	if err != nil {
+		return 0, fmt.Errorf("%s value %q must be a non-negative integer: %w", RestoreRetryLimitAnnotation, raw, err)
 	}
-	return limit, nil
+	return int(limit), nil
 }
 
 // SkipCompatCheckFromAnnotations reports whether compatibility checks are disabled.
