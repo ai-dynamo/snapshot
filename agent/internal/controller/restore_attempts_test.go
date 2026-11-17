@@ -49,12 +49,13 @@ func leaveRetryStatus(t *testing.T, pod *corev1.Pod, status podcontract.RestoreR
 }
 
 func TestRestoreAttemptsStatusRoundTrip(t *testing.T) {
-	record := restoreAttempts{Limit: 2, Attempt: 1, Deadline: time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC), ContainerID: "ctr-abc"}
+	deadline := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	record := restoreAttempts{Limit: 2, Attempt: 1, Deadline: deadline, ContainerID: "ctr-abc", RetryAt: deadline.Add(-time.Minute)}
 
 	status := record.status("restore-pod-uid")
 
 	assert.Equal(t, podcontract.ContainerRetryStatus{
-		Attempt: 1, RetryLimit: 2, Deadline: record.Deadline, ContainerID: "ctr-abc", PodUID: "restore-pod-uid",
+		Attempt: 1, RetryLimit: 2, Deadline: deadline, ContainerID: "ctr-abc", RetryAt: deadline.Add(-time.Minute), PodUID: "restore-pod-uid",
 	}, status)
 	assert.Equal(t, record, attemptsFromStatus(status))
 }
@@ -419,7 +420,7 @@ func TestStartAttempt(t *testing.T) {
 				putAttempts(op.controller, op.pod.UID, "main", *tc.record)
 			}
 
-			got, err := op.startAttempt()
+			got, err := op.startAttempt(context.Background())
 
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
