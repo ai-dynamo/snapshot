@@ -156,7 +156,8 @@ commit-level history for each release is on its
 - The chart requires Kubernetes 1.32 or newer (`kubeVersion: ">=1.32.0-0"`):
   `helm upgrade`, `helm template` and `helm install --skip-crds` refuse an older
   cluster. An older API server already refused the `SnapshotJob` CRD on
-  `helm install`. An install on 1.32 or newer needs no action. See
+  `helm install`. On an older cluster, upgrade Kubernetes to 1.32 or newer
+  before upgrading Snapshot. An install on 1.32 or newer needs no action. See
   [Prerequisites](docs/get-started/prerequisites.md#baseline-prerequisites).
 
 ### Deprecated
