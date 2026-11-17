@@ -70,9 +70,10 @@ reviews:
         to main, or merge the follow-up PR.
     - name: "Track agreed follow-up work"
       prompt: |
-        Run this action after every merge into main, even when no follow-up
-        work was agreed during review. At execution time, read the full PR
-        discussion, including comments added after the last review.
+        Run this action after every merge into the repository's default
+        branch, even when no follow-up work was agreed during review.
+        At execution time, read the full PR discussion, including comments
+        added after the last review.
         Identify follow-up work explicitly agreed to by a maintainer.
         If no such work exists, do nothing. Check existing open and closed
         issues before creating an issue. If the task is already tracked,
