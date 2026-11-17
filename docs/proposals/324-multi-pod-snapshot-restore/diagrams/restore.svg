@@ -73,7 +73,7 @@ text{font-family:Helvetica,Arial,"Liberation Sans",sans-serif}
 <text x="362.9" y="262.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">read meta {members, ranks, deadline, epoch}</text>
 <line class="arw" x1="500.0" y1="274.0" x2="227.7" y2="274.0" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#ah)"/>
 <text x="362.9" y="334.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">all-gather snapshot/admit {new IP, capture ID,</text>
-<text x="362.9" y="350.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">fabric domain, GPUs, cuInterpose}</text>
+<text x="362.9" y="350.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">relay}</text>
 <line class="arw" x1="225.7" y1="362.0" x2="498.0" y2="362.0" stroke-width="1.2" marker-end="url(#ah)"/>
 <text x="362.9" y="382.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">payloads of every rank: IP map with the artifact</text>
 <text x="362.9" y="398.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">table, checks</text>

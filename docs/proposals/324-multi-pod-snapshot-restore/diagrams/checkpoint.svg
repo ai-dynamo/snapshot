@@ -81,8 +81,8 @@ text{font-family:Helvetica,Arial,"Liberation Sans",sans-serif}
 <line class="arw" x1="250.0" y1="364.0" x2="401.3" y2="364.0" stroke-width="1.2" marker-end="url(#ah)"/>
 <text x="326.7" y="384.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">read meta {members, ranks, deadline, epoch}</text>
 <line class="arw" x1="403.3" y1="396.0" x2="252.0" y2="396.0" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#ah)"/>
-<text x="326.7" y="456.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">all-gather snapshot/admit {Pod IP, fabric</text>
-<text x="326.7" y="472.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">domain, versions, cuInterpose}</text>
+<text x="326.7" y="456.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">all-gather snapshot/admit {Pod IP, Pod UID,</text>
+<text x="326.7" y="472.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">containers, relay}</text>
 <line class="arw" x1="250.0" y1="484.0" x2="401.3" y2="484.0" stroke-width="1.2" marker-end="url(#ah)"/>
 <text x="326.7" y="504.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">payloads of every rank</text>
 <line class="arw" x1="403.3" y1="516.0" x2="252.0" y2="516.0" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#ah)"/>
