@@ -40,7 +40,7 @@ spec:
         # change, so an upgrade doesn't leave it running on stale config.
         # User-supplied podAnnotations cannot override this key.
         checksum/config: {{ include "snapshot.operatorConfigChecksum" . }}
-        {{- if .Values.podGroups.enabled }}
+        {{- if (.Values.podGroups).enabled }}
         # The pod group protocol versions this agent speaks. The operator
         # places a group's members only on nodes whose agent lists a version
         # it speaks too. User-supplied podAnnotations cannot override this key.
@@ -118,7 +118,7 @@ spec:
             - {{ .Values.runtime.type | quote }}
             - "--runtime-socket"
             - {{ $socket | quote }}
-            {{- if .Values.podGroups.enabled }}
+            {{- if (.Values.podGroups).enabled }}
             # How this agent reaches the coordinator of a pod group: the agent
             # Pod, selected as the DaemonSet selects it, on the node of the
             # group's rank-0 member, at that node's IP and coordinator.port.
@@ -136,7 +136,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            {{- if .Values.podGroups.enabled }}
+            {{- if (.Values.podGroups).enabled }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -201,7 +201,7 @@ spec:
               mountPath: /root/.docker
               readOnly: true
             {{- end }}
-            {{- if .Values.podGroups.enabled }}
+            {{- if (.Values.podGroups).enabled }}
             # The CA bundle that verifies the coordinators' certificate, read
             # on every connect, so a replaced CA is trusted once the kubelet
             # refreshes the file.
