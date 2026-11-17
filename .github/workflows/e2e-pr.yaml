@@ -291,7 +291,6 @@ jobs:
     needs: [check, cpu, images, candidate]
     uses: ./.github/workflows/e2e-frameworks.yaml
     with:
-      validated_sha: ${{ github.sha }}
       snapshot_tag: ${{ needs.images.outputs.tag }}
       image_digests: ${{ needs.candidate.outputs.digests }}
     permissions:

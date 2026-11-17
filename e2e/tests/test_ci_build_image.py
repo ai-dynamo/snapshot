@@ -131,11 +131,14 @@ def test_failed_builds_do_not_report_a_digest(build_env, overrides, expected):
 def cpu_workers(tmp_path):
     hack = tmp_path / "hack"
     hack.mkdir()
-    worker = """import json, os, pathlib, subprocess, sys, time
+    worker = """import json, os, pathlib, signal, subprocess, sys, time
 name = os.environ.get('IMAGE', 'cluster')
+print(name + ' worker output', flush=True)
+if os.environ.get('IGNORE_TERM'):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 root = pathlib.Path(os.environ['WORKERS_DIR'])
 (root / (name + '.config.json')).write_text(json.dumps({
-    key: os.environ.get(key) for key in ('BUILD_ARGS', 'CACHE_MODE')
+    key: os.environ.get(key) for key in ('BUILD_ARGS', 'CACHE_MODE', 'CI_PHASE_LOG', 'PHASE')
 }))
 (root / (name + '.started')).touch()
 deadline = time.monotonic() + 5
@@ -146,6 +149,13 @@ while len(list(root.glob('*.started'))) != 4:
 if os.environ.get('BLOCK_WORKERS'):
     child = subprocess.Popen(['sleep', '30'])
     (root / (name + '.pid')).write_text(str(child.pid))
+    if name == os.environ.get('FAIL_WORKER'):
+        while len(list(root.glob('*.pid'))) != 4:
+            if time.monotonic() > deadline:
+                sys.exit(9)
+            time.sleep(.01)
+        print(name + ' failed while other workers were blocked', flush=True)
+        sys.exit(int(os.environ.get('FAIL_STATUS', '7')))
     child.wait()
 else:
     (root / (name + '.finished')).touch()
@@ -163,61 +173,219 @@ else:
     (hack / "ci-prepare-cpu-e2e.sh").write_text(
         (ROOT / "hack/ci-prepare-cpu-e2e.sh").read_text()
     )
+    shutil.copy2(ROOT / "hack/ci-phase.sh", hack / "ci-phase.sh")
     script = tmp_path / "build-cpu.sh"
     script.write_text(step["run"])
     env = {
         **os.environ,
         "CACHE_MODE": step["env"]["CACHE_MODE"],
+        "CI_PHASE_LOG": str(tmp_path / "phases.tsv"),
         "WORKERS_DIR": str(tmp_path),
         "RUNNER_TEMP": str(tmp_path),
     }
-    return tmp_path, script, env
+    yield tmp_path, script, env
+    for path in tmp_path.glob("*.pid"):
+        try:
+            os.kill(int(path.read_text()), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 @pytest.mark.skipif(shutil.which("setsid") is None, reason="CPU workflow requires Linux setsid")
-@pytest.mark.parametrize("failure", ["", "agent", "operator", "pagebroker", "cluster"])
-def test_cpu_builds_overlap_and_wait_for_every_worker(cpu_workers, failure):
+def test_cpu_builds_overlap_and_wait_for_every_worker(cpu_workers):
     directory, script, env = cpu_workers
     result = subprocess.run(
-        ["bash", str(script)], cwd=directory, env={**env, "FAIL_WORKER": failure},
+        ["bash", str(script)], cwd=directory, env=env,
         capture_output=True, text=True, timeout=10,
     )
-    assert result.returncode == (1 if failure else 0), result.stderr
+    assert result.returncode == 0, result.stderr
     assert len(list(directory.glob("*.finished"))) == 4
     operator = json.loads((directory / "operator.config.json").read_text())
     assert operator == {
         "BUILD_ARGS": "--build-arg GO_BUILD_TAGS=snapshot_e2e",
         "CACHE_MODE": "read",
+        "CI_PHASE_LOG": env["CI_PHASE_LOG"] + ".builds",
+        "PHASE": "Build operator image",
     }
+    pagebroker = json.loads((directory / "pagebroker.config.json").read_text())
+    assert pagebroker["PHASE"] == "Build PageBroker image"
+    assert_prep_diagnostics(directory, result.stdout)
+
+
+def assert_prep_diagnostics(directory, output):
+    for worker in ("operator", "agent", "pagebroker", "cluster"):
+        assert worker + " worker output" in output
+    phases = (directory / "phases.tsv").read_text().splitlines()
+    assert len(phases) == 1
+    assert phases[0].split("\t")[0] == "Build images and create k3d cluster"
+
+
+def assert_workers_stopped(directory):
+    for path in directory.glob("*.pid"):
+        # A terminated orphan may remain a zombie until PID 1 reaps it.
+        status = Path(f"/proc/{int(path.read_text())}/stat")
+        assert not status.exists() or status.read_text().split()[2] == "Z"
 
 
 @pytest.mark.skipif(shutil.which("setsid") is None, reason="CPU workflow requires Linux setsid")
-def test_cancelling_cpu_builds_terminates_their_child_processes(cpu_workers):
+@pytest.mark.parametrize("failure", ["", "cluster"])
+def test_cpu_collects_workers_that_finished_before_wait_started(cpu_workers, failure):
+    directory, script, env = cpu_workers
+    prepare = directory / "hack/ci-prepare-cpu-e2e.sh"
+    source = prepare.read_text()
+    # Hold the test copy before wait_for_workers until Bash has reaped the
+    # fast workers. wait -n alone loses these already-completed jobs.
+    call = "\nwait_for_workers\n"
+    assert source.count(call) == 1
+    prepare.write_text(source.replace(call, """
+while true; do
+  finished=("${RUNNER_TEMP}"/*.finished)
+  ((${#finished[@]} == 4)) && break
+  sleep .01
+done
+sleep .05
+wait_for_workers
+"""))
+    result = subprocess.run(
+        ["bash", str(script)], cwd=directory, env={**env, "FAIL_WORKER": failure},
+        capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode == (7 if failure else 0), result.stderr
+    if failure:
+        assert "CPU worker cluster-up exited with status 7" in result.stderr
+    assert_prep_diagnostics(directory, result.stdout)
+
+
+@pytest.mark.skipif(shutil.which("setsid") is None, reason="CPU workflow requires Linux setsid")
+@pytest.mark.parametrize("worker, status", [("operator", 7), ("agent", 17), ("pagebroker", 23), ("cluster", 31)])
+def test_cpu_worker_failure_stops_blocked_peers_and_reports_diagnostics(cpu_workers, worker, status):
+    directory, script, env = cpu_workers
+    result = subprocess.run(
+        ["bash", str(script)], cwd=directory,
+        env={**env, "BLOCK_WORKERS": "true", "FAIL_WORKER": worker,
+             "FAIL_STATUS": str(status), "IGNORE_TERM": "true"},
+        capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode == status, result.stderr
+    name = "cluster-up" if worker == "cluster" else f"build-{worker}"
+    assert f"CPU worker {name} exited with status {status}" in result.stderr
+    assert f"{worker} failed while other workers were blocked" in result.stdout
+    assert not list(directory.glob("*.finished"))
+    assert_prep_diagnostics(directory, result.stdout)
+    assert_workers_stopped(directory)
+
+
+@pytest.mark.skipif(shutil.which("setsid") is None, reason="CPU workflow requires Linux setsid")
+@pytest.mark.parametrize("sent, expected", [(signal.SIGINT, 130), (signal.SIGTERM, 143)])
+def test_cancelling_cpu_builds_terminates_their_child_processes(cpu_workers, sent, expected):
     directory, script, env = cpu_workers
     process = subprocess.Popen(
-        ["bash", str(script)], cwd=directory, env={**env, "BLOCK_WORKERS": "true"},
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ["bash", str(script)], cwd=directory,
+        env={**env, "BLOCK_WORKERS": "true", "IGNORE_TERM": "true"},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
-    child_pids = []
     try:
         deadline = time.monotonic() + 5
         while len(list(directory.glob("*.pid"))) != 4:
             assert process.poll() is None
             assert time.monotonic() < deadline
             time.sleep(.01)
-        child_pids = [int(p.read_text()) for p in directory.glob("*.pid")]
-        process.send_signal(signal.SIGTERM)
-        assert process.wait(timeout=5) == 143
-        for pid in child_pids:
-            # A terminated orphan may remain a zombie until PID 1 reaps it.
-            status = Path(f"/proc/{pid}/stat")
-            assert not status.exists() or status.read_text().split()[2] == "Z"
+        process.send_signal(sent)
+        output, errors = process.communicate(timeout=5)
+        assert process.returncode == expected, errors
+        assert_prep_diagnostics(directory, output)
+        assert_workers_stopped(directory)
     finally:
         if process.poll() is None:
             process.kill()
             process.wait()
-        for pid in child_pids:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+
+
+@pytest.mark.skipif(shutil.which("setsid") is None, reason="CPU workflow requires Linux setsid")
+@pytest.mark.parametrize("sent, expected", [(signal.SIGINT, 130), (signal.SIGTERM, 143)])
+def test_cancellation_before_setsid_still_stops_launchers_and_children(cpu_workers, sent, expected):
+    directory, script, env = cpu_workers
+    bin_dir = directory / "bin"
+    bin_dir.mkdir()
+    executable(bin_dir / "setsid", """import os, pathlib, signal, sys, time
+def form_session(*_):
+    time.sleep(.1)
+    os.execv(os.environ['REAL_SETSID'], ['setsid', *sys.argv[1:]])
+signal.signal(signal.SIGTERM, form_session)
+print('launcher waiting for session', flush=True)
+pathlib.Path(os.environ['RUNNER_TEMP'], str(os.getpid()) + '.launcher').touch()
+while True:
+    signal.pause()
+""")
+    process = subprocess.Popen(
+        ["bash", str(script)], cwd=directory,
+        env={**env, "PATH": str(bin_dir) + os.pathsep + env["PATH"],
+             "REAL_SETSID": shutil.which("setsid"), "BLOCK_WORKERS": "true"},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while len(list(directory.glob("*.launcher"))) != 4:
+            assert process.poll() is None
+            assert time.monotonic() < deadline
+            time.sleep(.01)
+        process.send_signal(sent)
+        output, errors = process.communicate(timeout=5)
+        assert process.returncode == expected, errors
+        assert output.count("launcher waiting for session") == 4
+        for marker in directory.glob("*.launcher"):
+            assert not Path(f"/proc/{marker.stem}").exists()
+        assert_workers_stopped(directory)
+        assert (directory / "phases.tsv").exists()
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        for marker in directory.glob("*.launcher"):
+            pid = int(marker.stem)
+            for target in (pid, -pid):
+                try:
+                    os.kill(target, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+
+def test_phase_summary_reports_partial_build_details_without_a_phase_total(tmp_path):
+    phase_log = tmp_path / "phases.tsv"
+    Path(f"{phase_log}.builds").write_text("Build agent image\t60\t\n")
+    result = subprocess.run(
+        ["sh", "hack/ci-phase-summary.sh"], cwd=ROOT,
+        env={**os.environ, "CI_PHASE_LOG": str(phase_log)},
+        capture_output=True, text=True, check=True,
+    )
+    assert "No phases were recorded" in result.stdout
+    assert "| Build agent image | 1m 00s | — |" in result.stdout
+    assert "Total instrumented" not in result.stdout
+
+
+@pytest.mark.parametrize("build_details", [False, True])
+def test_phase_summary_excludes_overlapping_builds_from_totals(tmp_path, build_details):
+    phase_log = tmp_path / "phases.tsv"
+    phase_log.write_text("Build images and create k3d cluster\t600\t\nRun CPU tests\t300\t\n")
+    if build_details:
+        Path(f"{phase_log}.builds").write_text(
+            "Build operator image\t200\t1073741824\n"
+            "Build agent image\t600\t2147483648\n"
+            "Build PageBroker image\t100\t\n"
+        )
+    result = subprocess.run(
+        ["sh", "hack/ci-phase-summary.sh", "cold"], cwd=ROOT,
+        env={**os.environ, "CI_PHASE_LOG": str(phase_log)},
+        capture_output=True, text=True, check=True,
+    )
+    assert "Cache: cold." in result.stdout
+    assert "| **Total instrumented** | **15m 00s** | |" in result.stdout
+    assert "| Build images and create k3d cluster | 10m 00s (67%) |" in result.stdout
+    assert "| Run CPU tests | 5m 00s (33%) |" in result.stdout
+    if build_details:
+        assert "Their durations are not added to the total above." in result.stdout
+        assert "| Build operator image | 3m 20s | 1.00 GiB |" in result.stdout
+        assert "| Build agent image | 10m 00s | 2.00 GiB |" in result.stdout
+        assert "| Build PageBroker image | 1m 40s | — |" in result.stdout
+    else:
+        assert "Concurrent image builds" not in result.stdout

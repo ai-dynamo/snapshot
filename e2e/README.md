@@ -57,7 +57,9 @@ install those images rather than main's. Each suite receives the digests the
 build recorded in `SNAPSHOT_E2E_IMAGE_DIGESTS`, a JSON object keyed `operator`,
 `agent`, and `pagebroker`. With it set, `setup.py` uses `imagePullPolicy: Always` and verifies the running image content. The Pod spec identifies the repository; the runtime image ID identifies the content. When provenance indexes differ, setup compares their runnable manifests for the node's OS and architecture. This also handles mirrored runtime image names. Registry reads allow three attempts for transient failures. Different content or a failed lookup fails setup.
 
-The native GPU workflow runs independent lifecycle tests with two workers, then runs `serial` tests alone. Both phases report test durations and upload JUnit results. Framework tests reuse the caller's successful `make check` only for the same commit; scheduled and manual runs validate locally.
+CPU preparation builds the three images alongside cluster startup. A failed worker stops its peers and reports its name and exit status. Failure and cancellation retain worker logs. The phase summary counts preparation once and lists overlapping image builds separately.
+
+The native GPU workflow runs independent lifecycle tests with two workers, then runs `serial` tests alone. Both phases report test durations and upload JUnit results. Framework suites run their own repository validation before using the GPU cluster.
 
 The `PR E2E` check passes only when every suite the change needed passed, or
 when the change needed none of them. The scheduled registry prune deletes

@@ -78,18 +78,6 @@ def test_pr_e2e_requires_every_other_job(jobs):
         assert selector in script, f"PR E2E does not check {job}"
 
 
-def test_frameworks_reuse_validation_for_only_the_callers_commit(jobs):
-    caller = jobs["frameworks"]
-    assert "check" in caller["needs"]
-    assert caller["with"]["validated_sha"] == "${{ github.sha }}"
-    called = yaml.safe_load((ROOT / caller["uses"]).read_text())
-    inputs = called[True]["workflow_call"]["inputs"]
-    assert inputs["validated_sha"]["required"] is False
-    assert inputs["validated_sha"]["type"] == "string"
-    assert inputs["validated_sha"].get("default", "") == ""
-
-
-
 @pytest.mark.parametrize("failed_phase", ["", "not serial", "serial"])
 def test_native_parallel_and_serial_phases_preserve_failures(tmp_path, failed_phase):
     workflow = yaml.safe_load((ROOT / ".github/workflows/e2e.yaml").read_text())
