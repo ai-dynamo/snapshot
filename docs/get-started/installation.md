@@ -200,12 +200,12 @@ certificate: the CA Secret, the serving Secret, and the trust bundle ConfigMap.
 Uninstalling Snapshot, turning `podGroups.enabled` off, or switching to your own
 certificates leaves these resources, including the CA's private key.
 
-After the operator stops issuing certificates, delete the three resources by
-name. Use the namespace from `--coordinator-tls-namespace` and the names from
-`--coordinator-ca-secret`, `--coordinator-tls-secret`, and
-`--coordinator-ca-bundle`. The chart uses the release namespace and the names
-`<fullname>-coordinator-ca`, `<fullname>-coordinator-tls`, and
-`<fullname>-coordinator-ca-bundle`:
+Once the operator is uninstalled, or runs without its coordinator TLS flags,
+delete the three resources by name. Use the namespace from
+`--coordinator-tls-namespace` and the names from `--coordinator-ca-secret`,
+`--coordinator-tls-secret`, and `--coordinator-ca-bundle`. The chart uses the
+release namespace and the names `<fullname>-coordinator-ca`,
+`<fullname>-coordinator-tls`, and `<fullname>-coordinator-ca-bundle`:
 
 ```bash
 kubectl delete --namespace <tls-namespace> \
