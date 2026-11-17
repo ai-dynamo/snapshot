@@ -236,6 +236,7 @@ coordinator:
       cpu: 100m
       memory: 128Mi
     limits:
+      cpu: 1
       memory: 2Gi
   # The coordinator serves tls.crt and tls.key, and agents trust the CA bundle
   # ca.crt for serverName. By default the operator issues all three under a

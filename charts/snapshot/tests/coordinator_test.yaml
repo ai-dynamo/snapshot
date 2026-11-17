@@ -211,6 +211,7 @@ tests:
               cpu: 100m
               memory: 128Mi
             limits:
+              cpu: 1
               memory: 2Gi
 
   # The heap holds the sessions' data. With the container's memory limit as a
@@ -285,6 +286,7 @@ tests:
           cpu: 200m
           memory: 256Mi
         limits:
+          cpu: 2
           memory: 8Gi
     asserts:
       - contains:
@@ -314,6 +316,7 @@ tests:
               cpu: 200m
               memory: 256Mi
             limits:
+              cpu: 2
               memory: 8Gi
 
   # The session limits default to the coordinator's own, which checks them
