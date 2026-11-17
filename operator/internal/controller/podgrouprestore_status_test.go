@@ -658,9 +658,7 @@ func TestDerivePodGroupRestoreFailureReasons(t *testing.T) {
 			wantMessage: `the deadline of 600 seconds passed while admission was waiting: target "a": Pod "pod-a" does not exist yet`,
 		},
 		{
-			name:        "row 5: deleted before any member started",
-			members:     []podGroupRestoreMemberObservation{prPod("a"), prPod("b")},
-			previous:    pinned("a", "b"),
+			name:        "row 5: deleted before any member has work",
 			deleting:    true,
 			wantReason:  snapshotv1alpha1.PodGroupReasonCancelled,
 			wantMessage: podGroupRestoreCancelledMessage,
@@ -717,6 +715,7 @@ func TestDerivePodGroupRestoreNoFailure(t *testing.T) {
 		deleting bool
 	}{
 		{name: "members still restoring", members: []podGroupRestoreMemberObservation{prPod("a", prStarted), prPod("b")}},
+		{name: "deleted with pinned work, before any starts", members: []podGroupRestoreMemberObservation{prPod("a"), prPod("b")}, deleting: true},
 		{name: "deleted after a member started", members: []podGroupRestoreMemberObservation{prPod("a", prStarted), prPod("b")}, deleting: true},
 		{
 			name:    "a member failed on its own before any member started, while another may still start",

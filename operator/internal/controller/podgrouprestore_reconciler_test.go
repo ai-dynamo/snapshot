@@ -1066,10 +1066,10 @@ func TestPodGroupRestoreReconciler_ConfirmsTheDeadline(t *testing.T) {
 	}
 }
 
-// TestPodGroupRestoreReconciler_ConfirmsACancellation deletes a restore whose
-// member a started on the API server only. The cached pass would cancel it
-// and release its finalizer; the API server's pass keeps both.
-func TestPodGroupRestoreReconciler_ConfirmsACancellation(t *testing.T) {
+// TestPodGroupRestoreReconciler_DeletionWaitsForCachedReports deletes a restore
+// whose member a started on the API server only. Pinned work keeps the group
+// without a final decision or a live confirmation.
+func TestPodGroupRestoreReconciler_DeletionWaitsForCachedReports(t *testing.T) {
 	restore := func() *snapshotv1alpha1.PodGroupRestore {
 		restore := rgRestore("a", "b")
 		restore.DeletionTimestamp = ptr.To(metav1.Now())
@@ -1089,8 +1089,8 @@ func TestPodGroupRestoreReconciler_ConfirmsACancellation(t *testing.T) {
 	got := getRestore(t, r)
 	assert.Contains(t, got.Finalizers, snapshotv1alpha1.PodGroupInUseFinalizer)
 	assert.Nil(t, rgCondition(got.Status.Conditions, snapshotv1alpha1.PodGroupConditionFailed), "not cancelled")
-	assert.Equal(t, snapshotv1alpha1.RestorePhaseRestoring, got.Status.Members[0].Phase)
-	assert.Equal(t, []string{"Normal Committed the agents passed their admitted barrier, and the restore has started"}, drainEvents(recorder))
+	assert.Equal(t, snapshotv1alpha1.RestorePhaseAdmitted, got.Status.Members[0].Phase)
+	assert.Empty(t, drainEvents(recorder))
 }
 
 // TestPodGroupRestoreReconciler_RecordsNothingWhenTheLiveReadFails: at the
@@ -1443,7 +1443,7 @@ func TestPodGroupRestoreReconciler_Deletion(t *testing.T) {
 		require.NoError(t, r.Delete(context.Background(), getRestore(t, r)))
 	}
 
-	t.Run("cancelled before any member starts, held while its members are pinned", func(t *testing.T) {
+	t.Run("held while its members are pinned, before any member starts", func(t *testing.T) {
 		r := setup(t)
 		var recorded *metav1.Condition
 		r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
@@ -1457,14 +1457,15 @@ func TestPodGroupRestoreReconciler_Deletion(t *testing.T) {
 
 		reconcileRestore(t, r)
 
-		require.NotNil(t, recorded, "Cancelled is recorded before the finalizer goes")
-		assert.Equal(t, snapshotv1alpha1.PodGroupReasonCancelled, recorded.Reason)
+		assert.Nil(t, recorded, "deletion does not decide an outcome while member work exists")
 		assert.False(t, restoreGone(t, r), "a pinned member reports its own end")
-		assert.Equal(t, []string{"Warning Cancelled " + podGroupRestoreCancelledMessage}, drainEvents(recorder))
+		assert.Empty(t, drainEvents(recorder))
 
 		rgReport(t, r, "a", prRestoreError)
 		rgReport(t, r, "b", prRestoreError)
 		reconcileRestore(t, r)
+		require.NotNil(t, recorded)
+		assert.Equal(t, snapshotv1alpha1.PodGroupReasonRefused, recorded.Reason)
 		assert.True(t, restoreGone(t, r))
 	})
 
