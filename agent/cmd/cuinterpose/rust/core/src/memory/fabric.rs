@@ -16,8 +16,7 @@ use crate::error::{Error, Result};
 use crate::runtime;
 use cudarc::driver::sys::CUresult::{CUDA_ERROR_NOT_READY, CUDA_ERROR_NOT_SUPPORTED};
 use cudarc::driver::sys::{
-    CUmemAllocationHandleType, CUmemAllocationProp, CUmemAllocationType, CUmemLocation,
-    CUmemLocationType, CUmulticastObjectProp,
+    CUmemAllocationHandleType, CUmemAllocationProp, CUmemAllocationType, CUmulticastObjectProp,
 };
 use cuinterpose_protocol::{AllocationReference, FabricHandle, FabricReplacement, Record};
 use std::collections::BTreeMap;
@@ -99,13 +98,6 @@ pub(crate) fn import(
     }
     let multicast = is_multicast(&handle)?;
     let context = driver::context()?;
-    // An importer cannot observe the creator's properties. It records the device it
-    // imports on, or device 0 without a current context, as a native import needs none.
-    // The coordinator takes the location and the rest from the creator's records.
-    let mut device = 0;
-    if !multicast && context != 0 {
-        unsafe { driver::cuCtxGetDevice(&mut device) }?;
-    }
     // Imports can wait for the fabric manager, so the registry is released around them.
     let (mut state, imported) = runtime::call_unlocked(state, || driver::import_fabric(&handle))?;
     let imported = runtime::must_complete(VirtualAllocationHandle::from_driver(imported));
@@ -130,13 +122,22 @@ pub(crate) fn import(
             .insert(reference.id, Memblock::Multicast(object));
         return Ok((state, virtual_handle));
     }
+    // An importer cannot observe the creator's size, so the coordinator takes it and the
+    // location from the creator's records. The importer keeps the location that CUDA
+    // reports for the imported handle, as a POSIX import does, since a V1 multicast
+    // binding of the import names that device. The query, like the import, needs no
+    // current context.
+    let mut reported = std::mem::MaybeUninit::<CUmemAllocationProp>::zeroed();
+    if let Err(error) =
+        unsafe { driver::cuMemGetAllocationPropertiesFromHandle(reported.as_mut_ptr(), imported) }
+    {
+        runtime::must_complete(unsafe { driver::cuMemRelease(imported) });
+        return Err(error);
+    }
     let properties = CUmemAllocationProp {
         type_: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED,
         requestedHandleTypes: FABRIC,
-        location: CUmemLocation {
-            type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
-            id: device,
-        },
+        location: unsafe { reported.assume_init() }.location,
         ..unsafe { std::mem::zeroed() }
     };
     let virtual_handle = runtime::must_complete(state.adopt_unicast(Allocation {
