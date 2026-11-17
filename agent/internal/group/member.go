@@ -181,9 +181,10 @@ func (m *Member) Barrier(ctx context.Context, name string) error {
 }
 
 // Fail ends the attempt for every member, unless it has ended already, and
-// closes the connection. The reason is session.ReasonRefused until the member
-// calls the Admitted barrier, since no member has changed anything yet, and
-// session.ReasonMemberFailed after, since the attempt may then have committed.
+// closes the connection. The reason is session.ReasonRefused, which leaves
+// every member as Snapshot found it, until the member calls the Admitted
+// barrier, and session.ReasonMemberFailed after, since the attempt may then
+// have committed.
 func (m *Member) Fail(ctx context.Context) error {
 	reason := session.ReasonRefused
 	if m.committed.Load() {

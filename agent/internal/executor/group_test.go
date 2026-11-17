@@ -236,6 +236,106 @@ func TestGroupRestoreFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
 	}
 }
 
+func TestGroupCheckpointRecordsTheCommitBeforeItsFirstIrreversibleStep(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		recordErr error
+		wantSteps []string
+		wantStep  Step
+	}{
+		{
+			name:      "the record is written",
+			wantSteps: []string{"record", "dump"},
+			wantStep:  StepDumpCRIU,
+		},
+		{
+			name:      "the record cannot be written",
+			recordErr: errors.New("the API server refused the write"),
+			wantSteps: []string{"record"},
+			wantStep:  StepRecordGroupStart,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			member, peer := joinMembers(t)
+			peerEnded := runPeer(t, peer, group.Admission{PodIP: netip.MustParseAddr("10.0.0.2")}, group.NetFreeze)
+			socket := serveCheckpointStaging(t, t.TempDir())
+
+			var steps []string
+			stubCapture(t, func(*types.CheckpointManifest) (*checkpointPhaseTimings, error) {
+				steps = append(steps, "dump")
+				return nil, failStep(StepDumpCRIU, errors.New("stop at the first irreversible step"))
+			})
+			cfg := &types.AgentConfig{
+				Storage:    types.StorageSpec{BasePath: t.TempDir()},
+				PageBroker: types.PageBrokerSpec{ControlSocketPath: socket},
+			}
+			req := CheckpointRequest{
+				ContentUID: "content-uid", ContainerName: "main", PodIP: "10.0.0.1", Group: member,
+				Committed: func(context.Context) error {
+					steps = append(steps, "record")
+					return tc.recordErr
+				},
+			}
+			_, err := checkpoint(groupTestContext(t), nil, testr.New(t), req, cfg, inspectNothing(t))
+
+			assert.Equal(t, tc.wantStep, StepOf(err), "%v", err)
+			assert.Equal(t, tc.wantSteps, steps)
+			outcome := <-peerEnded
+			assert.True(t, outcome.committed, "whether the peer passed the admitted barrier")
+			require.ErrorIs(t, outcome.err, &session.AbortError{Reason: session.ReasonMemberFailed})
+		})
+	}
+}
+
+func TestGroupRestoreRecordsTheCommitBeforeItsFirstIrreversibleStep(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		recordErr error
+		wantSteps []string
+		wantStep  Step
+	}{
+		{
+			name:      "the record is written",
+			wantSteps: []string{"record", "mount the bundle"},
+			wantStep:  StepMountBundle,
+		},
+		{
+			name:      "the record cannot be written",
+			recordErr: errors.New("the API server refused the write"),
+			wantSteps: []string{"record"},
+			wantStep:  StepRecordGroupStart,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			member, peer := joinMembers(t)
+			peerEnded := runPeer(t, peer,
+				group.Admission{PodIP: netip.MustParseAddr("10.0.0.2"), CaptureID: "capture-1"}, group.Release)
+			base := writeGroupArtifact(t, capturedAs("member-0", "member-0", "member-1"))
+
+			var steps []string
+			mounter := stoppingMounter{stop: func() error {
+				steps = append(steps, "mount the bundle")
+				return errors.New("stop at the first irreversible step")
+			}}
+			req := RestoreRequest{
+				BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+				TargetPodIP: "10.0.0.1", WithoutProxy: true, SkipCompatCheck: true, Group: member,
+				Committed: func(context.Context) error {
+					steps = append(steps, "record")
+					return tc.recordErr
+				},
+			}
+			_, err := Restore(groupTestContext(t), &restoreFakeRuntime{}, testr.New(t), req, mounter)
+
+			assert.Equal(t, tc.wantStep, StepOf(err), "%v", err)
+			assert.Equal(t, tc.wantSteps, steps)
+			outcome := <-peerEnded
+			assert.True(t, outcome.committed, "whether the peer passed the admitted barrier")
+			require.ErrorIs(t, outcome.err, &session.AbortError{Reason: session.ReasonMemberFailed})
+		})
+	}
+}
+
 func TestRestoreRefusesAPodGroupMembersArtifactOnItsOwn(t *testing.T) {
 	base := writeGroupArtifact(t, capturedAs("member-0", "member-0", "member-1"))
 	mounter := stoppingMounter{stop: func() error {
