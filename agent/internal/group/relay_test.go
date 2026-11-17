@@ -134,6 +134,68 @@ func TestRelayFailEndsTheAttemptAsTheMemberWould(t *testing.T) {
 	}
 }
 
+// Two relays wait for each other until the deadline, then exit with an error,
+// after which their agents fail the attempt. The attempt still ends as the
+// coordinator ends it at the deadline, by a clock that may run behind theirs.
+func TestRelaysPastTheDeadlineLeaveTheAttemptDeadlineExceeded(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode string
+		// lag is how far the coordinator's clock runs behind the members',
+		// and ahead how far the relays' clocks run ahead of them.
+		lag, ahead time.Duration
+		// endedBy is the id of the relay's get that the session's end
+		// answers: 1 for its wait for the other relay, and 2 for its wait for
+		// the session's end, once the first has reached its deadline.
+		endedBy uint64
+	}{
+		{name: "the clocks agree", mode: "inspect", endedBy: 1},
+		{name: "the coordinator's clock runs behind", mode: "inspect", lag: time.Second, endedBy: 2},
+		{name: "the relays' clocks run ahead", mode: "prepare", ahead: time.Second, endedBy: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Half a second into a second, so the relay's deadline, rounded
+			// up, comes half a second after the session's.
+			deadline := time.Now().Truncate(time.Second).Add(2*time.Second + 500*time.Millisecond)
+			members := joinUntil(t, 2, deadline, tc.lag)
+			each(t, members, func(ctx context.Context, m *Member) error {
+				return m.Admit(ctx, Admission{PodIP: netip.MustParseAddr("10.1.0.1"), RunsRelay: true})
+			})
+			// Inspect runs before the commit, and prepare after it.
+			reason := session.ReasonRefused
+			if tc.mode != "inspect" {
+				reason = session.ReasonMemberFailed
+				each(t, members, func(ctx context.Context, m *Member) error { return m.Barrier(ctx, Admitted) })
+			}
+			// The leader waits for the follower's reply, and the follower for
+			// the leader's command, and neither comes.
+			keys := []string{tc.mode + ".1.reply.1", tc.mode + ".1.cmd"}
+			ended := make([]chan answer, len(members))
+			for rank, m := range members {
+				r := openRelay(t, m)
+				ended[rank] = make(chan answer, 1)
+				go func() {
+					got, err := relayPastDeadline(r.conn, r.args, tc.ahead, keys[rank], tc.mode, reason)
+					assert.NoError(t, err)
+					// The relay exits with an error, and its agent fails the
+					// attempt, as a capture or restore does.
+					_ = r.conn.Close()
+					assert.NoError(t, r.close())
+					assert.NoError(t, m.Fail(within(t)))
+					ended[rank] <- got
+				}()
+			}
+
+			for rank, m := range members {
+				assert.Equal(t, answer{
+					"id": tc.endedBy, "ok": false, "code": "ABORTED", "reason": session.ReasonDeadlineExceeded,
+				}, <-ended[rank])
+				assert.ErrorIs(t, m.session.Err(), &session.AbortError{Reason: session.ReasonDeadlineExceeded})
+			}
+		})
+	}
+}
+
 func TestRelayThatGoesAwayLeavesTheSession(t *testing.T) {
 	members := joinAll(t, 2)
 	r := openRelay(t, members[0])
@@ -279,6 +341,49 @@ func TestRelayFrameWithAnUnknownFieldEndsTheService(t *testing.T) {
 	assert.ErrorIs(t, err, io.EOF, "the agent closes its end")
 	require.ErrorContains(t, r.close(), `unknown field "x"`)
 	assert.NoError(t, members[0].session.Err(), "the session outlives its relay")
+}
+
+// relayPastDeadline does on conn what a cuInterpose relay does when its wait
+// for key reaches the deadline args give it, by a clock ahead of its member's
+// by ahead. It waits for the session's end with a get of mode.end, which
+// nobody inserts, until 60 seconds past the deadline, and fails the session
+// with reason only if that wait runs out. It returns the last answer it read.
+func relayPastDeadline(conn net.Conn, args []string, ahead time.Duration, key, mode, reason string) (answer, error) {
+	seconds, err := strconv.ParseInt(args[5], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	deadline := time.Unix(seconds, 0)
+	until := func(at time.Time) int64 { return max(time.Until(at)-ahead, 0).Milliseconds() }
+	ask := func(request map[string]any) (answer, error) {
+		body, err := msgpack.Marshal(request)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := conn.Write(append(binary.LittleEndian.AppendUint32(nil, uint32(len(body))), body...)); err != nil {
+			return nil, err
+		}
+		var header [4]byte
+		if _, err := io.ReadFull(conn, header[:]); err != nil {
+			return nil, err
+		}
+		body = make([]byte, binary.LittleEndian.Uint32(header[:]))
+		if _, err := io.ReadFull(conn, body); err != nil {
+			return nil, err
+		}
+		var a answer
+		return a, msgpack.Unmarshal(body, &a)
+	}
+
+	got, err := ask(map[string]any{"op": "get", "id": 1, "key": key, "wait_ms": until(deadline)})
+	if err != nil || (got["code"] != "NOT_YET" && got["code"] != "NOT_FOUND") {
+		return got, err
+	}
+	got, err = ask(map[string]any{"op": "get", "id": 2, "key": mode + ".end", "wait_ms": until(deadline.Add(time.Minute))})
+	if err != nil || got["code"] != "NOT_YET" {
+		return got, err
+	}
+	return ask(map[string]any{"op": "fail", "id": 3, "reason": reason})
 }
 
 // testRelay is the relay's end of a relay socket, as a connection.
