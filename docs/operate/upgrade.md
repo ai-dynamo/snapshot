@@ -45,8 +45,8 @@ During the upgrade:
   restore fails with a clear error.
 - A `SnapshotJob` whose `podSnapshotTemplate` sets
   `nvidia.com/snapshot-podgroup` or `nvidia.com/snapshot-podgroup-member` fails
-  with `InvalidSpec` before creating its `PodSnapshot`. The same applies when
-  it adopts an owned `PodSnapshot` whose UID it has not recorded. The
+  with `InvalidSpec` before creating its `PodSnapshot`. Such a `SnapshotJob`
+  also fails when it adopts an owned `PodSnapshot` whose UID it has not recorded. The
   controllers own these labels, and the `nvidia.com/snapshot-` prefix is
   Snapshot's. Delete the `SnapshotJob` and create one without those labels.
   If its old `PodSnapshot` remains, give the new `SnapshotJob` another name to

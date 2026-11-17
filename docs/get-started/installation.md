@@ -195,32 +195,19 @@ stored snapshots, delete the claim yourself:
 kubectl delete pvc <pvc-name> --namespace snapshot
 ```
 
-The operator writes some resources itself, in the release namespace, where it
-runs:
+The operator creates three resources when it issues the coordinator's TLS
+certificate: the CA Secret, the serving Secret, and the trust bundle ConfigMap.
+Uninstalling Snapshot, turning `podGroups.enabled` off, or switching to your own
+certificates leaves these resources, including the CA's private key.
 
-- With S3 storage, the ConfigMap that holds PageBroker's S3 configuration.
-- When the operator issues the pod group coordinator's TLS certificate, three
-  resources: the CA Secret, which holds the CA's private key; the serving
-  Secret; and the trust bundle ConfigMap.
-
-`helm uninstall` leaves them. Each carries the label
-`app.kubernetes.io/managed-by=snapshot-operator`. Once the operator's pod is
-gone, delete them:
-
-```bash
-kubectl delete secrets,configmaps --namespace snapshot \
-  --selector app.kubernetes.io/managed-by=snapshot-operator
-```
-
-Turning `podGroups.enabled` off or switching to your own certificates also leaves
-all three coordinator TLS resources, including the CA's private key. After the
-operator stops issuing certificates, delete the old resources by name:
+After the operator stops issuing certificates, delete the three resources by
+name. Use the namespace from `--coordinator-tls-namespace` and the names from
+`--coordinator-ca-secret`, `--coordinator-tls-secret`, and
+`--coordinator-ca-bundle`. The chart uses the release namespace and the names
+`<fullname>-coordinator-ca`, `<fullname>-coordinator-tls`, and
+`<fullname>-coordinator-ca-bundle`:
 
 ```bash
-kubectl delete secret <ca-secret-name> <serving-secret-name> --namespace <namespace>
-kubectl delete configmap <trust-bundle-name> --namespace <namespace>
+kubectl delete --namespace <tls-namespace> \
+  secret/<ca-secret-name> secret/<serving-secret-name> configmap/<trust-bundle-name>
 ```
-
-Use the names from the operator's `--coordinator-ca-secret`,
-`--coordinator-tls-secret`, and `--coordinator-ca-bundle` flags. While the operator
-runs, the shared label selector also selects PageBroker's S3 ConfigMap.

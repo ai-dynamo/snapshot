@@ -113,7 +113,7 @@ func TestWaitForCertificate(t *testing.T) {
 	})
 }
 
-// runUntilCleanup runs certs, as Run's manager does, until the test ends:
+// runUntilCleanup runs certs, as Run does, until the test ends:
 // certwatcher.New opens a file watcher that only the end of Start's ctx
 // closes. The cleanup waits for Start to return, before the certificate's
 // temporary directory is removed.

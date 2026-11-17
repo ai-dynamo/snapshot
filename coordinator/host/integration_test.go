@@ -31,6 +31,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -294,6 +295,32 @@ func TestRunWaitsForTheCertificate(t *testing.T) {
 	})
 }
 
+// TestRunFailureStopsCertificateWatcher fails Run after it has read its
+// certificate, before the manager starts. The file watcher must stop too.
+func TestRunFailureStopsCertificateWatcher(t *testing.T) {
+	k := startCluster(t)
+	_, err := k.admin.CoreV1().Namespaces().List(t.Context(), metav1.ListOptions{})
+	require.NoError(t, err)
+	existing := goleak.IgnoreCurrent()
+	dir := t.TempDir()
+	_, cert := testcert.New(t)
+	writeCert(t, dir, cert)
+	err = Run(t.Context(), Config{
+		RESTConfig:     k.cfg,
+		Node:           node,
+		ServiceAccount: agents,
+		Audience:       audience,
+		Host:           "127.0.0.1",
+		Port:           freePort(t),
+		HealthPort:     freePort(t),
+		TLSDir:         dir,
+		MaxBytes:       -1,
+		Log:            logr.Discard(),
+	})
+	require.ErrorContains(t, err, "limits cannot be negative")
+	goleak.VerifyNone(t, existing)
+}
+
 // TestRunServesHealthFirst starts Run while the API server holds its read of
 // the ServiceAccount issuer. Run is live but not ready meanwhile. Once the
 // read fails, Run returns that error, with its health port closed.
@@ -326,6 +353,32 @@ func TestRunServesHealthFirst(t *testing.T) {
 	issuer.fail()
 	require.ErrorContains(t, r.wait(t), "read the ServiceAccount token issuer")
 	require.True(t, closed(health), "the health port is still open")
+}
+
+// TestRunStoppedWhileReadingIssuer stops Run while the issuer request is
+// pending. Stopping the coordinator is not a startup error.
+func TestRunStoppedWhileReadingIssuer(t *testing.T) {
+	k := startCluster(t)
+	issuer := k.holdIssuer(t)
+	r := start(t, Config{
+		RESTConfig:     issuer.config,
+		Node:           node,
+		ServiceAccount: agents,
+		Audience:       audience,
+		Host:           "127.0.0.1",
+		Port:           freePort(t),
+		HealthPort:     freePort(t),
+		TLSDir:         t.TempDir(),
+		Log:            logr.Discard(),
+	})
+	select {
+	case <-issuer.requested:
+	case <-r.done:
+		t.Fatalf("Run returned: %v", r.err)
+	case <-time.After(timeout):
+		t.Fatal("Run did not read the issuer")
+	}
+	require.NoError(t, r.stop(t))
 }
 
 // cluster is the test's API server.
