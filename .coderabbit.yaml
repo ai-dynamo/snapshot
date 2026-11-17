@@ -72,7 +72,8 @@ reviews:
       prompt: |
         After a merge into main, check CHANGELOG.md for a missing entry about
         a notable user-facing change in the merged PR. Skip changes already
-        covered, internal refactors, tests, and CI-only changes.
+        covered in CHANGELOG.md or in an open follow-up PR, internal
+        refactors, tests, and CI-only changes.
         Follow the existing format and add only under Unreleased.
         Verify the entry against the merged code. State compatibility changes
         and required upgrade actions when relevant.
