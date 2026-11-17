@@ -244,9 +244,10 @@ day: the longest `deadlineSeconds` of a `PodGroupRestore`. A target's container
 starts only after the `PodGroupRestore` exists, so the probe cannot expire
 before the restore's deadline. That is safe because the probe never decides the
 outcome: the node agent fails a member at its deadline and stops the workload,
-and the probe only holds the container back until the agent releases it. A
-group target must carry exactly the probe of the API version it was built
-against, not the standalone one.
+and the probe only holds the container back until the agent releases it. The
+operator and the agent require a group target's `failureThreshold` multiplied
+by `periodSeconds` to allow at least the longest group deadline. Every other
+field must match the restore probe. The builder uses 86,400 one-second failures.
 
 Name the destination container in the `PodGroupRestore`, in the target's
 `containerMappings`. The operator claims the Pod in one patch: it writes
