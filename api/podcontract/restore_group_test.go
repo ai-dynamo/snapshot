@@ -79,7 +79,7 @@ func TestBuildGroupTargetShapesTheDestination(t *testing.T) {
 			t.Fatalf("%s = %q, want %q", name, got, SnapshotControlMountPath)
 		}
 	}
-	if !reflect.DeepEqual(server.StartupProbe, canonicalRestoreStartupProbe(v1alpha1.PodGroupMaxDeadlineSeconds)) {
+	if !reflect.DeepEqual(server.StartupProbe, canonicalRestoreStartupProbe(groupRestoreStartupFailureThreshold)) {
 		t.Fatalf("a group target lacks the restore startup probe: %#v", server.StartupProbe)
 	}
 	if server.SecurityContext == nil ||
@@ -111,7 +111,7 @@ func TestBuildGroupTargetAlwaysAddsTheStartupProbe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildGroupTarget() failed: %v", err)
 	}
-	want := canonicalRestoreStartupProbe(v1alpha1.PodGroupMaxDeadlineSeconds)
+	want := canonicalRestoreStartupProbe(groupRestoreStartupFailureThreshold)
 	if !reflect.DeepEqual(shaped.Spec.Containers[0].StartupProbe, want) {
 		t.Fatalf("startup probe = %#v, want the restore startup probe", shaped.Spec.Containers[0].StartupProbe)
 	}
@@ -126,8 +126,8 @@ func TestGroupTargetProbeBudgetIsTheLongestDeadline(t *testing.T) {
 		t.Fatalf("BuildGroupTarget() failed: %v", err)
 	}
 	probe := shaped.Spec.Containers[0].StartupProbe
-	if probe.FailureThreshold != 86400 || probe.PeriodSeconds != 1 {
-		t.Fatalf("group probe = %d failures at a period of %ds, want 86400 at 1s",
+	if probe.FailureThreshold != 86401 || probe.PeriodSeconds != 1 {
+		t.Fatalf("group probe = %d failures at a period of %ds, want 86401 at 1s",
 			probe.FailureThreshold, probe.PeriodSeconds)
 	}
 	standalone := canonicalRestoreStartupProbe(restoreStartupFailureThreshold)
@@ -311,14 +311,15 @@ func TestGroupTargetStartupProbeBudget(t *testing.T) {
 		timeout   int32
 		wantError bool
 	}{
-		{name: "the longest deadline", failures: longestDeadline, period: 1, timeout: 1},
-		{name: "a longer budget", failures: longestDeadline + 1, period: 1, timeout: 1},
-		{name: "the same budget with a longer period", failures: longestDeadline / 2, period: 2, timeout: 1},
-		{name: "a budget exceeding int32", failures: longestDeadline, period: 1 << 20, timeout: 1},
+		{name: "the minimum", failures: longestDeadline + 1, period: 1, timeout: 1},
+		{name: "a larger threshold", failures: longestDeadline + 2, period: 1, timeout: 1},
+		{name: "the longest deadline", failures: longestDeadline, period: 1, timeout: 1, wantError: true},
+		{name: "one check per day", failures: 1, period: longestDeadline, timeout: 1, wantError: true},
+		{name: "a longer period", failures: longestDeadline + 1, period: 2, timeout: 1, wantError: true},
+		{name: "a budget exceeding int32", failures: longestDeadline, period: 1 << 20, timeout: 1, wantError: true},
 		{name: "a shorter budget", failures: longestDeadline - 1, period: 1, timeout: 1, wantError: true},
-		{name: "a shorter product", failures: longestDeadline/2 - 1, period: 2, timeout: 1, wantError: true},
 		{name: "a different canonical field", failures: longestDeadline + 1, period: 1, timeout: 2, wantError: true},
-		{name: "a zero period", failures: longestDeadline, timeout: 1, wantError: true},
+		{name: "a zero period", failures: longestDeadline + 1, timeout: 1, wantError: true},
 		{name: "negative budget fields", failures: -longestDeadline, period: -1, timeout: 1, wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
