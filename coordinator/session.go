@@ -257,7 +257,7 @@ func (s *client) Barrier(ctx context.Context, name string) error {
 		return fmt.Errorf("barrier: %w", err)
 	}
 	arrival := session.BarrierKey(name, s.member)
-	if err := s.do(ctx, func(ctx context.Context) error {
+	if err := s.write(ctx, func(ctx context.Context) error {
 		_, err := s.control.kv.Put(ctx, arrival, nil)
 		return err
 	}); err != nil {
@@ -283,7 +283,7 @@ func (s *client) Barrier(ctx context.Context, name string) error {
 // Leave implements Session.
 func (s *client) Leave(ctx context.Context) error {
 	left := session.LeftKey(s.member)
-	err := s.do(ctx, func(ctx context.Context) error {
+	err := s.write(ctx, func(ctx context.Context) error {
 		_, err := s.control.kv.Put(ctx, left, nil)
 		return err
 	})
@@ -318,6 +318,21 @@ func (s *client) Fail(ctx context.Context, reason string) error {
 // done. Each try is bounded by attemptTimeout and by a disconnect.
 func (s *client) do(ctx context.Context, op func(context.Context) error) error {
 	return s.retry(ctx, func(ctx context.Context) error { return s.try(ctx, op) })
+}
+
+// write runs op, which writes to the session, as do does, but sends it, the
+// first time and every time again, only once settleToWrite returns. After a
+// reconnect, the attempt's buckets may hold a session the member never joined:
+// one the coordinator recreated after a restart, under the same names. The
+// verification of the reconnect then ends this session with
+// session.ErrCoordinatorLost, and the write is never sent.
+func (s *client) write(ctx context.Context, op func(context.Context) error) error {
+	return s.retry(ctx, func(ctx context.Context) error {
+		if err := s.settleToWrite(ctx); err != nil {
+			return err
+		}
+		return s.try(ctx, op)
+	})
 }
 
 // retry sends an operation through send, which tries it once, as do describes.

@@ -223,7 +223,7 @@ func (st *store) Delete(ctx context.Context, key string) error {
 	if err != nil {
 		return err
 	}
-	return st.s.do(ctx, func(ctx context.Context) error {
+	return st.s.write(ctx, func(ctx context.Context) error {
 		err := st.b.kv.Delete(ctx, k, jetstream.LastRevision(found.revision))
 		if errors.Is(err, jetstream.ErrKeyRevisionMismatch) {
 			// The value found is gone: an earlier try deleted it and its

@@ -4,15 +4,21 @@
 package sessiontest
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/coordinator"
+	"github.com/ai-dynamo/snapshot/coordinator/internal/backoff"
+	"github.com/ai-dynamo/snapshot/coordinator/server"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // TestReconnect breaks a member's connection while it waits: the client
@@ -194,6 +200,35 @@ func TestCoordinatorLost(t *testing.T) {
 		assert.Equal(t, session.ReasonCoordinatorLost, abort.Reason)
 	})
 
+	t.Run("a member that reconnects before its session is recreated never writes to it", func(t *testing.T) {
+		for _, tt := range []struct {
+			name  string
+			write func(context.Context, coordinator.Session) error
+			// bucket and key are where the write would land.
+			bucket func(attempt string) string
+			key    string
+		}{
+			{"Barrier", func(ctx context.Context, s coordinator.Session) error { return s.Barrier(ctx, "admitted") },
+				session.ControlBucket, session.BarrierKey("admitted", "member-0")},
+			{"Leave", func(ctx context.Context, s coordinator.Session) error { return s.Leave(ctx) },
+				session.ControlBucket, session.LeftKey("member-0")},
+			{"Fail", func(ctx context.Context, s coordinator.Session) error { return s.Fail(ctx, session.ReasonRefused) },
+				session.ControlBucket, session.KeyEnded},
+			{"Insert", func(ctx context.Context, s coordinator.Session) error {
+				return s.Snapshot().Insert(ctx, "ip.0", []byte("10.0.0.1"))
+			}, session.SnapshotBucket, string(session.NamespaceSnapshot) + ".ip.0"},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				h, ses, err := writeBeforeRecreated(t, tt.write)
+				_, got := ses.rawBucket(t, 1, tt.bucket(string(ses.spec.UID))).Get(within(t), tt.key)
+				require.ErrorIs(t, got, jetstream.ErrKeyNotFound, "the write reached the recreated session")
+				assert.Equal(t, []string{"opened"}, h.events(ses.spec),
+					"the recreated session must stay open: the member reconnected before it existed")
+				require.ErrorIs(t, err, session.ErrCoordinatorLost)
+			})
+		}
+	})
+
 	t.Run("a session that ended stays ended", func(t *testing.T) {
 		h := newHarness(t)
 		ctx := within(t)
@@ -202,6 +237,84 @@ func TestCoordinatorLost(t *testing.T) {
 		h.restart()
 		require.ErrorIs(t, s.Err(), &session.AbortError{Reason: session.ReasonRefused})
 	})
+}
+
+// writeBeforeRecreated has member-0 of a session of two write, with write,
+// while the coordinator restarts and admits members before the host has
+// recreated the session. The member is admitted to no session, the host then
+// recreates it, and only then does the member's reconnect end. It returns the
+// harness, the session, and what write returned.
+func writeBeforeRecreated(t *testing.T,
+	write func(context.Context, coordinator.Session) error) (*harness, *testSession, error) {
+	t.Helper()
+	// The member's reconnect stays held for hold once the session has been
+	// recreated. It outlasts the longest wait between two tries, so the
+	// member's next try is pending when the reconnect ends. It stays well
+	// under ClientConnectTimeout, which nats.go applies to the whole
+	// handshake. Past it, the member would reconnect to the recreated
+	// session, and admit would fail that session.
+	waits := backoff.New()
+	longest := time.Duration(float64(waits.Cap) * (1 + waits.Jitter))
+	hold := longest * 3 / 2
+	require.Less(t, 2*hold, coordinator.ClientConnectTimeout,
+		"a reconnect held for %s must end well within the client's %s handshake", hold,
+		coordinator.ClientConnectTimeout)
+
+	// Once stall holds a proxy, the next member authorized for an attempt
+	// the coordinator holds no session for stops receiving what the
+	// coordinator sends through that proxy. stalled then receives how many
+	// bytes the coordinator had sent through it until then.
+	var stall atomic.Pointer[proxy]
+	stalled := make(chan int64, 1)
+	h := newHarness(t, func(cfg *server.Config) {
+		next := cfg.Authorizer
+		cfg.Authorizer = authorizerFunc(func(ctx context.Context, uid types.UID, member, token string,
+			held bool) error {
+			if !held {
+				if p := stall.Swap(nil); p != nil {
+					p.hold()
+					stalled <- p.sent.Load()
+				}
+			}
+			return next.Authorize(ctx, uid, member, token, held)
+		})
+	})
+	ctx := within(t)
+	ses := h.session(t, 2)
+	s := ses.connect(t, 0)
+	// The member writes while it reconnects, so the session tries to send
+	// the write again until the member has reconnected.
+	h.replace()
+	written := make(chan error, 1)
+	go func() { written <- write(ctx, s) }()
+	requireWaiting(t, written)
+	stall.Store(ses.proxies[0])
+	h.srv.MarkReady()
+	var sent int64
+	select {
+	case sent = <-stalled:
+	case <-ctx.Done():
+		t.Fatal("the member did not reconnect")
+	}
+	// The coordinator answers the connection once it has admitted it, to no
+	// session. The member's reconnect ends with that answer.
+	require.Eventually(t, func() bool { return ses.proxies[0].sent.Load() > sent }, 10*time.Second,
+		5*time.Millisecond, "the coordinator did not answer the member's connection")
+	require.NoError(t, h.srv.Ensure(ctx, ses.spec))
+	// A try that does not wait for the verification of the reconnect blocks
+	// on nats.go's lock of the connection through the handshake. It sends
+	// the write the moment the handshake ends, while the verification starts
+	// only once nats.go has reported the reconnect, and takes two round
+	// trips.
+	requireWaitingFor(t, written, hold)
+	ses.proxies[0].release()
+	select {
+	case err := <-written:
+		return h, ses, err
+	case <-ctx.Done():
+		t.Fatal("the write did not return")
+		return nil, nil, nil
+	}
 }
 
 // TestRemoved removes a session under its connected members. Each member learns

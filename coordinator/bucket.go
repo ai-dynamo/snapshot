@@ -64,7 +64,7 @@ func (s *client) create(ctx context.Context, b bucket, key string, value []byte,
 	cost readCost) (bool, []byte, error) {
 	var revision uint64
 	for {
-		err := s.do(ctx, func(ctx context.Context) error {
+		err := s.write(ctx, func(ctx context.Context) error {
 			_, err := b.kv.Update(ctx, key, value, revision)
 			if errors.Is(err, jetstream.ErrKeyExists) {
 				return session.ErrExists
