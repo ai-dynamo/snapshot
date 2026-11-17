@@ -48,9 +48,9 @@ type attempt struct {
 	// True, or every member is in a final phase.
 	final bool
 
-	// failed reports whether a member is in the Failed phase. The member's
-	// reason stays in its status.
-	failed bool
+	// failureReason is a Failed member's session reason, or empty when none
+	// has failed. An attempt-wide reason takes precedence over Refused.
+	failureReason string
 
 	// deleting reports whether the resource's deletion has started.
 	deleting bool
@@ -72,7 +72,9 @@ func captureAttempt(group *v1alpha1.PodGroupSnapshot) attempt {
 		a.memberWork = a.memberWork || status.PodSnapshot != nil
 		everyFinal = everyFinal &&
 			(status.Phase == v1alpha1.CheckpointPhaseCheckpointed || status.Phase == v1alpha1.CheckpointPhaseFailed)
-		a.failed = a.failed || status.Phase == v1alpha1.CheckpointPhaseFailed
+		if status.Phase == v1alpha1.CheckpointPhaseFailed {
+			a.recordFailure(status.Reason)
+		}
 	}
 	a.final = a.final || everyFinal
 	return a
@@ -115,10 +117,26 @@ func restoreAttempt(restore *v1alpha1.PodGroupRestore, snapshot *v1alpha1.PodGro
 		a.memberWork = a.memberWork || status.Pod != nil
 		everyFinal = everyFinal &&
 			(status.Phase == v1alpha1.RestorePhaseReleased || status.Phase == v1alpha1.RestorePhaseFailed)
-		a.failed = a.failed || status.Phase == v1alpha1.RestorePhaseFailed
+		if status.Phase == v1alpha1.RestorePhaseFailed {
+			a.recordFailure(status.Reason)
+		}
 	}
 	a.final = a.final || everyFinal
 	return a, true
+}
+
+// recordFailure keeps the first attempt-wide reason, falling back to Refused
+// for a member's own reason.
+func (a *attempt) recordFailure(reason string) {
+	if a.failureReason != "" && a.failureReason != session.ReasonRefused {
+		return
+	}
+	switch reason {
+	case session.ReasonDeadlineExceeded, session.ReasonCoordinatorLost, session.ReasonCancelled:
+		a.failureReason = reason
+	default:
+		a.failureReason = session.ReasonRefused
+	}
 }
 
 // rankedTargets returns the IDs of a restore's targets in rank order, their

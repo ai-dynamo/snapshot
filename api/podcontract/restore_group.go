@@ -5,6 +5,7 @@ package podcontract
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -91,14 +92,38 @@ func groupTargetDestination(request GroupTargetRequest) (string, error) {
 }
 
 // validateGroupTarget checks the destinations of a group target: the minimum
-// protocol, the startup probe that BuildGroupTarget adds, and the seccomp
-// profile that options ask for.
+// protocol, a restore startup probe that allows the longest deadline, and the
+// seccomp profile that options ask for.
 func validateGroupTarget(spec *corev1.PodSpec, destinations []string, options Options) error {
 	if err := validateRestoreDestinations(spec, destinations); err != nil {
 		return err
 	}
-	options.EnableStartupGate = true
-	return validateCanonicalDestinations(spec, destinations, options, v1alpha1.PodGroupMaxDeadlineSeconds)
+	for _, name := range destinations {
+		container := findContainer(spec, name)
+		if err := validateGroupRestoreStartupProbe(container); err != nil {
+			return err
+		}
+		if err := validateContainerSeccompProfile(container, options.SeccompProfile); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateGroupRestoreStartupProbe keeps the restore probe's canonical fields
+// except its failure threshold and period, whose product must allow the
+// longest group deadline.
+func validateGroupRestoreStartupProbe(container *corev1.Container) error {
+	probe := container.StartupProbe
+	if probe != nil && probe.FailureThreshold > 0 && probe.PeriodSeconds > 0 &&
+		int64(probe.FailureThreshold)*int64(probe.PeriodSeconds) >= int64(v1alpha1.PodGroupMaxDeadlineSeconds) {
+		expected := canonicalRestoreStartupProbe(probe.FailureThreshold)
+		expected.PeriodSeconds = probe.PeriodSeconds
+		if reflect.DeepEqual(probe, expected) {
+			return nil
+		}
+	}
+	return fmt.Errorf("container %q has a conflicting restore startup gate", container.Name)
 }
 
 // HasRestoreGroupGate reports whether pod still carries

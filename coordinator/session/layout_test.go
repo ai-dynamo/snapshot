@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -170,4 +171,6 @@ func TestMaxPending(t *testing.T) {
 	assert.LessOrEqual(t, ReplyHeadroom, PayloadHeadroom)
 	replies := int64(MaxConcurrentGets*(MaxValue+ReplyHeadroom) + MaxLibraryValue + ReplyHeadroom)
 	assert.LessOrEqual(t, replies, MaxPending(MaxValue))
+	assert.LessOrEqual(t, MaxPending(MaxValue), int64(nats.DefaultSubPendingBytesLimit),
+		"the reads must fit the client's shared reply subscription")
 }

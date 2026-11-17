@@ -125,7 +125,9 @@ type Config struct {
 	// ending: the control keys are in file storage, which MaxBytes also bounds,
 	// for the control buckets of every session together. It defaults to
 	// DefaultMaxBytes, and must hold the control bucket of a session of
-	// session.MaxMembers, so that every group's session can open.
+	// session.MaxMembers. Concurrent sessions reserve their control buckets, so
+	// MaxBytes divided by session.ControlBytes(members) bounds how many sessions
+	// of that size can open.
 	//
 	// MaxBytes is not the coordinator's whole memory. The process also holds,
 	// for each connection, up to session.MaxPending(MaxValue) bytes of what
@@ -184,9 +186,13 @@ func (cfg Config) withDefaults() (Config, error) {
 	case cfg.MaxBytes < 0, cfg.MaxValue < 0, cfg.MaxLibraryValue < 0, cfg.MaxLibraryKeys < 0,
 		cfg.Grace < 0:
 		return cfg, fmt.Errorf("a coordinator's limits cannot be negative: %w", session.ErrInvalid)
-	case cfg.MaxValue > 1<<30, cfg.MaxLibraryValue > cfg.MaxValue:
-		return cfg, fmt.Errorf("the largest values must not exceed 1 GiB, nor the library's the Snapshot's: %w",
-			session.ErrInvalid)
+	case cfg.MaxValue > session.MaxValue:
+		return cfg, fmt.Errorf("MaxValue must not exceed %d bytes, so concurrent reads fit the client's buffer: %w",
+			session.MaxValue, session.ErrInvalid)
+	case cfg.MaxLibraryValue > cfg.MaxValue:
+		return cfg, fmt.Errorf("the library's largest value must not exceed the Snapshot's: %w", session.ErrInvalid)
+	case cfg.MaxBytes < int64(cfg.MaxValue):
+		return cfg, fmt.Errorf("MaxBytes must hold MaxValue, at least %d bytes: %w", cfg.MaxValue, session.ErrInvalid)
 	case cfg.MaxBytes < session.ControlBytes(session.MaxMembers):
 		return cfg, fmt.Errorf("MaxBytes must be at least %d bytes, the control bucket of a session of %d members: %w",
 			session.ControlBytes(session.MaxMembers), session.MaxMembers, session.ErrInvalid)
