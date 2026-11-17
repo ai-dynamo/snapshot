@@ -9,6 +9,7 @@ import (
 
 	"github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
+	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -45,10 +46,10 @@ const (
 	restoreKind  = "PodGroupRestore"
 )
 
-// request names one group resource: by kind, namespace and name, for the logs
-// and the startup's errors, and by UID, which the reconciler reads its attempt
-// by. Once the resource is gone, or another UID has taken its name, the UID
-// finds no attempt, and the reconciler removes the session.
+// request names one group resource: by kind, namespace and name, for the logs,
+// and by UID, which the reconciler reads its attempt by. Once the resource is
+// gone, or another UID has taken its name, the UID finds no attempt, and the
+// reconciler removes the session.
 type request struct {
 	kind string
 	types.NamespacedName
@@ -58,6 +59,12 @@ type request struct {
 // requestFor returns the request of a group resource of kind.
 func requestFor(kind string, obj client.Object) request {
 	return request{kind: kind, NamespacedName: client.ObjectKeyFromObject(obj), uid: obj.GetUID()}
+}
+
+// logger returns log with the values that name req's group resource and
+// attempt.
+func (req request) logger(log logr.Logger) logr.Logger {
+	return log.WithValues("kind", req.kind, "namespace", req.Namespace, "name", req.Name, "attempt", req.uid)
 }
 
 // Attempts reads the attempts of the group resources in a manager's cache, by

@@ -124,8 +124,8 @@ const (
 	RestorePhaseAdmitted RestorePhase = "Admitted"
 	// RestorePhaseRestoring means the member's processes are being restored.
 	RestorePhaseRestoring RestorePhase = "Restoring"
-	// RestorePhaseReleased means the member's processes were restored and
-	// released to run.
+	// RestorePhaseReleased means the member reached its release point, its
+	// restore-complete, and any postRestore notification has also succeeded.
 	RestorePhaseReleased RestorePhase = "Released"
 	// RestorePhaseFailed means the member's restore failed; the member's reason
 	// says why.

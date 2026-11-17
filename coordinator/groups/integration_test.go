@@ -928,6 +928,45 @@ func TestRestart(t *testing.T) {
 	}
 }
 
+// TestRestartWithoutRoom covers a host that starts while two attempts are in
+// flight whose control buckets do not fit in the coordinator's file store
+// together. The startup ensures one session and marks the coordinator ready
+// all the same. Once the held session's group is deleted, the controller
+// ensures the other, since the startup has returned by then.
+func TestRestartWithoutRoom(t *testing.T) {
+	here := nodes(t, 1)[0]
+	members := make([]member, session.MaxMembers)
+	for i := range members {
+		members[i] = member{id: fmt.Sprintf("m%d", i), node: here}
+	}
+	groups := make([]*v1alpha1.PodGroupSnapshot, 2)
+	for i := range groups {
+		g := createCapture(t, members, true, false)
+		// Another run of the test serves the same node, and must not find it.
+		t.Cleanup(func() { assert.NoError(t, client.IgnoreNotFound(k8s.Delete(context.Background(), g))) })
+		groups[i] = g
+	}
+
+	// Room for the control bucket of one session of the largest membership.
+	coord := coordinatortest.StartUnready(t, func(cfg *server.Config) {
+		cfg.MaxBytes = session.ControlBytes(session.MaxMembers)
+	})
+	h := startHost(t, here, coord)
+	require.Eventually(t, coord.Ready, timeout, 10*time.Millisecond)
+	held := slices.IndexFunc(groups, func(g *v1alpha1.PodGroupSnapshot) bool {
+		_, holds := coord.Ended(g.UID)
+		return holds
+	})
+	require.GreaterOrEqual(t, held, 0, "the coordinator must hold one of the sessions")
+	waiting := groups[1-held]
+	// The file store has room for one control bucket only.
+	_, holds := coord.Ended(waiting.UID)
+	require.False(t, holds, "the coordinator must not hold the other session")
+
+	require.NoError(t, k8s.Delete(within(t), groups[held]))
+	h.awaitHeld(t, waiting.UID, true)
+}
+
 // logLines records every log line.
 type logLines struct {
 	mu    sync.Mutex
