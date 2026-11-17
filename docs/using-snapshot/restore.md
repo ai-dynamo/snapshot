@@ -120,8 +120,8 @@ It prints `True`. If the restore does not complete, see
 ## When the Restored Process Exits
 
 The supported frameworks use a Deployment, which starts a container again when
-its process exits. The agent then restores the container again from the same
-`PodSnapshot`. See
+its process exits. On a node with the restore proxy, the agent then restores
+the container again from the same `PodSnapshot`. See
 [When a Container Starts Again](../reference/restore-pod-contract.md#when-a-container-starts-again).
 
 ## Generate Restore Pods Programmatically
