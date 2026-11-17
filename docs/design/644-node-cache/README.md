@@ -74,7 +74,6 @@ This proposal excludes these features:
   placement).
 - User-facing commands to preheat or delete cached copies.
 - A single cluster-wide inventory of cached copies.
-- Tracking which restores read a cached copy.
 - Content checksums and automatic recovery from a damaged copy.
 - Evicting copies of live snapshots to free space.
 - Checking that the configured path is on the intended disk.
@@ -105,7 +104,8 @@ existing ones.
 
 Each copy belongs to its `PodSnapshotContent`. The node removes the copy
 after that object is deleted, or when no policy selects the snapshot for the
-node any more. Checks at startup and at intervals catch missed changes.
+node any more. A copy that a restore on the node reads is removed after that
+restore ends. Checks at startup and at intervals catch missed changes.
 
 Each node reports its cache in a **cache status** object: the space used, the
 state of each snapshot, and any failure.
@@ -116,12 +116,12 @@ This proposal has these limitations:
 
 - **Missing cache directory:** With caching enabled, a missing directory
   prevents the agent Pod from starting, including for shared-storage restores.
+  The Pod stays in `ContainerCreating`, and its events name the missing path.
   Prepare each node first; see node preparation in [API](#api).
-- **Removal during a restore:** Cleanup does not track the restores that
-  read a copy. A restore that reads a copy can break in three cases: the
-  snapshot is deleted, a policy change stops selecting it for the node, or
-  the copy is removed by hand. Administrators must wait for those restores to
-  finish first.
+- **Removal by hand during a restore:** Cleanup waits for the restores that
+  read a copy, as described in [Cleanup](#cleanup). A copy that is removed by
+  hand has no such protection, and a restore that reads it can break.
+  Administrators must wait for those restores to finish first.
 - **Restore interference:** Preheat shares storage, the network, the disk,
   and the S3 transfer session with restores. Preheat must meet the failure
   isolation and slowdown gates in [Graduation Criteria](#graduation-criteria).
@@ -175,8 +175,9 @@ directories under `storage.nodeCache.hostPath`:
 - `.preheat/` is PageBroker's staging area, with a separate temporary directory
   for each copy request. Administrator tools must not write there.
 
-Both directories are on one filesystem. PageBroker publishes a copy in one
-step and never exposes partly copied files.
+PageBroker creates both directories at startup, with access limited to its
+own user. Both directories are on one filesystem. PageBroker publishes a copy
+in one step and never exposes partly copied files.
 
 Published copies use the existing filesystem layout:
 
@@ -196,9 +197,10 @@ The design has three kinds of checks:
   permissions, and empty directories. With S3, the list comes from
   `index.json`. With a shared filesystem, PageBroker builds the list from the
   source directory, and no S3 index is needed.
-- **Content integrity:** not checked. The proposal has no checksums and no
-  full content scan before a restore. Identity and completeness checks cannot
-  detect all damaged file contents.
+- **Content integrity:** not checked. A check would read every cached file
+  before each restore, so the proposal has no checksums and no full content
+  scan. Identity and completeness checks cannot detect all damaged file
+  contents.
 
 A published copy never changes. A copy from a shared filesystem holds
 independent files, with no links to shared storage and no files moved from it.
@@ -301,13 +303,13 @@ startup recovery blocks new preheats on that node.
 
 1. PageBroker confirms the shared-storage binding and checks
    [Cache Capacity](#cache-capacity).
-2. PageBroker copies the snapshot into `.preheat/` under a deadline and
-   validates the files.
+2. PageBroker copies the snapshot into `.preheat/` under a deadline,
+   validates the files, and flushes them to disk.
 3. The agent checks again that the `PodSnapshotContent` has the same UID, is
    Ready, has no deletion timestamp, and is still selected for this node.
 4. PageBroker publishes the copy in one step, without overwriting an existing
    copy.
-5. PageBroker reports success after the copy is durable.
+5. PageBroker reports success after the publication is durable.
 
 If the check in step 3 fails or its result is unknown, the agent cancels the
 copy. [Cleanup](#cleanup) removes a copy whose snapshot is deleted or no
@@ -317,7 +319,8 @@ Publication requires a complete, validated copy, an unexpired request, and
 cleanup that has not started. PageBroker runs publication, cancellation, and
 cleanup of one request one at a time, and cleanup waits for a publication that
 is underway. If step 5 fails after the copy became visible, PageBroker
-reports failure and keeps the copy. That copy might not survive a node crash.
+reports failure and keeps the copy. After a node crash, that copy can be
+missing, but it is never partial: its files reached the disk in step 2.
 
 The following diagram shows one preheat.
 
@@ -326,7 +329,7 @@ flowchart TD
     A{"Agent: snapshot eligible?"} -->|No| S["Skip this attempt"]
     A -->|Yes| B{"PageBroker: fits within<br/>the cache size limit?"}
     B -->|No| S
-    B -->|Yes| C["PageBroker copies and<br/>validates the files"]
+    B -->|Yes| C["PageBroker copies, validates,<br/>and flushes the files"]
     C -->|Failed or cancelled| X["PageBroker stops writers and<br/>removes temporary files"]
     C -->|Complete| D{"Agent: snapshot<br/>still eligible?"}
     D -->|No or unknown| X
@@ -394,8 +397,8 @@ Each pass follows these steps:
 2. The agent then reads a current, complete list of `PodSnapshotContent`
    objects from the API server. It also reads the cache policies and its
    Node.
-3. For each copy whose snapshot is gone or no longer selected, the agent asks
-   PageBroker to remove the copy.
+3. For each copy whose snapshot is gone or no longer selected, and that no
+   restore on this node reads, the agent asks PageBroker to remove the copy.
 4. PageBroker removes the copy and reports the result.
 
 The following diagram shows one pass.
@@ -407,7 +410,9 @@ flowchart TD
     C -->|No| N["Remove nothing and<br/>check again later"]
     C -->|Yes| D{"Snapshot exists and is<br/>selected for this node?"}
     D -->|Yes or unknown| K["Keep the copy"]
-    D -->|No| R["PageBroker removes the copy"]
+    D -->|No| U{"A restore on this node<br/>reads the copy?"}
+    U -->|Yes| K
+    U -->|No| R["PageBroker removes the copy"]
 ```
 
 These rules keep a pass safe:
@@ -416,6 +421,11 @@ These rules keep a pass safe:
   requests no removal. If the agent cannot read the policies or its Node, it
   removes only copies whose snapshot is confirmed deleted.
 - **New copies:** A copy published after step 1 waits for the next pass.
+- **Copies in use:** The agent keeps, in memory, the restores that read a
+  local copy, from source selection until the restore ends. A pass skips a
+  copy in use, and a later pass removes it. The agent never selects a copy
+  for a restore while it requests the removal of that copy. An agent restart
+  interrupts restores, so the agent does not store this list.
 - **Failed removal:** If a removal fails or its reply is lost, the next pass
   checks again and retries. A copy that is already absent counts as removed.
 
@@ -440,21 +450,23 @@ node. Follow these steps:
 **Recover from a temporary cleanup failure.** Fix the cause, then restart
 PageBroker with the steps above.
 
-**Retry preheat after retries are exhausted.** Fix the cause, then restart
-the agent with the steps above.
+**Retry preheat after retries are exhausted.** Fix the cause. To retry one
+snapshot, remove it from the cache policy for the node and select it again.
+To retry every snapshot on the node, restart the agent with the steps above.
 
 **Remove copies from a node.** Change or delete the cache policy so that it
-no longer selects the snapshot for the node. Wait for restores that read the
-copy to finish first.
+no longer selects the snapshot for the node. The agent removes each copy
+after the restores that read it end.
 
 **Remove a damaged copy.** Wait until no restore uses the copy, then remove
 its directory under `artifacts/`.
 
 **Disable preheat or caching.** Disabling preheat stops new attempts, and
 running work and cleanup finish. Disabling caching stops copying and local
-restores, and removes the cache mount. Cached files stay on disk until an
-administrator removes them. Disable caching before a downgrade to a version
-without the cache kinds.
+restores, and removes the cache mount. Changing `storage.nodeCache.enabled`
+in either direction restarts the agent Pods, so follow the restart steps
+above. Cached files stay on disk until an administrator removes them. Disable
+caching before a downgrade to a version without the cache kinds.
 
 **Place a copy.** Administrators can place copies with their own tools, with
 or without preheat enabled. A placed copy follows the same restore and
@@ -473,9 +485,10 @@ Then follow these steps:
 1. Build the complete copy in a temporary directory on the cache filesystem,
    outside `artifacts/` and `.preheat/`. Your tool manages its own temporary
    files.
-2. Rename the directory into the published path in one atomic operation,
+2. Flush the files to disk.
+3. Rename the directory into the published path in one atomic operation,
    without overwriting an entry.
-3. Leave the published copy unchanged.
+4. Leave the published copy unchanged.
 
 Copying files does not import a snapshot from another cluster.
 
@@ -550,7 +563,7 @@ status:
 
 These rules apply:
 
-- **Snapshot state:** Each selected snapshot has one state: `Cached`,
+- **Snapshot state:** Each listed snapshot has one state: `Cached`,
   `Copying`, `Skipped`, or `Failed`. `Skipped` and `Failed` carry a reason
   and a message.
 - **Node state:** `used` and `maxSize` show the cache size limit and its use.
@@ -558,6 +571,8 @@ These rules apply:
 - **Freshness:** The agent updates the object when the node's cache changes
   and at each periodic check. A node that is offline keeps its last status,
   and `updatedAt` shows its age.
+- **Size:** The status lists at most 500 snapshots, with cached, copying, and
+  failed snapshots first. `unlistedSnapshotCount` counts the rest.
 - **Finding a snapshot:** To see where a snapshot is cached, list these
   objects.
 
@@ -571,18 +586,17 @@ chart installs the agent permissions.
 - `storage.nodeCache.enabled`: disabled by default.
 - `storage.nodeCache.hostPath`: an existing local directory, required when
   caching is enabled.
-- `storage.nodeCache.maxSize`: the cache size limit, a required positive
-  storage quantity such as `500Gi`. Missing, invalid, zero, or negative values
-  are rejected. There is no unlimited default.
+- `storage.nodeCache.maxSize`: the cache size limit, a positive storage
+  quantity such as `500Gi`, required when caching is enabled. Missing,
+  invalid, zero, or negative values are then rejected. There is no unlimited
+  default.
 - `storage.nodeCache.preheat.enabled`: disabled by default. Preheat requires
   both switches and a cache policy.
 
 The existing `storage.type` and backend settings select the shared storage.
 
-**For discussion:** Agent and PageBroker maintainers and administrators need
-to agree on the preheat timeout and periodic-check interval, including whether
-they are configurable. These choices affect recovery time and background
-load.
+**Timing.** The agent runs its periodic checks every 10 minutes. One preheat
+copy has a deadline of 2 hours. Neither value is configurable.
 
 **Node preparation.** The administrator prepares and mounts the NVMe
 filesystem and creates the cache directory on every participating node. All
@@ -645,8 +659,9 @@ pages, and unwritten disk data still use memory.
 
 A 1 TiB snapshot set on 50 selected nodes uses about 50 TiB; on five nodes,
 about 5 TiB, plus temporary space. Each node reads its own copy from shared
-storage. Each cleanup pass adds one list request to the API server. Each node
-has one status object, and only its own agent updates it.
+storage. Each cleanup pass adds one list request to the API server, and reads
+the cache policies and the Node. Each node has one status object, and only
+its own agent updates it.
 
 **For discussion:** What memory limits and maximum restore slowdown are
 acceptable for each backend? PageBroker maintainers and workload owners
@@ -662,9 +677,9 @@ The agent already emits restore lifecycle events on the destination Pod.
 This proposal adds a Pod event that says which source the restore selected:
 the local cache or shared storage.
 
-Preheat has no restore Pod. The node agent emits its events, and they refer
-to the owning `PodSnapshotContent` by name and UID. Each event names the node
-and explains what happened:
+Preheat has no restore Pod. The node agent emits its events on the
+`PodSnapshot`, in the namespace of that `PodSnapshot`. Each event names the
+node and the `PodSnapshotContent` UID, and explains what happened:
 
 - **Normal: `PreheatCompleted`:** The copy was published.
 - **Normal: `PreheatSkipped`:** The snapshot cannot be copied now. The reason
@@ -679,11 +694,10 @@ and explains what happened:
   gives the cause and says that new preheats on the node are blocked until
   recovery.
 
-Events are stored through the Kubernetes API in the namespace named by
-`PodSnapshotContent.spec.snapshotRef.namespace`. The `PodSnapshotContent`
-itself is cluster-scoped. Administrators can list Events in that namespace
-and filter them by snapshot UID. A failure to publish an event does not change
-copying or cleanup.
+The events do not refer to the `PodSnapshotContent`: Kubernetes does not
+accept an Event in a workload namespace for a cluster-scoped object.
+Administrators list the Events of the `PodSnapshot`. A failure to publish an
+event does not change copying or cleanup.
 
 Repeated events are rate-limited. An unchanged skip does not produce an event
 on every check.
@@ -701,9 +715,10 @@ for S3, [SNEP-237](../237-s3-storage/README.md) and its download path.
 
 **Unit.** The agent's decisions are table-tested: the restore source for each
 case in [Restore Source](#restore-source), policy selection, preheat
-eligibility and order, retry counting and resets, and the cleanup decision.
-Every unknown input, such as an incomplete list or a failed policy or Node
-read, is tested to remove nothing.
+eligibility and order, retry counting and resets, and the cleanup decision,
+including a copy in use.
+An incomplete list is tested to remove nothing. A failed policy or Node read
+is tested to remove only copies of deleted snapshots.
 
 **Integration.** PageBroker runs against a real local filesystem and a
 disposable S3-compatible service. Tests interrupt a copy at each stage, by
@@ -724,6 +739,8 @@ temporary cleanup failure.
   object matches.
 - Deleting a snapshot removes its copies, including on a node whose agent was
   down.
+- Deleting a snapshot or narrowing a policy during a local restore does not
+  break that restore. The copy is removed after the restore ends.
 
 **Performance.** Tests measure preheat duration, restore latency from the
 cache and from shared storage, and peak memory, including a snapshot larger
