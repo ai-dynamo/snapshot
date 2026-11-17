@@ -124,8 +124,9 @@ issue_enrichment:
         instructions: "Apply to requests for new or improved capabilities."
       - label: documentation
         instructions: "Apply to reports of missing, incorrect, or unclear documentation."
-      - label: needs-info
-        instructions: "Apply when a bug report lacks expected and actual behavior or enough reproduction details to investigate, or a feature request lacks the problem and desired outcome. Check the full discussion first. Do not infer AI authorship or treat a short issue as incomplete when it contains the needed information."
+      # Enable this rule only after the repository has a needs-info label.
+      # - label: needs-info
+      #   instructions: "Apply when a bug report lacks expected and actual behavior or enough reproduction details to investigate, or a feature request lacks the problem and desired outcome. Check the full discussion first. Do not infer AI authorship or treat a short issue as incomplete when it contains the needed information."
 
 chat:
   auto_reply: true
