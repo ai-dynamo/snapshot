@@ -983,15 +983,15 @@ func TestDiscoverGPUsDescribePodResourcesGPUs(t *testing.T) {
 				)
 				if tc.wantErr != "" {
 					if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-						t.Fatalf("discoverGPUs() error = %v, want %q", err, tc.wantErr)
+						t.Fatalf("DiscoverGPUs() error = %v, want %q", err, tc.wantErr)
 					}
 					return
 				}
 				if err != nil {
-					t.Fatalf("discoverGPUs: %v", err)
+					t.Fatalf("DiscoverGPUs: %v", err)
 				}
 				if !reflect.DeepEqual(got, tc.want) {
-					t.Fatalf("discoverGPUs() = %#v, want %#v", got, tc.want)
+					t.Fatalf("DiscoverGPUs() = %#v, want %#v", got, tc.want)
 				}
 			})
 		}

@@ -443,6 +443,8 @@ func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podNa
 // what gets recorded does not depend on how this cluster allocates GPUs.
 // Explicit environment selections are resolved on the host; disabled legacy
 // selections inspect only container visibility, which can include CDI devices.
+// Device-plugin marker-directory selections use allocation-based discovery,
+// with the allocated GPUs ordered by the container's bus-ordered listing.
 // visible is what the container sees, from ListVisibleGPUs.
 func DiscoverGPUs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName string, env []string, visible VisibleGPULister, log logr.Logger) (compat.GPUInfo, error) {
 	if value := VisibleDevicesValue(env); value != nil && *value != "all" {
