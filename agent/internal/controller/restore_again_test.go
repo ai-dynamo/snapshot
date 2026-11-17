@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -182,32 +183,72 @@ func TestRestoreAgainFails(t *testing.T) {
 
 		require.Error(t, w.RestoreAgain(context.Background(), identity(pod), "main"))
 		assert.False(t, sawEventReason(w.clientset.(*fake.Clientset), restoreRepeatedReason))
+		assert.Equal(t, 1, w.restoreQueue.Len(), "the write can land even when it fails")
 	})
 }
 
-// Until the cache shows the new restore, the agent must not act on the ended
-// one: that would mark it handled, and the new restore would never run.
-func TestRestoreAgainWaitsForTheCache(t *testing.T) {
-	pod := withRestoredCondition(restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"}),
-		corev1.ConditionTrue, podcontract.RestoreReasonSucceeded)
-	w := makeTestController(t, pod)
-	now := time.Now()
-	w.nowFn = func() time.Time { return now }
-	cacheRestorePods(w, pod)
-	require.NoError(t, w.RestoreAgain(context.Background(), identity(pod), "main"))
+// While the cache still shows the ended restore, the agent must not act on it:
+// that would keep the restore handled, and the new one would never run.
+func TestLatestRestorePodReadsTheAPIServerWhileTheCacheShowsTheEndedRestore(t *testing.T) {
+	annotations := map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"}
+	ctx := context.Background()
 
-	processQueuedRestorePod(t, w, pod)
+	t.Run("status write landed", func(t *testing.T) {
+		pod := withRestoredCondition(restorePod(annotations), corev1.ConditionTrue, podcontract.RestoreReasonSucceeded)
+		w := makeTestController(t, pod)
+		w.markRestoreHandled(pod)
+		cacheRestorePods(w, pod)
+		require.NoError(t, w.RestoreAgain(ctx, identity(pod), "main"))
 
-	assert.False(t, sawEventReason(w.clientset.(*fake.Clientset), restoreAlreadyCompletedReason))
-	assert.False(t, w.restoreHandled(pod))
+		current, err := w.latestRestorePod(ctx, pod)
 
-	now = now.Add(restoreAgainCacheWait)
-	processQueuedRestorePod(t, w, pod)
+		require.NoError(t, err)
+		assert.Equal(t, podcontract.RestoreReasonInProgress, restoredPodCondition(current).Reason)
+		assert.False(t, w.restoreHandled(pod))
 
-	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), restoreAlreadyCompletedReason),
-		"a status write that never showed up stops holding the Pod back")
-	_, waiting := w.restoresStartedAgain.Load(string(pod.UID))
-	assert.False(t, waiting)
+		w.markRestoreHandled(pod)
+		_, err = w.latestRestorePod(ctx, pod)
+		require.NoError(t, err)
+		assert.True(t, w.restoreHandled(pod), "a mark set after the restore started again holds")
+
+		cached, err := w.latestRestorePod(ctx, current)
+		require.NoError(t, err)
+		assert.Same(t, current, cached, "the cache shows the restore back in progress")
+		_, pending := w.restoresStartedAgain.Load(string(pod.UID))
+		assert.False(t, pending)
+		assert.True(t, w.restoreHandled(pod))
+	})
+
+	t.Run("status write failed", func(t *testing.T) {
+		pod := withRestoredCondition(restorePod(annotations), corev1.ConditionTrue, podcontract.RestoreReasonSucceeded)
+		w := makeTestController(t, pod)
+		w.markRestoreHandled(pod)
+		cacheRestorePods(w, pod)
+		w.clientset.(*fake.Clientset).PrependReactor("patch", "pods", func(clientgotesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.New("apiserver unavailable")
+		})
+		require.Error(t, w.RestoreAgain(ctx, identity(pod), "main"))
+
+		current, err := w.latestRestorePod(ctx, pod)
+
+		require.NoError(t, err)
+		assert.Equal(t, podcontract.RestoreReasonSucceeded, restoredPodCondition(current).Reason)
+		assert.True(t, w.restoreHandled(pod))
+		_, pending := w.restoresStartedAgain.Load(string(pod.UID))
+		assert.False(t, pending)
+	})
+
+	t.Run("another Pod under the name", func(t *testing.T) {
+		pod := withRestoredCondition(restorePod(annotations), corev1.ConditionTrue, podcontract.RestoreReasonSucceeded)
+		replacement := pod.DeepCopy()
+		replacement.UID = "other-uid"
+		w := makeTestController(t, replacement)
+		w.restoresStartedAgain.Store(string(pod.UID), restoreStartedAgain{at: time.Now()})
+
+		_, err := w.latestRestorePod(ctx, pod)
+
+		assert.True(t, apierrors.IsNotFound(err))
+	})
 }
 
 // A restore Pod whose restore succeeded has a destination that starts again.
@@ -246,13 +287,11 @@ func TestRestoreAgainRestoresTheDestinationThatStartedAgain(t *testing.T) {
 
 	require.NoError(t, w.RestoreAgain(context.Background(), identity(pod), "engine-1"))
 	w.RestoreContainerStarted(client.ObjectKeyFromObject(pod), pod.UID, "engine-1", "engine-1-new")
-	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
-	require.NoError(t, err)
-	processQueuedRestorePod(t, w, live)
+	processQueuedRestorePod(t, w, pod)
 
 	assert.Equal(t, []string{"engine-1-new"}, restored,
 		"only the destination that started again is restored, into its new container and not the one its status still names")
-	live, err = w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
 	require.NoError(t, err)
 	condition := restoredPodCondition(live)
 	require.NotNil(t, condition)
@@ -261,6 +300,12 @@ func TestRestoreAgainRestoresTheDestinationThatStartedAgain(t *testing.T) {
 	assert.True(t, w.restoreHandled(live))
 	_, restarted := w.restartedRestoreContainers.Load(restoreContainerKey(pod.UID, "engine-1"))
 	assert.False(t, restarted)
+
+	processQueuedRestorePod(t, w, pod)
+
+	assert.Equal(t, []string{"engine-1-new"}, restored)
+	_, pending := w.restoresStartedAgain.Load(string(pod.UID))
+	assert.False(t, pending, "the API server shows the restore ended again")
 }
 
 func TestResolveRestoreContainerIDSkipsTheStatusOfADestinationRestoredAgain(t *testing.T) {

@@ -109,8 +109,9 @@ type NodeController struct {
 	// restore destination container the NRI plugin saw start, so a restore
 	// begins before kubelet publishes the container in the Pod status.
 	startedRestoreContainers sync.Map
-	// restoresStartedAgain holds, per Pod UID, when RestoreAgain last set the
-	// Pod's restore back in progress, until the cache shows it.
+	// restoresStartedAgain holds, per Pod UID, the restoreStartedAgain that
+	// RestoreAgain left, until the cache shows the restore back in progress
+	// or the API server shows it ended.
 	restoresStartedAgain sync.Map
 	// restartedRestoreContainers holds the restoreContainerKey of each
 	// destination that RestoreAgain restores again, until a pass finds its
@@ -538,12 +539,17 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
 		requeue = true
 		return
 	}
-	pod = pod.DeepCopy()
-	panicked = pod
-	if wait := w.restoreAgainPending(pod); wait > 0 {
-		w.restoreQueue.AddAfter(key, wait)
+	pod, err = w.latestRestorePod(ctx, pod)
+	if apierrors.IsNotFound(err) {
 		return
 	}
+	if err != nil {
+		w.log.Error(err, "Failed to read restore pod from the API server", "pod", key.String())
+		requeue = true
+		return
+	}
+	pod = pod.DeepCopy()
+	panicked = pod
 	if w.skipRequestedAfterRefusal(pod) {
 		// The skip request is the way back for a pod the gates turned down, so
 		// it has to clear the in-process marker as well as the condition below.

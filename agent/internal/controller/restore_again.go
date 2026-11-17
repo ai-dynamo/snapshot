@@ -9,20 +9,25 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
-const (
-	// restoreRepeatedReason is the event on a restore Pod whose restore starts
-	// again for a destination container that started again.
-	restoreRepeatedReason = "RestoreRepeated"
+// restoreRepeatedReason is the event on a restore Pod whose restore starts
+// again for a destination container that started again.
+const restoreRepeatedReason = "RestoreRepeated"
 
-	// restoreAgainCacheWait bounds how long the restore queue waits for its
-	// cache to show a restore that RestoreAgain set back in progress.
-	restoreAgainCacheWait = 30 * time.Second
-)
+// restoreStartedAgain is what RestoreAgain leaves for the restore queue.
+type restoreStartedAgain struct {
+	at time.Time
+	// handledCleared is set once a pass has cleared the handled mark that the
+	// ended restore left, so a mark set after that, such as after a panic,
+	// holds.
+	handledCleared bool
+}
 
 // RestoreEnded reports whether the Pod's restore has ended, whatever its
 // outcome. A destination container that starts again then is restored again
@@ -47,36 +52,53 @@ func (w *NodeController) RestoreAgain(ctx context.Context, pod *corev1.Pod, cont
 		return fmt.Errorf("restore Pod %s/%s has UID %s, not %s", pod.Namespace, pod.Name, current.UID, pod.UID)
 	}
 	current = current.DeepCopy()
-	w.restoresStartedAgain.Store(string(current.UID), w.nowFn())
 	w.restartedRestoreContainers.Store(restoreContainerKey(current.UID, container), struct{}{})
 	message := fmt.Sprintf("Destination %s started again; restoring it again from PodSnapshot %s",
 		container, current.Annotations[podcontract.RestoreFromAnnotation])
-	if err := w.applyRestoredCondition(ctx, current, corev1.ConditionFalse, podcontract.RestoreReasonInProgress, message); err != nil {
+	err = w.applyRestoredCondition(ctx, current, corev1.ConditionFalse, podcontract.RestoreReasonInProgress, message)
+	// Left only after the write, which can land even when it fails: a pass
+	// that read the ended restore before the write landed would drop it.
+	w.restoresStartedAgain.Store(string(current.UID), restoreStartedAgain{at: w.nowFn()})
+	w.restoreQueue.Add(client.ObjectKeyFromObject(current))
+	if err != nil {
 		return fmt.Errorf("set the restore of Pod %s/%s back in progress: %w", pod.Namespace, pod.Name, err)
 	}
 	emitPodEvent(ctx, w.clientset, w.log, current, snapshotEventComponent, corev1.EventTypeNormal, restoreRepeatedReason, message)
-	w.restoreQueue.Add(client.ObjectKeyFromObject(current))
 	return nil
 }
 
-// restoreAgainPending returns how long the restore queue waits before acting
-// on the Pod, while its cache still shows the restore that RestoreAgain set
-// back in progress as ended. Acting on that copy would mark the restore
-// handled, and the new one would never run. Once the cache shows the new
-// restore, the mark an earlier pass left goes too. A status write that failed
-// leaves the cache as it was, which is why the wait is bounded.
-func (w *NodeController) restoreAgainPending(pod *corev1.Pod) time.Duration {
-	startedAgain, found := w.restoresStartedAgain.Load(string(pod.UID))
+// latestRestorePod returns the copy of the Pod that the restore queue acts on.
+// After RestoreAgain, the cache can still show the restore that ended. Acting
+// on that copy would keep the restore handled, and the new one would never
+// run, so until the cache shows the restore back in progress, the Pod is read
+// from the API server. The first pass that sees the restore back in progress
+// clears the handled mark that the ended restore left.
+func (w *NodeController) latestRestorePod(ctx context.Context, cached *corev1.Pod) (*corev1.Pod, error) {
+	uid := string(cached.UID)
+	value, found := w.restoresStartedAgain.Load(uid)
 	if !found {
-		return 0
+		return cached, nil
 	}
-	if isRestoreTerminal(pod) {
-		if wait := restoreAgainCacheWait - w.nowFn().Sub(startedAgain.(time.Time)); wait > 0 {
-			return wait
+	note := value.(restoreStartedAgain)
+	if !isRestoreTerminal(cached) {
+		if !note.handledCleared {
+			w.handledRestores.Delete(uid)
 		}
-	} else {
-		w.handledRestores.Delete(string(pod.UID))
+		w.restoresStartedAgain.CompareAndDelete(uid, note)
+		return cached, nil
 	}
-	w.restoresStartedAgain.CompareAndDelete(string(pod.UID), startedAgain)
-	return 0
+	current, err := w.clientset.CoreV1().Pods(cached.Namespace).Get(ctx, cached.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if current.UID != cached.UID {
+		return nil, apierrors.NewNotFound(corev1.Resource("pods"), cached.Name)
+	}
+	if isRestoreTerminal(current) {
+		w.restoresStartedAgain.CompareAndDelete(uid, note)
+	} else if !note.handledCleared {
+		w.handledRestores.Delete(uid)
+		w.restoresStartedAgain.CompareAndSwap(uid, note, restoreStartedAgain{at: note.at, handledCleared: true})
+	}
+	return current, nil
 }
