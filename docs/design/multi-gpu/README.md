@@ -778,7 +778,9 @@ At prepare, each coordinator writes its own Pod's `cuinterpose.state` when the m
 
 The attempt's deadline bounds every round.
 At restore each coordinator starts only after its own Pod's CRIU and CUDA restores, and the per-process timeouts of a step already bound each coordinator's own work, so the leader waits for replies until the deadline.
-A leader that reaches the deadline with replies missing exits without failing the session, which then ends with `DeadlineExceeded`.
+A leader that reaches the deadline with replies missing, or a follower without a command by then, does not fail the session.
+The session ends with `DeadlineExceeded` at the deadline by its own clock, which can be later than the coordinator's, so the coordinator then gets the key `<mode>.end`, which nobody inserts, until the session ends, and exits with the session's reason.
+A session that has not ended 60 seconds past the deadline is an error, which fails it as any other error does.
 A coordinator that fails ends the attempt for every member through the session.
 The reason follows the commit point: `Refused` in `--inspect`, which runs before the attempt commits, and `MemberFailed` in `--prepare` and `--restore`, which run after it.
 Every other coordinator then exits with an error, without failing the session again, and each agent handles the failure as for a single Pod.
