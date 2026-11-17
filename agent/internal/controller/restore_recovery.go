@@ -153,10 +153,7 @@ func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, recor
 	case retryInPlace:
 		backoff := restoreRetryBackoff(record.Attempt)
 		record.RetryAt = now.Add(backoff)
-		if saveErr := op.writeRestoreAttempts(op.nodeUID, record); saveErr != nil {
-			op.reportFailedAttempt(ctx, record, failure, recoveryNotRetried+saveErr.Error())
-			return op.failRestore(ctx, errors.Join(err, saveErr))
-		}
+		op.saveAttempts(record)
 		op.reportFailedAttempt(ctx, record, failure, fmt.Sprintf(recoveryRetryInPlace, backoff))
 		return errRetryScheduled
 	case retriesExhausted:
