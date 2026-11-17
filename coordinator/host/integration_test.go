@@ -31,6 +31,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -292,6 +293,32 @@ func TestRunWaitsForTheCertificate(t *testing.T) {
 		assert.Equal(t, 1, count(lines, foundLine), "logged once")
 		require.NoError(t, w.stop(t))
 	})
+}
+
+// TestRunFailureStopsCertificateWatcher fails Run after it has read its
+// certificate, before the manager starts. The file watcher must stop too.
+func TestRunFailureStopsCertificateWatcher(t *testing.T) {
+	k := startCluster(t)
+	_, err := k.admin.CoreV1().Namespaces().List(t.Context(), metav1.ListOptions{})
+	require.NoError(t, err)
+	existing := goleak.IgnoreCurrent()
+	dir := t.TempDir()
+	_, cert := testcert.New(t)
+	writeCert(t, dir, cert)
+	err = Run(t.Context(), Config{
+		RESTConfig:     k.cfg,
+		Node:           node,
+		ServiceAccount: agents,
+		Audience:       audience,
+		Host:           "127.0.0.1",
+		Port:           freePort(t),
+		HealthPort:     freePort(t),
+		TLSDir:         dir,
+		MaxBytes:       -1,
+		Log:            logr.Discard(),
+	})
+	require.ErrorContains(t, err, "limits cannot be negative")
+	goleak.VerifyNone(t, existing)
 }
 
 // TestRunServesHealthFirst starts Run while the API server holds its read of
