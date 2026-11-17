@@ -202,3 +202,16 @@ gone, delete them:
 kubectl delete secrets,configmaps --namespace snapshot \
   --selector app.kubernetes.io/managed-by=snapshot-operator
 ```
+
+Turning `podGroups.enabled` off or switching to your own certificates also leaves
+all three coordinator TLS resources, including the CA's private key. After the
+operator stops issuing certificates, delete the old resources by name:
+
+```bash
+kubectl delete secret <ca-secret-name> <serving-secret-name> --namespace <namespace>
+kubectl delete configmap <trust-bundle-name> --namespace <namespace>
+```
+
+Use the names from the operator's `--coordinator-ca-secret`,
+`--coordinator-tls-secret`, and `--coordinator-ca-bundle` flags. While the operator
+runs, the shared label selector also selects PageBroker's S3 ConfigMap.
