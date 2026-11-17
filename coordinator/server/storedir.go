@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // storeDirPrefix starts the name of a store directory New creates under the
@@ -24,8 +25,21 @@ func newStoreDir(dir string) (string, error) {
 		}
 		return dir, nil
 	}
+	// A trailing slash or dot makes Lstat follow the final symlink.
+	// Normalize before inspecting or emptying the directory.
+	dir = filepath.Clean(dir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create the store directory: %w", err)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return "", fmt.Errorf("inspect the store directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("store directory %q must not be a symlink", dir)
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); !ok || stat.Uid != uint32(os.Geteuid()) {
+		return "", fmt.Errorf("store directory %q must have effective uid %d as its owner", dir, os.Geteuid())
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
