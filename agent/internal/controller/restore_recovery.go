@@ -163,10 +163,7 @@ func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, recor
 		backoff := restoreRetryBackoff(record.Attempt)
 		record.RetryAt = now.Add(backoff)
 		record.LastFailure = failureSummary(failure)
-		if saveErr := op.writeRestoreAttempts(op.nodeUID, record); saveErr != nil {
-			op.reportFailedAttempt(ctx, record, failure, recoveryNotRetried+saveErr.Error())
-			return op.failRestore(ctx, errors.Join(err, saveErr))
-		}
+		op.saveAttempts(record)
 		op.reportFailedAttempt(ctx, record, failure, fmt.Sprintf(recoveryRetryInPlace, backoff))
 		return errRetryScheduled
 	case retriesExhausted:
@@ -181,17 +178,13 @@ func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, recor
 }
 
 // recordLastFailure saves the failure that ended the restore for the retry
-// status. It follows restore-failed and the kill, which end the restore
-// whether or not the record is saved. A restore without retries keeps no
-// record.
+// status. A restore without retries keeps no record.
 func (op *restoreOperation) recordLastFailure(record *restoreAttempts, f *executor.RestoreFailure) {
 	if record.Limit == 0 {
 		return
 	}
 	record.LastFailure = failureSummary(f)
-	if err := op.writeRestoreAttempts(op.nodeUID, record); err != nil {
-		op.log.Error(err, "Failed to save the failed attempt in the restore attempt record")
-	}
+	op.saveAttempts(record)
 }
 
 // failureSummary is a failed attempt as the retry status annotation reports

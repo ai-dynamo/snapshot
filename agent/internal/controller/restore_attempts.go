@@ -5,96 +5,127 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	ktypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
-// restoreAttemptsMaxBytes bounds the read of a record the Pod can rewrite.
-// It holds a LastFailure whose cause JSON escapes to six times its size.
-const restoreAttemptsMaxBytes = 8192
-
 // restoreAttempts is a destination container's record of its restore
-// attempts. A restore that allows retries keeps it in the container's
-// directory of the Pod's snapshot-control volume. The volume outlives
-// container restarts and goes with the Pod, so a new Pod starts a new restore.
+// attempts. A restore that allows retries keeps it in the agent's memory and
+// copies it to the Pod's retry status annotation, which a restarted agent
+// reads it back from. It goes with the Pod, so a new Pod starts a new restore.
 type restoreAttempts struct {
 	// Limit is the retry limit, resolved at the first attempt.
-	Limit int `json:"limit"`
+	Limit int
 	// Attempt is the current or last attempt, from 1.
-	Attempt int `json:"attempt"`
+	Attempt int
 	// Deadline is set at the first attempt and ends every attempt. Zero means
 	// the restore has no timeout.
-	Deadline time.Time `json:"deadline"`
+	Deadline time.Time
 	// ContainerID is the container the attempt ran in.
-	ContainerID string `json:"containerID"`
+	ContainerID string
 	// RetryAt is when an in-place retry falls due, and zero otherwise.
-	RetryAt time.Time `json:"retryAt"`
-	// LastFailure is the last failed attempt, the source of the retry status
-	// annotation.
-	LastFailure *podcontract.FailureSummary `json:"lastFailure,omitempty"`
+	RetryAt time.Time
+	// LastFailure is the last failed attempt, and nil before one failed.
+	LastFailure *podcontract.FailureSummary
 }
 
-func parseRestoreAttempts(data []byte) (*restoreAttempts, error) {
-	var record restoreAttempts
-	if err := json.Unmarshal(data, &record); err != nil {
-		return nil, err
+func attemptsFromStatus(entry podcontract.ContainerRetryStatus) restoreAttempts {
+	return restoreAttempts{
+		Limit:       entry.RetryLimit,
+		Attempt:     entry.Attempt,
+		Deadline:    entry.Deadline,
+		ContainerID: entry.ContainerID,
+		RetryAt:     entry.RetryAt,
+		LastFailure: entry.LastFailure,
 	}
-	switch {
-	case record.Attempt < 1:
-		return nil, fmt.Errorf("attempt %d is not positive", record.Attempt)
-	case record.Limit < 0:
-		return nil, fmt.Errorf("retry limit %d is negative", record.Limit)
-	case record.ContainerID == "":
-		return nil, errors.New("no container ID")
-	}
-	return &record, nil
 }
 
-// readRestoreAttempts returns the destination's attempt record, and false when
-// it has none yet. A record that cannot be read or parsed is an error: the
-// restore ends rather than grant attempts it cannot count.
-func (w *NodeController) readRestoreAttempts(nodeUID, destination string) (*restoreAttempts, bool, error) {
-	data, err := w.readPodControlFileFn(nodeUID, destination, podcontract.RestoreAttemptsFile, restoreAttemptsMaxBytes)
-	if errors.Is(err, os.ErrNotExist) {
+func (r restoreAttempts) status(podUID ktypes.UID) podcontract.ContainerRetryStatus {
+	return podcontract.ContainerRetryStatus{
+		Attempt:     r.Attempt,
+		RetryLimit:  r.Limit,
+		Deadline:    r.Deadline,
+		ContainerID: r.ContainerID,
+		RetryAt:     r.RetryAt,
+		LastFailure: r.LastFailure,
+		PodUID:      podUID,
+	}
+}
+
+// attemptSeed copies a Pod's retry status annotation into memory once, before
+// the agent loads any record of the Pod.
+type attemptSeed struct {
+	once sync.Once
+	err  error
+}
+
+// seedAttempts copies every entry the Pod's retry status annotation holds for
+// this Pod into memory, the first time the agent loads a record of the Pod, as
+// after an agent restart. Every entry is copied, so the agent's next write of
+// the annotation keeps the entries of destinations it has not restored since.
+// An entry written for another Pod, such as one copied with the Pod's
+// annotations, is skipped. An annotation that cannot be parsed is an error:
+// the restore ends rather than grant attempts it cannot count.
+func (w *NodeController) seedAttempts(pod *corev1.Pod) error {
+	value, _ := w.attemptSeeds.LoadOrStore(pod.UID, &attemptSeed{})
+	seed := value.(*attemptSeed)
+	seed.once.Do(func() {
+		status, found, err := podcontract.RestoreRetryStatusFromAnnotations(pod.Annotations)
+		if err != nil {
+			seed.err = err
+			return
+		}
+		if found {
+			// Counted as written, so a write that leaves no records still removes it.
+			w.retryStatusWritten.LoadOrStore(pod.UID, pod.Annotations[podcontract.RestoreRetryStatusAnnotation])
+		}
+		for container, entry := range status {
+			if entry.PodUID != pod.UID {
+				continue
+			}
+			if entry.ContainerID == "" {
+				seed.err = fmt.Errorf("%s entry for container %q has no container ID",
+					podcontract.RestoreRetryStatusAnnotation, container)
+				return
+			}
+			w.restoreAttemptRecords.LoadOrStore(restoreContainerKey(pod.UID, container), attemptsFromStatus(entry))
+		}
+	})
+	return seed.err
+}
+
+// loadAttempts returns the destination's attempt record, and false when it
+// has none yet.
+func (op *restoreOperation) loadAttempts() (*restoreAttempts, bool, error) {
+	if err := op.controller.seedAttempts(op.pod); err != nil {
+		return nil, false, err
+	}
+	value, found := op.controller.restoreAttemptRecords.Load(restoreContainerKey(op.pod.UID, op.destination))
+	if !found {
 		return nil, false, nil
 	}
-	if err != nil {
-		return nil, false, fmt.Errorf("read restore attempt record: %w", err)
-	}
-	record, err := parseRestoreAttempts(data)
-	if err != nil {
-		return nil, false, fmt.Errorf("restore attempt record %q is invalid: %w", podcontract.RestoreAttemptsFile, err)
-	}
-	return record, true, nil
+	record := value.(restoreAttempts)
+	return &record, true, nil
 }
 
-func (op *restoreOperation) writeRestoreAttempts(nodeUID string, record *restoreAttempts) error {
-	data, err := json.Marshal(record)
-	if err != nil {
-		return err
-	}
-	if len(data) > restoreAttemptsMaxBytes {
-		return fmt.Errorf("save restore attempt record: %d bytes is more than the %d a pass reads", len(data), restoreAttemptsMaxBytes)
-	}
-	if err := op.controller.writePodControlSentinelFn(nodeUID, op.destination, podcontract.RestoreAttemptsFile, data); err != nil {
-		return fmt.Errorf("save restore attempt record: %w", err)
-	}
-	return nil
+// saveAttempts keeps the destination's record and queues the Pod's retry
+// status annotation for a write, which runs outside the restore.
+func (op *restoreOperation) saveAttempts(record *restoreAttempts) {
+	op.controller.restoreAttemptRecords.Store(restoreContainerKey(op.pod.UID, op.destination), *record)
+	op.controller.queueRetryStatus(op.pod)
 }
 
 // startAttempt resolves the attempt about to start. A restore that allows
 // retries picks it up from the destination's record and saves it there first,
 // and gets errRetryScheduled while an in-place retry is not due. A limit of 0
-// keeps no record, so the restore reads and writes nothing through the node's
-// path, and a restarted agent starts it over with a full timeout, as before
-// retries.
+// keeps no record, so a restarted agent starts the restore over with a full
+// timeout, as before retries.
 func (op *restoreOperation) startAttempt(ctx context.Context) (*restoreAttempts, error) {
 	now := op.controller.nowFn()
 	limit, err := op.retryLimit()
@@ -123,8 +154,7 @@ func (op *restoreOperation) startAttempt(ctx context.Context) (*restoreAttempts,
 // again within the same deadline and keeps its number, as an agent restart
 // always repeated it.
 func (op *restoreOperation) saveAttempt(ctx context.Context, first *restoreAttempts, now time.Time) (*restoreAttempts, error) {
-	op.nodeUID = op.nodePodUID(ctx)
-	record, found, err := op.controller.readRestoreAttempts(op.nodeUID, op.destination)
+	record, found, err := op.loadAttempts()
 	if err != nil {
 		return nil, err
 	}
@@ -150,9 +180,7 @@ func (op *restoreOperation) saveAttempt(ctx context.Context, first *restoreAttem
 		record.RetryAt = time.Time{}
 	}
 	record.ContainerID = op.containerID
-	if err := op.writeRestoreAttempts(op.nodeUID, record); err != nil {
-		return nil, err
-	}
+	op.saveAttempts(record)
 	return record, nil
 }
 
@@ -178,34 +206,17 @@ func (op *restoreOperation) announceAttempt(ctx context.Context, record *restore
 // forgetAttempts removes the destination's record after the gates refused
 // the restore. A refusal is not an attempt, so the skip request that reopens
 // the restore starts it over with a full timeout.
-func (op *restoreOperation) forgetAttempts(ctx context.Context) {
-	if err := op.controller.removePodControlFileFn(op.nodePodUID(ctx), op.destination, podcontract.RestoreAttemptsFile); err != nil {
-		op.log.Error(err, "Failed to remove the restore attempt record after the refusal")
-	}
+func (op *restoreOperation) forgetAttempts() {
+	op.controller.restoreAttemptRecords.Delete(restoreContainerKey(op.pod.UID, op.destination))
+	op.controller.queueRetryStatus(op.pod)
 }
 
 // retryLimit is the Pod's nvidia.com/restore-retry-limit, or the agent's
 // restore.retryLimit when the Pod sets none.
 func (op *restoreOperation) retryLimit() (int, error) {
-	return op.controller.retryLimit(op.pod)
-}
-
-func (w *NodeController) retryLimit(pod *corev1.Pod) (int, error) {
-	limit, found, err := podcontract.RestoreRetryLimitFromAnnotations(pod.Annotations)
+	limit, found, err := podcontract.RestoreRetryLimitFromAnnotations(op.pod.Annotations)
 	if err != nil || found {
 		return limit, err
 	}
-	return w.config.Restore.ResolveRetryLimit(), nil
-}
-
-// nodePodUID is the Pod's UID on the node, which names the Pod's directories
-// under kubelet's. In a vCluster it differs from the Pod's own UID; the
-// runtime knows it while the container exists.
-func (op *restoreOperation) nodePodUID(ctx context.Context) string {
-	nodeUID, err := op.controller.runtime.ResolveContainerPodUID(ctx, op.containerID)
-	if err != nil {
-		op.log.V(1).Info("Cannot read the Pod's UID on the node; using its own", "error", err.Error())
-		return string(op.pod.UID)
-	}
-	return nodeUID
+	return op.controller.config.Restore.ResolveRetryLimit(), nil
 }

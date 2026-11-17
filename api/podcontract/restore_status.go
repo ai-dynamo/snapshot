@@ -6,8 +6,10 @@ package podcontract
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // RestoreOutcome is the stable, consumer-facing state of a restore request.
@@ -87,16 +89,18 @@ func ClassifyRestoreOutcome(conditions []corev1.PodCondition) RestoreOutcome {
 }
 
 // RestoreRetryStatusAnnotation is written by the node agent on a restore Pod
-// once a destination container's restore attempt fails. Its value is a JSON
-// RestoreRetryStatus. The agent never reads it back.
+// when a destination container's restore attempt starts and when it fails,
+// once the restore has a nonzero retry limit. Its value is a JSON
+// RestoreRetryStatus. A restarted agent reads it back to continue the
+// restore's attempts.
 const RestoreRetryStatusAnnotation = "nvidia.com/restore-retry-status"
 
 // FailureCauseMaxBytes bounds FailureSummary.Cause, the limit of an event
 // message.
 const FailureCauseMaxBytes = 1024
 
-// RestoreRetryStatus holds one entry per destination container with a failed
-// attempt, keyed by container name. Decode it with
+// RestoreRetryStatus holds one entry per destination container that started
+// an attempt, keyed by container name. Decode it with
 // RestoreRetryStatusFromAnnotations, which checks each entry.
 type RestoreRetryStatus map[string]ContainerRetryStatus
 
@@ -106,8 +110,18 @@ type ContainerRetryStatus struct {
 	Attempt int `json:"attempt"`
 	// RetryLimit is the limit resolved at the first attempt.
 	RetryLimit int `json:"retryLimit"`
-	// LastFailure is the last failed attempt.
-	LastFailure FailureSummary `json:"lastFailure"`
+	// LastFailure is the last failed attempt, absent until one fails.
+	LastFailure *FailureSummary `json:"lastFailure,omitempty"`
+	// RetryAt is when the next attempt is due, set while an in-place retry
+	// waits.
+	RetryAt time.Time `json:"retryAt,omitzero"`
+	// Deadline ends every attempt, set at the first attempt.
+	Deadline time.Time `json:"deadline,omitzero"`
+	// ContainerID is the container the attempt ran in.
+	ContainerID string `json:"containerID,omitempty"`
+	// PodUID is the Pod the entry was written for, so an entry copied to
+	// another Pod is not mistaken for that Pod's own.
+	PodUID types.UID `json:"podUID,omitempty"`
 }
 
 // FailureSummary says where and why a restore attempt failed.

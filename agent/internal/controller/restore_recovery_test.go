@@ -9,7 +9,6 @@ import (
 	"math"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -178,10 +177,15 @@ func TestRunRestoreRetriesInPlaceOnceEachRetryIsDue(t *testing.T) {
 	started := h.now
 
 	require.ErrorIs(t, run(), errRetryScheduled)
-	record := h.volume.record(t, "host-uid", "main")
+	record := savedAttempts(h.w, h.pod.UID, "main")
+	require.NotNil(t, record)
 	assert.Equal(t, 1, record.Attempt)
 	assert.True(t, started.Add(30*time.Second).Equal(record.RetryAt), "retry at %s", record.RetryAt)
 	assert.Empty(t, h.calls, "an attempt retried in place wrote restore-failed or killed the container")
+	writeQueuedRetryStatus(h.w)
+	status, found := publishedRetryStatus(t, h.w, h.pod)
+	require.True(t, found)
+	assert.True(t, started.Add(30*time.Second).Equal(status["main"].RetryAt), "the Pod shows a retry at %s", status["main"].RetryAt)
 
 	h.now = started.Add(29 * time.Second)
 	require.ErrorIs(t, run(), errRetryScheduled)
@@ -192,7 +196,7 @@ func TestRunRestoreRetriesInPlaceOnceEachRetryIsDue(t *testing.T) {
 	assert.Equal(t, 2, h.restores)
 	assert.Equal(t, 2, h.seen.Attempt)
 	assert.True(t, h.seen.RetryAt.IsZero(), "the attempt that started still shows a retry due")
-	record = h.volume.record(t, "host-uid", "main")
+	record = savedAttempts(h.w, h.pod.UID, "main")
 	assert.True(t, started.Add(90*time.Second).Equal(record.RetryAt), "the second wait is twice the first: retry at %s", record.RetryAt)
 
 	h.now = started.Add(90 * time.Second)
@@ -257,7 +261,7 @@ func TestRunRestoreEndsWithoutRetryingWhatNoAttemptChanges(t *testing.T) {
 func TestRunRestoreEndsWhenTheAttemptTimedOut(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		h, run := newAttemptHarness(t, retryLimit("2"), nil)
-		h.volume.put(t, "host-uid", "main", restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(50 * time.Millisecond), ContainerID: "ctr-abc"})
+		putAttempts(h.w, h.pod.UID, "main", restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(50 * time.Millisecond), ContainerID: "ctr-abc"})
 		restore := h.w.restoreFn
 		h.w.restoreFn = func(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req executor.RestoreRequest, mounter executor.RestoreMounter) (executor.RestoreResult, error) {
 			_, _ = restore(ctx, rt, log, req, mounter)
@@ -326,8 +330,8 @@ func TestRunRestoreWithoutRetriesFailsAsBefore(t *testing.T) {
 
 	assert.Same(t, failure, err)
 	assert.Equal(t, []string{"write " + podcontract.RestoreFailedFile, "kill"}, h.calls)
-	assert.Empty(t, h.volume.reads)
-	assert.Empty(t, h.volume.writes)
+	assert.Nil(t, savedAttempts(h.w, h.pod.UID, "main"))
+	assert.Zero(t, h.w.retryStatusQueue.Len())
 	assert.Equal(t, []string{"Restore requested from PodSnapshot snapshot-a for destination main"}, h.events(restoreRequestedReason))
 	assert.Empty(t, h.events(restoreAttemptFailedReason))
 	assert.Empty(t, h.events(restoreRetriesExhaustedReason))
@@ -353,7 +357,7 @@ func TestRunRestoreEndsWhenADueRetryHasNothingLeft(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			h, run := newAttemptHarness(t, retryLimit("2"), nil)
-			h.volume.put(t, "host-uid", "main", tc.record(h.now))
+			putAttempts(h.w, h.pod.UID, "main", tc.record(h.now))
 
 			err := run()
 
@@ -366,28 +370,6 @@ func TestRunRestoreEndsWhenADueRetryHasNothingLeft(t *testing.T) {
 	}
 }
 
-func TestRunRestoreEndsWhenTheRetryCannotBeSaved(t *testing.T) {
-	h, run := newAttemptHarness(t, retryLimit("2"), nil)
-	failure := untouched(storeUnreachable)
-	restore := h.w.restoreFn
-	h.w.restoreFn = func(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req executor.RestoreRequest, mounter executor.RestoreMounter) (executor.RestoreResult, error) {
-		_, _ = restore(ctx, rt, log, req, mounter)
-		h.volume.mu.Lock()
-		h.volume.writeErrs[podcontract.RestoreAttemptsFile] = syscall.ENOSPC
-		h.volume.mu.Unlock()
-		return executor.RestoreResult{}, failure
-	}
-
-	err := run()
-
-	require.ErrorIs(t, err, syscall.ENOSPC)
-	require.ErrorIs(t, err, storeUnreachable)
-	assert.Equal(t, []string{"write " + podcontract.RestoreFailedFile, "kill"}, h.calls)
-	failed := h.events(restoreAttemptFailedReason)
-	require.Len(t, failed, 1)
-	assert.Contains(t, failed[0], "not retried: save restore attempt record")
-}
-
 // A pass runs every destination of the Pod. While one waits for its retry,
 // one that already ended reports the same result without another restore.
 func TestRestorePodContainersReportsAFinishedDestinationWhileASiblingWaits(t *testing.T) {
@@ -395,8 +377,7 @@ func TestRestorePodContainersReportsAFinishedDestinationWhileASiblingWaits(t *te
 	pod.Annotations[podcontract.RestoreRetryLimitAnnotation] = "1"
 	w := makeTestController(t, pod)
 	w.config.Restore.TimeoutSeconds = 600
-	w.runtime = &fakeRuntime{resolveContainerPID: 4242, podUID: "host-uid"}
-	volume := newFakeControlVolume(w)
+	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
 	now := time.Now().UTC().Truncate(time.Second)
 	started := now
 	w.nowFn = func() time.Time { return now }
@@ -451,8 +432,8 @@ func TestRestorePodContainersReportsAFinishedDestinationWhileASiblingWaits(t *te
 	assert.Contains(t, final[len(final)-1], podcontract.RestoreReasonSucceeded)
 	assert.Len(t, eventsForReason(clientset, restoreRequestedReason), 3)
 	assert.Len(t, eventsForReason(clientset, restoreAttemptFailedReason), 1)
-	assert.Equal(t, 2, volume.record(t, "host-uid", "engine-1").Attempt)
-	assert.Equal(t, 1, volume.record(t, "host-uid", "engine-0").Attempt)
+	assert.Equal(t, 2, savedAttempts(w, pod.UID, "engine-1").Attempt)
+	assert.Equal(t, 1, savedAttempts(w, pod.UID, "engine-0").Attempt)
 }
 
 func TestFailureSummary(t *testing.T) {
