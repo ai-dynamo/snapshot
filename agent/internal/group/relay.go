@@ -72,9 +72,17 @@ func (m *Member) relayArgs() []string {
 			ranks = append(ranks, strconv.Itoa(rank))
 		}
 	}
+	// The relay takes the deadline in whole seconds. Rounded up, it never
+	// reaches the deadline before this member does, and past the deadline it
+	// waits for the session's end itself.
+	deadline := m.session.Meta().Deadline
+	seconds := deadline.Unix()
+	if deadline.Nanosecond() > 0 {
+		seconds++
+	}
 	return []string{
 		"--rank", strconv.Itoa(m.Rank()),
 		"--relay-ranks", strings.Join(ranks, ","),
-		"--deadline", strconv.FormatInt(m.session.Meta().Deadline.Unix(), 10),
+		"--deadline", strconv.FormatInt(seconds, 10),
 	}
 }

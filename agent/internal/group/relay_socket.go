@@ -33,14 +33,18 @@ import (
 // session's cuinterpose namespace, so a relay reaches nothing else. A fail ends
 // the attempt as the member's own failure would, whatever its reason says:
 // Refused until the member calls the admitted barrier, and MemberFailed after.
-// The agent answers each request once, in any order, with {id, ok}, a value on
-// a successful get, and on a failure a code, such as NOT_YET, with the
-// session's reason for ABORTED. When the session ends, the agent answers every
-// pending request with ABORTED or CLOSED and closes its end.
+// From the session's deadline on, it ends nothing, and is answered once the
+// coordinator's DeadlineExceeded has ended the session. The agent answers each
+// request once, in any order, with {id, ok}, a value on a successful get, and
+// on a failure a code, such as NOT_YET, with the session's reason for ABORTED.
+// When the session ends, the agent answers every pending request with ABORTED
+// or CLOSED and closes its end.
 //
 // A get's wait starts once the coordinator has answered that the key is
 // absent, so while the agent cannot reach the coordinator, the answer can come
-// later than wait_ms, though never after the session's end.
+// later than wait_ms, though never after the session's end. The agent caps no
+// wait, so a relay past the deadline learns how the session ended from a get
+// of a key nobody inserts, with a wait that outlasts the session.
 
 // maxRelayBody is the largest frame body either end accepts: a value of the
 // session's largest, with its key and the rest of the message.

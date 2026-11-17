@@ -37,8 +37,7 @@ func TestRelaysRunARoundThroughTheSession(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, relay)
 	leader, follower := openRelay(t, members[0]), openRelay(t, members[2])
-	deadline := strconv.FormatInt(members[2].session.Meta().Deadline.Unix(), 10)
-	assert.Equal(t, []string{"--rank", "2", "--relay-ranks", "0,2", "--deadline", deadline}, follower.args)
+	assert.Equal(t, []string{"--rank", "2", "--relay-ranks", "0,2"}, follower.args[:4])
 
 	write(t, follower.conn, map[string]any{"op": "get", "id": 1, "key": "inspect.1.cmd", "wait_ms": 60_000})
 	assert.Equal(t, answer{"id": uint64(1), "ok": true}, call(t, leader.conn,
@@ -55,6 +54,26 @@ func TestRelaysRunARoundThroughTheSession(t *testing.T) {
 	got, err := members[1].session.CuInterpose().Get(within(t), "inspect.1.cmd", 0)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("INSPECT"), got)
+}
+
+func TestRelayDeadlineIsTheSessionsRoundedUpToTheSecond(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		deadline time.Time
+		want     string
+	}{
+		{"a deadline on a second", time.Unix(1_000_000, 0), "1000000"},
+		{"a deadline just past a second", time.Unix(1_000_000, 1), "1000001"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := session.Meta{
+				Deadline: tc.deadline,
+				Members:  []session.Member{{ID: "member-0"}, {ID: "member-1", Rank: 1}},
+			}
+			m := &Member{session: metaSession{meta: meta}, admissions: []Admission{{RunsRelay: true}, {RunsRelay: true}}}
+			assert.Equal(t, []string{"--rank", "0", "--relay-ranks", "0,1", "--deadline", tc.want}, m.relayArgs())
+		})
+	}
 }
 
 func TestRelayAnswersInAnyOrderAndRefusesAnIDAlreadyPending(t *testing.T) {
