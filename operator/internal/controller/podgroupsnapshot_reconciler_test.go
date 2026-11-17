@@ -6,6 +6,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -907,6 +908,43 @@ func TestPodGroupSnapshotReconciler_Deletion(t *testing.T) {
 		assert.True(t, gone(t, r))
 	})
 
+	for _, succeeds := range []bool{true, false} {
+		t.Run(fmt.Sprintf("members start after deletion and succeed-%t", succeeds), func(t *testing.T) {
+			r := setup(t)
+			group := getGroup(t, r)
+			group.Finalizers = append(group.Finalizers, "test.example.com/observe")
+			require.NoError(t, r.Update(t.Context(), group))
+			deleteGroup(t, r)
+			reconcileGroup(t, r)
+			assert.Nil(t, groupCondition(t, getGroup(t, r), snapshotv1alpha1.PodGroupConditionFailed))
+
+			for _, id := range []string{"a", "b"} {
+				pgReport(t, r, id, []metav1.Condition{pgStarted}, nil)
+			}
+			reconcileGroup(t, r)
+			assert.Nil(t, groupCondition(t, getGroup(t, r), snapshotv1alpha1.PodGroupConditionFailed))
+
+			first := []metav1.Condition{pgStarted, ready}
+			if !succeeds {
+				first = []metav1.Condition{pgStarted, pgFailed("CriuDumpFailed")}
+			}
+			pgReport(t, r, "a", first, first)
+			pgReport(t, r, "b", []metav1.Condition{pgStarted, ready}, []metav1.Condition{ready})
+			reconcileGroup(t, r)
+
+			got := getGroup(t, r)
+			assert.NotContains(t, got.Finalizers, snapshotv1alpha1.PodGroupInUseFinalizer)
+			if succeeds {
+				assert.Nil(t, groupCondition(t, got, snapshotv1alpha1.PodGroupConditionFailed))
+				assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, snapshotv1alpha1.PodGroupConditionReady))
+			} else {
+				failed := groupCondition(t, got, snapshotv1alpha1.PodGroupConditionFailed)
+				require.NotNil(t, failed)
+				assert.Equal(t, snapshotv1alpha1.PodGroupReasonMemberFailed, failed.Reason)
+			}
+		})
+	}
+
 	t.Run("the deadline ends the wait", func(t *testing.T) {
 		r := setup(t)
 		deleteGroup(t, r)
@@ -1203,7 +1241,7 @@ func TestPodGroupSnapshotReconciler_ConfirmsADeletion(t *testing.T) {
 		return group
 	}
 
-	t.Run("a member the cache has not seen start keeps the group", func(t *testing.T) {
+	t.Run("a member with work keeps the group before its start is cached", func(t *testing.T) {
 		group := deleting()
 		r, recorder := makeLaggingPodGroupReconciler(t,
 			pgObjects([]client.Object{group}, pgMemberObjects(group, 0, nil, nil), pgMemberObjects(group, 1, nil, nil)),
@@ -1216,11 +1254,10 @@ func TestPodGroupSnapshotReconciler_ConfirmsADeletion(t *testing.T) {
 		got := getGroup(t, r)
 		assert.Contains(t, got.Finalizers, snapshotv1alpha1.PodGroupInUseFinalizer, "the finalizer is kept")
 		assert.Nil(t, groupCondition(t, got, snapshotv1alpha1.PodGroupConditionFailed), "no Cancelled")
-		assert.Equal(t, snapshotv1alpha1.CheckpointPhaseCheckpointing, got.Status.Members[0].Phase)
-		assert.NotNil(t, got.Status.Members[0].StartedAt)
+		assert.Equal(t, snapshotv1alpha1.CheckpointPhaseAdmitted, got.Status.Members[0].Phase)
+		assert.Nil(t, got.Status.Members[0].StartedAt)
 		assert.Positive(t, res.RequeueAfter, "the deadline still applies")
-		assert.Equal(t, []string{"Normal Committed the agents passed their admitted barrier, and the checkpoint has started"},
-			drainEvents(recorder))
+		assert.Empty(t, drainEvents(recorder), "waiting on work makes no final decision that needs live confirmation")
 	})
 
 	t.Run("a group whose members have no work is cancelled and released", func(t *testing.T) {

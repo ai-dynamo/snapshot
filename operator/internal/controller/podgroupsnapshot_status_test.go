@@ -461,8 +461,7 @@ func TestDerivePodGroupSnapshotFailureReasons(t *testing.T) {
 			wantMessage: "duplicate source",
 		},
 		{
-			name:        "deleted while no member has startedAt",
-			members:     []podGroupMemberObservation{admitted("a"), admitted("b"), {}},
+			name:        "deleted while no member has work",
 			deleting:    true,
 			wantReason:  snapshotv1alpha1.PodGroupReasonCancelled,
 			wantMessage: podGroupCancelledMessage,
@@ -577,13 +576,6 @@ func TestDerivePodGroupSnapshotFailureReasons(t *testing.T) {
 			wantMessage:  `member "b" (rank 1) failed with SourcePodGone: SourcePodGone message`,
 		},
 		{
-			name:        "deleted after a member failed, while another never reported",
-			members:     []podGroupMemberObservation{failedOnly("a", "SourcePodGone"), admitted("b")},
-			deleting:    true,
-			wantReason:  snapshotv1alpha1.PodGroupReasonCancelled,
-			wantMessage: podGroupCancelledMessage,
-		},
-		{
 			name:    "a deleted PodSnapshot in a committed group, at once",
 			members: []podGroupMemberObservation{{podSnapshotDeleted: true}, started("b")},
 			previous: snapshotv1alpha1.PodGroupSnapshotStatus{Members: []snapshotv1alpha1.PodGroupSnapshotMemberStatus{
@@ -653,6 +645,10 @@ func TestDerivePodGroupSnapshotNoFailure(t *testing.T) {
 		deleting bool
 	}{
 		{name: "members still running", members: []podGroupMemberObservation{{podSnapshot: pgSnap("a")}, {}}},
+		{name: "deleted with member work, before any starts",
+			members: []podGroupMemberObservation{pgAdmittedMember("a"), pgAdmittedMember("b")}, deleting: true},
+		{name: "deleted after a member failed, while another never reported",
+			members: []podGroupMemberObservation{pgFailedMember("a", "SourcePodGone"), pgAdmittedMember("b")}, deleting: true},
 		{
 			name: "deleted after a member started",
 			members: []podGroupMemberObservation{

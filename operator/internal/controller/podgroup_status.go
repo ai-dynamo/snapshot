@@ -291,7 +291,7 @@ func (a *podGroupAttempt) updateConditions(conditions *[]metav1.Condition, now t
 //	                                          a group-level one, otherwise
 //	                                          Refused
 //	4  the deadline passed                    DeadlineExceeded
-//	5  deleted, and not committed             Cancelled
+//	5  deleted, not committed, no member work Cancelled
 //	6  every member final, some member Failed MemberFailed
 //
 // The group-level reasons are CoordinatorLost, DeadlineExceeded, Cancelled and
@@ -320,7 +320,7 @@ func (a *podGroupAttempt) failure(conditions []metav1.Condition) *podGroupCause 
 			message += "; " + podGroupMemberFailureMessage(outcomes.ownFailure)
 		}
 		return &podGroupCause{snapshotv1alpha1.PodGroupReasonDeadlineExceeded, message}
-	case a.deleting && !outcomes.committed:
+	case a.deleting && !outcomes.committed && !outcomes.workExists:
 		return &podGroupCause{snapshotv1alpha1.PodGroupReasonCancelled, a.kind.cancelledMessage}
 	case outcomes.allFinal && named != nil:
 		return &podGroupCause{snapshotv1alpha1.PodGroupReasonMemberFailed, podGroupMemberFailureMessage(named)}
