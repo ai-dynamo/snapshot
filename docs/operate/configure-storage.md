@@ -212,7 +212,8 @@ node by default). The chart default already covers both; raise it further
 only if your node has more GPUs or a larger `pageBroker.transferBufferCount`.
 
 Each agent pod requests 10 CPU and 33Gi of memory in total by default, including
-the GPU engine transfer rings. Nodes must have that allocatable capacity.
+the GPU engine transfer rings. With `podGroups.enabled`, the coordinator adds
+100m CPU and 128Mi. Nodes must have that allocatable capacity.
 Limits are not checked at scheduling time.
 
 ### Why the Staging Volume Needs a Cap

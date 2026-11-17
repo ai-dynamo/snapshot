@@ -68,8 +68,11 @@ other options.
 
 - Each agent pod runs two containers: the agent and the PageBroker sidecar.
   PageBroker stages snapshot data in memory and publishes it to the snapshot
-  volume.
+  volume. With `podGroups.enabled`, the pod also runs a third container, the
+  pod group coordinator. See [Pod Groups](../reference/helm-values.md#pod-groups).
 - By default, the agent pod requests 10 CPU and 33Gi of memory on each GPU node.
+  The coordinator adds a request of 100m CPU and 128Mi of memory, and has its
+  own limit of 1 CPU and 2Gi of memory.
 - The pod's memory limit sets the largest snapshot it can take.
 
 See [PageBroker Staging](../operate/configure-storage.md#pagebroker-staging) for how to
