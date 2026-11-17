@@ -56,6 +56,19 @@ reviews:
   related_issues: false
   related_prs: false
 
+  post_merge_actions:
+    - name: "Update affected documentation"
+      prompt: |
+        After a merge into main, check whether changes to public APIs, CRDs,
+        Helm values, annotations, environment variables, CLI flags,
+        prerequisites, or user-facing behavior leave documentation outdated.
+        Follow AGENTS.md and docs/development/writing-docs.md. Verify each
+        change against the merged code and link to the relevant source.
+        Skip internal-only changes and behavior already documented.
+        Open a follow-up PR containing only the needed documentation changes.
+        Do not edit CHANGELOG.md or published release notes, commit directly
+        to main, or merge the follow-up PR.
+
   finishing_touches:
     docstrings:
       enabled: false
