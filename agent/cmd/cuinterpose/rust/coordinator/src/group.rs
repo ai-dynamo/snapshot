@@ -609,6 +609,29 @@ mod tests {
     }
 
     #[test]
+    fn fabric_creator_owns_its_allocation_before_an_earlier_importer() {
+        // The importer comes first by group PID. A creator holds every allocation that
+        // it exported, so it still saves the backing, and the importer, which records no
+        // size, never does.
+        let topology = Topology::validate(&pods([
+            (0, vec![(1, importer(handle(1)))]),
+            (1, vec![(1, creator())]),
+        ]))
+        .unwrap();
+        assert_eq!(
+            carrier(&topology, 0, 1),
+            (
+                0,
+                vec![AllocationOwner {
+                    allocation: import(9),
+                    owner_pid: REMOTE_OWNER
+                }]
+            )
+        );
+        assert_eq!(carrier(&topology, 1, 1).0, 4096);
+    }
+
+    #[test]
     fn fabric_importer_in_the_same_pod_names_its_creator_as_owner() {
         let topology = Topology::validate(&alone(Manifest::from([
             (1, creator()),

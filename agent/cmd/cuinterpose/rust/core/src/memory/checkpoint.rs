@@ -155,6 +155,8 @@ impl ProcessState {
             if !allocation.uses_host_carrier()
                 || allocation.reference != owner.allocation
                 || owner.owner_pid == 0
+                // A FABRIC import does not know its size, so only its creator can save it.
+                || (owner.owner_pid == self.namespace_pid && allocation.size == 0)
                 || selected
                     .insert(owner.allocation.id, owner.owner_pid)
                     .is_some()
@@ -558,6 +560,26 @@ mod tests {
             );
             assert_eq!(state.checkpoint_owners, original);
         }
+    }
+
+    #[test]
+    fn a_fabric_import_cannot_own_its_backing() {
+        // Saving an import without a size would fail after the process began to change.
+        let mut state = ProcessState::new(41);
+        let imported = add_allocation(&mut state, [1; 16], true);
+        state
+            .memblocks
+            .get_mut(&imported.id)
+            .and_then(Memblock::unicast_mut)
+            .unwrap()
+            .size = 0;
+        let owner = |owner_pid| AllocationOwner {
+            allocation: imported,
+            owner_pid,
+        };
+        assert!(state.select_checkpoint_owners(&[owner(41)]).is_err());
+        assert!(state.checkpoint_owners.is_empty());
+        state.select_checkpoint_owners(&[owner(17)]).unwrap();
     }
 
     #[test]
