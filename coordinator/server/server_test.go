@@ -264,6 +264,24 @@ func TestConfig(t *testing.T) {
 
 }
 
+func TestConfigRefusesValuesPastClientBuffer(t *testing.T) {
+	const bound = nats.DefaultSubPendingBytesLimit/session.MaxConcurrentGets - session.PayloadHeadroom
+	_, cert := testcert.New(t)
+	for _, value := range []int{bound + 1, 80 << 20} {
+		t.Run(fmt.Sprint(value), func(t *testing.T) {
+			srv, err := New(Config{
+				Host: "127.0.0.1", Port: natsserver.RANDOM_PORT, Authorizer: &testAuthorizer{},
+				TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, MaxValue: value,
+			})
+			if srv != nil {
+				t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+			}
+			require.ErrorIs(t, err, session.ErrInvalid)
+			assert.ErrorContains(t, err, fmt.Sprint(bound))
+		})
+	}
+}
+
 // TestTLSHandshakeFirst checks that the coordinator sends nothing before the
 // client's TLS handshake, so its INFO line never goes out in plaintext, and
 // refuses a client that begins in plaintext.

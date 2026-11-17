@@ -9,6 +9,8 @@ import (
 	"math"
 	"strings"
 	"time"
+
+	"github.com/nats-io/nats.go"
 )
 
 // The limits a session's buckets have unless the coordinator is configured
@@ -16,14 +18,14 @@ import (
 // size of its values, the library bucket also its number of keys, none reserves
 // memory, and every session shares the coordinator's memory cap. The control
 // bucket lives in file storage, outside that cap, and has a size of its own:
-// see ControlBytes. MaxValue is SNEP-324's default, to revisit once
-// the largest cuInterpose record has been measured on the largest supported
-// topology. Meta carries the value limits a session actually has, and the
-// client refuses a larger value itself.
+// see ControlBytes. MaxValue also bounds configured values so concurrent reads
+// fit the client's shared reply subscription. Meta carries the value limits a
+// session actually has, and the client refuses a larger value itself.
 const (
 	// MaxValue is the largest value the Snapshot bucket holds: agent and relay
-	// records, which can describe a whole topology.
-	MaxValue = 32 << 20
+	// records, which can describe a whole topology. Concurrent replies must fit
+	// the client's shared reply subscription, including their framing.
+	MaxValue = nats.DefaultSubPendingBytesLimit/MaxConcurrentGets - PayloadHeadroom
 
 	// MaxLibraryValue is the largest value the library bucket holds. NCCL's
 	// communicator identifiers take 128 bytes.

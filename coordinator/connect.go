@@ -262,9 +262,10 @@ func (s *client) join(ctx context.Context) error {
 	s.control = buckets[session.ControlBucket(s.attempt)]
 	// What the coordinator buffers for the connection, session.MaxPending, is
 	// MaxConcurrentGets of the largest messages it takes, session.MaxPayload,
-	// which it announced as the connection began: the budget holds as much
-	// before Meta is read.
-	s.budget = semaphore.NewWeighted(session.MaxConcurrentGets * s.nc.MaxPayload())
+	// which it announced as the connection began. The client's shared reply
+	// subscription also bounds the budget before Meta is read.
+	maxPayload := min(s.nc.MaxPayload(), int64(session.MaxPayload(session.MaxValue)))
+	s.budget = semaphore.NewWeighted(session.MaxConcurrentGets * maxPayload)
 	s.slots = semaphore.NewWeighted(session.MaxConcurrentGets)
 	s.mu.Lock()
 	target := s.target()
