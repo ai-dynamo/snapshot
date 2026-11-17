@@ -187,8 +187,8 @@ platform's operator checkpoints a warmed-up pair of workers once with a `PodGrou
 every new replica its workload manager creates two restore Pods, from the template
 that every replica shares, on other nodes of the same fabric, after which the
 operator creates a `PodGroupRestore` that names them. The restored workers resume with their shared
-GPU buffers at the same virtual addresses, NCCL rebuilds its communicators
-through the session, and the MPI connections between the two Pods continue on
+GPU buffers at the same virtual addresses, their NCCL communicators continue
+over the restored NVLink memory, and the MPI connections between the two Pods continue on
 the new IPs, so the replica serves its first request without initialization.
 
 #### Story 2: A communication library that restores itself
@@ -215,8 +215,9 @@ Redis-compatible server.
 | Sessions hosted on the same node share the coordinator's memory, so a compromised workload can fill it with records forged through its relay and make concurrent attempts' data writes fail until its own attempt ends at its deadline. Every client the coordinator admits is an agent, and agents are one trust domain: in the coordinator's shared NATS account, a compromised agent can change another attempt's keys, for example through the reply subject of a request, which its permissions don't cover. | The sessions that the cap affects still end promptly, since their control keys live outside it, libraries are bounded per session, each bucket bounds how many watches its members open, and the cap protects the coordinator itself. A compromised agent gains nothing it lacks already, since the agent's ServiceAccount can patch any Pod, and the token review keeps everything that isn't an agent out. Beta revisits both limits together: one NATS account per attempt to isolate agents from each other, and memory isolated per session once cuInterpose's largest records are measured, while a ValidatingAdmissionPolicy that lets the agent change only Pods' metadata and status narrows what a compromised agent can do. |
 | The agent sits on every coordination path, and an agent can restart in the middle of a restore. | The agent records its intent before CRIU starts and treats `restore-complete` as proof of release, so a restarted agent never replays CRIU and never kills a released workload. |
 | Importing GPU memory shared from another node after a native CUDA restore depends on a driver fix, and cuInterpose currently infers the kind of an imported FABRIC handle from its opaque contents. | Cross-node sharing in alpha requires a driver with the fix, and a public query for the handle kind is a beta prerequisite. |
-| CUDA Checkpoint's prepare and resume phases are not released yet. | Until they are, the application calls NCCL Checkpoint's prepare and restore itself, and NCCL restores after release through the library endpoint. |
+| CUDA Checkpoint's prepare and resume phases are not released yet. | Until they are, an application whose communicators use a transport that Snapshot cannot preserve, such as RDMA, calls NCCL Checkpoint's prepare and restore itself, and NCCL restores after release through the library endpoint. Over NVLink, an existing communicator continues without either call, since cuInterpose restores its memory and Snapshot preserves its connections. |
 | A group restore Pod's container starts only after its claim, so its startup probe runs while the restore waits for its peers. | A group target's probe allows the longest deadline, a day, so it never expires before the restore's own deadline; the agent fails a member at that deadline and stops its workload, so the probe never decides an outcome. |
+| A restored process keeps its captured hostname namespace, so `gethostname()` returns its source's hostname, while the target Pod's hostname and `/etc/hosts` name the target. A workload that resolves its own hostname after release reaches loopback or nothing, and one that reports `gethostname()` as its identity names its source. | Preserved connections don't depend on names, and eager vLLM restored under new target hostnames. Workloads take their current identity from the Pod's metadata, refreshed at restore, select their network interfaces explicitly rather than through their hostname, and don't resolve their own hostname after release. |
 
 ## Design Details
 
@@ -309,7 +310,10 @@ bounded per session by its number of members, because NATS limits memory and
 file storage separately, so a session whose peers fill the memory cap can still
 end, fail, and release every wait. That store sits in a directory the
 coordinator owns, which it empties when it starts, so like the rest of a session
-it never outlives the coordinator. Members coordinate through six patterns, each built from standard NATS key-value
+it never outlives the coordinator. Every control bucket reserves its worst case
+for its number of members from that one store, which `maxMemoryBytes` sizes. A
+session that does not fit is not created: the coordinator retries it, its
+members wait to join, and the attempt ends at its deadline unless room frees. Members coordinate through six patterns, each built from standard NATS key-value
 operations, which [Session semantics](#session-semantics) defines precisely.
 
 | Pattern | Purpose | Used by |
@@ -438,7 +442,7 @@ must be read.
 
 | Signal | Written by | What it promises for a group |
 | --- | --- | --- |
-| `ready-for-snapshot` | The workload, through its readiness probe | The member has drained its GPU work and starts no new work on memory shared across Pods, on communicators, or on connections to peers. Until CUDA Checkpoint's library interface drives NCCL, the application must also have called NCCL Checkpoint's prepare itself. Capture admission waits for this signal from every member. |
+| `ready-for-snapshot` | The workload, through its readiness probe | The member has drained its GPU work and starts no new work on memory shared across Pods, on communicators, or on connections to peers. A communicator over a transport that Snapshot cannot preserve, such as RDMA, must also have been prepared through NCCL Checkpoint, until CUDA Checkpoint's library interface drives NCCL. Capture admission waits for this signal from every member. |
 | `restore-complete` | The agent, after the `release` barrier | Every member is reconstructed: shared GPU memory is back at its original addresses, preserved connections are open on the new IPs, and libraries that restore in CUDA's resume phase have reconnected. The file names the attempt. |
 
 A member's settings ([API](#api)) can also carry either signal through
@@ -464,10 +468,12 @@ does not yet map its creator's memory or a communicator whose peers are still
 reconnecting.
 Waiting therefore applies to every thread that could touch such state,
 including background threads such as communicator watchdogs and progress
-threads, and not only to the application's main loop. A library that Snapshot
-does not drive yet, such as NCCL until CUDA Checkpoint's library interface
-ships, restores only when the application calls it, so the application calls
-NCCL Checkpoint's restore after release and before it uses any communicator.
+threads, and not only to the application's main loop. A library that rebuilds
+its own connections and that Snapshot does not drive yet, such as NCCL over
+RDMA until CUDA Checkpoint's library interface ships, restores only when the
+application calls it, so the application calls NCCL Checkpoint's restore after
+release and before it uses any communicator. A communicator whose memory and
+connections Snapshot preserves, such as NCCL over NVLink, needs no call.
 Snapshot cannot verify any of this from outside
 the process, so the SNEP makes it a requirement of group membership: integrations
 that launch the workload through a wrapper gating on both signals, as some
@@ -741,6 +747,9 @@ reads `<host>:<port>[/<prefix>]` from the file named by
 in which rank 0 of every communicator sets a 128-byte identifier while the other
 ranks poll until it appears; the application calls NCCL's prepare before
 reporting `ready-for-snapshot` and NCCL's restore after `restore-complete`.
+An application needs it only for communicators over a transport that Snapshot
+cannot preserve, such as RDMA; over NVLink, an existing communicator continues
+without it.
 Because the variable is captured in the CRIU image, Snapshot requires it to point
 into the Pod's control volume, rejects other paths during admission, and records
 the path in the artifact. At restore, the agent writes that file with the
@@ -839,7 +848,7 @@ either window of the [workload contract](#workload-contract).
 | Agent connection broken while the agent and the coordinator keep running | The agent reconnects within a grace period, resumes its waits, and sends again what it had not seen answered, and the attempt continues | Same | Same |
 | Agent connection not restored within the grace period, agent restart, or coordinator restart | Left as found | Fails with `MemberFailed` or `CoordinatorLost` | Keeps running; the rendezvous ends |
 | Deadline expires | Left as found; the attempt ends with `DeadlineExceeded` | Fails with `DeadlineExceeded` | Keeps running; the session closes |
-| Group resource deleted | If no member has a record, the attempt ends with `Cancelled` | Otherwise a finalizer waits for the attempt to end | The session closes |
+| Group resource deleted | Left as found: a member without work is cancelled at once, and an attempt that has not committed ends with `Cancelled` | Goes on until the attempt ends; the finalizer holds the group until every member with work has reported its end, bounded by the deadline | The session closes |
 
 ![Failure paths](diagrams/failure-paths.svg)
 
@@ -885,11 +894,16 @@ and every agent presents the epoch it read whenever it reconnects. If the
 coordinator has recreated the session since, it fails the session with
 `CoordinatorLost` before admitting the agent, and an agent that finds no
 session at all reports `CoordinatorLost` as well. The owner then retries with a
-new attempt, which for a restore means fresh Pods. For this to be prompt, the coordinator opens its client listener only after it has
-recreated the session of every unfinished attempt it hosts; otherwise an agent that
+new attempt, which for a restore means fresh Pods. For this to be prompt, the coordinator opens its client listener only after one pass that
+recreates the session of every unfinished attempt it hosts; otherwise an agent that
 reconnects early would find no session and fail nothing, members that had not
 connected yet would join the recreated session, and the attempt would wait for
-its deadline. The design does not depend on this choice, however, because every
+its deadline. A session that the pass cannot recreate, for example because the
+store is full, is retried like any other and does not hold up the others. A
+member that reconnects before it exists learns `CoordinatorLost` and can no
+longer write, so a session created later cannot commit without it. A session that no member had joined
+loses nothing when the coordinator recreates it: its members join the new one,
+and the attempt goes on. The design does not depend on this choice, however, because every
 session pattern is safe to repeat: keeping attempts alive across a restart
 needs only replicated buckets, which JetStream provides by clustering the
 embedded servers of several agents, and no client changes. That
@@ -917,8 +931,9 @@ the coordinator relies on nothing else.
   wait expires. In every case it returns as soon as the session ends, with how
   the session ended.
 - `Delete(key)` removes the key whether or not it exists, and a later `Insert`
-  of that key starts afresh. It writes a marker, so at a full memory cap it
-  fails like an `Insert`.
+  of that key starts afresh. It removes only the value it found, so a `Delete`
+  sent again after a lost reply never removes a value inserted after it. It
+  writes a marker, so at a full memory cap it fails like an `Insert`.
 - `Barrier(name)` records that the caller's member has arrived, then returns
   once every member listed in `meta` has arrived; only agents use it. It needs
   no count and no creation, a member that arrives again changes nothing, and a
@@ -938,7 +953,11 @@ the coordinator relies on nothing else.
 A session ends exactly once: it closes when every member has left, or it fails
 with the first reason it receives. Each agent holds one connection per hosted
 member, and a broken connection reconnects within the grace period and sends
-again whatever it had not seen answered, which is safe for every pattern. The
+again whatever it had not seen answered, which is safe for every pattern. It
+sends nothing until it has confirmed that the session is the one it joined, and
+a member that the coordinator admits while it holds no session for its attempt
+may read but not write, so a lost member never writes to a session recreated
+after it. The
 grace period starts when the coordinator sees the connection close, which the
 keepalive settings of both sides bound well within the grace period, and a
 restarted agent does not reconnect to an attempt in flight, so its member's
@@ -1097,10 +1116,13 @@ during capture, and through `Pending`, `Admitted`, `Restoring`, and `Released` d
 restore, with `Failed` and a reason otherwise. `Admitted` names three different
 things: a member phase, which means that the operator created the member's work;
 the group's condition, which turns True on the first `startedAt`; and the agents'
-`admitted` barrier, whose completion is the commit. A restore is `Released` once its
-`release` barrier completes, after which the attempt's outcome no longer
-affects a released member, and `Ready` only when every member is Released,
-including any `postRestore` notification. Each member's write-once `startedAt` is the
+`admitted` barrier, whose completion is the commit. `Released` has one meaning
+for a member and one for the group. A member's release point is its
+`restore-complete`, and the member is `Released` once any `postRestore`
+notification has also succeeded; from its release point on, the attempt's
+outcome no longer affects it. The group's `Released` condition turns True on
+the first Released member, which proves that the `release` barrier completed,
+and the group is `Ready` only when every member is Released. Each member's write-once `startedAt` is the
 `lastTransitionTime` of its agent's record, the `Started` condition at capture or
 the `nvidia.com/RestoreStarted` condition at restore, both of which are set once
 and never removed, so the operator cannot miss them however fast a member fails
@@ -1109,8 +1131,10 @@ afterwards. It tells the owner which workloads Snapshot changed.
 The operator derives the group's status from these records alone, by fixed
 rules. It refuses a group, or keeps it waiting, before it creates any member
 work, and from then on it fails a group itself only at the deadline, or when
-the group is deleted before any member started, both of which the coordinator
-observes as well; every other failure comes from a member. An agent reports a
+the group is deleted while no member has work, both of which the coordinator
+observes as well; every other failure comes from a member. A member's missing
+`startedAt` is final once the member has reported its end, since its agent
+records the start before any irreversible step. An agent reports a
 failure on its own member's record: a member that fails on its own reports its
 own reason, whereas a member that fails because the session ended reports the
 session's reason, which is one of the group's. `Admitted` turns True on the
@@ -1125,7 +1149,7 @@ barrier, and `Failed` keeps the first reason it receives:
   reported its end and none has started, so in this case no workload was
   changed;
 - `DeadlineExceeded` at the deadline, and `Cancelled` when the group is deleted
-  before any member started;
+  while no member has work;
 - `MemberFailed` when every member has ended in any other way, for instance
   after a member's `PodSnapshot` or pinned restore Pod was deleted
   (`PodSnapshotDeleted` or `TargetPodDeleted`), which may hide its start.
@@ -1138,7 +1162,8 @@ serves HTTP and workers that only use control-volume files can thus each keep
 their own signals, and a member without a template gets the defaults of a
 `PodSnapshot` without settings. Capture copies the container settings into the
 member's `PodSnapshotContent`, as for any `PodSnapshot`, so every restore uses
-them and a `PodGroupRestore` carries none. The controller sets everything else
+them and a `PodGroupRestore` carries none; settings captured for a source
+container apply to the destination it is mapped to. The controller sets everything else
 on the member's `PodSnapshot`: its name, owner reference, and group labels, and
 its source from the member. The template is therefore a type of its own rather
 than SnapshotJob's `PodSnapshotTemplate`, which also names the target
@@ -1309,13 +1334,15 @@ and slow-consumer statistics.
 - [SNEP-295](https://github.com/ai-dynamo/snapshot/issues/295), cuInterpose,
   which this SNEP extends across Pods.
 - For GPU memory shared across nodes, a CUDA driver in which FABRIC handles
-  exported on another node can be imported after a native CUDA restore, whose
-  fix is in progress, and fabric-domain access for restore Pods, for example
-  through an IMEX channel granted by a ComputeDomain.
+  exported on another node can be imported after a native CUDA restore, and
+  fabric-domain access for restore Pods, for example through an IMEX channel
+  granted by a ComputeDomain. Validation used libcuda 620.70.06 from the
+  public `cuda-compat` package inside the containers, over unchanged 580 node
+  drivers.
 - A CRIU build with the inet-socket update hook, which is currently available
   only on CRIU's development branch, so the agent must pin the commit it builds.
-- NCCL 2.31 or newer for NCCL Checkpoint, and later a release that restores in
-  CUDA Checkpoint's resume phase.
+- For communicators over RDMA, NCCL 2.31 or newer for NCCL Checkpoint, and
+  later a release that restores in CUDA Checkpoint's resume phase.
 - The NATS server, with JetStream, embedded in the coordinator as a Go library,
   so no separate deployment is needed.
 - [SNEP-411](https://github.com/ai-dynamo/snapshot/issues/411)'s container
@@ -1501,9 +1528,10 @@ const PodGroupMaxDeadlineSeconds = 86400
 
 // Condition types. Admitted is True, with Committed, once the attempt commits,
 // which the operator sees as the first member's startedAt. Released applies to
-// PodGroupRestore only: it is True once the release barrier completes, after
-// which the attempt's outcome no longer affects a released member. Ready is
-// True once every member is Checkpointed, or every member is Released.
+// PodGroupRestore only: it is True on the first Released member, which proves
+// that the release barrier completed; from its release point on, the
+// attempt's outcome no longer affects a member. Ready is True once every
+// member is Checkpointed, or every member is Released.
 const (
 	PodGroupConditionAdmitted = "Admitted"
 	PodGroupConditionReleased = "Released"

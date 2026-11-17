@@ -39,8 +39,8 @@ def tw(text, size, bold=False):
             except OSError:
                 font = None
         if font is None:
-            warnings.warn(f"{FONTS[bold]} is not available, so text widths are estimated and the SVGs will change",
-                          stacklevel=2)
+            missing = "Pillow is not installed" if ImageFont is None else f"{FONTS[bold]} is not available"
+            warnings.warn(f"{missing}, so text widths are estimated and the SVGs will change", stacklevel=2)
         _font_cache[key] = font
     font = _font_cache[key]
     if font is None:
