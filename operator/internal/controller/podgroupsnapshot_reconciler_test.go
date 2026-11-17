@@ -890,13 +890,19 @@ func TestPodGroupSnapshotReconciler_Deletion(t *testing.T) {
 			reconcileGroup(t, r)
 			assert.False(t, gone(t, r))
 		})
+	})
 
-		t.Run("released once every member reports", func(t *testing.T) {
-			cancelled := pgCondition(snapshotv1alpha1.PodSnapshotConditionFailed, "Cancelled")
-			pgReport(t, r, "b", nil, []metav1.Condition{cancelled})
-			reconcileGroup(t, r)
-			assert.True(t, gone(t, r))
-		})
+	t.Run("released once every member reports", func(t *testing.T) {
+		r := setup(t)
+		deleteGroup(t, r)
+		reconcileGroup(t, r)
+		require.False(t, gone(t, r))
+
+		cancelled := pgCondition(snapshotv1alpha1.PodSnapshotConditionFailed, "Cancelled")
+		pgReport(t, r, "a", nil, []metav1.Condition{cancelled})
+		pgReport(t, r, "b", nil, []metav1.Condition{cancelled})
+		reconcileGroup(t, r)
+		assert.True(t, gone(t, r))
 	})
 
 	t.Run("the deadline ends the wait", func(t *testing.T) {
