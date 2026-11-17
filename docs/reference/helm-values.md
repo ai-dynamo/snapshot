@@ -135,7 +135,7 @@ Kubernetes than the baseline; see
 
 | Value                                 | Default                                     | Description                                                                                                                        |
 |---------------------------------------|---------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
-| `podGroups.enabled`                   | `false`                                     | Install what pod groups need: the coordinator, its RBAC, and the operator's issuer of its TLS certificate.                         |
+| `podGroups.enabled`                   | `false`                                     | Turn pod groups on, with everything the chart deploys for them. The chart installs their CRDs either way.                          |
 | `coordinator.port`                    | `4224`                                      | Port agents connect to over TLS, on the node's IP. 1024 to 65535.                                                                  |
 | `coordinator.healthPort`              | `4225`                                      | Port of the coordinator's health endpoint, on the node's IP. 1024 to 65535. The agent pod is ready only once the coordinator is.   |
 | `coordinator.maxMemoryBytes`          | `1073741824`                                | Memory, in bytes, that every group's session shares, at least about 8 MiB. A group's writes fail once it is full.                  |
@@ -148,6 +148,14 @@ Kubernetes than the baseline; see
 | `coordinator.tls.trust.secretName`    | `""`                                        | Your own Secret holding that CA bundle, in the release namespace.                                                                  |
 | `coordinator.tls.trust.key`           | `ca.crt`                                    | Key holding the CA bundle in your ConfigMap or Secret.                                                                             |
 | `coordinator.tls.serverName`          | `""`                                        | DNS name your serving certificate carries, which agents verify. It is never resolved. Empty: `<fullname>-coordinator.<namespace>`. |
+
+With `podGroups.enabled`, the chart also deploys these:
+
+- With `rbac.create`, the coordinator's ClusterRole and ClusterRoleBinding,
+  `<fullname>-agent-coordinator`, for the agents' ServiceAccount.
+- The operator's issuer of the coordinator's TLS certificate, unless you bring
+  your own. With `rbac.create`, its Role and RoleBinding,
+  `<fullname>-operator-coordinator-tls`, for the operator's ServiceAccount.
 
 The coordinator's `/tmp` is an `emptyDir` on node disk, sized to
 `coordinator.maxMemoryBytes` plus 64 MiB. It holds the control buckets' file
