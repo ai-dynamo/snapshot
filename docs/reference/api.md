@@ -175,9 +175,9 @@ The caller sets these annotations on the new pod to trigger a restore:
 Snapshot then reports restore progress with a pod status condition, written by
 the node agent and not set by the caller:
 
-| Pod condition         | Description                                                                                                                                                                                                                                                                                                                                             |
-|-----------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `nvidia.com/Restored` | Added to the pod by the node agent once a restore is under way; becomes `True` when the restore completes. Observe it alongside pod readiness to confirm a restore. It returns to `RestoreInProgress` when a container that starts again is restored again; see [When a Container Starts Again](restore-pod-contract.md#when-a-container-starts-again). |
+| Pod condition         | Description                                                                                                                                                                                                                                                                                                                                                                              |
+|-----------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `nvidia.com/Restored` | Added to the pod by the node agent once a restore is under way; becomes `True` when the restore completes. Observe it alongside pod readiness to confirm a restore. It returns to `RestoreInProgress`, with a `RestoreRepeated` event, when a container that starts again is restored again; see [When a Container Starts Again](restore-pod-contract.md#when-a-container-starts-again). |
 
 ## Labels
 

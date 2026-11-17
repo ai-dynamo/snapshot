@@ -174,20 +174,11 @@ the longest restore you expect.
 
 Restore Pods are expected to use `restartPolicy: Never`, which keeps a Pod to
 one restore. With `restartPolicy: Always` or `OnFailure`, as in a Deployment, a
-destination container starts again when the restored workload exits, or when
-the agent kills the container after a failed restore. Once the Pod's restore
-has ended, whatever its outcome, the agent restores that container again from
-the same `PodSnapshot`:
-
-- The `nvidia.com/Restored` condition returns to `RestoreInProgress`, and the
-  Pod gets a `RestoreRepeated` event.
-- A destination container whose restored workload still runs keeps it. Its
-  `lifecycle.postRestore` action, if set, runs again.
-- A container that starts again while the Pod's restore is still running exits
-  with code 112. Kubelet starts it again after its back-off.
-
-This needs the restore proxy. See
-[Nodes Without the Restore Proxy](#nodes-without-the-restore-proxy).
+destination container that starts again after the Pod's restore has ended,
+whatever its outcome, is restored again from the same `PodSnapshot`. A
+destination container whose restored workload still runs keeps it, and its
+`lifecycle.postRestore` action, if set, runs again. This needs the restore
+proxy. See [Nodes Without the Restore Proxy](#nodes-without-the-restore-proxy).
 
 The proxy reserves two exit codes:
 
