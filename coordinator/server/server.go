@@ -189,6 +189,8 @@ func (cfg Config) withDefaults() (Config, error) {
 			session.MaxValue, session.ErrInvalid)
 	case cfg.MaxLibraryValue > cfg.MaxValue:
 		return cfg, fmt.Errorf("the library's largest value must not exceed the Snapshot's: %w", session.ErrInvalid)
+	case cfg.MaxBytes < int64(cfg.MaxValue):
+		return cfg, fmt.Errorf("MaxBytes must hold MaxValue, at least %d bytes: %w", cfg.MaxValue, session.ErrInvalid)
 	case cfg.MaxBytes < session.ControlBytes(session.MaxMembers):
 		return cfg, fmt.Errorf("MaxBytes must be at least %d bytes, the control bucket of a session of %d members: %w",
 			session.ControlBytes(session.MaxMembers), session.MaxMembers, session.ErrInvalid)
