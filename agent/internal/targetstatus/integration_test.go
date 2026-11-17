@@ -225,7 +225,7 @@ func owners(t *testing.T, pod *corev1.Pod, conditionType corev1.PodConditionType
 				Conditions map[string]json.RawMessage `json:"f:conditions"`
 			} `json:"f:status"`
 		}
-		require.NoError(t, json.Unmarshal(entry.FieldsV1.Raw, &fields))
+		require.NoError(t, json.Unmarshal(entry.FieldsV1.GetRawBytes(), &fields))
 		if _, ok := fields.Status.Conditions[key]; ok {
 			managers = append(managers, entry.Manager)
 		}
