@@ -136,6 +136,8 @@ Kubernetes than the baseline; see
 | Value                                 | Default                                     | Description                                                                                                                        |
 |---------------------------------------|---------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
 | `podGroups.enabled`                   | `false`                                     | Turn pod groups on, with everything the chart deploys for them. The chart installs their CRDs either way.                          |
+| `coordinator.runAsUser`               | `47293`                                     | Dedicated coordinator UID. Pick an ID that no workload on the nodes uses. |
+| `coordinator.runAsGroup`              | `47293`                                     | Dedicated coordinator GID. Pick an ID that no workload on the nodes uses. |
 | `coordinator.port`                    | `4224`                                      | Port agents connect to over TLS, on the node's IP. 1024 to 65535.                                                                  |
 | `coordinator.healthPort`              | `4225`                                      | Port of the coordinator's health endpoint, on the node's IP. 1024 to 65535. The agent pod is ready only once the coordinator is.   |
 | `coordinator.maxMemoryBytes`          | `1073741824`                                | Memory, in bytes, that every group's session shares, at least about 8 MiB. A group's writes fail once it is full.                  |

@@ -20,6 +20,16 @@
     "coordinator": {
       "type": "object",
       "properties": {
+        "runAsUser": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967294
+        },
+        "runAsGroup": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967294
+        },
         "port": {
           "type": "integer",
           "minimum": 1024,

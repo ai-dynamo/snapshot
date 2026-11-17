@@ -209,8 +209,8 @@ tests:
           path: spec.template.spec.containers[?(@.name == "coordinator")].securityContext
           value:
             runAsNonRoot: true
-            runAsUser: 65532
-            runAsGroup: 65532
+            runAsUser: 47293
+            runAsGroup: 47293
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
@@ -218,6 +218,20 @@ tests:
                 - ALL
             seccompProfile:
               type: RuntimeDefault
+
+  - it: takes the dedicated coordinator user and group from values
+    template: templates/daemonset.yaml
+    set:
+      podGroups.enabled: true
+      coordinator.runAsUser: 47294
+      coordinator.runAsGroup: 47295
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].securityContext.runAsUser
+          value: 47294
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].securityContext.runAsGroup
+          value: 47295
 
   - it: probes readiness and liveness at the health port, and sets the resources
     template: templates/daemonset.yaml

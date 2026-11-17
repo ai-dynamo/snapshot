@@ -208,6 +208,9 @@ pageBroker:
 # runs as non-root with no capabilities, but shares the agent's ServiceAccount
 # and the host's namespaces. Deployed only with podGroups.enabled.
 coordinator:
+  # Pick IDs that no workload on the nodes uses: hostPID shares process IDs.
+  runAsUser: 47293
+  runAsGroup: 47293
   # The port agents connect to, over TLS. The agent Pod uses the host's
   # network, so it is a port on the node's IP.
   port: 4224
