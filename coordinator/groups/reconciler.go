@@ -36,7 +36,7 @@ type reconciler struct {
 
 // Reconcile implements reconcile.TypedReconciler. Once it has ensured a
 // session, it decides again with the session held, and acts on that, so a
-// member that failed before the session opened fails it in the same pass.
+// group being deleted or with a Failed member ends it in the same pass.
 func (r *reconciler) Reconcile(ctx context.Context, req request) (reconcile.Result, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

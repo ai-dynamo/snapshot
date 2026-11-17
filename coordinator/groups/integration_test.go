@@ -688,6 +688,35 @@ func TestDeletion(t *testing.T) {
 	})
 }
 
+func TestDeletionBeforeSessionExists(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		create func(*testing.T, []member) client.Object
+	}{
+		{"snapshot", func(t *testing.T, pair []member) client.Object {
+			return createCapture(t, pair, true, true)
+		}},
+		{"restore", func(t *testing.T, pair []member) client.Object {
+			return createRestore(t, readySnapshot(t, []string{"a", "b"}), pair, withFinalizer)
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			node := nodes(t, 1)[0]
+			pair := []member{{"a", node}, {"b", node}}
+			group := tt.create(t, pair)
+			require.NoError(t, k8s.Delete(within(t), group))
+			h := startHost(t, node, coordinatortest.Start(t))
+			h.awaitHeld(t, group.GetUID(), true)
+			for _, m := range pair {
+				err := awaitEnd(t, h.connect(t, group.GetUID(), m.id))
+				require.ErrorIs(t, err, &session.AbortError{Reason: session.ReasonCancelled})
+			}
+			release(t, group)
+			h.awaitHeld(t, group.GetUID(), false)
+		})
+	}
+}
+
 // TestMemberFailed covers a group resource of either kind whose status shows
 // a Failed member: before every member has arrived at the admitted barrier,
 // its session fails with session.ReasonRefused, so the peers waiting there

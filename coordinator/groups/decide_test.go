@@ -75,7 +75,7 @@ func TestDecide(t *testing.T) {
 
 		{"deleting, its session open", served(deleting), open, now, cancel, 0},
 		{"deleting, its session ended", served(deleting), ended, now, none, 0},
-		{"deleting, no session", served(deleting), notHeld, now, none, 0},
+		{"deleting, no session", served(deleting), notHeld, now, ensure, 0},
 		{"deleting and final, its session open", served(both(final, deleting)), open, now, cancel, recheck},
 		{"deleting and final, its session ended", served(both(final, deleting)), ended, now, remove, 0},
 
