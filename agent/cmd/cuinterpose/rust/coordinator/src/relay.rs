@@ -147,6 +147,12 @@ pub trait Pod {
     fn finish(&mut self) -> Result<()>;
 }
 
+/// How long past the deadline a relay that found it passed waits for the session to end.
+/// The coordinator fails the session at the deadline by its own clock, which may run
+/// behind this one, and an agent that cannot reach the coordinator ends the session
+/// itself 5 seconds past the deadline, so the session ends well within this.
+const END_WAIT: Duration = Duration::from_secs(60);
+
 /// This relay's place in the group, as its agent passes it.
 pub struct Group {
     pub rank: Rank,
@@ -273,14 +279,11 @@ impl Relay<'_> {
         loop {
             let round = self.round;
             let key = self.command_key(round);
-            // At the deadline the coordinator fails the session, so a follower that waited
-            // that long leaves the failure to it.
             let wait = self.group.until_deadline();
             let Some(value) = self.session().get(&key, wait)? else {
-                return Err(session::Ended(format!(
-                    "no command for round {round} before the deadline"
-                ))
-                .into());
+                return Err(
+                    self.past_deadline(format!("no command for round {round} before the deadline"))
+                );
             };
             let command: Command = rmp_serde::from_slice(&value)
                 .with_context(|| format!("decode the command for round {round}"))?;
@@ -351,11 +354,9 @@ impl Relay<'_> {
             .map(|(rank, _)| *rank)
             .collect();
         if !missing.is_empty() {
-            // At the deadline the coordinator fails the session, so its reason stands.
-            return Err(session::Ended(format!(
+            return Err(self.past_deadline(format!(
                 "ranks {missing:?} did not reply to round {round} ({command}) before the deadline"
-            ))
-            .into());
+            )));
         }
         for (rank, value) in others.into_iter().zip(values) {
             let reply: Reply = rmp_serde::from_slice(&value.unwrap_or_default())
@@ -476,6 +477,23 @@ impl Relay<'_> {
             session.insert(&key, &rmp_serde::to_vec_named(&Command::Done)?)?;
         }
         Ok(())
+    }
+
+    /// The error of a relay whose wait for `missing` reached the deadline. The coordinator
+    /// fails the session at the deadline with its own reason, and the agent fails the
+    /// session when the relay exits with an error, so a relay that exited before the
+    /// session ended would replace that reason. The relay waits for the end with a get of
+    /// a key that nobody inserts, which the agent answers with how the session ended.
+    fn past_deadline(&mut self, missing: String) -> anyhow::Error {
+        let key = format!("{}.end", self.mode.key());
+        let wait = (self.group.deadline + END_WAIT)
+            .duration_since(SystemTime::now())
+            .unwrap_or_default();
+        let error = match self.session().get(&key, wait) {
+            Ok(_) => anyhow::anyhow!("the session did not end within {END_WAIT:?} of the deadline"),
+            Err(error) => error,
+        };
+        error.context(missing)
     }
 
     /// The session of a follower, which only a group has.
@@ -910,16 +928,21 @@ mod tests {
     }
 
     #[test]
-    fn silent_rank_leaves_the_failure_to_the_deadline() {
+    fn silent_rank_leaves_the_failure_to_the_coordinator_at_the_deadline() {
         let agent = FakeAgent::default();
         let mut pods = pods();
         pods[2].slow = Some(("PrepareMulticast", Duration::from_secs(2)));
-        let started = Instant::now();
+        // The coordinator's clock runs behind the relays', so the session ends after the
+        // relays find their deadline passed.
+        agent.expire_after(Duration::from_millis(1500));
         let results = group(&agent, Mode::Prepare, pods, Duration::from_secs(1));
-        assert!(started.elapsed() >= Duration::from_millis(900));
         for (result, _) in &results {
             let error = result.as_ref().unwrap_err();
             assert!(session::ended(error), "{error:#}");
+            assert!(
+                format!("{error:#}").contains("ABORTED (DeadlineExceeded)"),
+                "{error:#}"
+            );
         }
         let leader = format!("{:#}", results[0].0.as_ref().unwrap_err());
         assert!(
@@ -928,8 +951,38 @@ mod tests {
             ),
             "{leader}"
         );
-        // The coordinator fails the session at the deadline with its own reason.
+        let follower = format!("{:#}", results[1].0.as_ref().unwrap_err());
+        assert!(
+            follower.contains("no command for round 4 before the deadline"),
+            "{follower}"
+        );
+        // No relay failed the session, so the coordinator's reason stands.
         assert!(agent.fails().is_empty());
+    }
+
+    #[test]
+    fn relay_gives_up_on_a_session_that_does_not_end_after_the_deadline() {
+        let agent = FakeAgent::default();
+        let mut pod = Scripted::new(1);
+        // The leader sends no command, and the wait for the session's end runs out soon.
+        let group = Group {
+            rank: 1,
+            relays: vec![0, 1],
+            deadline: SystemTime::now() - END_WAIT + Duration::from_millis(500),
+        };
+        let started = Instant::now();
+        let member = Some((Session::new(agent.attach(1)), group));
+        let error = run(member, Mode::Inspect, &mut pod).unwrap_err();
+        assert!(started.elapsed() >= Duration::from_millis(400));
+        assert!(!session::ended(&error), "{error:#}");
+        let message = format!("{error:#}");
+        assert!(
+            message
+                .starts_with("no command for round 1 before the deadline: the session did not end"),
+            "{message}"
+        );
+        // A session that did not end is failed as for any other error.
+        assert_eq!(agent.fails(), [(1, "Refused".to_owned())]);
     }
 
     #[test]
@@ -938,6 +991,7 @@ mod tests {
         // Rank 2 never starts, as when its restore has not finished.
         let mut pods = pods();
         pods.pop();
+        agent.expire_after(Duration::from_millis(1500));
         let started = Instant::now();
         let results = group(&agent, Mode::Inspect, pods, Duration::from_secs(1));
         assert!(started.elapsed() >= Duration::from_millis(900));

@@ -4,6 +4,7 @@
 //! The agent's side of a relay's session socket, over an in-memory session with
 //! blocking reads, as relay tests need it. Each request runs on its own thread, so
 //! answers arrive in any order, and a failed session answers every read with ABORTED.
+#![allow(dead_code, reason = "each test crate uses a different subset")]
 
 /// A member rank, as in `group::Rank`, which integration tests cannot import.
 type Rank = u32;
@@ -71,6 +72,21 @@ impl FakeAgent {
             }
         });
         relay
+    }
+
+    /// Fail the session with DeadlineExceeded after `wait`, as the coordinator does at the
+    /// attempt's deadline.
+    pub fn expire_after(&self, wait: Duration) {
+        let session = Arc::clone(&self.session);
+        std::thread::spawn(move || {
+            std::thread::sleep(wait);
+            let (lock, changed) = &*session;
+            let mut session = lock.lock().unwrap();
+            session
+                .failed
+                .get_or_insert_with(|| "DeadlineExceeded".to_owned());
+            changed.notify_all();
+        });
     }
 
     /// The `fail` requests so far, by rank.
