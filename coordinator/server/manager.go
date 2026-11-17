@@ -539,15 +539,14 @@ func (s *Server) Remove(ctx context.Context, uid types.UID) error {
 // FailUncommitted fails the session of an attempt with reason, which must be a
 // valid condition reason, unless every member has arrived at
 // session.BarrierAdmitted, which commits the attempt. The host fails a session
-// this way before the commit: with session.ReasonCancelled once its group
-// resource's deletion has started, and with session.ReasonRefused once one of
-// its members has failed. The control stream's sequence fences the read of
-// the arrivals: any intervening write makes it read again before recording
-// the end. A commit recorded first keeps the session open. Once
-// FailUncommitted has seen it, it leaves the session open from then on, even if
-// an arrival is deleted. FailUncommitted returns nil once the session has
-// ended, however it ended, and when it leaves a committed session open. It
-// reports session.ErrNotFound for an attempt with no session.
+// this way before the commit when its group resource's deletion has started
+// or one of its members has failed. It reads the control stream's sequence
+// before the arrivals. An intervening write makes it read again before
+// recording the end. A commit recorded first keeps the session open. Once
+// FailUncommitted has seen the commit, it leaves the session open, even if an
+// arrival is deleted. It returns nil once the session has ended, however it
+// ended, and when it leaves a committed session open. It reports
+// session.ErrNotFound for an attempt with no session.
 func (s *Server) FailUncommitted(ctx context.Context, uid types.UID, reason string) error {
 	if err := session.ValidateReason(reason); err != nil {
 		return err

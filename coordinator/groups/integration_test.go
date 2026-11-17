@@ -719,8 +719,8 @@ func TestDeletionBeforeSessionExists(t *testing.T) {
 
 // TestMemberFailed covers a group resource of either kind whose status shows
 // a Failed member: before every member has arrived at the admitted barrier,
-// its session fails with session.ReasonRefused, so the peers waiting there
-// learn it at once instead of at the deadline; afterwards, it stays open.
+// its session preserves attempt-wide reasons and reports other failures as
+// Refused. Peers learn the reason at once; after the barrier it stays open.
 func TestMemberFailed(t *testing.T) {
 	names := nodes(t, 1)
 	h := startHost(t, names[0], coordinatortest.Start(t))
@@ -769,6 +769,29 @@ func TestMemberFailed(t *testing.T) {
 		require.ErrorIs(t, awaitEnd(t, h.connect(t, g.UID, "a")), &session.AbortError{Reason: session.ReasonRefused})
 	})
 
+	for _, reason := range []string{
+		session.ReasonDeadlineExceeded, session.ReasonCoordinatorLost, session.ReasonCancelled,
+	} {
+		t.Run("a capture with group reason "+reason, func(t *testing.T) {
+			g := createCapture(t, pair, true, false)
+			h.awaitHeld(t, g.UID, true)
+			arrived := admit(t, g.UID)
+			g.Status.Members[1].Phase = v1alpha1.CheckpointPhaseFailed
+			g.Status.Members[1].Reason = reason
+			require.NoError(t, k8s.Status().Update(within(t), g))
+			require.ErrorIs(t, <-arrived, &session.AbortError{Reason: reason})
+		})
+		t.Run("a restore with group reason "+reason, func(t *testing.T) {
+			r := createRestore(t, readySnapshot(t, []string{"a", "b"}), pair)
+			h.awaitHeld(t, r.UID, true)
+			arrived := admit(t, r.UID)
+			r.Status.Members[1].Phase = v1alpha1.RestorePhaseFailed
+			r.Status.Members[1].Reason = reason
+			require.NoError(t, k8s.Status().Update(within(t), r))
+			require.ErrorIs(t, <-arrived, &session.AbortError{Reason: reason})
+		})
+	}
+
 	t.Run("once it has completed, the session stays open", func(t *testing.T) {
 		g := createCapture(t, pair, true, false)
 		h.awaitHeld(t, g.UID, true)
@@ -778,7 +801,7 @@ func TestMemberFailed(t *testing.T) {
 		g.Status.Members[1].Phase = v1alpha1.CheckpointPhaseFailed
 		g.Status.Members[1].Reason = v1alpha1.ReasonPodSnapshotDeleted
 		require.NoError(t, k8s.Status().Update(within(t), g))
-		h.awaitSeen(t, g.UID, func(a *attempt) bool { return a.failed })
+		h.awaitSeen(t, g.UID, func(a *attempt) bool { return a.failureReason != "" })
 		// A reconcile that reads the failure, as the host's own does, leaves
 		// the committed session open.
 		r := &reconciler{attempts: h.attempts, server: h.coord.Server, node: h.node, clock: h.clock}
