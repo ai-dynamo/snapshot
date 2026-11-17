@@ -6,6 +6,8 @@ package podcontract
 import (
 	"reflect"
 	"testing"
+
+	"k8s.io/utils/ptr"
 )
 
 func TestGetRestoreFromSnapshotName(t *testing.T) {
@@ -157,14 +159,15 @@ func TestRestoreRetryLimitFromAnnotations(t *testing.T) {
 		wantErr   bool
 	}{
 		{name: "absent"},
-		{name: "zero", value: ptr("0"), wantFound: true},
-		{name: "positive", value: ptr("5"), wantLimit: 5, wantFound: true},
-		{name: "surrounding space", value: ptr(" 3 "), wantLimit: 3, wantFound: true},
-		{name: "empty", value: ptr(""), wantFound: true, wantErr: true},
-		{name: "negative", value: ptr("-1"), wantFound: true, wantErr: true},
-		{name: "not a number", value: ptr("two"), wantFound: true, wantErr: true},
-		{name: "fraction", value: ptr("1.5"), wantFound: true, wantErr: true},
-		{name: "overflow", value: ptr("99999999999999999999"), wantFound: true, wantErr: true},
+		{name: "zero", value: ptr.To("0"), wantFound: true},
+		{name: "positive", value: ptr.To("5"), wantLimit: 5, wantFound: true},
+		{name: "surrounding space", value: ptr.To(" 3 "), wantLimit: 3, wantFound: true},
+		{name: "empty", value: ptr.To(""), wantFound: true, wantErr: true},
+		{name: "negative", value: ptr.To("-1"), wantFound: true, wantErr: true},
+		{name: "not a number", value: ptr.To("two"), wantFound: true, wantErr: true},
+		{name: "fraction", value: ptr.To("1.5"), wantFound: true, wantErr: true},
+		{name: "trailing text", value: ptr.To("2x"), wantFound: true, wantErr: true},
+		{name: "overflow", value: ptr.To("99999999999999999999"), wantFound: true, wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -185,10 +188,6 @@ func TestRestoreRetryLimitFromAnnotations(t *testing.T) {
 	if _, found, err := RestoreRetryLimitFromAnnotations(nil); found || err != nil {
 		t.Fatalf("nil annotations = found %v, error %v", found, err)
 	}
-}
-
-func ptr[T any](value T) *T {
-	return &value
 }
 
 func TestRestoreCompleteRoundTrip(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 )
 
 func restorePodFixture() *corev1.Pod {
@@ -378,6 +379,9 @@ func TestValidateRejectsMinimumContractDrift(t *testing.T) {
 		"annotation": func(pod *corev1.Pod) {
 			delete(pod.Annotations, RestoreFromAnnotation)
 		},
+		"retry limit": func(pod *corev1.Pod) {
+			pod.Annotations[RestoreRetryLimitAnnotation] = "-2"
+		},
 		"volume": func(pod *corev1.Pod) {
 			pod.Spec.Volumes = nil
 		},
@@ -407,10 +411,10 @@ func TestBuildKeepsRetryLimitAnnotation(t *testing.T) {
 		wantErr  bool
 	}{
 		{name: "unset leaves the agent default"},
-		{name: "zero", existing: ptr("0"), want: ptr("0")},
-		{name: "positive", existing: ptr("2"), want: ptr("2")},
-		{name: "negative", existing: ptr("-1"), wantErr: true},
-		{name: "not a number", existing: ptr("many"), wantErr: true},
+		{name: "zero", existing: ptr.To("0"), want: ptr.To("0")},
+		{name: "positive", existing: ptr.To("2"), want: ptr.To("2")},
+		{name: "negative", existing: ptr.To("-1"), wantErr: true},
+		{name: "not a number", existing: ptr.To("many"), wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -447,20 +451,6 @@ func TestBuildKeepsRetryLimitAnnotation(t *testing.T) {
 				t.Fatalf("Validate() rejected the built Pod: %v", err)
 			}
 		})
-	}
-}
-
-func TestValidateRejectsInvalidRetryLimit(t *testing.T) {
-	valid, err := Build(restorePodFixture(), restoreRequest(), Options{})
-	if err != nil {
-		t.Fatalf("Build() failed: %v", err)
-	}
-	for _, value := range []string{"", "-2", "one", "2x"} {
-		pod := valid.DeepCopy()
-		pod.Annotations[RestoreRetryLimitAnnotation] = value
-		if err := Validate(pod, restoreRequest()); err == nil {
-			t.Errorf("Validate() accepted %s=%q", RestoreRetryLimitAnnotation, value)
-		}
 	}
 }
 
