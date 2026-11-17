@@ -50,7 +50,7 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
-  {{- if .Values.podGroups.enabled }}
+  {{- if (.Values.podGroups).enabled }}
   - apiGroups: ["nvidia.com"]
     resources: ["podgroupsnapshots"]
     verbs: ["get", "list", "watch", "update", "patch"]
