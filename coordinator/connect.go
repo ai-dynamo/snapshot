@@ -239,7 +239,7 @@ func (s *client) disconnected(nc *nats.Conn) {
 
 // join waits until the coordinator admits the connection, binds the buckets,
 // reads Meta, makes the Store of each namespace, and starts verifying the
-// session when asked, following its end, and timing its deadline.
+// session when asked, watching its control keys, and timing its deadline.
 func (s *client) join(ctx context.Context) error {
 	select {
 	case <-s.connected:
@@ -262,9 +262,10 @@ func (s *client) join(ctx context.Context) error {
 	s.control = buckets[session.ControlBucket(s.attempt)]
 	// What the coordinator buffers for the connection, session.MaxPending, is
 	// MaxConcurrentGets of the largest messages it takes, session.MaxPayload,
-	// which it announced as the connection began: the budget holds as much
-	// before Meta is read.
-	s.budget = semaphore.NewWeighted(session.MaxConcurrentGets * s.nc.MaxPayload())
+	// which it announced as the connection began. The client's shared reply
+	// subscription also bounds the budget before Meta is read.
+	maxPayload := min(s.nc.MaxPayload(), int64(session.MaxPayload(session.MaxValue)))
+	s.budget = semaphore.NewWeighted(session.MaxConcurrentGets * maxPayload)
 	s.slots = semaphore.NewWeighted(session.MaxConcurrentGets)
 	s.mu.Lock()
 	target := s.target()
@@ -293,11 +294,12 @@ func (s *client) join(ctx context.Context) error {
 	s.epoch.Store(s.meta.Epoch)
 	// Reading Meta verified every reconnect before it.
 	s.settled(target)
+	s.events = newControlWatcher(s)
 	s.joined = true
 
 	s.wg.Add(3)
 	go s.verifier()
-	go s.followEnd()
+	go s.events.run()
 	go s.expire()
 	return nil
 }

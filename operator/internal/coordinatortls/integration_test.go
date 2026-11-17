@@ -162,6 +162,60 @@ func TestIssuer(t *testing.T) {
 		f.requireServes(after, before.caCert(t))
 	})
 
+	for _, tc := range []struct {
+		name   string
+		ca     bool
+		typeOf corev1.SecretType
+	}{
+		{name: "adopted Opaque serving Secret", typeOf: corev1.SecretTypeOpaque},
+		{name: "adopted CA Secret", ca: true, typeOf: "example.com/ca"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, cl)
+			f.ensure()
+			before := f.read()
+			adopted := before.serving
+			renewAt := before.servingCert(t).NotAfter
+			if tc.ca {
+				adopted = before.ca
+				renewAt = before.caCert(t).NotAfter
+			}
+			require.NoError(t, cl.Delete(t.Context(), adopted))
+			adopted.ResourceVersion = ""
+			adopted.UID = ""
+			adopted.Type = tc.typeOf
+			require.NoError(t, cl.Create(t.Context(), adopted))
+			f.clock.SetTime(renewAt.Add(-renewalWindow).Add(time.Second))
+
+			f.ensure()
+			after := f.read()
+			if tc.ca {
+				assert.Equal(t, tc.typeOf, after.ca.Type)
+				assert.NotEqual(t, serials(before.caCert(t)), serials(after.caCert(t)))
+			} else {
+				f.requireSameCA(before, after)
+				assert.Equal(t, tc.typeOf, after.serving.Type)
+				assert.NotEqual(t, serials(before.servingCert(t)), serials(after.servingCert(t)))
+			}
+			f.requireServes(after, after.caCert(t))
+		})
+	}
+
+	t.Run("a CA restricted to client authentication", func(t *testing.T) {
+		f := newFixture(t, cl)
+		template := caTemplate(f.clock.Now().AddDate(10, 0, 0))
+		template.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
+		ca := mint(t, template, nil)
+		secret := caSecret(ca)
+		secret.Namespace, secret.Name = f.cfg.Namespace, f.cfg.CASecret
+		require.NoError(t, cl.Create(t.Context(), secret))
+
+		f.requireWrites(f.ensure(), f.cfg.CASecret, f.cfg.CABundle, f.cfg.TLSSecret)
+		after := f.read()
+		assert.NotEqual(t, serials(parseOne(t, ca.cert)), serials(after.caCert(t)))
+		f.requireServes(after, after.caCert(t))
+	})
+
 	t.Run("a changed server name", func(t *testing.T) {
 		f := newFixture(t, cl)
 		f.ensure()

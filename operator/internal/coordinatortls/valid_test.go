@@ -6,6 +6,7 @@ package coordinatortls
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/asn1"
 	"testing"
 	"time"
 
@@ -53,6 +54,36 @@ func TestValidCA(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, serials(parseOne(t, tc.pair.cert)), serials(got.cert))
+		})
+	}
+}
+
+func TestCAUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		usages  []x509.ExtKeyUsage
+		unknown []asn1.ObjectIdentifier
+		valid   bool
+	}{
+		{name: "unrestricted", valid: true},
+		{name: "server authentication", usages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, valid: true},
+		{name: "any", usages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}, valid: true},
+		{name: "client authentication", usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}},
+		{name: "unknown usage", unknown: []asn1.ObjectIdentifier{{1, 2, 3, 4}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			template := caTemplate(now.AddDate(10, 0, 0))
+			template.ExtKeyUsage = tc.usages
+			template.UnknownExtKeyUsage = tc.unknown
+			ca := mint(t, template, nil)
+			_, err := validCA(ca.cert, ca.key, now, renewalWindow)
+			if tc.valid {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, "server authentication")
+			}
+			p := decide(caSecret(ca), &corev1.ConfigMap{}, &corev1.Secret{}, serverName, now)
+			assert.Equal(t, !tc.valid, p.newCA)
 		})
 	}
 }

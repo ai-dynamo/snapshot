@@ -7,5 +7,5 @@
 // connection, Meta, and the errors either side reports. A session lives in
 // memory except its control keys, which use a small file store that does not
 // outlive the coordinator's process, so a full memory cap never stops a
-// session from ending. It imports no NATS package.
+// session from ending.
 package session

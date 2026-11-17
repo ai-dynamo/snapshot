@@ -688,10 +688,39 @@ func TestDeletion(t *testing.T) {
 	})
 }
 
+func TestDeletionBeforeSessionExists(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		create func(*testing.T, []member) client.Object
+	}{
+		{"snapshot", func(t *testing.T, pair []member) client.Object {
+			return createCapture(t, pair, true, true)
+		}},
+		{"restore", func(t *testing.T, pair []member) client.Object {
+			return createRestore(t, readySnapshot(t, []string{"a", "b"}), pair, withFinalizer)
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			node := nodes(t, 1)[0]
+			pair := []member{{"a", node}, {"b", node}}
+			group := tt.create(t, pair)
+			require.NoError(t, k8s.Delete(within(t), group))
+			h := startHost(t, node, coordinatortest.Start(t))
+			h.awaitHeld(t, group.GetUID(), true)
+			for _, m := range pair {
+				err := awaitEnd(t, h.connect(t, group.GetUID(), m.id))
+				require.ErrorIs(t, err, &session.AbortError{Reason: session.ReasonCancelled})
+			}
+			release(t, group)
+			h.awaitHeld(t, group.GetUID(), false)
+		})
+	}
+}
+
 // TestMemberFailed covers a group resource of either kind whose status shows
 // a Failed member: before every member has arrived at the admitted barrier,
-// its session fails with session.ReasonRefused, so the peers waiting there
-// learn it at once instead of at the deadline; afterwards, it stays open.
+// its session preserves attempt-wide reasons and reports other failures as
+// Refused. Peers learn the reason at once; after the barrier it stays open.
 func TestMemberFailed(t *testing.T) {
 	names := nodes(t, 1)
 	h := startHost(t, names[0], coordinatortest.Start(t))
@@ -740,6 +769,29 @@ func TestMemberFailed(t *testing.T) {
 		require.ErrorIs(t, awaitEnd(t, h.connect(t, g.UID, "a")), &session.AbortError{Reason: session.ReasonRefused})
 	})
 
+	for _, reason := range []string{
+		session.ReasonDeadlineExceeded, session.ReasonCoordinatorLost, session.ReasonCancelled,
+	} {
+		t.Run("a capture with group reason "+reason, func(t *testing.T) {
+			g := createCapture(t, pair, true, false)
+			h.awaitHeld(t, g.UID, true)
+			arrived := admit(t, g.UID)
+			g.Status.Members[1].Phase = v1alpha1.CheckpointPhaseFailed
+			g.Status.Members[1].Reason = reason
+			require.NoError(t, k8s.Status().Update(within(t), g))
+			require.ErrorIs(t, <-arrived, &session.AbortError{Reason: reason})
+		})
+		t.Run("a restore with group reason "+reason, func(t *testing.T) {
+			r := createRestore(t, readySnapshot(t, []string{"a", "b"}), pair)
+			h.awaitHeld(t, r.UID, true)
+			arrived := admit(t, r.UID)
+			r.Status.Members[1].Phase = v1alpha1.RestorePhaseFailed
+			r.Status.Members[1].Reason = reason
+			require.NoError(t, k8s.Status().Update(within(t), r))
+			require.ErrorIs(t, <-arrived, &session.AbortError{Reason: reason})
+		})
+	}
+
 	t.Run("once it has completed, the session stays open", func(t *testing.T) {
 		g := createCapture(t, pair, true, false)
 		h.awaitHeld(t, g.UID, true)
@@ -749,7 +801,7 @@ func TestMemberFailed(t *testing.T) {
 		g.Status.Members[1].Phase = v1alpha1.CheckpointPhaseFailed
 		g.Status.Members[1].Reason = v1alpha1.ReasonPodSnapshotDeleted
 		require.NoError(t, k8s.Status().Update(within(t), g))
-		h.awaitSeen(t, g.UID, func(a *attempt) bool { return a.failed })
+		h.awaitSeen(t, g.UID, func(a *attempt) bool { return a.failureReason != "" })
 		// A reconcile that reads the failure, as the host's own does, leaves
 		// the committed session open.
 		r := &reconciler{attempts: h.attempts, server: h.coord.Server, node: h.node, clock: h.clock}
@@ -949,7 +1001,7 @@ func TestRestartWithoutRoom(t *testing.T) {
 
 	// Room for the control bucket of one session of the largest membership.
 	coord := coordinatortest.StartUnready(t, func(cfg *server.Config) {
-		cfg.MaxBytes = session.ControlBytes(session.MaxMembers)
+		cfg.MaxBytes, cfg.MaxValue = session.ControlBytes(session.MaxMembers), session.MaxLibraryValue
 	})
 	h := startHost(t, here, coord)
 	require.Eventually(t, coord.Ready, timeout, 10*time.Millisecond)

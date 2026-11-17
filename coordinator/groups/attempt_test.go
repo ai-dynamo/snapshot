@@ -145,7 +145,7 @@ func TestCaptureAttempt(t *testing.T) {
 		t.Run("failed: "+tt.name, func(t *testing.T) {
 			g := newSnapshot("snapshot-uid", "a", "b", "c")
 			g.Status.Members = tt.statuses
-			assert.Equal(t, tt.failed, captureAttempt(g).failed)
+			assert.Equal(t, tt.failed, captureAttempt(g).failureReason != "")
 		})
 	}
 }
@@ -213,7 +213,7 @@ func TestRestoreAttempt(t *testing.T) {
 			assert.True(t, a.memberWork)
 			assert.True(t, a.final)
 			assert.True(t, a.deleting)
-			assert.True(t, a.failed)
+			assert.NotEmpty(t, a.failureReason)
 		})
 	}
 
@@ -288,7 +288,46 @@ func TestRestoreAttempt(t *testing.T) {
 			r.Status.Members = tt.statuses
 			a, ok := restoreAttempt(r, snapshot)
 			require.True(t, ok)
-			assert.Equal(t, tt.failed, a.failed)
+			assert.Equal(t, tt.failed, a.failureReason != "")
+		})
+	}
+}
+
+func TestAttemptFailureReasons(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		reasons []string
+		want    string
+	}{
+		{"no failure", nil, ""},
+		{"no reason", []string{""}, session.ReasonRefused},
+		{"a member reason", []string{"PodIPChanged"}, session.ReasonRefused},
+		{"deadline", []string{session.ReasonDeadlineExceeded}, session.ReasonDeadlineExceeded},
+		{"coordinator lost", []string{session.ReasonCoordinatorLost}, session.ReasonCoordinatorLost},
+		{"cancelled", []string{session.ReasonCancelled}, session.ReasonCancelled},
+		{"a group reason after a member reason", []string{"PodIPChanged", session.ReasonDeadlineExceeded},
+			session.ReasonDeadlineExceeded},
+		{"a member reason after a group reason", []string{session.ReasonDeadlineExceeded, "PodIPChanged"},
+			session.ReasonDeadlineExceeded},
+		{"the first group reason", []string{session.ReasonCancelled, session.ReasonCoordinatorLost},
+			session.ReasonCancelled},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			g := newSnapshot("snapshot-uid", "a", "b")
+			r := newRestore(g, "a", "b")
+			for i, reason := range tt.reasons {
+				id := g.Spec.Members[i].ID
+				g.Status.Members = append(g.Status.Members, v1alpha1.PodGroupSnapshotMemberStatus{
+					ID: id, Rank: int32(i), Phase: v1alpha1.CheckpointPhaseFailed, Reason: reason,
+				})
+				r.Status.Members = append(r.Status.Members, v1alpha1.PodGroupRestoreMemberStatus{
+					ID: id, Phase: v1alpha1.RestorePhaseFailed, Reason: reason,
+				})
+			}
+			assert.Equal(t, tt.want, captureAttempt(g).failureReason)
+			a, ok := restoreAttempt(r, g)
+			require.True(t, ok)
+			assert.Equal(t, tt.want, a.failureReason)
 		})
 	}
 }
