@@ -117,7 +117,7 @@ At most one class is the default; see [Default class](#default-class).
 | Secret missing or revoked | An S3 class's Secret is deleted or rotated to an invalid key. | The class goes `Ready=False`, reason `CredentialsUnavailable`, and new bindings stop. In-flight operations fail with the existing credential errors; nothing is deleted on an access error. |
 | Agent holds credentials | Today only PageBroker and the operator see S3 credentials. The agent now reads the class's Secret and writes it to a local file for PageBroker. | The Secret must live in the Snapshot namespace; the agent's RBAC is a Role there, not a ClusterRole. The file is written to the memory-backed volume the two containers already share, mode `0600`, under a per-transaction directory removed on Commit or Abort. Accepted trade-off against giving PageBroker a Kubernetes client; see Alternatives. |
 | Duplicate or overlapping location | Two classes describe the same place, through the same fields, through an alias such as a second endpoint hostname, or through a nested prefix; cleanup through one could reach the other's content. | The operator refuses `Ready` for the later class with reason `DuplicateStore` or `StoreOverlap` and names the other; see [Store uniqueness](#store-uniqueness). |
-| Nested store in another cluster | Another cluster or installation registers a class above or below this one's prefix in the same bucket or claim. The scan cannot see it, and a sweep through the parent could delete the child's data. | The ancestor-marker check refuses the child when the parent registered first. A parent registered later is not detected, so a sweep never deletes inside a subtree whose marker names another store, and deleting content removes only its own recorded handles. Data written by something that leaves no marker is not protected. |
+| Nested store in another cluster | Another cluster or installation registers a class above or below this one's prefix in the same bucket or claim. The scan cannot see it, and a sweep through the parent could delete the child's data. | The ancestor-marker check refuses the child when the parent registered first. A parent registered later is not detected, so a sweep looks only inside its own `artifacts/` and deletes only orphans named by a UUID, and deleting content removes only its own recorded handles. Data written by something that leaves no marker is not protected. |
 | Old agent, new class | During a rolling upgrade an agent that predates this proposal receives content bound to a non-default class. | It passes its startup store to PageBroker, whose `storeID` does not match the content's; PageBroker returns `STORE_MISMATCH` and the capture fails before any I/O. The existing retry picks it up after the node upgrades. |
 | Default misconfigured | Two classes set `isDefault: true`, or the default is deleted and unnamed `PodSnapshot`s fail. | The admission policy denies both. If it is absent or bypassed, the oldest marked class wins with `DefaultConflict` on the others, and a Warning event flags a deleted default; see [Default class](#default-class). |
 
@@ -249,7 +249,7 @@ disappear unnoticed. Two layers hold that.
    the policy, a Warning event names the effect: unnamed `PodSnapshot`s fail
    with `StorageClassTerminating` while content references it, and
    `StorageClassNotFound` after. The chart recreates its `default` class on the
-   next `helm upgrade` while `createDefaultClass` is true.
+   next `helm upgrade`.
 
 #### Store uniqueness
 
@@ -259,15 +259,17 @@ reconciler runs these checks in order:
 1. **Digest.** Another class with the same `storeID` is `DuplicateStore`.
 2. **Overlap.** Another class on the same claim or in the same S3 bucket whose
    `basePath` or prefix is a parent or child of this one's is `StoreOverlap`;
-   siblings such as `team-a/` and `team-b/` are allowed. The scan reads the
+   siblings such as `team-a/` and `team-b/` are allowed. A location inside
+   another store's `artifacts/` directory is also `StoreOverlap`. The scan reads the
    class informer cache and compares only immutable location fields, so a result
    changes only when a class is added or deleted. The later
    class by `creationTimestamp`, ties by name, is refused, so two classes
    created at once get the same answer in any reconcile order.
 3. **Ancestor markers.** The operator reads the marker at each ancestor prefix
    (S3) or ancestor directory under the claim root (PVC). A marker for another
-   store is `StoreOverlap`; this sees stores registered by another cluster,
-   which the scan cannot. A read the credentials deny, or a missing marker, is
+   store is `StoreOverlap`, including a location inside that store's
+   `artifacts/`; this sees stores registered by another cluster, which the scan
+   cannot. A read the credentials deny, or a missing marker, is
    skipped, so a class whose credentials cover only its own prefix still
    reaches `Ready`. Sweeps do not repeat it: they delete only inside their own
    prefix, so a parent registered later changes nothing for them.
@@ -288,7 +290,7 @@ never overwritten, so it must be deleted by hand before the location is reused.
 
 Descendants are not checked: a class registered above an existing store in
 another cluster cannot be found without listing the whole prefix, so it reaches
-`Ready`, and [Maintenance](#maintenance) guards deletion instead. Only Snapshot
+`Ready`, and [Maintenance](#maintenance) limits what a sweep can delete. Only Snapshot
 writes markers, so data placed there by anything else is not detected.
 
 #### Agent and PageBroker
@@ -296,8 +298,8 @@ writes markers, so data placed there by anything else is not detected.
 The agent already carries `storeID` and the artifact identity to PageBroker; it
 adds the resolved store through the `StorageBackend` selector, so PageBroker no
 longer depends on one store fixed at startup. PVC reuses `FilesystemStorage`;
-S3 is the one new kind. `--storage-config` remains for installations without
-classes. Only new fields are shown.
+S3 is the one new kind. `--storage-config` remains only for content that has
+no class. Only new fields are shown.
 
 ```protobuf
 message StorageBackend {
@@ -364,9 +366,11 @@ against the binding, and returns that backend. Under the content's
 the store and emits `SnapshotsRetained` with the handle. Sweeps run per class
 and never cross stores. A sweep first reads the marker at its own
 location and stops, reporting why, if it is missing or names another store. It
-then lists its prefix once and skips every subtree whose marker names a
-different `storeID`; on a PVC it does the same while walking directories.
-Deleting content removes only the handles recorded on it. Content whose class
+then looks only inside `<location>/artifacts/` and deletes only orphaned
+directories whose name is a UUID, the `PodSnapshotContent` UID that PageBroker
+names them by. This filter is new: today every directory there with a safe name
+and no matching content is an orphan. Other names are left alone. Deleting
+content removes only the handles recorded on it. Content whose class
 is gone keeps its finalizer and gets `StoreInactive`, as in SNEP-237.
 
 ### Security
@@ -383,20 +387,34 @@ is gone keeps its finalizer and gets `StoreInactive`, as in SNEP-237.
 
 ### Configuration
 
-The chart keeps `storage.*` and renders it as the `default` class. New values:
+The chart keeps `storage.*` and always renders it as the `default` class. New value:
 
 ```yaml
 storage:
   pvc:
     # Claims to mount for additional PVC classes, in the release namespace.
     additionalClaims: []
-  # Create the default class from the values above. Set false to manage classes by hand.
-  createDefaultClass: true
 ```
 
 Classes require `operator.bindNewContents` and `pageBroker.artifactAddressing`;
-the chart fails the render otherwise. The operator's `--snapshot-storage-config`
-and S3 credential flags are deprecated; with the CRD it reads classes instead.
+the chart fails the render otherwise.
+
+Every `storage.*` value keeps its meaning and feeds the `default` class: `type`
+selects PVC or S3; `s3.endpoint`, `region`, `bucket`, `prefix`, `addressing`,
+`allowHttp`, `credentialsSecretRef`, `credentialsSecretKey`,
+`caBundleConfigMapRef` and `caBundleConfigMapKey` become the class's `s3` fields;
+`pvc.name` becomes `claimName`, with the class `basePath` at the claim root.
+`pvc.basePath` stays the container mount path, and `pvc.create`, `size` and
+`storageClass` still only provision the claim. What changes is delivery: the
+chart no longer mounts the S3 Secret or CA ConfigMap into PageBroker and the
+operator, because both are read through the API and passed per transaction.
+
+Classes are the only way to define a store. The operator builds its backend
+registry from classes only, so this release removes its `--snapshot-storage-config`
+and S3 credential flags; an operator started with one fails at start with an
+unknown-flag error, so remove it from any hand-edited arguments. The chart no
+longer passes them. The agent's `--storage-config` remains only for content
+that has no class.
 
 #### Upgrade from a single-store installation
 
@@ -445,8 +463,9 @@ the old operator ignores both and reads `storage.yaml`.
 - **Agent:** Secret fetch, file permissions and removal on Commit, Abort and
   crash; mount mapping for default and extra claims; `StorageClassUnavailable`
   on a missing class, a `status.storeID` mismatch, or a claim with no mount.
-- **Maintenance:** a sweep stops when its own marker is missing or foreign and
-  skips foreign subtrees, on S3 and on a PVC.
+- **Maintenance:** a sweep stops when its own marker is missing or foreign, and
+  looks only inside `artifacts/`, deleting only UUID-named orphans, on S3 and on
+  a PVC. A class inside another store's `artifacts/` is refused.
 - **PageBroker:** per-request `StorageBackend`, client cache, two stores live.
 - **End to end:** two S3 and one PVC class in one cluster, checkpoint and
   cross-node restore through each; a class terminates only after its content is
@@ -457,9 +476,6 @@ the old operator ignores both and reads `storage.yaml`.
 
 - **Alpha:** CRD and fields as above; PVC and S3 classes; default class from
   the chart; protection finalizer; `Retain`; PVC mount limitation documented.
-- **Beta:** a cluster running two or more classes in production; metrics and
-  events stable; upgrade and rollback from the single-store chart tested.
-- **GA:** API stable for one release; the deprecated operator flags removed.
 
 ## Alternatives
 
