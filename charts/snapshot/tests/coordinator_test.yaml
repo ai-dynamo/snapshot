@@ -26,6 +26,40 @@ tests:
       - notExists:
           path: spec.template.spec.volumes[?(@.name == "coordinator-tmp")]
 
+  - it: renders old values without podGroups
+    template: templates/daemonset.yaml
+    set:
+      podGroups: null
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 2
+
+  - it: renders the operator without podGroups in old values
+    template: templates/operator-deployment.yaml
+    set:
+      podGroups: null
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --coordinator-tls-namespace=snapshot-system
+
+  - it: renders no coordinator RBAC without podGroups in old values
+    template: templates/coordinator-rbac.yaml
+    set:
+      podGroups: null
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders no issuer RBAC without podGroups in old values
+    template: templates/coordinator-issuer-rbac.yaml
+    set:
+      podGroups: null
+    asserts:
+      - hasDocuments:
+          count: 0
+
   # /tmp holds the control buckets' file store, which maxMemoryBytes bounds, so
   # the volume follows it, with a 64 MiB margin for JetStream's own files.
   - it: sizes /tmp from maxMemoryBytes

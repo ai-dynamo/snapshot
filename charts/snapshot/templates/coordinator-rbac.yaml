@@ -1,4 +1,4 @@
-{{- if and .Values.rbac.create .Values.podGroups.enabled }}
+{{- if and .Values.rbac.create (.Values.podGroups).enabled }}
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 

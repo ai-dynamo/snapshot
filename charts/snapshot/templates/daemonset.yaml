@@ -1,5 +1,5 @@
 {{- include "snapshot.validateRuntime" . -}}
-{{- if .Values.podGroups.enabled -}}
+{{- if (.Values.podGroups).enabled -}}
 {{- include "snapshot.validateCoordinator" . -}}
 {{- end -}}
 {{- if hasKey .Values.image.pageBroker "tag" -}}
@@ -269,7 +269,7 @@ spec:
               mountPath: {{ include "snapshot.modelStreamerMountDir" . }}
               readOnly: true
             {{- end }}
-        {{- if .Values.podGroups.enabled }}
+        {{- if (.Values.podGroups).enabled }}
         # The coordinator of pod groups. It runs as non-root with no
         # capabilities: it needs only the API server, its serving certificate,
         # its two ports, which are on the node's IP, and /tmp. It still shares the
@@ -480,7 +480,7 @@ spec:
           secret:
             secretName: {{ .Values.storage.oci.credentialsSecretRef }}
         {{- end }}
-        {{- if .Values.podGroups.enabled }}
+        {{- if (.Values.podGroups).enabled }}
         # The coordinator's serving certificate. Optional, so the agent and
         # PageBroker start before the operator has issued it; the kubelet fills
         # the volume once the Secret exists, and the coordinator waits for it,
