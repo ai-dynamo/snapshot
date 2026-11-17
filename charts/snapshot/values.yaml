@@ -438,7 +438,7 @@ config:
     skipInFlight: true             # Skip in-flight TCP connections
 
 # Alpha: pod groups (SNEP-324), which checkpoint a group of cooperating Pods
-# together and restore it. The chart installs what pod groups need only when
-# this is true.
+# together and restore it. True turns pod groups on, with everything the chart
+# deploys for them. The chart installs their CRDs either way.
 podGroups:
   enabled: false
