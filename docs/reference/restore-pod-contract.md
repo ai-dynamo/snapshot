@@ -259,6 +259,7 @@ Name the destination container in the `PodGroupRestore`, in the target's
   restores until every target's destination container exists.
 - A claimed Pod serves one restore only. If that restore fails, create a new
   gated Pod.
-- On a node without the restore proxy, give the destination an inert command,
-  as described in
-  [Nodes Without the Restore Proxy](#nodes-without-the-restore-proxy).
+- On a node without the restore proxy, or whose node agent does not support pod
+  groups, the destination's own command runs. Give it an inert command, as
+  described in [Nodes Without the Restore Proxy](#nodes-without-the-restore-proxy),
+  or keep group restores off such nodes.
