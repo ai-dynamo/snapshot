@@ -505,49 +505,14 @@ func TestRunRestoreRecordsTheLastFailure(t *testing.T) {
 			} else {
 				require.Error(t, err)
 			}
-			record := h.volume.record(t, "host-uid", "main")
+			record := savedAttempts(h.w, h.pod.UID, "main")
+			require.NotNil(t, record)
 			require.NotNil(t, record.LastFailure)
 			assert.Equal(t, tc.want, *record.LastFailure)
-		})
-	}
-}
-
-// The failure that ends a restore is saved after restore-failed, which ends
-// the restore whether or not the record is saved.
-func TestRunRestoreSavesTheEndingFailureAfterRestoreFailed(t *testing.T) {
-	for name, tc := range map[string]struct {
-		limit   string
-		record  func(*attemptHarness) restoreAttempts
-		failure error
-	}{
-		"not retried": {limit: "2", failure: untouched(pagebroker.NewFailureError(pagebroker.Failure_ARTIFACT_CORRUPT, "bad index"))},
-		"no retries left": {limit: "1", failure: untouched(storeUnreachable), record: func(h *attemptHarness) restoreAttempts {
-			return restoreAttempts{Limit: 1, Attempt: 1, Deadline: h.now.Add(10 * time.Minute), ContainerID: "ctr-abc", RetryAt: h.now.Add(-time.Second)}
-		}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			h, run := newAttemptHarness(t, retryLimit(tc.limit), nil)
-			if tc.record != nil {
-				h.volume.put(t, "host-uid", "main", tc.record(h))
-			}
-			h.failAttempts(tc.failure)
-			var order []string
-			writeSentinel := h.w.writeControlSentinelFn
-			h.w.writeControlSentinelFn = func(pid int, name string, data []byte) error {
-				order = append(order, name)
-				return writeSentinel(pid, name, data)
-			}
-			writeFile := h.w.writePodControlSentinelFn
-			h.w.writePodControlSentinelFn = func(uid, container, name string, data []byte) error {
-				if name == podcontract.RestoreAttemptsFile && strings.Contains(string(data), `"lastFailure"`) {
-					order = append(order, "record with the failure")
-				}
-				return writeFile(uid, container, name, data)
-			}
-
-			require.Error(t, run())
-
-			assert.Equal(t, []string{podcontract.RestoreFailedFile, "record with the failure"}, order)
+			writeQueuedRetryStatus(h.w)
+			status, found := publishedRetryStatus(t, h.w, h.pod)
+			require.True(t, found)
+			assert.Equal(t, &tc.want, status["main"].LastFailure)
 		})
 	}
 }
@@ -559,11 +524,11 @@ func TestRunRestoreKeepsTheLastFailureThroughTheNextAttempt(t *testing.T) {
 	h.failAttempts(untouched(storeUnreachable))
 	require.ErrorIs(t, run(), errRetryScheduled)
 
-	h.now = h.volume.record(t, "host-uid", "main").RetryAt
+	h.now = savedAttempts(h.w, h.pod.UID, "main").RetryAt
 	require.NoError(t, run())
 
 	assert.Equal(t, 2, h.seen.Attempt)
 	require.NotNil(t, h.seen.LastFailure)
 	assert.Equal(t, "PageBroker STORAGE_UNAVAILABLE: store unreachable", h.seen.LastFailure.Cause)
-	assert.Equal(t, h.seen.LastFailure, h.volume.record(t, "host-uid", "main").LastFailure)
+	assert.Equal(t, h.seen.LastFailure, savedAttempts(h.w, h.pod.UID, "main").LastFailure)
 }
