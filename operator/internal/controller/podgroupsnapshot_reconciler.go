@@ -41,16 +41,12 @@ import (
 // group, creates one owned PodSnapshot per member, and aggregates what the
 // members report into the group's status.
 //
-// The operator never fails a group while member work runs, except at the
-// deadline and on deletion, both of which the coordinator observes itself.
-// The coordinator reads group status to place its session and to remove it once
-// the attempt is final. It never ends a running session because of the status,
-// so a failure only the operator knew about would leave every agent waiting
-// until the deadline. The reconciler therefore refuses a bad group before it
-// creates any member work, then creates all of it, and from then on only
-// records what the members report: each agent reports on its member's
-// PodSnapshotContent, and the PodSnapshot controller mirrors that to the
-// PodSnapshot.
+// The reconciler refuses a bad group before creating member work, then records
+// what the members report. Each agent reports on its PodSnapshotContent, and
+// the PodSnapshot controller mirrors that to its PodSnapshot. The coordinator
+// reads group status to place and remove sessions and ends an uncommitted
+// session when the group reports a failure. After the commit, member reports
+// decide the outcome; the coordinator still enforces the deadline.
 type PodGroupSnapshotReconciler struct {
 	client.Client
 	NonCacheReadClient client.Reader
