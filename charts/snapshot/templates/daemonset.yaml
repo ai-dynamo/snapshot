@@ -312,13 +312,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            # A soft limit: the Go runtime collects garbage as the heap, which
-            # holds the sessions' data, nears the container's memory limit,
-            # rather than letting it grow past the limit to twice the live data.
-            - name: GOMEMLIMIT
+            {{- if ((.Values.coordinator.resources).limits).memory }}
+            # The coordinator sets Go's soft limit below the container limit.
+            - name: SNAPSHOT_COORDINATOR_MEMORY_LIMIT_BYTES
               valueFrom:
                 resourceFieldRef:
                   resource: limits.memory
+            {{- end }}
           # Host ports, the Pod being on the host's network, so the scheduler
           # keeps a second Pod that wants them off the node.
           ports:
