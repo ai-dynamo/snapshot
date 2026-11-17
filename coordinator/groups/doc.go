@@ -19,8 +19,8 @@
 //
 // The host configures logging on the manager, which the package logs through.
 // Sessions live only in the coordinator's memory, so after a restart the
-// startup ensures the session of every unfinished attempt the node serves
-// before it marks the server ready.
+// startup tries to ensure the session of every unfinished attempt the node
+// serves before it marks the server ready.
 //
 // The host's ServiceAccount needs get, list, and watch on both kinds,
 // cluster-wide, as a ClusterRole grants them:

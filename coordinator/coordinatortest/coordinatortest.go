@@ -67,8 +67,8 @@ func Start(t testing.TB, modify ...func(*server.Config)) *Coordinator {
 }
 
 // StartUnready starts a coordinator as Start does, but leaves it refusing
-// every client until MarkReady, which a host calls once it has ensured the
-// sessions it serves.
+// every client until MarkReady, which a host calls once it has tried to ensure
+// the sessions it serves.
 func StartUnready(t testing.TB, modify ...func(*server.Config)) *Coordinator {
 	t.Helper()
 	roots, cert := testcert.New(t)

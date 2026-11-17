@@ -43,6 +43,11 @@ During the upgrade:
   [How the CRDs Are Updated](#how-the-crds-are-updated).
 - Snapshots taken with an older version still restore. If one cannot, the
   restore fails with a clear error.
+- A `SnapshotJob` that has no `PodSnapshot` yet, and whose
+  `podSnapshotTemplate` sets `nvidia.com/snapshot-podgroup` or
+  `nvidia.com/snapshot-podgroup-member`, fails with `InvalidSpec`. The
+  controllers own these labels, and the `nvidia.com/snapshot-` prefix is
+  Snapshot's. Delete it, and create it again without those labels.
 
 If you use a private node agent image, set its pull secret in the same
 `helm upgrade`. Otherwise the new chart defaults remove the image access the

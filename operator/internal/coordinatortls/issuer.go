@@ -88,9 +88,10 @@ func (i *Issuer) Start(ctx context.Context) error {
 // persisted. So the bundle that trusts a new CA is published before the
 // serving certificate it signs, although each node's kubelet refreshes the
 // mounted files on its own schedule. Each write is conditional on the
-// resourceVersion read, or is a create when the resource was absent. When one
-// loses a race, ensure discards what it generated, then reads and decides
-// again, a bounded number of times.
+// resourceVersion read, or is a create when the resource was absent. Last, it
+// updates each valid resource that lacks the operator's labels as read, with
+// only its labels set. When a write loses a race, ensure discards what it
+// generated, then reads and decides again, a bounded number of times.
 func (i *Issuer) ensure(ctx context.Context) error {
 	return retry.OnError(retry.DefaultRetry, lostRace, func() error {
 		ca := &corev1.Secret{ObjectMeta: i.meta(i.cfg.CASecret)}
@@ -167,6 +168,17 @@ func (i *Issuer) ensure(ctx context.Context) error {
 			}
 			i.cfg.Log.Info("Issued the coordinator's serving certificate", "secret", serving.Name,
 				"serial", serial(certs[0]), "notAfter", certs[0].NotAfter, "reason", p.serving.Error())
+		}
+
+		for _, obj := range p.relabel {
+			if err := i.write(ctx, obj); err != nil {
+				return err
+			}
+			key := "secret"
+			if _, ok := obj.(*corev1.ConfigMap); ok {
+				key = "configMap"
+			}
+			i.cfg.Log.Info("Labeled a coordinator TLS resource as the operator's", key, obj.GetName())
 		}
 		return nil
 	})

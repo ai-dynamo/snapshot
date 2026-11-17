@@ -12,6 +12,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 )
 
 const serverName = "snapshot-coordinator"
@@ -222,6 +227,21 @@ func TestDecide(t *testing.T) {
 			want: want{serving: true}},
 		{name: "the bundle and the serving Secret are absent", bundle: &corev1.ConfigMap{}, serving: &corev1.Secret{},
 			want: want{bundle: true, serving: true}},
+		{name: "valid, without labels", ca: withLabels(caSecret(ca, previous), nil),
+			bundle: withLabels(bundleConfigMap(ca, previous), nil), serving: withLabels(tlsSecret(serving), nil),
+			want: want{relabel: []string{"ca", "bundle", "serving"}}},
+		{name: "valid, with a label of another value",
+			serving: withLabels(tlsSecret(serving), map[string]string{operatortypes.ManagedByLabel: "other"}),
+			want:    want{relabel: []string{"serving"}}},
+		{name: "valid, with other labels too",
+			ca:   withLabels(caSecret(ca), labels.Merge(operatortypes.Labels(), map[string]string{"other": "kept"})),
+			want: want{}},
+		{name: "a resource written gets the labels by its write", bundle: withLabels(bundleConfigMap(other), nil),
+			want: want{bundle: true}},
+		{name: "a valid resource relabeled beside another's write", ca: withLabels(caSecret(ca), nil),
+			bundle: bundleConfigMap(other), want: want{bundle: true, relabel: []string{"ca"}}},
+		{name: "a new CA, without labels", ca: withLabels(caSecret(nearExpiry), nil),
+			bundle: withLabels(bundleConfigMap(nearExpiry), nil), serving: withLabels(tlsSecret(serving), nil), want: all},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.ca == nil {
@@ -237,7 +257,12 @@ func TestDecide(t *testing.T) {
 				tc.serverName = serverName
 			}
 			p := decide(tc.ca, tc.bundle, tc.serving, tc.serverName, now)
-			assert.Equal(t, tc.want, want{p.newCA, p.ca != nil, p.bundle != nil, p.serving != nil})
+			names := map[client.Object]string{tc.ca: "ca", tc.bundle: "bundle", tc.serving: "serving"}
+			var relabel []string
+			for _, obj := range p.relabel {
+				relabel = append(relabel, names[obj])
+			}
+			assert.Equal(t, tc.want, want{p.newCA, p.ca != nil, p.bundle != nil, p.serving != nil, relabel})
 			if p.newCA {
 				assert.ErrorIs(t, p.bundle, errNewCA)
 				assert.ErrorIs(t, p.serving, errNewCA)
@@ -246,8 +271,11 @@ func TestDecide(t *testing.T) {
 	}
 }
 
-// want is what a plan writes.
-type want struct{ newCA, ca, bundle, serving bool }
+// want is what a plan writes, and which resources it relabels, in order.
+type want struct {
+	newCA, ca, bundle, serving bool
+	relabel                    []string
+}
 
 // pemPair is a certificate and its private key, as PEM.
 type pemPair struct{ cert, key []byte }
@@ -305,7 +333,7 @@ func bundleOf(pairs ...pemPair) []byte {
 
 // caSecret holds p as the CA and, when given, previous as the previous CA.
 func caSecret(p pemPair, previous ...pemPair) *corev1.Secret {
-	s := &corev1.Secret{Data: map[string][]byte{caCertKey: p.cert, caKeyKey: p.key}}
+	s := &corev1.Secret{ObjectMeta: labeledMeta(), Data: map[string][]byte{caCertKey: p.cert, caKeyKey: p.key}}
 	if len(previous) > 0 {
 		s.Data[previousKey] = bundleOf(previous...)
 	}
@@ -313,9 +341,21 @@ func caSecret(p pemPair, previous ...pemPair) *corev1.Secret {
 }
 
 func bundleConfigMap(pairs ...pemPair) *corev1.ConfigMap {
-	return &corev1.ConfigMap{Data: map[string]string{bundleKey: string(bundleOf(pairs...))}}
+	return &corev1.ConfigMap{ObjectMeta: labeledMeta(), Data: map[string]string{bundleKey: string(bundleOf(pairs...))}}
 }
 
 func tlsSecret(p pemPair) *corev1.Secret {
-	return &corev1.Secret{Data: map[string][]byte{corev1.TLSCertKey: p.cert, corev1.TLSPrivateKeyKey: p.key}}
+	return &corev1.Secret{ObjectMeta: labeledMeta(),
+		Data: map[string][]byte{corev1.TLSCertKey: p.cert, corev1.TLSPrivateKeyKey: p.key}}
+}
+
+// labeledMeta carries the operator's labels, as the Issuer writes them.
+func labeledMeta() metav1.ObjectMeta {
+	return metav1.ObjectMeta{Labels: operatortypes.Labels()}
+}
+
+// withLabels replaces obj's labels with l.
+func withLabels[T client.Object](obj T, l map[string]string) T {
+	obj.SetLabels(l)
+	return obj
 }

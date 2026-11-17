@@ -93,6 +93,57 @@ func TestIssuer(t *testing.T) {
 		}
 	})
 
+	t.Run("labels on valid resources", func(t *testing.T) {
+		f := newFixture(t, cl)
+		f.ensure()
+		// Replace the CA, so that the CA Secret holds previous.crt too.
+		f.clock.SetTime(f.read().caCert(t).NotAfter.Add(-renewalWindow).Add(time.Second))
+		f.ensure()
+		before := f.read()
+		require.Contains(t, before.ca.Data, previousKey)
+		for _, obj := range before.objects() {
+			obj.SetLabels(map[string]string{operatortypes.ManagedByLabel: "other", "other": "kept"})
+			require.NoError(t, cl.Update(t.Context(), obj))
+		}
+
+		f.requireWrites(f.ensure(), f.cfg.CASecret, f.cfg.CABundle, f.cfg.TLSSecret)
+		after := f.read()
+		want := operatortypes.Labels()
+		want["other"] = "kept"
+		for _, obj := range after.objects() {
+			assert.Equal(t, want, obj.GetLabels(), obj.GetName())
+		}
+		assert.Equal(t, before.ca.Data, after.ca.Data)
+		assert.Equal(t, before.bundle.Data, after.bundle.Data)
+		assert.Equal(t, before.serving.Data, after.serving.Data)
+		f.requireWrites(f.ensure())
+	})
+
+	t.Run("a conflict on the label update", func(t *testing.T) {
+		f := newFixture(t, cl)
+		f.ensure()
+		before := f.read()
+		before.ca.SetLabels(nil)
+		require.NoError(t, cl.Update(t.Context(), before.ca))
+
+		// Between ensure's read and its update, another writer annotates the
+		// CA Secret, so the update conflicts.
+		w := &recordingWriter{Writer: cl, hold: func(tried int) {
+			if tried == 0 {
+				ca := f.read().ca
+				ca.Annotations = map[string]string{"other": "kept"}
+				require.NoError(t, cl.Update(t.Context(), ca))
+			}
+		}}
+		require.NoError(t, NewIssuer(f.cfg, cl, w).ensure(t.Context()))
+		assert.Equal(t, 2, w.tried, "the first update conflicts")
+		f.requireWrites(w, f.cfg.CASecret)
+		after := f.read()
+		assert.Equal(t, operatortypes.Labels(), after.ca.Labels)
+		assert.Equal(t, map[string]string{"other": "kept"}, after.ca.Annotations)
+		assert.Equal(t, before.ca.Data, after.ca.Data)
+	})
+
 	t.Run("renewal of the serving certificate", func(t *testing.T) {
 		f := newFixture(t, cl)
 		f.ensure()

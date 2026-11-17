@@ -6,6 +6,7 @@ package session
 import (
 	"encoding/json"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -96,6 +97,18 @@ func TestMemberPermissionsFollowTheBuckets(t *testing.T) {
 	}
 	assert.Len(t, publish, cap(publish), "the subjects must fill what was allocated for them")
 	assert.Equal(t, []string{"_INBOX.a.m.>"}, permissions.Subscribe)
+}
+
+// TestReadOnlyPermissionsWriteNoKey checks that a read-only member may make
+// every request a member may, and write no key.
+func TestReadOnlyPermissionsWriteNoKey(t *testing.T) {
+	member, readOnly := MemberPermissions("a", "m"), ReadOnlyPermissions("a", "m")
+	requests := slices.DeleteFunc(slices.Clone(member.Publish), func(subject string) bool {
+		return strings.HasPrefix(subject, "$KV.")
+	})
+	assert.Equal(t, requests, readOnly.Publish)
+	assert.Len(t, readOnly.Publish, cap(readOnly.Publish), "the subjects must fill what was allocated for them")
+	assert.Equal(t, member.Subscribe, readOnly.Subscribe)
 }
 
 // TestControlBytes checks the control bucket's size against its parts, with

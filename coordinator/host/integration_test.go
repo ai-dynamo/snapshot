@@ -12,11 +12,14 @@ import (
 	"crypto/x509"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +27,7 @@ import (
 	"github.com/ai-dynamo/snapshot/coordinator"
 	"github.com/ai-dynamo/snapshot/coordinator/internal/testcert"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
+	"github.com/go-logr/logr"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -290,6 +294,40 @@ func TestRunWaitsForTheCertificate(t *testing.T) {
 	})
 }
 
+// TestRunServesHealthFirst starts Run while the API server holds its read of
+// the ServiceAccount issuer. Run is live but not ready meanwhile. Once the
+// read fails, Run returns that error, with its health port closed.
+func TestRunServesHealthFirst(t *testing.T) {
+	k := startCluster(t)
+	issuer := k.holdIssuer(t)
+	healthPort := freePort(t)
+	health := net.JoinHostPort("127.0.0.1", strconv.Itoa(healthPort))
+	r := start(t, Config{
+		RESTConfig:     issuer.config,
+		Node:           node,
+		ServiceAccount: agents,
+		Audience:       audience,
+		Host:           "127.0.0.1",
+		Port:           freePort(t),
+		HealthPort:     healthPort,
+		TLSDir:         t.TempDir(),
+		Log:            logr.Discard(),
+	})
+	select {
+	case <-issuer.requested:
+	case <-r.done:
+		t.Fatalf("Run returned: %v", r.err)
+	case <-time.After(timeout):
+		t.Fatal("Run did not read the issuer")
+	}
+	require.Equal(t, http.StatusOK, probe(health, "/healthz"), "liveness")
+	require.NotEqual(t, http.StatusOK, probe(health, "/readyz"), "readiness")
+
+	issuer.fail()
+	require.ErrorContains(t, r.wait(t), "read the ServiceAccount token issuer")
+	require.True(t, closed(health), "the health port is still open")
+}
+
 // cluster is the test's API server.
 type cluster struct {
 	cfg   *rest.Config
@@ -381,6 +419,52 @@ func (k *cluster) grantRBAC(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// heldIssuer is a proxy of the test's API server that holds every read of
+// the ServiceAccount issuer's discovery document until fail, and then answers
+// it with 503 Service Unavailable.
+type heldIssuer struct {
+	// config acts as the agents' ServiceAccount through the proxy.
+	config *rest.Config
+	// requested is closed once the proxy holds a read of the issuer.
+	requested chan struct{}
+	fail      func()
+}
+
+// holdIssuer starts a heldIssuer, and stops it when the test ends.
+func (k *cluster) holdIssuer(t *testing.T) *heldIssuer {
+	t.Helper()
+	target, _, err := rest.DefaultServerUrlFor(k.cfg)
+	require.NoError(t, err)
+	transport, err := rest.TransportFor(k.cfg)
+	require.NoError(t, err)
+	proxy := &httputil.ReverseProxy{
+		Rewrite:   func(r *httputil.ProxyRequest) { r.SetURL(target) },
+		Transport: transport,
+	}
+	h := &heldIssuer{requested: make(chan struct{})}
+	var requested sync.Once
+	released := make(chan struct{})
+	h.fail = sync.OnceFunc(func() { close(released) })
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/.well-known/openid-configuration" {
+			proxy.ServeHTTP(w, r)
+			return
+		}
+		requested.Do(func() { close(h.requested) })
+		select {
+		case <-released:
+			http.Error(w, "the issuer is held", http.StatusServiceUnavailable)
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() {
+		h.fail()
+		srv.Close()
+	})
+	h.config = &rest.Config{Host: srv.URL, Impersonate: k.agentConfig().Impersonate}
+	return h
+}
+
 // member is one member of a test's group: its ID and its node.
 type member struct{ id, node string }
 
@@ -468,6 +552,12 @@ func (r *running) requireRunning(t *testing.T) {
 func (r *running) stop(t *testing.T) error {
 	t.Helper()
 	r.cancel()
+	return r.wait(t)
+}
+
+// wait returns what Run returns.
+func (r *running) wait(t *testing.T) error {
+	t.Helper()
 	select {
 	case <-r.done:
 		return r.err

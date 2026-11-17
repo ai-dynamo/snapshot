@@ -57,14 +57,22 @@ const (
 // down within a bounded time, failing every open session with
 // session.ReasonCoordinatorLost. It builds the parts in the order package groups
 // gives, and returns an error, having shut down what it started, if any of them
-// fails. Before server.New, it serves the health endpoint, and waits for the
-// serving certificate's files if they are missing. It returns nil once ctx is
-// done, also while it waits, unless the manager, the health endpoint, or the
+// fails. It serves the health endpoint first, before anything that can wait,
+// such as the read of the API server's ServiceAccount issuer: the endpoint
+// reports the process live from its start, and ready once the coordinator
+// admits clients. Before server.New, it waits for the serving certificate's
+// files if they are missing. It returns nil once ctx is done, also while it
+// waits for those files, unless the manager, the health endpoint, or the
 // shutdown fails.
 func Run(ctx context.Context, cfg Config) (err error) {
 	if err := cfg.validate(); err != nil {
 		return err
 	}
+	health, err := serveHealth(net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.HealthPort)))
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, health.stop()) }()
 	mgr, err := newManager(cfg)
 	if err != nil {
 		return err
@@ -77,11 +85,6 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	if err != nil {
 		return err
 	}
-	health, err := serveHealth(net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.HealthPort)))
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, health.stop()) }()
 	certs, err := waitForCertificate(ctx, cfg.TLSDir, certPoll, cfg.Log)
 	if err != nil {
 		if ctx.Err() != nil {

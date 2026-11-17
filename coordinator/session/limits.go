@@ -143,7 +143,7 @@ const (
 	MaxConcurrentGets = 2
 
 	// PayloadHeadroom is what the coordinator's largest message may carry
-	// beyond the Snapshot bucket's largest value: the headers of a write, and
+	// beyond the largest value of any bucket: the headers of a write, and
 	// what a read's reply adds, which ReplyHeadroom bounds. The key in a
 	// write's subject does not count.
 	PayloadHeadroom = 64 << 10
@@ -156,14 +156,22 @@ const (
 	ReplyHeadroom = 8 << 10
 )
 
+// MaxPayload is the largest message the coordinator accepts, for a Snapshot
+// bucket whose largest value is maxValue: the largest value of any bucket, and
+// PayloadHeadroom. That value is maxValue, or the largest Meta of a session of
+// MaxMembers members when maxValue is smaller.
+func MaxPayload(maxValue int) int {
+	return max(maxValue, ControlValueBytes(MaxMembers)) + PayloadHeadroom
+}
+
 // MaxPending is how many bytes the coordinator buffers for a connection, of
 // what it has sent and the connection has not taken yet, before it drops the
-// connection as a slow consumer: MaxConcurrentGets of the largest messages it
-// accepts, for a Snapshot bucket whose largest value is maxValue. A client
+// connection as a slow consumer: MaxConcurrentGets of its largest messages,
+// MaxPayload, for a Snapshot bucket whose largest value is maxValue. A client
 // budgets its reads within it, in bytes, each the largest value of its bucket
 // and ReplyHeadroom, so concurrent Gets never cost a reconnect, and a small
 // read goes on beside the largest ones.
-func MaxPending(maxValue int) int64 { return MaxConcurrentGets * int64(maxValue+PayloadHeadroom) }
+func MaxPending(maxValue int) int64 { return MaxConcurrentGets * int64(MaxPayload(maxValue)) }
 
 // MaxNameLength bounds a member ID and a barrier name.
 const MaxNameLength = 253

@@ -5,6 +5,7 @@ package coordinator
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,6 +25,30 @@ var (
 	smallRead = readCost{bytes: readSize(session.MaxLibraryValue)}
 )
 
+// startRead starts a read with its cost and operation, and returns a channel
+// of its result.
+type startRead func(ctx context.Context, cost readCost, op func(context.Context) error) <-chan error
+
+// reader returns a startRead that runs each read of s on a goroutine of its
+// own. Once the test ends, even through a failed assertion, release lets the
+// reads' operations return, and the reads are joined with the operations they
+// ran, so none leaks into the next test.
+func reader(t *testing.T, s *client, release func()) startRead {
+	var reads sync.WaitGroup
+	t.Cleanup(func() {
+		release()
+		reads.Wait()
+		// The client runs each operation on a goroutine of its own, and
+		// starts none once its read has returned.
+		s.wg.Wait()
+	})
+	return func(ctx context.Context, cost readCost, op func(context.Context) error) <-chan error {
+		done := make(chan error, 1)
+		reads.Go(func() { done <- s.read(ctx, cost, op) })
+		return done
+	}
+}
+
 // TestReadsShareABudgetInBytes checks that the reads of a connection share a
 // budget, in bytes, of what the coordinator buffers for it: while
 // session.MaxConcurrentGets reads of the Snapshot bucket's largest values are
@@ -33,31 +58,28 @@ var (
 func TestReadsShareABudgetInBytes(t *testing.T) {
 	s := testClient(t)
 	ctx := context.Background()
-	started, release := make(chan struct{}), make(chan struct{})
-	read := func(cost readCost) <-chan error {
-		done := make(chan error, 1)
-		go func() {
-			done <- s.read(ctx, cost, func(context.Context) error {
-				started <- struct{}{}
-				<-release
-				return nil
-			})
-		}()
-		return done
+	// started holds a signal of every large read, so none blocks on it once
+	// the test has stopped receiving.
+	started, release := make(chan struct{}, session.MaxConcurrentGets+1), make(chan struct{})
+	free := sync.OnceFunc(func() { close(release) })
+	read := reader(t, s, free)
+	hold := func(context.Context) error {
+		started <- struct{}{}
+		<-release
+		return nil
 	}
 	var reads []<-chan error
 	for range session.MaxConcurrentGets {
-		reads = append(reads, read(largeRead))
+		reads = append(reads, read(ctx, largeRead, hold))
 		<-started
 	}
-	reads = append(reads, read(largeRead))
+	reads = append(reads, read(ctx, largeRead, hold))
 	select {
 	case <-started:
 		t.Fatal("a read past the budget must wait")
 	case <-time.After(pending):
 	}
-	small := make(chan error, 1)
-	go func() { small <- s.read(ctx, smallRead, func(context.Context) error { return nil }) }()
+	small := read(ctx, smallRead, func(context.Context) error { return nil })
 	select {
 	case err := <-small:
 		require.NoError(t, err)
@@ -65,7 +87,7 @@ func TestReadsShareABudgetInBytes(t *testing.T) {
 		t.Fatal("a small read must go on beside the largest ones, and the one waiting")
 	}
 
-	close(release)
+	free()
 	<-started
 	for _, done := range reads {
 		require.NoError(t, <-done)
@@ -103,19 +125,17 @@ func TestReadKeepsItsBytesUntilItsReplyArrives(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	all := session.MaxPending(session.MaxValue)
 	started, reply := make(chan struct{}), make(chan struct{})
-	done := make(chan error, 1)
-	go func() {
-		done <- s.read(ctx, readCost{bytes: all}, func(context.Context) error {
-			close(started)
-			<-reply
-			return nil
-		})
-	}()
+	answer := sync.OnceFunc(func() { close(reply) })
+	done := reader(t, s, answer)(ctx, readCost{bytes: all}, func(context.Context) error {
+		close(started)
+		<-reply
+		return nil
+	})
 	<-started
 	cancel()
 	require.ErrorIs(t, <-done, context.Canceled)
 	assert.False(t, s.budget.TryAcquire(1), "the read must keep its bytes until its reply arrives")
-	close(reply)
+	answer()
 	require.Eventually(t, func() bool { return s.budget.TryAcquire(all) }, time.Second, time.Millisecond,
 		"the reply must free the read's bytes")
 }
