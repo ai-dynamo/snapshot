@@ -166,6 +166,7 @@ func TestRestoreRetryLimitFromAnnotations(t *testing.T) {
 		{name: "negative", value: ptr.To("-1"), wantFound: true, wantErr: true},
 		{name: "not a number", value: ptr.To("two"), wantFound: true, wantErr: true},
 		{name: "fraction", value: ptr.To("1.5"), wantFound: true, wantErr: true},
+		{name: "trailing text", value: ptr.To("2x"), wantFound: true, wantErr: true},
 		{name: "overflow", value: ptr.To("99999999999999999999"), wantFound: true, wantErr: true},
 	}
 	for _, test := range tests {
