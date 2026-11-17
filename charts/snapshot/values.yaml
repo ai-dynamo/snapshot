@@ -221,7 +221,7 @@ coordinator:
   # coordinator's /tmp, an emptyDir on node disk sized to this plus 64 MiB.
   maxMemoryBytes: 1073741824
   # The largest value, in bytes, an agent may write to a session.
-  maxValueBytes: 33554432
+  maxValueBytes: 32505856
   # The largest value, in bytes, a communication library may write to a session.
   maxLibraryValueBytes: 4096
   # How many keys communication libraries may write to a session, deleted ones

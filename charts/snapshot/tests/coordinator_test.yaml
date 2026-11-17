@@ -149,7 +149,7 @@ tests:
             - --port=4224
             - --health-port=4225
             - --max-memory-bytes=1073741824
-            - --max-value-bytes=33554432
+            - --max-value-bytes=32505856
             - --max-library-value-bytes=4096
             - --max-library-keys=4096
       - equal:
@@ -353,16 +353,15 @@ tests:
               cpu: 2
               memory: 8Gi
 
-  # The session limits default to the coordinator's own, which checks them
-  # when it starts.
-  - it: passes the coordinator's own session limits by default
+  # The coordinator validates the chart's session limits at startup.
+  - it: passes the chart's default session limits
     template: templates/daemonset.yaml
     set:
       podGroups.enabled: true
     asserts:
       - contains:
           path: spec.template.spec.containers[?(@.name == "coordinator")].args
-          content: --max-value-bytes=33554432
+          content: --max-value-bytes=32505856
       - contains:
           path: spec.template.spec.containers[?(@.name == "coordinator")].args
           content: --max-library-value-bytes=4096
