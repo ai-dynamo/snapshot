@@ -298,6 +298,7 @@ tests:
           content:
             name: coordinator-tmp
             emptyDir:
+              medium: Memory
               # maxMemoryBytes, 1 GiB, plus 64 MiB.
               sizeLimit: "1140850688"
       # Only the coordinator mounts them.

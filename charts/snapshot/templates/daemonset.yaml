@@ -494,10 +494,11 @@ spec:
                 path: tls.crt
               - key: tls.key
                 path: tls.key
-        # The coordinator's /tmp, on node disk, sized so that the coordinator
+        # The coordinator's /tmp, in memory, sized so that the coordinator
         # refuses a write before the kubelet would evict the Pod.
         - name: coordinator-tmp
           emptyDir:
+            medium: Memory
             sizeLimit: {{ include "snapshot.coordinatorTmpSizeLimit" . | quote }}
         {{- end }}
       {{- with .Values.daemonset.imagePullSecrets }}

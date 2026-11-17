@@ -157,7 +157,7 @@ With `podGroups.enabled`, the chart also deploys these:
   your own. With `rbac.create`, its Role and RoleBinding,
   `<fullname>-operator-coordinator-tls`, for the operator's ServiceAccount.
 
-The coordinator's `/tmp` is an `emptyDir` on node disk, sized to
+The coordinator's `/tmp` is an `emptyDir` in memory, sized to
 `coordinator.maxMemoryBytes` plus 64 MiB. It holds the control buckets' file
 store, which `coordinator.maxMemoryBytes` also bounds.
 
