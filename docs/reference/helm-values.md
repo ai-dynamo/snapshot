@@ -165,6 +165,14 @@ refuses one without the other, `coordinator.tls.serverName` or
 writes. See
 [Security Boundaries](../overview/architecture-overview.md#security-boundaries).
 
+The operator replaces its CA near expiry, or when the CA Secret is lost or
+damaged. After a replacement near expiry, the trust bundle keeps the replaced
+CA until it expires; a lost or damaged CA Secret loses it. A replacement can
+disrupt group attempts that reconnect while it propagates. Recovery needs both
+sides to reload from their mounted files: each coordinator its serving
+certificate, and each agent its trust in `ca.crt`. The kubelet refreshes those
+files on each node's own schedule.
+
 ## Agent Config (`config.*`)
 
 `config.*` renders into the agent ConfigMap.
