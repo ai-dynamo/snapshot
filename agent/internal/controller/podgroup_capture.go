@@ -32,9 +32,8 @@ type captureMember struct {
 	// the session.
 	group   client.ObjectKey
 	attempt ktypes.UID
-	// id is the member's ID, and rank its position in spec.members.
-	id   string
-	rank int
+	// id is the member's ID.
+	id string
 	// deadline is the PodGroupSnapshot's creation plus spec.deadlineSeconds.
 	deadline time.Time
 }
@@ -122,7 +121,6 @@ func (w *NodeController) resolveCaptureMember(
 		group:    key,
 		attempt:  podGroup.UID,
 		id:       id,
-		rank:     rank,
 		deadline: podGroup.CreationTimestamp.Add(time.Duration(podGroup.Spec.DeadlineSeconds) * time.Second),
 	}, nil
 }

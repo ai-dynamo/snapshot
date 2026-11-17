@@ -680,7 +680,6 @@ func TestCaptureMemberOf(t *testing.T) {
 		require.NotNil(t, member)
 		assert.Equal(t, captureGroupUID, member.attempt)
 		assert.Equal(t, "worker", member.id)
-		assert.Equal(t, 1, member.rank)
 		assert.Equal(t, client.ObjectKey{Namespace: "inference", Name: "pair"}, member.group)
 		assert.WithinDuration(t, g.group.CreationTimestamp.Add(600*time.Second), member.deadline, time.Second)
 
