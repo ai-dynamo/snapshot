@@ -294,6 +294,10 @@ func (r *restoreFakeRuntime) ResolveContainerPodUID(context.Context, string) (st
 	return "", errors.New("not implemented")
 }
 
+func (r *restoreFakeRuntime) ResolvePodSandboxIPs(context.Context, string) ([]string, error) {
+	return nil, errors.New("not implemented")
+}
+
 func (r *restoreFakeRuntime) TerminateContainer(context.Context, string) error {
 	return errors.New("not implemented")
 }
