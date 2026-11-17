@@ -1001,7 +1001,7 @@ func TestRestartWithoutRoom(t *testing.T) {
 
 	// Room for the control bucket of one session of the largest membership.
 	coord := coordinatortest.StartUnready(t, func(cfg *server.Config) {
-		cfg.MaxBytes = session.ControlBytes(session.MaxMembers)
+		cfg.MaxBytes, cfg.MaxValue = session.ControlBytes(session.MaxMembers), session.MaxLibraryValue
 	})
 	h := startHost(t, here, coord)
 	require.Eventually(t, coord.Ready, timeout, 10*time.Millisecond)
