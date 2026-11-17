@@ -162,6 +162,7 @@ const DefaultRestoreRetryLimit = 0
 
 // RestoreSpec holds settings for the CRIU restore process.
 type RestoreSpec struct {
+	// TimeoutSeconds bounds a destination container's restore, across all of its attempts.
 	TimeoutSeconds int `yaml:"timeoutSeconds"`
 
 	// RetryLimit is how many more attempts a destination container gets after its first restore
