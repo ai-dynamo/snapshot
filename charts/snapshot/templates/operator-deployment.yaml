@@ -104,8 +104,8 @@ spec:
             not mark the agent Pods as group-capable yet, so every
             PodGroupSnapshot, and every PodGroupRestore that passes its other
             checks, waits with Admitted=False, reason AgentNotReady, until its
-            deadline. No PodSnapshot is created and no restore Pod is pinned
-            meanwhile. */}}
+            deadline. Restore targets are still claimed and scheduled. No
+            PodSnapshot is created and no restore Pod is pinned meanwhile. */}}
             - --enable-pod-groups=true
             - {{ printf "--agent-namespace=%s" .Release.Namespace | quote }}
             - {{ printf "--agent-selector=app.kubernetes.io/component=snapshot-agent,app.kubernetes.io/instance=%s" .Release.Name | quote }}

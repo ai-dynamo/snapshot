@@ -251,13 +251,15 @@ field must match the restore probe. The builder uses 86,400 one-second failures.
 
 Name the destination container in the `PodGroupRestore`, in the target's
 `containerMappings`. The operator claims no target until every target passes
-its checks, so no Pod takes a node while a peer is missing or refused, unless a
-target changes during the claim. It then claims each Pod in one patch: it
-writes `nvidia.com/restore-group-uid` and the mapping as
+its checks. It then claims each Pod in one patch: it writes
+`nvidia.com/restore-group-uid` and the mapping as
 `nvidia.com/restore-container-map`, and removes the gate. Do not remove the
-gate yourself. The patches are separate, so a claim that landed stays when a
-later target changes: the next pass refuses the restore or waits, and the
-claimed Pod can take a node meanwhile.
+gate yourself.
+
+The patches are separate. A claim that landed stays if a later target changes
+or a later claim is refused, for example by a webhook or a 403. Claims also stay
+if the restore or its snapshot changes right after the claims. The next pass
+can refuse the restore or wait, while claimed Pods can take nodes.
 
 While the restore waits, its `Admitted` condition gives one of these reasons:
 
