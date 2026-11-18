@@ -3,16 +3,20 @@
 #
 # Dockerfile for the snapshot-agent image.
 #
-# Build targets. Two named build contexts are required for the agent: `api`
-# (the agent module depends on it via `replace => ../api`) and `compliance`
-# (attribution helpers shared with the operator image):
+# Build targets. Three named build contexts are required for the agent: `api`
+# and `coordinator` (the agent module depends on them via `replace => ../api`
+# and `replace => ../coordinator`) and `compliance` (attribution helpers shared
+# with the operator image):
 #   docker build --platform linux/amd64 --target agent \   (or linux/arm64)
-#     --build-context api=../api --build-context compliance=../hack/compliance \
+#     --build-context api=../api --build-context coordinator=../coordinator \
+#     --build-context compliance=../hack/compliance \
 #     -t snapshot-agent:latest .
 #
 # Optional targets for CI:
-#   docker build --target linter --build-context api=../api .   # Run linting
-#   docker build --target tester --build-context api=../api .   # Run tests
+#   docker build --target linter --build-context api=../api \
+#     --build-context coordinator=../coordinator .   # Run linting
+#   docker build --target tester --build-context api=../api \
+#     --build-context coordinator=../coordinator .   # Run tests
 
 # =============================================================================
 # Build Arguments
