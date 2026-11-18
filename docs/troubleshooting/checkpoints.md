@@ -113,6 +113,26 @@ answer before the checkpoint becomes destructive.
 - The delivery mount is writable
 - The coordinator is not running
 
+### staging CUDA job file
+
+For a driver-managed GPU checkpoint, the agent copies the CUDA checkpoint job
+file out of the container and checks that it lists every GPU.
+
+**Likely causes:**
+
+- The workload has not reached its quiescent point, so the job file is missing or stale
+- The GPU count in the file differs from the devices discovered
+
+### configuring CRIU dump and writing checkpoint manifest
+
+The agent builds CRIU's dump options from the inspected container and writes
+`manifest.json` into the staging directory.
+
+**Likely causes:**
+
+- A mount layout CRIU options cannot express
+- A staging directory that is not writable
+
 ### admitting the pod group
 
 For a member of a pod group, the agent publishes the Pod's IP, then waits for
@@ -147,26 +167,6 @@ that had already started fail with it.
 ```bash
 kubectl logs $agent -n <snapshot-ns> -c agent | grep -i 'pod group'
 ```
-
-### staging CUDA job file
-
-For a driver-managed GPU checkpoint, the agent copies the CUDA checkpoint job
-file out of the container and checks that it lists every GPU.
-
-**Likely causes:**
-
-- The workload has not reached its quiescent point, so the job file is missing or stale
-- The GPU count in the file differs from the devices discovered
-
-### configuring CRIU dump and writing checkpoint manifest
-
-The agent builds CRIU's dump options from the inspected container and writes
-`manifest.json` into the staging directory.
-
-**Likely causes:**
-
-- A mount layout CRIU options cannot express
-- A staging directory that is not writable
 
 ### checkpointing GPU state
 

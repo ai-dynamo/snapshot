@@ -113,6 +113,23 @@ kubectl describe pod <restore-pod> -n <ns>
 kubectl exec <restore-pod> -n <ns> -c <container> -- nvidia-smi -L
 ```
 
+### building GPU context
+
+The agent builds the mapping PageBroker uses to place checkpointed GPU memory
+on the placeholder's GPUs.
+
+**Likely causes:**
+
+- The placeholder has no visible GPUs
+- The device mapping recorded at checkpoint does not match the devices allocated now
+
+Check `NVIDIA_VISIBLE_DEVICES` and the GPU resource request on the restore pod.
+
+A checkpoint reports the same step when the agent builds the context from the
+source container's CUDA processes and GPUs. Check that the source pod still
+holds its GPU allocation and that its CUDA processes are running; a process
+that exited between the checkpoint request and the dump leaves nothing to map.
+
 ### admitting the pod group
 
 For a member of a pod group, the agent checks that the checkpoint is the
@@ -145,23 +162,6 @@ it restores anything. If it cannot, the member fails the attempt with
 ```bash
 kubectl get pod <restore-pod> -n <ns> -o jsonpath='{.status.conditions}'
 ```
-
-### building GPU context
-
-The agent builds the mapping PageBroker uses to place checkpointed GPU memory
-on the placeholder's GPUs.
-
-**Likely causes:**
-
-- The placeholder has no visible GPUs
-- The device mapping recorded at checkpoint does not match the devices allocated now
-
-Check `NVIDIA_VISIBLE_DEVICES` and the GPU resource request on the restore pod.
-
-A checkpoint reports the same step when the agent builds the context from the
-source container's CUDA processes and GPUs. Check that the source pod still
-holds its GPU allocation and that its CUDA processes are running; a process
-that exited between the checkpoint request and the dump leaves nothing to map.
 
 ### mounting agent bundle into placeholder
 
