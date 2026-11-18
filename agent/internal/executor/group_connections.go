@@ -170,8 +170,13 @@ func (k *keptConnections) inherit(cmd *exec.Cmd) {
 
 // serve waits for nsrestore to report its restored sockets, then for every
 // member to have restored theirs, lifts the hold, turns keepalive back on, and
-// lets nsrestore continue. Any error closes the agent's end of the socket, so
-// nsrestore gets no answer and fails its CRIU restore before a task runs.
+// lets nsrestore continue with one byte. An error before that byte closes the
+// agent's end of the socket, so nsrestore gets no answer and aborts this
+// member's CRIU restore before its tasks run. After sockets-restored, a peer
+// can still fail, for example while it lifts its hold or turns keepalive back
+// on. That does not stop this member, whose tasks may already have resumed.
+// The attempt then ends for every member through the session, with
+// session.ReasonMemberFailed.
 func (k *keptConnections) serve(ctx context.Context) (err error) {
 	// After a successful write, nsrestore already has its answer.
 	defer k.agent.Close()
