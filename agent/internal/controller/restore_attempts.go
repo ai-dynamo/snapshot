@@ -36,53 +36,58 @@ func (op *restoreOperation) loadAttempts() (*restoreAttempts, bool) {
 	return &record, true
 }
 
-// saveAttempts keeps the destination's record.
-func (op *restoreOperation) saveAttempts(record *restoreAttempts) {
+// storeAttempts keeps the destination's record.
+func (op *restoreOperation) storeAttempts(record *restoreAttempts) {
 	op.controller.restoreAttemptRecords.Store(restoreContainerKey(op.pod.UID, op.destination), *record)
 }
 
-// startAttempt resolves the attempt about to start. A restore that allows
-// retries saves it in the destination's record first. A limit of 0 keeps no
+// startAttempt resolves the attempt about to start. A limit of 0 keeps no
 // record, so every pass starts the restore over with a full timeout, as
-// before retries.
+// before retries. A restore that allows retries continues the destination's
+// record, which keeps its limit and deadline, or saves the first attempt as a
+// new record before it runs.
 func (op *restoreOperation) startAttempt() (*restoreAttempts, error) {
 	now := op.controller.nowFn()
 	limit, err := op.retryLimit()
 	if err != nil {
 		return nil, err
 	}
-	record := &restoreAttempts{Limit: limit, Attempt: 1, ContainerID: op.containerID}
-	if timeout := op.controller.config.Restore.RestoreTimeout(); timeout > 0 {
-		record.Deadline = now.Add(timeout)
+	if limit == 0 {
+		record := op.firstAttempt(limit, now)
+		op.logAttempt(record, now)
+		return record, nil
 	}
-	if limit > 0 {
-		if record, err = op.saveAttempt(record, now); err != nil {
-			return nil, err
-		}
-	}
-	op.log = op.log.WithValues("attempt", record.Attempt, "retry_limit", record.Limit)
-	if record.Deadline.IsZero() {
-		op.log.Info("Starting restore attempt")
-	} else {
-		op.log.Info("Starting restore attempt", "time_left", record.Deadline.Sub(now).Round(time.Second).String())
-	}
-	return record, nil
-}
-
-// saveAttempt saves the attempt about to start in the destination's record.
-// With no record yet it saves first, which holds the limit and deadline
-// resolved now; a record that exists keeps its limit and deadline.
-func (op *restoreOperation) saveAttempt(first *restoreAttempts, now time.Time) (*restoreAttempts, error) {
 	record, found := op.loadAttempts()
 	if !found {
-		record = first
+		record = op.firstAttempt(limit, now)
 	} else if !record.Deadline.IsZero() && !now.Before(record.Deadline) {
 		return nil, fmt.Errorf("restore timed out at %s, before attempt %d could start",
 			record.Deadline.UTC().Format(time.RFC3339), record.Attempt)
 	}
 	record.ContainerID = op.containerID
-	op.saveAttempts(record)
+	op.storeAttempts(record)
+	op.logAttempt(record, now)
 	return record, nil
+}
+
+// firstAttempt is attempt 1 of a restore, with the limit and the deadline
+// that ends every attempt.
+func (op *restoreOperation) firstAttempt(limit int, now time.Time) *restoreAttempts {
+	record := &restoreAttempts{Limit: limit, Attempt: 1, ContainerID: op.containerID}
+	if timeout := op.controller.config.Restore.RestoreTimeout(); timeout > 0 {
+		record.Deadline = now.Add(timeout)
+	}
+	return record
+}
+
+// logAttempt names the attempt in the operation's log and logs its start.
+func (op *restoreOperation) logAttempt(record *restoreAttempts, now time.Time) {
+	op.log = op.log.WithValues("attempt", record.Attempt, "retry_limit", record.Limit)
+	if record.Deadline.IsZero() {
+		op.log.Info("Starting restore attempt")
+		return
+	}
+	op.log.Info("Starting restore attempt", "time_left", record.Deadline.Sub(now).Round(time.Second).String())
 }
 
 // forgetAttempts removes the destination's record after the gates refused
