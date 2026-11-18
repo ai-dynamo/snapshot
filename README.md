@@ -190,7 +190,7 @@ The full documentation set lives in [`docs/`](docs/README.md), in these sections
 
 [NVIDIA Dynamo](https://github.com/ai-dynamo/dynamo), the open-source
 inference-serving stack, integrates Snapshot for GPU cold-start. On Dynamo, Snapshot is available through it directly. See
-[Snapshotting GPU Workers](https://docs.nvidia.com/dynamo/latest/kubernetes/operations/cold-start-optimizations/dynamo-snapshot)
+[Dynamo Snapshot (Experimental)](https://docs.nvidia.com/dynamo/latest/kubernetes/model-deployment/model-loading/dynamo-snapshot-experimental)
 in the Dynamo docs.
 
 ## Contributing
