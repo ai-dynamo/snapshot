@@ -110,48 +110,37 @@ func (op *restoreOperation) loadAttempts() (*restoreAttempts, bool, error) {
 	return &record, true, nil
 }
 
-// saveAttempts keeps the destination's record and queues the Pod's retry
+// storeAttempts keeps the destination's record and queues the Pod's retry
 // status annotation for a write, which runs outside the restore.
-func (op *restoreOperation) saveAttempts(record *restoreAttempts) {
+func (op *restoreOperation) storeAttempts(record *restoreAttempts) {
 	op.controller.restoreAttemptRecords.Store(restoreContainerKey(op.pod.UID, op.destination), *record)
 	op.controller.queueRetryStatus(op.pod)
 }
 
-// startAttempt resolves the attempt about to start. A restore that allows
-// retries picks it up from the destination's record and saves it there first,
-// and gets errRetryScheduled while an in-place retry is not due. A limit of 0
-// keeps no record, so a restarted agent starts the restore over with a full
-// timeout, as before retries.
+// startAttempt resolves the attempt about to start. A limit of 0 keeps no
+// record, so a restarted agent starts the restore over with a full timeout,
+// as before retries. A restore that allows retries saves the first attempt as
+// a new record before it runs, and otherwise picks the restore up from the
+// destination's record: it gets errRetryScheduled while an in-place retry is
+// not due, and an agent that restarted during an attempt repeats it within the
+// record's limit and deadline.
 func (op *restoreOperation) startAttempt(ctx context.Context) (*restoreAttempts, error) {
 	now := op.controller.nowFn()
 	limit, err := op.retryLimit()
 	if err != nil {
 		return nil, err
 	}
-	record := &restoreAttempts{Limit: limit, Attempt: 1, ContainerID: op.containerID}
-	if timeout := op.controller.config.Restore.RestoreTimeout(); timeout > 0 {
-		record.Deadline = now.Add(timeout)
+	if limit == 0 {
+		record := op.firstAttempt(limit, now)
+		op.log = op.log.WithValues("attempt", record.Attempt, "retry_limit", record.Limit)
+		return record, nil
 	}
-	if limit > 0 {
-		if record, err = op.saveAttempt(ctx, record, now); err != nil {
-			return nil, err
-		}
-	}
-	op.log = op.log.WithValues("attempt", record.Attempt, "retry_limit", record.Limit)
-	return record, nil
-}
-
-// saveAttempt picks the restore up from the destination's record and saves
-// the attempt about to start. With no record yet it saves first, which holds
-// the limit and deadline resolved now; an agent that restarted during an
-// attempt repeats it within the record's limit and deadline.
-func (op *restoreOperation) saveAttempt(ctx context.Context, first *restoreAttempts, now time.Time) (*restoreAttempts, error) {
 	record, found, err := op.loadAttempts()
 	if err != nil {
 		return nil, err
 	}
 	if !found {
-		record = first
+		record = op.firstAttempt(limit, now)
 	} else {
 		if now.Before(record.RetryAt) {
 			op.log.V(1).Info("Restore retry is not due yet", "retry_at", record.RetryAt.UTC().Format(time.RFC3339))
@@ -172,8 +161,19 @@ func (op *restoreOperation) saveAttempt(ctx context.Context, first *restoreAttem
 		record.RetryAt = time.Time{}
 	}
 	record.ContainerID = op.containerID
-	op.saveAttempts(record)
+	op.storeAttempts(record)
+	op.log = op.log.WithValues("attempt", record.Attempt, "retry_limit", record.Limit)
 	return record, nil
+}
+
+// firstAttempt is attempt 1 of a restore, with the limit and the deadline
+// that ends every attempt.
+func (op *restoreOperation) firstAttempt(limit int, now time.Time) *restoreAttempts {
+	record := &restoreAttempts{Limit: limit, Attempt: 1, ContainerID: op.containerID}
+	if timeout := op.controller.config.Restore.RestoreTimeout(); timeout > 0 {
+		record.Deadline = now.Add(timeout)
+	}
+	return record
 }
 
 // announceAttempt emits RestoreRequested for every attempt that starts. A
