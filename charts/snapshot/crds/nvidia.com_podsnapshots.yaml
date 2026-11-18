@@ -282,14 +282,13 @@ spec:
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   name:
-                    description: Name of the PodGroupSnapshot.
-                    maxLength: 63
+                    description: Name of the object.
+                    maxLength: 253
                     minLength: 1
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                     type: string
                   uid:
-                    description: UID of the PodGroupSnapshot, which identifies the
-                      checkpoint attempt.
+                    description: UID of the object.
                     maxLength: 128
                     minLength: 1
                     type: string
