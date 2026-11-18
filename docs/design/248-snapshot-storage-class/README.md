@@ -100,11 +100,12 @@ its snapshots: `Delete` removes them, `Retain` keeps them and marks them in the
 store so cleanup never removes them. The policy is copied onto the content at
 binding and does not change afterwards.
 
-**The default.** When the cluster has no class, the operator creates one named
-`default` with `isDefault: true` from the chart's `storage.*` values, so an
-upgraded installation needs no manual step. It never overwrites a class, so the
-default may move to another class; bound content keeps its binding. At most one
-class is the default; see [Default class](#default-class).
+**The default.** The operator's configuration names the default class:
+`storage.defaultClassName` in the chart, `default` unless changed. When the
+cluster has no class, the operator creates that class from the chart's
+`storage.*` values, so an upgraded installation needs no manual step. It never
+overwrites a class. The default moves by changing the value; bound content
+keeps its binding. See [Default class](#default-class).
 
 ### User Stories
 
@@ -126,7 +127,7 @@ class is the default; see [Default class](#default-class).
 | Nested stores | One store's location is a parent of another's, in this cluster or another. | Allowed, because each store keeps its snapshots under its own `artifacts/`: a sweep looks only there and deletes only orphans named by a UUID, and deleting content removes only its own recorded handles. The API rejects a location inside another store's `artifacts/`. Data written by something that leaves no marker is not protected. |
 | Old agent, new class | During a rolling upgrade an agent that predates this proposal receives content bound to a non-default class. | It passes its startup store to PageBroker, whose `storeID` does not match the content's; PageBroker returns `STORE_MISMATCH` and the capture fails before any I/O. The existing retry picks it up after the node upgrades. |
 | Restore from several S3 stores | The native restore engine holds one session per PageBroker process, fixed to one endpoint, one region and one set of credentials, and reads its CA bundle and addressing mode once at start. | Restores whose stores share the endpoint, region and credentials run in parallel; a restore that differs in any of them waits until the others drain, then PageBroker replaces the session. A long restore delays the others, and a waiting transaction can expire. An S3 class whose CA bundle or addressing mode differs from PageBroker's startup values cannot restore. Parallel restore across sessions is a follow-up; see [Agent and PageBroker](#agent-and-pagebroker). |
-| Default misconfigured | Two classes set `isDefault: true`, or the default is deleted and unnamed `PodSnapshot`s fail. | The admission policy denies both. If it is absent or bypassed, the oldest marked class wins with `DefaultConflict` on the others, and a Warning event flags a deleted default; see [Default class](#default-class). |
+| Default misconfigured | `storage.defaultClassName` names a class that does not exist, is not Ready or is being deleted, and unnamed `PodSnapshot`s fail. | The default is one configured name, so two defaults cannot exist. An unnamed `PodSnapshot` fails with the same reasons as a named one and retries until the class is usable. The operator reports a missing default at start, and a Warning event flags a terminating one; see [Default class](#default-class). |
 
 ## Design Details
 
@@ -158,8 +159,6 @@ type SnapshotStorageClassSpec struct {
     // +unionDiscriminator
     // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="type is immutable"
     Type StoreType `json:"type"`
-    // IsDefault selects this class for PodSnapshots that name none.
-    IsDefault bool `json:"isDefault,omitempty"`
     // +kubebuilder:validation:Enum=Delete;Retain
     // +kubebuilder:default=Delete
     ReclaimPolicy ReclaimPolicy `json:"reclaimPolicy,omitempty"`
@@ -200,15 +199,13 @@ type SnapshotStorageClassStatus struct {
 ```
 
 `Ready` carries the reasons `ClaimNotMounted`, `CredentialsUnavailable`,
-`DuplicateStore`, `StoreUnreachable` and `Terminating`. A
-separate `DefaultConflict` condition is True on a class marked `isDefault`
-while an older class is also marked; `Ready` is unaffected.
+`DuplicateStore`, `StoreUnreachable` and `Terminating`.
 
 #### Request and content fields
 
 `PodSnapshot` (`spec`) and the `SnapshotJob` template
 (`spec.podSnapshotTemplate`) gain an optional `storageClassName`; empty selects
-the class marked `isDefault`. `PodSnapshotContent.spec.storage` gains the class
+the default class. `PodSnapshotContent.spec.storage` gains the class
 name beside the digest, which stays the authority on *where*; the name says
 *how to reach it*. It also gains `reclaimPolicy`, copied from the class at
 binding and immutable, so editing the class later never changes what happens to
@@ -235,8 +232,8 @@ type CheckpointStorageBinding struct {
    bound. A missing or terminating class sets `InvalidSpec`, which is terminal.
    A not-Ready class is a wait: the job reports `StorageClassNotReady`, launches
    no pod, and continues when the class becomes Ready.
-2. The `PodSnapshot` reconciler reads `spec.storageClassName`, or the class
-   marked `isDefault: true`; none marked fails with `StorageClassNotFound`.
+2. The `PodSnapshot` reconciler reads `spec.storageClassName`, or the default
+   class name from the operator's configuration when it is empty.
 3. At binding it requires `Ready=True` and no deletion timestamp, else it sets
    `Ready=False` on the `PodSnapshot` with `StorageClassNotFound`,
    `StorageClassNotReady` or `StorageClassTerminating` and requeues; a watch on
@@ -255,23 +252,26 @@ type CheckpointStorageBinding struct {
 
 #### Default class
 
-At most one class should have `isDefault: true`, and the default should not
-disappear unnoticed. Two layers hold that.
+The default class is named in the operator's configuration, not on the class:
+the chart value `storage.defaultClassName`, passed to the operator as
+`--default-storage-class`, `default` unless changed. A request with no
+`storageClassName` resolves to that name and then follows the same rules as a
+request that names a class. One configured name means there is never more than
+one default, so the class carries no default field and nothing has to arbitrate
+between classes.
 
-1. **Admission.** The chart installs a `ValidatingAdmissionPolicy` that denies
-   setting `isDefault: true` while another class has it, and denies deleting
-   the default. The default is moved first: clear `isDefault` on the old class,
-   then set it on the new one. In between, an unnamed `PodSnapshot` fails with
-   `StorageClassNotFound` and retries.
-2. **Operator.** Admission is not serialized and the policy may be absent. If
-   two classes are marked, the earliest `creationTimestamp`, ties by name, is
-   the default and the others get `DefaultConflict` naming it; `Ready` is
-   unaffected and no `PodSnapshot` fails. If the default is deleted without
-   the policy, a Warning event names the effect: unnamed `PodSnapshot`s fail
-   with `StorageClassTerminating` while content references it, and
-   `StorageClassNotFound` after. The operator creates a `default` class only when
-   the cluster has no class at all, so a deleted default is not brought back
-   while another class exists.
+- **Moving the default.** Create the new class, change the value and run
+  `helm upgrade`. Only the operator restarts: the agents never read the
+  default, so their configuration checksum leaves the value out. Bound content
+  keeps its binding.
+- **Default missing.** If the named class does not exist, the operator reports
+  it at start, and unnamed `PodSnapshot`s fail with `StorageClassNotFound` until
+  it does.
+- **Default deleted.** A Warning event names the effect: unnamed `PodSnapshot`s
+  fail with `StorageClassTerminating` while content references the class, and
+  `StorageClassNotFound` after. The operator creates the default class only
+  when the cluster has no class at all, so a deleted default is not brought
+  back while another class exists.
 
 #### Store uniqueness
 
@@ -436,11 +436,14 @@ is gone keeps its finalizer and gets `StoreInactive`, as in SNEP-237.
 
 The chart keeps `storage.*` but ships no class object: Helm applies a release
 before the operator's `crd-installer` has created the new CRD, so the operator
-creates the `default` class instead. The installer's RBAC gains the new CRD.
-New value:
+creates the default class instead. The installer's RBAC gains the new CRD.
+New values:
 
 ```yaml
 storage:
+  # The class used by requests that name none. The operator creates it from
+  # the values below when the cluster has no class.
+  defaultClassName: default
   pvc:
     # Claims to mount for additional PVC classes, in the release namespace.
     additionalClaims: []
@@ -449,32 +452,33 @@ storage:
 Classes require `operator.bindNewContents` and `pageBroker.artifactAddressing`;
 the chart fails the render otherwise.
 
-Every `storage.*` value keeps its meaning and feeds the `default` class: `type`
+Every other `storage.*` value keeps its meaning and feeds the default class: `type`
 selects PVC or S3; `s3.endpoint`, `region`, `bucket`, `prefix`, `addressing`,
 `allowHttp`, `credentialsSecretRef`, `credentialsSecretKey`,
 `caBundleConfigMapRef` and `caBundleConfigMapKey` become the class's `s3` fields;
 `pvc.name` becomes `claimName`, with the class `basePath` at the claim root.
 `pvc.basePath` stays the container mount path, and `pvc.create`, `size` and
 `storageClass` still only provision the claim. An empty
-`s3.credentialsSecretRef` gives a `default` class with no Secret. What changes
+`s3.credentialsSecretRef` gives a default class with no Secret. What changes
 is delivery: the
 chart no longer mounts the S3 Secret, which is read through the API and passed
 per transaction. The CA ConfigMap stays mounted in PageBroker, because the
 native restore engine reads its CA bundle and addressing mode once at start.
 
 The chart renders these values into the operator's storage configuration file,
-read through `--snapshot-storage-config`. The operator uses it for one thing:
-when the cluster has no `SnapshotStorageClass` at all, it creates `default` with
-`isDefault: true`. That covers a fresh install and the first upgrade. If any
-class exists it does nothing, so it never recreates a deleted `default`, re-sets
-`isDefault` or reverts an edit. Later changes to `storage.*` do not change an
-existing class; to switch stores, create a new class.
+read through `--snapshot-storage-config`, and passes `storage.defaultClassName`
+as `--default-storage-class`. The operator uses the file for one thing: when
+the cluster has no `SnapshotStorageClass` at all, it creates the default class
+under that name. That covers a fresh install and the first upgrade. If any
+class exists it does nothing, so it never recreates a deleted class or reverts
+an edit. Later changes to the store values do not change an existing class; to
+switch stores, create a new class and point `storage.defaultClassName` at it.
 
 Classes are the only way to define a store. The operator builds its backend
 registry from classes only, so this release removes its S3 credential flags; an
 operator started with one fails at start with an unknown-flag error, so remove
 it from any hand-edited arguments. `--snapshot-storage-config` stays, only as
-the seed for the `default` class. PageBroker's `--storage-config` no longer
+the seed for the default class. PageBroker's `--storage-config` no longer
 selects a store; it carries the process-wide restore settings.
 
 #### Upgrade from a single-store installation
@@ -482,9 +486,9 @@ selects a store; it carries the process-wide restore settings.
 An installation upgraded from a release without classes keeps working after a
 `helm upgrade` run with the previous values:
 
-1. The operator applies the new CRD, finds no class, and creates `default` from
-   the same `storage.*` values, so its `storeID` is byte-identical to the one
-   recorded on every bound `PodSnapshotContent`.
+1. The operator applies the new CRD, finds no class, and creates the default
+   class, named `default`, from the same `storage.*` values, so its `storeID`
+   is byte-identical to the one recorded on every bound `PodSnapshotContent`.
 2. Existing content is not rewritten. Content that has a `storeID` but no class
    name is matched to a class by digest whenever it is used, and it protects
    that class from deletion; content matching none keeps the `StoreInactive`
@@ -492,15 +496,15 @@ An installation upgraded from a release without classes keeps working after a
 3. Content with no `spec.storage`, bound before SNEP-237, keeps the legacy
    path-addressed flow and is never assigned a class.
 4. `PodSnapshot`s and `SnapshotJob`s without `storageClassName` resolve to
-   `default`.
+   the default class.
 
 Rollback to the previous chart leaves the CRD and `default` object in place;
 the old operator ignores both and reads `storage.yaml`.
 
 ### Monitoring
 
-- `SnapshotStorageClass` status: `storeID`, `Ready` with the reasons above, and
-  `DefaultConflict`. A refused class names the other in its condition and in a
+- `SnapshotStorageClass` status: `storeID` and `Ready` with the reasons above.
+  A refused class names the other in its condition and in a
   Warning event once per transition; only the later class is marked.
 - Events: `SnapshotsRetained` under `Retain`; `StorageClassTerminating` on the
   class while references remain, with count; a Warning on a terminating default.
@@ -521,10 +525,11 @@ the old operator ignores both and reads `storage.yaml`.
 - **Operator:** Ready/NotReady for each reason; digest and marker
   detection, including two classes created at once and a stale marker; nested
   stores are accepted; a marker from another cluster with the same class
-  name is refused; default resolution with two marked classes and with none;
-  the `default` class is created only when no class exists; terminating class, finalizer, `Retain`, registry rebuild.
-- **Admission policy:** rejects a second default and deleting the default,
-  and accepts moving it; without it, deleting the default emits the Warning.
+  name is refused; default resolution from the configured name, with the named
+  class missing, and after the name changes; the default class is created only
+  when no class exists; terminating class, finalizer, `Retain`, registry rebuild.
+- **Chart:** changing only `storage.defaultClassName` changes the operator's
+  pod template and leaves the agent DaemonSet's unchanged.
 - **Agent:** Secret fetch, file permissions and removal on Commit, Abort and
   crash; no credentials file for a class without a Secret; mount mapping for default and extra claims; `StorageClassUnavailable`
   on a missing class, a `status.storeID` mismatch, or a claim with no mount.
@@ -552,6 +557,10 @@ the old operator ignores both and reads `storage.yaml`.
   over a local socket. Rejected.
 - **Mounting arbitrary PVCs at runtime.** Needs the agent to mount claims or a
   restart per claim; deferred and recorded as the limitation.
+- **A default marker on the class (`isDefault`).** Lets the default move with
+  one edit and no restart, but any number of classes can carry it, so it needs
+  an admission policy and a tie-break rule in the operator. A configured name
+  cannot conflict. Rejected.
 - **Parallel restore from several stores.** Needs a restore worker per store
   connection or a change in the native engine; deferred, with the session
   queue as the interim.
