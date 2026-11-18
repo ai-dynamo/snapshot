@@ -345,11 +345,7 @@ func (w *NodeController) leaveMemberSourceAsFound(ctx context.Context, member *c
 // or deletion. The label may be from an earlier reconcile, so it reads the
 // source again and checks its UID.
 func (w *NodeController) leaveUnstartedMemberSource(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent) {
-	if contentStarted(content) {
-		return
-	}
-	member, _, err := w.captureMemberOf(ctx, content)
-	if err != nil || member == nil {
+	if contentStarted(content) || content.Spec.PodGroup == nil {
 		return
 	}
 	pod := &corev1.Pod{}

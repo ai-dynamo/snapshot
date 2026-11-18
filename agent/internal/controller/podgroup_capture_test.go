@@ -939,3 +939,20 @@ func TestCaptureDeleteAfterCacheEviction(t *testing.T) {
 		})
 	}
 }
+
+func TestUnstartedMemberCleanupDoesNotNeedItsGroup(t *testing.T) {
+	for _, samePod := range []bool{true, false} {
+		t.Run(fmt.Sprintf("same-pod-%t", samePod), func(t *testing.T) {
+			g := newCaptureGroup()
+			g.pods[0].Labels[snapshotv1alpha1.CaptureEligibleLabel] = "true"
+			if !samePod {
+				g.pods[0].UID = "replacement"
+			}
+			w, _ := groupCaptureController(t, nil, g, nil, nil)
+			require.NoError(t, w.client.Delete(t.Context(), g.group))
+			w.leaveUnstartedMemberSource(t.Context(), g.contents[0])
+			_, labeled := getPod(t, w, "inference", "worker-0").Labels[snapshotv1alpha1.CaptureEligibleLabel]
+			assert.Equal(t, !samePod, labeled, "cleanup only changes the pinned source Pod")
+		})
+	}
+}
