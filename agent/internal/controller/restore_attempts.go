@@ -38,7 +38,7 @@ func (w *NodeController) seedAttempts(pod *corev1.Pod) error {
 		}
 		if found {
 			// Counted as written, so a write that leaves no records still removes it.
-			w.retryStatusWritten.Store(pod.UID, pod.Annotations[podcontract.RestoreRetryStatusAnnotation])
+			w.retryStatusWritten.Store(pod.UID, retryStatusDigest(pod.Annotations[podcontract.RestoreRetryStatusAnnotation]))
 		}
 		for container, entry := range status {
 			if entry.PodUID != pod.UID {

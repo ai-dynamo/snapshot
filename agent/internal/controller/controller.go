@@ -118,8 +118,8 @@ type NodeController struct {
 	restoreAttemptRecords sync.Map
 	attemptSeeds          sync.Map
 	// retryStatusQueue holds the Pods whose retry status annotation lags
-	// their records, and retryStatusWritten, per Pod UID, the value the agent
-	// last wrote.
+	// their records, and retryStatusWritten, per Pod UID, the
+	// retryStatusDigest of the value the agent last wrote.
 	retryStatusQueue   workqueue.TypedRateLimitingInterface[retryStatusKey]
 	retryStatusWritten sync.Map
 
