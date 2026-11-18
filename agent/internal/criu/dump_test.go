@@ -4,14 +4,16 @@
 package criu
 
 import (
+	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
+
+	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
 
 // CRIU reports a full volume only in its message text, so the errno every
@@ -42,33 +44,46 @@ func TestWithFullDiskErrno(t *testing.T) {
 	}
 }
 
-// CRIU packs its version into one integer, and a bug report quoting "40100" is
-// no more use than one quoting nothing.
-func TestFormatCriuVersion(t *testing.T) {
-	for encoded, want := range map[int]string{
-		40000:  "4.0.0",
-		40100:  "4.1.0",
-		301502: "30.15.2",
-		31207:  "3.12.7",
+// go-criu folds a git build's sublevel into the minor number and throws the
+// commit away, so what CRIU states is read from the binary instead. The commit
+// is what identifies a build from a moving branch, which the agent defaults to.
+func TestParseVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		output string
+		want   string
+	}{
+		{
+			name:   "a build from git is named by its commit",
+			output: "Version: 4.3\nGitID: v4.3-128-g1a2b3c4d\n",
+			want:   "4.3 (v4.3-128-g1a2b3c4d)",
+		},
+		{
+			name:   "a release states no commit and needs none",
+			output: "Version: 4.3\n",
+			want:   "4.3",
+		},
+		{
+			name:   "a sublevel is reported as CRIU states it",
+			output: "Version: 3.19.1\nGitID: v3.19.1\n",
+			want:   "3.19.1 (v3.19.1)",
+		},
 	} {
-		assert.Equal(t, want, formatCriuVersion(encoded))
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseVersion(tc.output)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
 	}
+
+	_, err := parseVersion("criu: command not found")
+	assert.Error(t, err, "output with no version is an error, not an empty version")
 }
 
-// The default CRIU reference is a development branch, where every commit
-// reports the same version number. The commit the image was built from is what
-// makes a dev build identifiable at all.
-func TestWithBuildRef(t *testing.T) {
-	dir := t.TempDir()
-	recorded := filepath.Join(dir, "criu-build-ref")
-	require.NoError(t, os.WriteFile(recorded, []byte("1a2b3c4d5e6f\n"), 0o644))
-
-	assert.Equal(t, "4.3.0 (1a2b3c4d5e6f)", withBuildRef("4.3.0", recorded),
-		"a recorded commit identifies the build")
-	assert.Equal(t, "4.3.0", withBuildRef("4.3.0", filepath.Join(dir, "absent")),
-		"a release build is identified by its version alone")
-
-	empty := filepath.Join(dir, "empty")
-	require.NoError(t, os.WriteFile(empty, []byte("  \n"), 0o644))
-	assert.Equal(t, "4.3.0", withBuildRef("4.3.0", empty), "an empty file adds nothing")
+// A binary that cannot be asked leaves the version unknown rather than failing
+// the dump that was already failing.
+func TestVersionOrUnknown(t *testing.T) {
+	got := versionOrUnknown(context.Background(),
+		&types.CRIUSettings{BinaryPath: filepath.Join(t.TempDir(), "no-such-criu")})
+	assert.Equal(t, "unknown", got)
 }

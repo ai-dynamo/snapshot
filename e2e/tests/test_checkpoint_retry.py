@@ -184,8 +184,8 @@ def test_the_agent_reports_the_criu_build_it_runs(
 ) -> None:
     # CRIU is pinned by the agent image rather than by this repository, and the
     # default reference is a development branch where every commit reports the
-    # same version number. A bug report quoting the number alone cannot say
-    # which build produced a dump, so the agent names the commit too.
+    # same version. A bug report quoting the version alone cannot say which
+    # build produced a dump, so the agent names the commit beside it.
     source, node = create_ready_source(config, run, gpu=False)
     assert source is not None
 
@@ -199,8 +199,11 @@ def test_the_agent_reports_the_criu_build_it_runs(
     reported = re.search(r'"criu_version":\s*"([^"]+)"', startup[-1])
     assert reported, f"the startup line names the CRIU it runs: {startup[-1]}"
 
+    # What `criu --version` states: a version, and for a build from git the
+    # GitID beside it. The agent builds from criu-dev by default, so the GitID
+    # is what tells two builds reporting the same version apart.
     version = reported.group(1)
-    assert re.fullmatch(r"\d+\.\d+\.\d+ \([0-9a-f]{7,40}\)", version), (
-        "a development build is identified by the commit the image was built "
-        f"from, not by its version alone: {version!r}"
+    assert re.fullmatch(r"\d+(\.\d+)+ \(\S+\)", version), (
+        "a development build is named by the commit it was built at, not by "
+        f"its version alone: {version!r}"
     )

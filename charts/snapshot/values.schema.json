@@ -25,20 +25,10 @@
           "minimum": 1,
           "maximum": 9223372036854775807
         },
-        "transferBufferCount": {
+        "stagingBytesPerGPU": {
           "type": "integer",
-          "minimum": 1,
-          "maximum": 9223372036854775807
-        },
-        "transferChunkBytes": {
-          "type": "integer",
-          "minimum": 4096,
-          "multipleOf": 4096,
-          "maximum": 9223372036854775807
-        },
-        "maxPinnedBytes": {
-          "type": "integer",
-          "minimum": 0,
+          "minimum": 134217728,
+          "multipleOf": 134217728,
           "maximum": 9223372036854775807
         },
         "s3": {

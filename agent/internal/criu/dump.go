@@ -4,10 +4,13 @@
 package criu
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -27,58 +30,59 @@ const (
 	dumpLogTailMaxSize = 16 * 1024
 )
 
-// buildRefPath is where the agent image records the CRIU commit it was built
-// from. Overridden in tests.
-var buildRefPath = "/usr/local/share/snapshot/criu-build-ref"
+// versionTimeout bounds asking CRIU what it is. Overridden in tests.
+var versionTimeout = 5 * time.Second
 
-// Version reports the CRIU that will run, formatted major.minor.sublevel and,
-// where the image recorded one, the commit it was built from.
+// DefaultBinary is the CRIU the agent runs when its configuration names none.
+const DefaultBinary = "criu"
+
+// Version reports the CRIU that will run: the version it states, and for a
+// build from git the commit it was built at.
 //
 // CRIU moves under the agent — the reference is pinned by image, not by this
-// repository — so a dump failure is otherwise impossible to attribute to a
-// version from a bug report alone. The default reference is a development
-// branch, where every commit reports the same version number, so the number on
-// its own does not identify the build either.
-func Version(settings *types.CRIUSettings) (string, error) {
-	client := criulib.MakeCriu()
+// repository, and defaults to a development branch — so neither the version
+// nor the commit identifies a build on its own.
+//
+// It asks the binary rather than the RPC. go-criu folds a git build's sublevel
+// into the minor number ("if it is a git release -> increase minor by 1"), so
+// the number it returns is not the one CRIU states, and it discards the commit
+// the same response carries.
+func Version(ctx context.Context, settings *types.CRIUSettings) (string, error) {
+	binary := DefaultBinary
 	if settings != nil && strings.TrimSpace(settings.BinaryPath) != "" {
-		client.SetCriuPath(settings.BinaryPath)
+		binary = settings.BinaryPath
 	}
-	return versionOf(client)
-}
-
-func versionOf(client *criulib.Criu) (string, error) {
-	encoded, err := client.GetCriuVersion()
+	ctx, cancel := context.WithTimeout(ctx, versionTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, binary, "--version").CombinedOutput()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("ask %s its version: %w", binary, err)
 	}
-	return withBuildRef(formatCriuVersion(encoded), buildRefPath), nil
+	return parseVersion(string(out))
 }
 
-// withBuildRef names the commit the image was built from, when it recorded one.
-// A release build is identified by its version alone, so an absent file is not
-// a failure and reports nothing extra.
-func withBuildRef(version, path string) string {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return version
-	}
-	ref := strings.TrimSpace(string(raw))
-	if ref == "" {
-		return version
-	}
-	return fmt.Sprintf("%s (%s)", version, ref)
-}
+var (
+	versionLine = regexp.MustCompile(`(?m)^Version:\s*(\S+)`)
+	gitIDLine   = regexp.MustCompile(`(?m)^GitID:\s*(\S+)`)
+)
 
-// CRIU encodes its version as major*10000 + minor*100 + sublevel.
-func formatCriuVersion(encoded int) string {
-	return fmt.Sprintf("%d.%d.%d", encoded/10000, (encoded/100)%100, encoded%100)
+// parseVersion reads what `criu --version` states. GitID is printed only for a
+// build from git, so its absence is a release build rather than a failure.
+func parseVersion(out string) (string, error) {
+	version := versionLine.FindStringSubmatch(out)
+	if version == nil {
+		return "", fmt.Errorf("no version in %q", strings.TrimSpace(out))
+	}
+	if gitID := gitIDLine.FindStringSubmatch(out); gitID != nil {
+		return fmt.Sprintf("%s (%s)", version[1], gitID[1]), nil
+	}
+	return version[1], nil
 }
 
 // versionOrUnknown never fails the caller: a dump that already failed is not
 // made worse by being unable to name the CRIU that failed it.
-func versionOrUnknown(client *criulib.Criu) string {
-	version, err := versionOf(client)
+func versionOrUnknown(ctx context.Context, settings *types.CRIUSettings) string {
+	version, err := Version(ctx, settings)
 	if err != nil {
 		return "unknown"
 	}
@@ -194,7 +198,7 @@ func ExecuteDump(
 			"duration", dumpDuration,
 			// Asked only here: the round trip costs nothing against a dump that
 			// has already failed, and this is the line a bug report quotes.
-			"criu_version", versionOrUnknown(criuClient),
+			"criu_version", versionOrUnknown(context.Background(), settings),
 			"checkpoint_dir", checkpointDir,
 			"dump_log_path", dumpLogPath,
 			"skip_mnt", criuOpts.GetSkipMnt(),

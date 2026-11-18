@@ -80,7 +80,7 @@ func main() {
 
 	// CRIU is pinned by the agent image rather than by this repository, so the
 	// version that ran is recorded once here and named again on a failed dump.
-	criuVersion, err := criu.Version(&cfg.CRIU)
+	criuVersion, err := criu.Version(rootCtx, &cfg.CRIU)
 	if err != nil {
 		agentLog.Error(err, "Failed to read the CRIU version; dumps taken here will not record it")
 		criuVersion = "unknown"
@@ -120,7 +120,7 @@ func main() {
 	agentLog.Info("Agent stopped")
 }
 
-// The sidecar allocates its GPU transfer rings before it creates the control socket.
+// The sidecar allocates its GPU transfer buffers before it creates the control socket.
 const pageBrokerStartupTimeout = 5 * time.Minute
 
 // waitForPageBroker retries while the sidecar is not yet listening.
