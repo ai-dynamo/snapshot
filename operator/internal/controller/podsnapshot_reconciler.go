@@ -434,6 +434,7 @@ func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *snapshotv1alpha1.
 			},
 			Storage:    storage,
 			Containers: copyContainerSettings(snap.Spec.Containers),
+			PodGroup:   snap.Spec.PodGroup.DeepCopy(),
 		},
 	}
 }

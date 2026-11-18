@@ -6,6 +6,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -1124,5 +1125,24 @@ func TestSnapshotReconciler_CascadeDeleteRequeuesUntilContentGone(t *testing.T) 
 		assert.False(t, controllerutil.ContainsFinalizer(gone, podSnapshotFinalizer))
 	} else {
 		assert.True(t, apierrors.IsNotFound(err))
+	}
+}
+
+func TestSnapshotReconcilerBuildContentCopiesPodGroup(t *testing.T) {
+	for _, membership := range []*snapshotv1alpha1.PodGroupMembership{
+		nil,
+		{Name: "group", UID: "group-uid", MemberID: "worker-0"},
+	} {
+		t.Run(fmt.Sprint(membership), func(t *testing.T) {
+			snap := makeSnapshotForReconcile()
+			snap.Spec.PodGroup = membership
+			r := makeSnapshotReconciler(snapshotReconcilerScheme())
+			content := r.buildPodSnapshotContent(snap, "content", scheduledPod())
+			assert.Equal(t, membership, content.Spec.PodGroup)
+			if membership != nil {
+				content.Spec.PodGroup.MemberID = "other"
+				assert.Equal(t, "worker-0", membership.MemberID)
+			}
+		})
 	}
 }
