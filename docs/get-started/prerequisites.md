@@ -71,7 +71,9 @@ Requires [Multi-GPU Workloads](#multi-gpu-workloads), and CUDA user-mode driver
 the import's fabric event after CUDA restore, so the restore fails when it
 imports the memory again, with `CUDA_ERROR_INVALID_VALUE` on an r620 driver
 older than 620.58. To select a newer user-mode driver, see
-[Check the CUDA User-Mode Driver](../operate/cuda-driver.md).
+[Check the CUDA User-Mode Driver](../operate/cuda-driver.md). For how FABRIC
+sharing is captured and restored, see
+[Multi-GPU support](../design/multi-gpu/README.md#fabric-handles).
 
 ### Restore Proxy
 
