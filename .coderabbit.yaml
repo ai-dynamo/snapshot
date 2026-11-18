@@ -80,6 +80,22 @@ reviews:
         Open a follow-up PR changing only CHANGELOG.md.
         Do not edit published entries or release notes, commit directly to
         main, or merge the follow-up PR.
+    - name: "Track agreed follow-up work"
+      prompt: |
+        Run this action after every merge into the repository's default
+        branch, even when no follow-up work was agreed during review.
+        At execution time, read the full PR discussion, including comments
+        added after the last review.
+        Identify follow-up work explicitly agreed to by a maintainer.
+        If no such work exists, do nothing. Check existing open and closed
+        issues before creating an issue. If the task is already tracked,
+        do not create another issue.
+        For each untracked agreed task, create a GitHub issue in this
+        repository with a short title, the task, and a link to the source
+        PR discussion and relevant files.
+        Do not treat an unresolved thread alone as agreement. Skip rejected
+        findings and unaccepted suggestions. Do not assign issues, apply
+        approval or priority labels, close issues, change code, or open PRs.
 
   finishing_touches:
     docstrings:
@@ -121,6 +137,23 @@ knowledge_base:
     filePatterns:
       - files: ".ai/**/*.md"
         applyTo: "**/*"
+
+issue_enrichment:
+  auto_enrich:
+    enabled: true
+  planning:
+    enabled: false
+  labeling:
+    auto_apply_labels: true
+    labeling_instructions:
+      - label: bug
+        instructions: "Apply to reports of incorrect behavior, crashes, or regressions."
+      - label: enhancement
+        instructions: "Apply to requests for new or improved capabilities."
+      - label: documentation
+        instructions: "Apply to reports of missing, incorrect, or unclear documentation."
+      - label: needs-info
+        instructions: "Apply when a bug report lacks expected and actual behavior or enough reproduction details to investigate, or a feature request lacks the problem and desired outcome. Check the full discussion first. Do not infer AI authorship or treat a short issue as incomplete when it contains the needed information."
 
 chat:
   auto_reply: true
