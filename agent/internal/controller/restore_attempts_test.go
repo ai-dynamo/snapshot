@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	ktypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/utils/ptr"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
@@ -360,12 +361,14 @@ func TestLoadAttemptsReadsThePodOnce(t *testing.T) {
 
 func TestStartAttempt(t *testing.T) {
 	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	lastFailure := &podcontract.FailureSummary{Step: "restore", Cause: "PageBroker STORAGE_UNAVAILABLE"}
 	for name, tc := range map[string]struct {
-		annotation string
-		timeout    int
-		record     *podcontract.ContainerRetryStatus
-		want       *podcontract.ContainerRetryStatus
-		wantErr    string
+		annotation    string
+		timeout       int
+		record        *podcontract.ContainerRetryStatus
+		want          *podcontract.ContainerRetryStatus
+		wantErr       string
+		wantExhausted bool
 	}{
 		"the first attempt": {
 			annotation: "2", timeout: 60,
@@ -387,13 +390,59 @@ func TestStartAttempt(t *testing.T) {
 		},
 		"the deadline passed": {
 			annotation: "1", timeout: 60,
-			record:  &podcontract.ContainerRetryStatus{RetryLimit: 1, Attempt: 2, Deadline: now.Add(-time.Second), ContainerID: "ctr-old"},
-			wantErr: "restore timed out at 2026-11-09T11:59:59Z, before attempt 2 could start",
+			record:        &podcontract.ContainerRetryStatus{RetryLimit: 1, Attempt: 2, Deadline: now.Add(-time.Second), ContainerID: "ctr-old"},
+			wantErr:       "restore ran out of time after attempt 2 of 2: restore timed out at 2026-11-09T11:59:59Z, before attempt 2 could start",
+			wantExhausted: true,
 		},
 		"the deadline is now": {
 			annotation: "1", timeout: 60,
-			record:  &podcontract.ContainerRetryStatus{RetryLimit: 1, Attempt: 2, Deadline: now, ContainerID: "ctr-old"},
-			wantErr: "restore timed out at",
+			record:        &podcontract.ContainerRetryStatus{RetryLimit: 1, Attempt: 2, Deadline: now, ContainerID: "ctr-old"},
+			wantErr:       "restore timed out at",
+			wantExhausted: true,
+		},
+		"a retry not due yet": {
+			annotation: "2", timeout: 60,
+			record:  &podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 1, Deadline: now.Add(time.Minute), RetryAt: now.Add(time.Second), LastFailure: lastFailure, ContainerID: "ctr-abc"},
+			wantErr: errRetryScheduled.Error(),
+		},
+		"a due retry starts the next attempt with the record's limit": {
+			annotation: "5", timeout: 60,
+			record: &podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 1, Deadline: now.Add(time.Minute), RetryAt: now.Add(-time.Second), LastFailure: lastFailure, ContainerID: "ctr-old"},
+			want:   &podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 2, Deadline: now.Add(time.Minute), LastFailure: lastFailure, ContainerID: "ctr-abc"},
+		},
+		"a retry due now starts": {
+			annotation: "2", timeout: 60,
+			record: &podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 1, Deadline: now.Add(time.Minute), RetryAt: now, ContainerID: "ctr-abc"},
+			want:   &podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 2, Deadline: now.Add(time.Minute), ContainerID: "ctr-abc"},
+		},
+		"the last retry starts": {
+			annotation: "2", timeout: 60,
+			record: &podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 2, Deadline: now.Add(time.Minute), RetryAt: now.Add(-time.Second), ContainerID: "ctr-abc"},
+			want:   &podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 3, Deadline: now.Add(time.Minute), ContainerID: "ctr-abc"},
+		},
+		"a due retry past the deadline": {
+			annotation: "2", timeout: 60,
+			record:        &podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 1, Deadline: now.Add(-time.Second), RetryAt: now.Add(-5 * time.Second), ContainerID: "ctr-abc"},
+			wantErr:       "restore ran out of time after attempt 1 of 3: restore timed out at 2026-11-09T11:59:59Z, before attempt 2 could start",
+			wantExhausted: true,
+		},
+		"a due retry over the limit": {
+			annotation: "1", timeout: 60,
+			record:        &podcontract.ContainerRetryStatus{RetryLimit: 1, Attempt: 2, Deadline: now.Add(time.Minute), RetryAt: now.Add(-time.Second), ContainerID: "ctr-abc"},
+			wantErr:       "restore used all 2 attempts: attempt 3 is over the limit of 2",
+			wantExhausted: true,
+		},
+		"a retry past the deadline before it is due": {
+			annotation: "2", timeout: 60,
+			record:        &podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 1, Deadline: now.Add(-time.Second), RetryAt: now.Add(5 * time.Second), ContainerID: "ctr-abc"},
+			wantErr:       "restore ran out of time after attempt 1 of 3: restore timed out at 2026-11-09T11:59:59Z, before attempt 2 could start",
+			wantExhausted: true,
+		},
+		"a retry over the limit before it is due": {
+			annotation: "1", timeout: 60,
+			record:        &podcontract.ContainerRetryStatus{RetryLimit: 1, Attempt: 2, Deadline: now.Add(time.Minute), RetryAt: now.Add(time.Second), ContainerID: "ctr-abc"},
+			wantErr:       "restore used all 2 attempts: attempt 3 is over the limit of 2",
+			wantExhausted: true,
 		},
 		"an invalid Pod limit": {annotation: "two", timeout: 60, wantErr: "must be a non-negative integer"},
 	} {
@@ -410,16 +459,51 @@ func TestStartAttempt(t *testing.T) {
 
 			got, err := op.startAttempt(context.Background())
 
+			exhausted := eventsForReason(op.controller.clientset.(*fake.Clientset), restoreRetriesExhaustedReason)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
 				assert.Zero(t, op.controller.retryStatusQueue.Len(), "a refused attempt was saved")
 				assert.Equal(t, tc.record, savedAttempts(op.controller, op.pod.UID, "main"), "a refused attempt rewrote the record")
+				if tc.wantExhausted {
+					require.Len(t, exhausted, 1)
+					assert.Equal(t, "Destination main: "+err.Error(), exhausted[0].Message)
+				} else {
+					assert.Empty(t, exhausted)
+				}
 				return
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
 			assert.Equal(t, tc.want, savedAttempts(op.controller, op.pod.UID, "main"))
 			assert.Equal(t, 1, op.controller.retryStatusQueue.Len())
+			assert.Empty(t, exhausted)
+		})
+	}
+}
+
+func TestAnnounceAttempt(t *testing.T) {
+	for name, tc := range map[string]struct {
+		record podcontract.ContainerRetryStatus
+		want   string
+	}{
+		"a restore without retries": {
+			record: podcontract.ContainerRetryStatus{Attempt: 1},
+			want:   "Restore requested from PodSnapshot snapshot-a for destination main",
+		},
+		"a retry": {
+			record: podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 2, Deadline: time.Now().Add(time.Minute)},
+			want:   "Restore requested from PodSnapshot snapshot-a for destination main (attempt 2 of 3)",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			op := newAttemptOperation(t, nil)
+
+			op.announceAttempt(context.Background(), &tc.record)
+
+			events := eventsForReason(op.controller.clientset.(*fake.Clientset), restoreRequestedReason)
+			require.Len(t, events, 1)
+			assert.Equal(t, corev1.EventTypeNormal, events[0].Type)
+			assert.Equal(t, tc.want, events[0].Message)
 		})
 	}
 }
