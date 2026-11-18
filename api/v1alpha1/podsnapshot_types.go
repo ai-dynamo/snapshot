@@ -64,6 +64,11 @@ type PodSnapshotSpec struct {
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=1
 	Containers []ContainerSnapshotConfig `json:"containers,omitempty"`
+
+	// PodGroup requires this snapshot to be checkpointed as a member of its
+	// PodGroupSnapshot. Omitted means a standalone checkpoint.
+	// +optional
+	PodGroup *PodGroupMembership `json:"podGroup,omitempty"`
 }
 
 // PodSnapshotSource identifies the workload a PodSnapshot was taken from.

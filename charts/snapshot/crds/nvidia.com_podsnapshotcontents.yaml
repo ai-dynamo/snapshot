@@ -274,6 +274,36 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
+              podGroup:
+                description: |-
+                  PodGroup requires this snapshot to be checkpointed as a member of its
+                  PodGroupSnapshot. Omitted means a standalone checkpoint.
+                properties:
+                  memberID:
+                    description: |-
+                      MemberID identifies the member in the PodGroupSnapshot's spec.members.
+                      Its rank is that member's position in the list.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  name:
+                    description: Name of the PodGroupSnapshot.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                  uid:
+                    description: UID of the PodGroupSnapshot, which identifies the
+                      checkpoint attempt.
+                    maxLength: 128
+                    minLength: 1
+                    type: string
+                required:
+                - memberID
+                - name
+                - uid
+                type: object
               snapshotRef:
                 description: |-
                   PodSnapshotRef is the back-pointer to the bound PodSnapshot. It may span
