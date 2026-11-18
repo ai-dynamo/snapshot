@@ -129,8 +129,7 @@ Pod groups are alpha. With `podGroups.enabled`, each agent pod runs the pod
 group coordinator in a container of its own, `coordinator`, which listens on
 the node's IP. It runs as a non-root user with no capabilities, on the host's
 network, so it cannot bind a port below 1024. It shares the agent's
-ServiceAccount, and with it the agent's API rights. Pod groups need a newer
-Kubernetes than the baseline; see
+ServiceAccount, and with it the agent's API rights. See
 [Prerequisites](../get-started/prerequisites.md#pod-groups).
 
 | Value                                 | Default                                     | Description                                                                                                                        |
