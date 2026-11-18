@@ -22,12 +22,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
+	"github.com/ai-dynamo/snapshot/agent/internal/group"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/coordinator/session"
 )
 
 // CheckpointParams carries everything the node driver needs to dump one container.
@@ -57,6 +59,11 @@ type CheckpointParams struct {
 	OnDumpRepeat func(repeat int, err error)
 	// StoreID binds this capture to a configured store; empty means legacy.
 	StoreID string
+	// Group, for a member of a pod group, is the member's part in the group's
+	// attempt, and Committed records that the member started once the
+	// attempt commits. Both are nil for a Pod checkpointed on its own.
+	Group     *group.Member
+	Committed func(context.Context) error
 }
 
 // singleTargetContainer returns the one capture-target container a source podRef names, from a
@@ -90,7 +97,33 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	}
 	if content == nil || content.Spec.Source.NodeName != w.config.NodeName ||
 		!content.DeletionTimestamp.IsZero() || isContentTerminal(content) {
+		if content != nil && content.Spec.Source.NodeName == w.config.NodeName &&
+			!content.DeletionTimestamp.IsZero() {
+			w.leaveUnstartedMemberSource(ctx, content)
+		}
 		w.checkpointGates.Delete(name)
+		w.forgetCaptureOutcome(name)
+		return nil
+	}
+	// A pod group member's capture runs once: what this agent already
+	// concluded is recorded again rather than checkpointed again.
+	if outcome := w.pendingCaptureOutcome(content); outcome != nil {
+		return w.recordCaptureOutcome(ctx, content, outcome)
+	}
+	member, err := w.captureMemberOf(ctx, content)
+	if err != nil {
+		if errors.As(err, new(*invalidMemberError)) {
+			return w.setSnapshotContentFailed(ctx, content, reasonInvalidPodGroupMember, err)
+		}
+		return err
+	}
+
+	if member != nil && !member.pinned {
+		now := w.nowFn()
+		if !now.Before(member.deadline) {
+			return w.setSnapshotContentFailed(ctx, content, session.ReasonDeadlineExceeded, context.DeadlineExceeded)
+		}
+		w.requeueCaptureFn(name, min(captureMemberRetryInterval, member.deadline.Sub(now)))
 		return nil
 	}
 
@@ -140,6 +173,9 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	if recovered, err := w.recoverCommittedArtifact(ctx, content, contentUID, containerName, artifactPath); recovered || err != nil {
 		return err
 	}
+	if member != nil && contentStarted(content) {
+		return w.failInterruptedCapture(ctx, content, pod, containerName)
+	}
 
 	// Several work orders can name one pod, and everything below draws conclusions from live pod
 	// state — including a sweep that SIGKILLs its containers. Only the owner may. A non-owner
@@ -154,7 +190,7 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 		return nil
 	}
 
-	if handled, err := w.failCheckpointOnContainerExit(ctx, content, pod); handled {
+	if handled, err := w.failCheckpointOnContainerExit(ctx, content, pod, member); handled {
 		return err
 	}
 	if reason, msg := classifySourcePodLiveness(pod); reason != "" {
@@ -163,11 +199,16 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 		return err
 	}
 
+	if member != nil && !w.nowFn().Before(member.deadline) {
+		return w.failBeforeJoin(ctx, content, pod, member, session.ReasonDeadlineExceeded,
+			context.DeadlineExceeded)
+	}
+
 	// Check the opt-in before labeling the source and waiting for readiness, so a misconfigured
 	// Pod fails without waiting for its workload to become ready.
 	cuInterposeRequested, err := preflightCuInterpose(pod, containerName)
 	if err != nil {
-		return w.setSnapshotContentFailed(ctx, content, "CuInterposeMisconfigured", err)
+		return w.failBeforeJoin(ctx, content, pod, member, "CuInterposeMisconfigured", err)
 	}
 
 	// The source-pod informer keys on this label, so the patch is what makes pod status changes
@@ -178,6 +219,7 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 
 	gate, err := w.getCheckpointGate(ctx, content, pod, containerName)
 	if gate == nil {
+		w.leaveMemberSourceAsFound(ctx, member, pod)
 		return err
 	}
 	now := w.nowFn()
@@ -185,6 +227,9 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	if !ready {
 		// Pod events wake the work order more often than the period, so the
 		// gate paces the checks and says when the next one is due.
+		if member != nil && (next.IsZero() || member.deadline.Before(next)) {
+			next = member.deadline
+		}
 		if !next.IsZero() {
 			w.requeueCaptureFn(name, next.Sub(now))
 		}
@@ -195,17 +240,21 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 
 	containerID := containerIDForName(pod, containerName)
 	if containerID == "" {
-		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved",
+		return w.failBeforeJoin(ctx, content, pod, member, "ContainerNotResolved",
 			fmt.Errorf("could not resolve container %q ID", containerName))
 	}
 	containerPID, _, err := w.runtime.ResolveContainer(ctx, containerID)
 	if err != nil {
-		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName, err))
+		return w.failBeforeJoin(ctx, content, pod, member, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName, err))
 	}
 	// Refused before the suspend, so the workload is never disturbed for a
 	// capture the node cannot stage.
 	if err := w.checkStagingCapacity(ctx, containerPID); err != nil {
-		return w.setSnapshotContentFailed(ctx, content, reasonImageTooLarge, err)
+		return w.failBeforeJoin(ctx, content, pod, member, reasonImageTooLarge, err)
+	}
+	if member != nil {
+		return w.runGroupCheckpoint(ctx, content, pod, member, containerName, containerID, containerPID,
+			cuInterposeRequested, contentUID, artifactPath)
 	}
 	return w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, cuInterposeRequested, contentUID, artifactPath)
 }
@@ -536,12 +585,18 @@ func classifySourcePodLiveness(pod *corev1.Pod) (string, string) {
 	return "", ""
 }
 
-// failCheckpointOnContainerExit fails the work order and force-terminates the pod's still-running
-// containers when any checkpoint container has terminated non-zero. The bool says the caller must
-// stop; the error is the status write's, so one that did not land is retried. Only call this for a
-// pod this work order owns — the sweep kills every running container in it. Init containers
-// (pod.Status.InitContainerStatuses) are intentionally out of scope.
-func (w *NodeController) failCheckpointOnContainerExit(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod) (bool, error) {
+// failCheckpointOnContainerExit fails the work order when any checkpoint container has terminated
+// non-zero. The bool says the caller must stop; the error is the status write's, so one that did
+// not land is retried. Init containers (pod.Status.InitContainerStatuses) are intentionally out of
+// scope.
+//
+// For a pod captured on its own, it also force-terminates the pod's still-running containers. Only
+// call this for a pod this work order owns — the sweep kills every running container in it. A pod
+// group member's source belongs to its owner, and a member that gets here has not started, so its
+// source is left as found, as every failure before the join leaves it (failBeforeJoin).
+func (w *NodeController) failCheckpointOnContainerExit(
+	ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod, member *captureMember,
+) (bool, error) {
 	failed := failedCheckpointContainer(pod)
 	if failed == nil {
 		return false, nil
@@ -555,8 +610,14 @@ func (w *NodeController) failCheckpointOnContainerExit(ctx context.Context, cont
 	logger := logr.FromContextOrDiscard(ctx).WithValues("container", failed.Name)
 	logger.Info("Checkpoint container failed", "exit_code", term.ExitCode, "reason", term.Reason)
 	emitPodEvent(ctx, w.clientset, logger, pod, snapshotEventComponent, corev1.EventTypeWarning, "CheckpointFailed", message)
-	w.killRunningContainers(ctx, logger, pod, fmt.Sprintf("checkpoint container %s failed", failed.Name))
-	if err := w.setSnapshotContentFailed(ctx, content, "CheckpointContainerFailed", errors.New(message)); err != nil {
+	var err error
+	if member != nil {
+		err = w.failBeforeJoin(ctx, content, pod, member, "CheckpointContainerFailed", errors.New(message))
+	} else {
+		w.killRunningContainers(ctx, logger, pod, fmt.Sprintf("checkpoint container %s failed", failed.Name))
+		err = w.setSnapshotContentFailed(ctx, content, "CheckpointContainerFailed", errors.New(message))
+	}
+	if err != nil {
 		return true, fmt.Errorf("write PodSnapshotContent failed status %q: %w", content.Name, err)
 	}
 	return true, nil
@@ -806,6 +867,7 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		NodeName:             w.config.NodeName,
 		PodName:              params.Pod.Name,
 		PodNamespace:         params.Pod.Namespace,
+		PodUID:               string(params.Pod.UID),
 		PodIP:                params.Pod.Status.PodIP,
 		Pod:                  podEnvironment(params.Pod, params.ContainerName),
 		Clientset:            w.clientset,
@@ -814,6 +876,8 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		DumpRetriesRemaining: params.DumpRetriesRemaining,
 		DumpWorthRepeating:   params.DumpWorthRepeating,
 		OnDumpRepeat:         params.OnDumpRepeat,
+		Group:                params.Group,
+		Committed:            params.Committed,
 	}
 	// Recovering the source belongs to runCheckpoint, which is the only place that
 	// knows whether another attempt follows.

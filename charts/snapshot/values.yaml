@@ -383,14 +383,16 @@ config:
       - "*.pyc"
 
   checkpoint:
-    # Maximum seconds before the agent marks a checkpoint failed.
+    # Maximum seconds before the agent marks a checkpoint failed. A pod group
+    # member is bounded by its group's deadlineSeconds instead.
     timeoutSeconds: 3600
     # Times a failed checkpoint may be retried, beyond the first attempt. 0 keeps
     # retry opt-in, so upgrading changes no existing checkpoint's behaviour.
     retryLimit: 0
 
   restore:
-    # Maximum seconds to allow a restore attempt before the agent marks it failed
+    # Maximum seconds to allow a restore attempt before the agent marks it failed.
+    # A pod group target is bounded by its group's deadlineSeconds instead.
     timeoutSeconds: 7200
     # Skip the restore compatibility check on every restore this agent handles.
     # The gate refuses a restore whose snapshot was taken somewhere the

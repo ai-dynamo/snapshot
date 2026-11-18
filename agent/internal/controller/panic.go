@@ -22,6 +22,9 @@ import (
 // queue does not redeliver a panicking key, so this is the only chance.
 const panicStatusRetries = 3
 
+// reasonAgentPanic fails a work order whose capture panicked.
+const reasonAgentPanic = "AgentPanic"
+
 // recoveredPanicError carries a panic as an error, so the normal failure
 // paths can report it.
 type recoveredPanicError struct{ value any }
@@ -47,7 +50,8 @@ func recoverPanic(log logr.Logger, operation string, onPanic func(error), keysAn
 //
 // A panic can land after the capture committed but before Ready is written, so
 // a committed artifact is promoted first: AgentPanic is terminal, and a
-// terminal work order never reaches recovery again.
+// terminal work order never reaches recovery again. The source of a pod group
+// member that had not started is left as Snapshot found it.
 func (w *NodeController) failCaptureAfterPanic(ctx context.Context, name string, cause error) {
 	defer recoverPanic(w.log, "capture panic cleanup", nil, "content", name)
 
@@ -63,8 +67,9 @@ func (w *NodeController) failCaptureAfterPanic(ctx context.Context, name string,
 		if w.recoverCommittedCaptureAfterPanic(ctx, content, name) {
 			return
 		}
-		err := w.setSnapshotContentFailed(ctx, content, "AgentPanic", errors.New(cause.Error()))
+		err := w.setSnapshotContentFailed(ctx, content, reasonAgentPanic, errors.New(cause.Error()))
 		if err == nil {
+			w.leaveUnstartedMemberSource(ctx, content)
 			return
 		}
 		if attempt == panicStatusRetries-1 {
@@ -106,6 +111,10 @@ func (w *NodeController) failRestoreAfterPanic(ctx context.Context, key client.O
 	// Marked handled first: a failed status write must not leave the key
 	// eligible for redelivery into the same panic.
 	w.markRestoreHandled(pod)
+	if w.groupTargetRelevant(pod) {
+		w.failGroupRestoreAfterPanic(ctx, pod, cause)
+		return
+	}
 	for attempt := range panicStatusRetries {
 		err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonFailed, cause.Error())
 		if err == nil {

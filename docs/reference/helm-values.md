@@ -163,6 +163,10 @@ With `podGroups.enabled`, the chart also deploys these:
 - The operator's issuer of the coordinator's TLS certificate, unless you bring
   your own. With `rbac.create`, its Role and RoleBinding,
   `<fullname>-operator-coordinator-tls`, for the operator's ServiceAccount.
+- The agent's part: its pod group flags, and the
+  `nvidia.com/snapshot-podgroup-protocols: v1` annotation on the agent pod,
+  which the operator reads to place groups. `daemonset.podAnnotations` cannot
+  override it.
 
 The coordinator's `/tmp` is an `emptyDir` in memory, sized to
 `coordinator.maxMemoryBytes` plus 64 MiB. It holds the control buckets' file
@@ -234,8 +238,8 @@ deleted:
 `config.*` renders into the agent ConfigMap.
 
 - `config.overlay.exclusions` - Rootfs-diff tar exclusions. Default: `/proc`, `/sys`, `/dev`, `*/.cache/huggingface`, `*/__pycache__`, `*.pyc`. A file the checkpointed processes hold open or mapped at dump time is archived even when an exclusion matches it, so CRIU can reopen it. Other excluded files are not restored; the workload must recreate them if needed.
-- `config.checkpoint.timeoutSeconds` - Maximum seconds for a checkpoint before the agent marks it failed. Default `3600`.
-- `config.restore.timeoutSeconds` - Maximum seconds for a restore before the agent marks it failed. Default `7200`.
+- `config.checkpoint.timeoutSeconds` - Maximum seconds for a checkpoint before the agent marks it failed. Default `3600`. A member of a `PodGroupSnapshot` is bounded by the group's `deadlineSeconds` instead.
+- `config.restore.timeoutSeconds` - Maximum seconds for a restore before the agent marks it failed. Default `7200`. A target of a `PodGroupRestore` is bounded by the group's `deadlineSeconds` instead.
 
 `config.criu.*` - CRIU options:
 

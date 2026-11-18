@@ -307,7 +307,8 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
      issuer's flags nor its RBAC.
 
      How an agent reaches the coordinator of a group, for the agent's side:
-       - Address: tls://<the agent Pod IP of the group's rank-0 member>:<coordinator.port>.
+       - Address: tls://<the agent Pod IP of the group's rank-0 member>:<coordinator.port>,
+         the agent Pod selected by snapshot.agentPodSelector.
        - Server name: snapshot.coordinatorServerName, passed to the agent as a
          flag.
        - CA: the selected trust bundle's key, the built-in ConfigMap's ca.crt
@@ -317,6 +318,22 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
          snapshot.coordinatorTokenAudience, with expirationSeconds: 3600, at
          /var/run/secrets/snapshot-coordinator/token. The coordinator admits
          it only for members on the agent's own node. */}}
+
+{{/* The label selector of the agent Pods, as the agent DaemonSet selects
+     them: snapshot.selectorLabels and the agent's component label, in the
+     comma-separated form of an --agent-selector flag. Read line by line, so
+     a value is never reparsed as a YAML number. */}}
+{{- define "snapshot.agentPodSelector" -}}
+{{- $pairs := list -}}
+{{- range $line := splitList "\n" (include "snapshot.selectorLabels" .) -}}
+{{- $kv := splitList ": " $line -}}
+{{- if eq (len $kv) 2 -}}
+{{- $pairs = append $pairs (printf "%s=%s" (first $kv) (last $kv)) -}}
+{{- end -}}
+{{- end -}}
+{{- $pairs = append $pairs "app.kubernetes.io/component=snapshot-agent" -}}
+{{- join "," $pairs -}}
+{{- end -}}
 
 {{/* The name the coordinators' serving certificate carries, which agents
      verify. It is never resolved. */}}

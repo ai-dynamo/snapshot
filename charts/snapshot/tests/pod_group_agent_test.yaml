@@ -1,0 +1,255 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: pod group agent
+templates:
+  - templates/daemonset.yaml
+release:
+  name: snapshot
+  namespace: snapshot-system
+tests:
+  # Off by default.
+
+  - it: gives the agent no pod group flags by default
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --enable-pod-groups
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --agent-namespace=$(POD_NAMESPACE)
+      - notExists:
+          path: spec.template.spec.containers[0].env[?(@.name == "POD_NAMESPACE")]
+
+  - it: mounts no coordinator CA or token by default
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].volumeMounts[?(@.name == "coordinator-ca")]
+      - notExists:
+          path: spec.template.spec.containers[0].volumeMounts[?(@.name == "coordinator-token")]
+      - notExists:
+          path: spec.template.spec.volumes[?(@.name == "coordinator-ca")]
+      - notExists:
+          path: spec.template.spec.volumes[?(@.name == "coordinator-token")]
+
+  - it: does not advertise the pod group protocols by default
+    asserts:
+      - notExists:
+          path: spec.template.metadata.annotations["nvidia.com/snapshot-podgroup-protocols"]
+
+  - it: does not let podAnnotations advertise the pod group protocols while pod groups are off
+    set:
+      daemonset.podAnnotations:
+        nvidia.com/snapshot-podgroup-protocols: v1
+        example.com/kept: "yes"
+    asserts:
+      - notExists:
+          path: spec.template.metadata.annotations["nvidia.com/snapshot-podgroup-protocols"]
+      - equal:
+          path: spec.template.metadata.annotations["example.com/kept"]
+          value: "yes"
+
+  # On.
+
+  - it: advertises pod group protocol v1
+    set:
+      podGroups.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.metadata.annotations["nvidia.com/snapshot-podgroup-protocols"]
+          value: v1
+
+  - it: does not let podAnnotations override the pod group protocols
+    set:
+      podGroups.enabled: true
+      daemonset.podAnnotations:
+        nvidia.com/snapshot-podgroup-protocols: v1,v2
+        example.com/kept: "yes"
+    asserts:
+      - equal:
+          path: spec.template.metadata.annotations["nvidia.com/snapshot-podgroup-protocols"]
+          value: v1
+      - equal:
+          path: spec.template.metadata.annotations["example.com/kept"]
+          value: "yes"
+
+  - it: does not let podAnnotations override the pod group protocols on OpenShift
+    set:
+      podGroups.enabled: true
+      openshift.enabled: true
+      daemonset.podAnnotations:
+        nvidia.com/snapshot-podgroup-protocols: v1,v2
+    asserts:
+      - equal:
+          path: spec.template.metadata.annotations["nvidia.com/snapshot-podgroup-protocols"]
+          value: v1
+      - equal:
+          path: spec.template.metadata.annotations["openshift.io/required-scc"]
+          value: privileged
+
+  - it: tells the agent how to reach a group's coordinator
+    set:
+      podGroups.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --enable-pod-groups
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --agent-namespace=$(POD_NAMESPACE)
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --agent-selector=app.kubernetes.io/name=snapshot,app.kubernetes.io/instance=snapshot,app.kubernetes.io/component=snapshot-agent
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --coordinator-server-name=snapshot-coordinator.snapshot-system
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --coordinator-port=4224
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+
+  - it: selects the agent Pods as the DaemonSet does
+    set:
+      podGroups.enabled: true
+    asserts:
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/component"]
+          value: snapshot-agent
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/instance"]
+          value: snapshot
+
+  - it: selects the agent Pods with the DaemonSet's labels after a name override
+    set:
+      podGroups.enabled: true
+      nameOverride: snap
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --agent-selector=app.kubernetes.io/name=snap,app.kubernetes.io/instance=snapshot,app.kubernetes.io/component=snapshot-agent
+      - equal:
+          path: spec.selector.matchLabels
+          value:
+            app.kubernetes.io/name: snap
+            app.kubernetes.io/instance: snapshot
+            app.kubernetes.io/component: snapshot-agent
+
+  - it: keeps a release name that YAML would read as a number
+    release:
+      name: "1e3"
+    set:
+      podGroups.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --agent-selector=app.kubernetes.io/name=snapshot,app.kubernetes.io/instance=1e3,app.kubernetes.io/component=snapshot-agent
+
+  - it: passes coordinator.port and your own server name
+    set:
+      podGroups.enabled: true
+      coordinator.port: 5300
+      coordinator.tls.serving.secretName: my-serving
+      coordinator.tls.trust.configMapName: my-bundle
+      coordinator.tls.serverName: coordinator.example.com
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --coordinator-port=5300
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --coordinator-server-name=coordinator.example.com
+
+  - it: mounts the coordinator CA and token in the agent container
+    set:
+      podGroups.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: coordinator-ca
+            mountPath: /etc/snapshot-coordinator/ca
+            readOnly: true
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: coordinator-token
+            mountPath: /var/run/secrets/snapshot-coordinator
+            readOnly: true
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "coordinator")].volumeMounts[?(@.name == "coordinator-token")]
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts[?(@.name == "coordinator-ca")]
+
+  - it: projects a token for the coordinators' audience alone
+    set:
+      podGroups.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: coordinator-token
+            projected:
+              sources:
+                - serviceAccountToken:
+                    audience: snapshot-coordinator.snapshot-system
+                    expirationSeconds: 3600
+                    path: token
+
+  - it: trusts the operator's CA bundle by default
+    set:
+      podGroups.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: coordinator-ca
+            configMap:
+              name: snapshot-coordinator-ca-bundle
+              optional: true
+              items:
+                - key: ca.crt
+                  path: ca.crt
+
+  - it: trusts your own CA bundle ConfigMap
+    set:
+      podGroups.enabled: true
+      coordinator.tls.serving.secretName: my-serving
+      coordinator.tls.trust.configMapName: my-bundle
+      coordinator.tls.trust.key: bundle.pem
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: coordinator-ca
+            configMap:
+              name: my-bundle
+              optional: true
+              items:
+                - key: bundle.pem
+                  path: ca.crt
+
+  - it: trusts your own CA bundle Secret
+    set:
+      podGroups.enabled: true
+      coordinator.tls.serving.secretName: my-serving
+      coordinator.tls.trust.secretName: my-bundle
+      coordinator.tls.trust.key: trust-bundle.pem
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: coordinator-ca
+            secret:
+              secretName: my-bundle
+              optional: true
+              items:
+                - key: trust-bundle.pem
+                  path: ca.crt
+      - notExists:
+          path: spec.template.spec.volumes[?(@.name == "coordinator-ca")].configMap

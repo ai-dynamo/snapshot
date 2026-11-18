@@ -6,7 +6,7 @@ include $(REPO_HACK_DIR)/tools.mk
 
 .DEFAULT_GOAL := build
 
-.PHONY: build go-build cuinterpose-build cuinterpose-test cuda-checkpoint-helper test test-go test-pagebroker tidy lint fmt pagebroker-generate pagebroker-check-generated
+.PHONY: build go-build cuinterpose-build cuinterpose-test cuda-checkpoint-helper test test-go test-integration test-pagebroker tidy lint fmt pagebroker-generate pagebroker-check-generated
 
 PROTOC_GEN_GO := $(TOOLS_BIN_DIR)/protoc-gen-go
 CUDA_ROOT ?= /usr/local/cuda
@@ -35,6 +35,14 @@ test: test-go
 
 test-go:
 	go test ./...
+
+# Runs the tests that need a real API server (envtest kube-apiserver and etcd):
+# the fenced status writes on a pod group's restore Pods. The integration tag
+# keeps them out of make test. The package needs no Linux-only code, so this
+# also runs on a Mac.
+test-integration: $(SETUP_ENVTEST)
+	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
+	  go test -tags=integration ./internal/targetstatus/...
 
 # Run the PageBroker CPU tests with the PageBroker image's build dependencies.
 test-pagebroker:
