@@ -222,13 +222,19 @@ func TestPodGroupSnapshotReconciler_CreatesMembersWithTheirOwnSettings(t *testin
 		assert.NotContains(t, snap.Labels, "nvidia.com/snapshot-podgroup")
 		assert.NotContains(t, snap.Labels, "nvidia.com/snapshot-podgroup-member")
 	}
-	assert.Equal(t, &snapshotv1alpha1.PodGroupMembership{Name: group.Name, UID: group.UID, MemberID: "head"}, head.Spec.PodGroup)
+	assert.Equal(t, &snapshotv1alpha1.PodGroupSnapshotMembership{
+		ObjectIdentity: snapshotv1alpha1.ObjectIdentity{Name: group.Name, UID: group.UID},
+		MemberID:       "head",
+	}, head.Spec.PodGroup)
 	assert.Equal(t, "head", head.Labels["role"])
 	assert.Equal(t, map[string]string{"note": "serves HTTP"}, head.Annotations)
 	assert.Equal(t, group.Spec.Members[0].Source, head.Spec.Source)
 	assert.Equal(t, containerSettings("main"), head.Spec.Containers)
 
-	assert.Equal(t, &snapshotv1alpha1.PodGroupMembership{Name: group.Name, UID: group.UID, MemberID: "worker"}, worker.Spec.PodGroup)
+	assert.Equal(t, &snapshotv1alpha1.PodGroupSnapshotMembership{
+		ObjectIdentity: snapshotv1alpha1.ObjectIdentity{Name: group.Name, UID: group.UID},
+		MemberID:       "worker",
+	}, worker.Spec.PodGroup)
 	assert.Equal(t, "worker", worker.Labels["role"])
 	assert.Empty(t, worker.Annotations)
 	assert.Equal(t, group.Spec.Members[1].Source, worker.Spec.Source)
@@ -1028,7 +1034,10 @@ func TestPodGroupSnapshotReconciler_Deletion(t *testing.T) {
 func TestPodGroupSnapshotReconciler_MapsContentToGroup(t *testing.T) {
 	content := &snapshotv1alpha1.PodSnapshotContent{Spec: snapshotv1alpha1.PodSnapshotContentSpec{
 		PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: pgNamespace, Name: "deleted-member"},
-		PodGroup:       &snapshotv1alpha1.PodGroupMembership{Name: "group", UID: "group-uid", MemberID: "a"},
+		PodGroup: &snapshotv1alpha1.PodGroupSnapshotMembership{
+			ObjectIdentity: snapshotv1alpha1.ObjectIdentity{Name: "group", UID: "group-uid"},
+			MemberID:       "a",
+		},
 	}}
 	ctx := context.Background()
 
