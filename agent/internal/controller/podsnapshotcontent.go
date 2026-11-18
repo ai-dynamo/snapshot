@@ -102,10 +102,7 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 			w.leaveUnstartedMemberSource(ctx, content)
 		}
 		w.checkpointGates.Delete(name)
-		// A queued delete still needs the identity after the index drops its content.
-		if content != nil {
-			w.forgetCaptureOutcome(name)
-		}
+		w.forgetCaptureOutcome(name)
 		return nil
 	}
 	// A pod group member's capture runs once: what this agent already

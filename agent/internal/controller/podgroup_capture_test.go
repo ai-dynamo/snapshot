@@ -940,6 +940,19 @@ func TestCaptureDeleteAfterCacheEviction(t *testing.T) {
 	}
 }
 
+func TestCaptureWithoutContentForgetsItsOutcome(t *testing.T) {
+	g := newCaptureGroup()
+	w, _ := groupCaptureController(t, nil, g, nil, nil)
+	content := g.contents[0]
+	outcome := &captureOutcome{uid: content.UID, ready: true}
+	w.podGroups.captureOutcomes.Store(content.Name, outcome)
+	require.Same(t, outcome, w.pendingCaptureOutcome(content))
+	require.NoError(t, w.contentIndexer.Delete(mustUnstructured(t, content)))
+
+	require.NoError(t, w.reconcileCapture(t.Context(), content.Name))
+	assert.Nil(t, w.pendingCaptureOutcome(content))
+}
+
 func TestUnstartedMemberCleanupDoesNotNeedItsGroup(t *testing.T) {
 	for _, samePod := range []bool{true, false} {
 		t.Run(fmt.Sprintf("same-pod-%t", samePod), func(t *testing.T) {
