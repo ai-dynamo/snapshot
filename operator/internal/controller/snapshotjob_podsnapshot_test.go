@@ -206,7 +206,7 @@ func TestSnapshotJobReconcileFailsRefusedTemplateBeforePodSnapshotCreate(t *test
 	pod := sourcePodForJob(job)
 
 	sj.Spec.PodSnapshotTemplate.Metadata = &snapshotv1alpha1.PodSnapshotTemplateMetadata{
-		Labels: map[string]string{snapshotv1alpha1.PodGroupLabel: "caller"},
+		Labels: map[string]string{snapshotv1alpha1.SnapshotJobOwnerLabel: "caller"},
 	}
 	sj.Status.SourceJobUID = job.UID
 	r := makeSnapshotJobReconciler(s, sj, job, pod)
