@@ -135,7 +135,7 @@ keeps its binding. See [Default class](#default-class).
 | Class edited after binding | The location fields change; content bound to the old `storeID` would read or delete in the wrong place. Or `reclaimPolicy` flips and existing content loses data it was meant to keep. | Location fields are immutable through CEL, and the policy is frozen on the content at binding. Credentials and TLS settings stay editable because they are not identity inputs. The agent and maintenance compare the class's `status.storeID` with the content's binding before any I/O and refuse a mismatch. |
 | Class deleted under content | Content loses the only description of where its snapshots are. | Protection finalizer; a terminating class still resolves for existing content. Force-removing the finalizer leaves content with the existing `StoreInactive` handling from SNEP-237. |
 | Secret missing or revoked | An S3 class's Secret is deleted or rotated to an invalid key. | The class goes `Ready=False`, reason `CredentialsUnavailable`, and new bindings stop. In-flight operations fail with the existing credential errors; nothing is deleted on an access error. |
-| Agent holds credentials | Today only PageBroker and the operator see S3 credentials. The agent now reads the class's Secret and writes it to a local file for PageBroker. | The Secret must live in the Snapshot namespace. The operator keeps the agent's Role limited by `resourceNames` to the Secrets and ConfigMaps that classes reference; a node can still read the credentials of every store, where today it holds one. The file is written to the memory-backed volume the two containers already share, mode `0600`, under a per-transaction directory removed on Commit or Abort. Accepted trade-off against giving PageBroker a Kubernetes client; see Alternatives. |
+| Agent holds credentials | Today only PageBroker and the operator see S3 credentials. The agent now reads the class's Secret and passes it to PageBroker in the request. | The Secret must live in the Snapshot namespace. The operator keeps the agent's Role limited by `resourceNames` to the Secrets and ConfigMaps that classes reference; a node can still read the credentials of every store, where today it holds one. The credentials stay in memory in both processes and cross only the local socket the agent already uses; they are never written to a volume, a transaction record or a log. Accepted trade-off against giving PageBroker a Kubernetes client; see Alternatives. |
 | Shared workload identity | Classes without a Secret are all reached with one identity, that of the agent's and the operator's service accounts. | That identity needs access to every such store, so credentials do not separate those stores from each other; use a Secret per class where separation matters. Instance metadata is excluded, so a broken identity fails instead of falling back to the node's role. |
 | Duplicate location | Two classes in one cluster describe the same place, so one store gets two policies and two sets of access settings. | The operator refuses `Ready` for the later class with reason `DuplicateStore` and names the other. Two classes that reach one bucket through different hostnames are not detected; that is harmless, because a sweep keeps every directory whose content exists in the cluster, whichever class it is bound to. See [Store uniqueness](#store-uniqueness). |
 | Shared store | Several clusters use one location. A sweep or a delete in one cluster could remove another's snapshots. | Each content directory carries `.origin` with the creating cluster's ID. A sweep deletes only orphans whose `.origin` names its own cluster, and deleting content skips a directory that names another. Each cluster's credentials can still read and delete the others' snapshots, so share only between clusters that trust each other. A destroyed cluster's directories stay until an administrator removes them. |
@@ -349,10 +349,10 @@ message S3Storage {
   string region = 2;
   string bucket = 3;
   string prefix = 4;
-  string credentials_file = 5;  // On the shared staging volume; agent-owned.
+  bytes credentials = 5;  // The Secret's shared-credentials content. Empty: workload identity.
   string addressing = 6;
   bool allow_http = 7;
-  string ca_bundle_file = 8;
+  bytes ca_bundle = 8;    // PEM, from the class's ConfigMap. Empty: system roots.
 }
 
 message ArtifactTarget    { StorageBackend storage = 3; }  // Resolved class.
@@ -362,7 +362,7 @@ message PublishedArtifact { StorageBackend storage = 3; }  // Restore and metada
 PageBroker trusts `store_id` and `StorageBackend` as it trusts its startup
 configuration today; the binding check is the agent's. It caches S3 clients by
 `store_id`, `addressing`, `allow_http` and a SHA-256 digest of the credentials
-and CA bundle file contents, computed when it builds the client, so rotated
+and CA bundle bytes in the request, computed when it builds the client, so rotated
 credentials or a changed setting get a new client. An entry idle for 15 minutes
 is dropped, the cache holds at most 64 entries, and a client with calls in
 flight is never dropped. A missing class or Secret fails the operation with
@@ -388,31 +388,33 @@ bundle or addressing mode differs from PageBroker's startup values, taken from
 #### Credential delivery
 
 S3 credentials are not mounted: a Secret volume is fixed when the pod starts,
-which is why today's single store needs a restart. The agent carries them per
-transaction through the staging volume it shares with PageBroker:
+which is why today's single store needs a restart. They are also not written to
+the volume the agent shares with PageBroker; this design adds no file exchange
+between the two. The agent passes them in the request:
 
 1. At Prepare, the agent reads the class's Secret, and the CA bundle ConfigMap
-   if set, with an uncached `Get` and writes
-   `<staging>/stores/<transaction-id>/credentials` and `ca.crt`, mode `0600`.
-2. It passes the paths in `S3Storage`; PageBroker builds its client from that
-   file in the shared-credentials format it reads today.
-3. It removes the directory on Commit or Abort, and on restart removes
-   directories whose transaction is gone. The volume is RAM, so a crash leaves
-   nothing on the node.
+   if set, with an uncached `Get`.
+2. It puts their contents in `S3Storage.credentials` and `S3Storage.ca_bundle`
+   on every call that carries a `StorageBackend`. The credentials are in the
+   shared-credentials format PageBroker parses today.
+3. PageBroker keeps them in memory for the transaction and hands them to its
+   S3 tooling as environment or arguments, as it does today. It does not store
+   them in a transaction record, so a call after a PageBroker restart carries
+   them again. The CA bundle is not secret; where a tool needs a path,
+   PageBroker writes it to its own scratch space.
 
-A class with no `credentialsSecretRef` uses workload identity. The agent writes
-no credentials file and leaves `credentials_file` empty; PageBroker and the
-operator then use the SDK default credential chain under their own service
-accounts, with instance metadata excluded so the node's role is never used.
-Those credentials refresh on their own.
+A class with no `credentialsSecretRef` uses workload identity. The agent leaves
+`credentials` empty; PageBroker and the operator then use the SDK default
+credential chain under their own service accounts, with instance metadata
+excluded so the node's role is never used. Those credentials refresh on their
+own.
 
-The directory is per transaction, not per store: concurrent transactions never
-share a file, and a rotated Secret reaches the next transaction while an
-in-flight one keeps its key. For a restore payload the new key takes effect
-when the restore session is replaced; see [Agent and PageBroker](#agent-and-pagebroker).
-A retried checkpoint or restore is a new transaction with a new ID and
-directory, so it reads the Secret again. Sharing
-happens in PageBroker's client cache.
+Credentials are read per transaction, not per store: a rotated Secret reaches
+the next transaction while an in-flight one keeps its key. For a restore
+payload the new key takes effect when the restore session is replaced; see
+[Agent and PageBroker](#agent-and-pagebroker). A retried checkpoint or restore
+is a new transaction, so it reads the Secret again. Sharing happens in
+PageBroker's client cache.
 
 #### Maintenance
 
@@ -450,8 +452,8 @@ and gets `StoreInactive`, as in SNEP-237.
   classes reference; every node can still read every store's credentials. The
   agent's ClusterRole gains `get`/`list`/`watch` on `snapshotstorageclasses`.
   A class without a Secret uses the service accounts' workload identity.
-  The agent writes a Secret only to the staging tmpfs, never to the node
-  filesystem or logs.
+  The agent holds a Secret only in memory and sends it only over the local
+  socket; neither process writes it to a volume or a log.
 - **PageBroker.** No Kubernetes client, RBAC or long-lived credentials; it
   trusts the agent on the local socket as today.
 - **Shared stores.** Every cluster that shares a store holds credentials that
@@ -556,8 +558,8 @@ the old operator ignores both and reads `storage.yaml`.
   when no class exists; terminating class, finalizer, `Retain`, registry rebuild.
 - **Chart:** changing only `storage.defaultClassName` changes the operator's
   pod template and leaves the agent DaemonSet's unchanged.
-- **Agent:** Secret fetch, file permissions and removal on Commit, Abort and
-  crash; no credentials file for a class without a Secret; mount mapping for default and extra claims; `StorageClassUnavailable`
+- **Agent:** Secret fetch per transaction; credentials in the request and never
+  on a volume or in a log; empty credentials for a class without a Secret; mount mapping for default and extra claims; `StorageClassUnavailable`
   on a missing class, a `status.storeID` mismatch, or a claim with no mount.
 - **Maintenance:** a sweep looks only inside `artifacts/` and deletes only
   UUID-named orphans whose `.origin` names this cluster, on S3 and on a PVC.
@@ -565,6 +567,7 @@ the old operator ignores both and reads `storage.yaml`.
   survive. Deleting content skips a directory that names another cluster. A
   nested store's data survives its parent's sweep.
 - **PageBroker:** per-request `StorageBackend`, client cache, two stores live;
+  credentials from the request are not written to disk or a transaction record;
   restores from stores that differ in endpoint, region or credentials queue and
   run in turn; stores that share them restore in parallel.
 - **End to end:** two S3 and one PVC class in one cluster, checkpoint and
@@ -582,6 +585,10 @@ the old operator ignores both and reads `storage.yaml`.
 - **PageBroker with its own Kubernetes client.** Keeps credentials out of the
   agent, but adds an API dependency, RBAC and a watch to a component driven
   over a local socket. Rejected.
+- **Credential files on the volume the agent shares with PageBroker.** Keeps
+  secrets out of the request, but adds a file contract between the two, with
+  its own permissions and cleanup. Rejected; the request already carries the
+  store.
 - **Mounting arbitrary PVCs at runtime.** Needs the agent to mount claims or a
   restart per claim; deferred and recorded as the limitation.
 - **A default marker on the class (`isDefault`).** Lets the default move with
