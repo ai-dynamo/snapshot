@@ -24,18 +24,18 @@ import (
 
 // putAttempts keeps record in the agent's memory, as it holds a destination's
 // record once an attempt started.
-func putAttempts(w *NodeController, uid ktypes.UID, container string, record restoreAttempts) {
+func putAttempts(w *NodeController, uid ktypes.UID, container string, record podcontract.ContainerRetryStatus) {
 	w.restoreAttemptRecords.Store(restoreContainerKey(uid, container), record)
 }
 
 // savedAttempts returns the destination's record in the agent's memory, nil
 // when it has none.
-func savedAttempts(w *NodeController, uid ktypes.UID, container string) *restoreAttempts {
+func savedAttempts(w *NodeController, uid ktypes.UID, container string) *podcontract.ContainerRetryStatus {
 	value, ok := w.restoreAttemptRecords.Load(restoreContainerKey(uid, container))
 	if !ok {
 		return nil
 	}
-	record := value.(restoreAttempts)
+	record := value.(podcontract.ContainerRetryStatus)
 	return &record
 }
 
@@ -49,7 +49,7 @@ type attemptHarness struct {
 	restores int
 	deadline time.Time
 	// seen is the record as the attempt saw it when it started.
-	seen  *restoreAttempts
+	seen  *podcontract.ContainerRetryStatus
 	calls []string
 }
 
@@ -104,7 +104,7 @@ func TestRunRestoreSavesTheFirstAttemptBeforeRunningIt(t *testing.T) {
 
 			require.NoError(t, run())
 
-			want := restoreAttempts{Limit: tc.wantRetryLimit, Attempt: 1, Deadline: h.now.Add(time.Minute), ContainerID: "ctr-abc"}
+			want := podcontract.ContainerRetryStatus{RetryLimit: tc.wantRetryLimit, Attempt: 1, Deadline: h.now.Add(time.Minute), ContainerID: "ctr-abc", PodUID: h.pod.UID}
 			require.NotNil(t, h.seen, "the record must be saved before the attempt runs")
 			assert.Equal(t, want, *h.seen)
 			assert.True(t, want.Deadline.Equal(h.deadline), "the attempt's context ends at %s, want the record's %s", h.deadline, want.Deadline)
@@ -150,7 +150,7 @@ func TestRunRestoreEndsWhenItsDeadlinePassedBeforeTheAttempt(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			h, run := newAttemptHarness(t, retryLimit("2"), nil)
-			putAttempts(h.w, h.pod.UID, "main", restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(-before), ContainerID: "ctr-abc"})
+			putAttempts(h.w, h.pod.UID, "main", podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 1, Deadline: h.now.Add(-before), ContainerID: "ctr-abc"})
 
 			err := run()
 
@@ -230,10 +230,10 @@ func TestRetryLimit(t *testing.T) {
 }
 
 func TestLoadAttempts(t *testing.T) {
-	inMemory := restoreAttempts{Limit: 2, Attempt: 2, ContainerID: "ctr-abc"}
+	inMemory := podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 2, ContainerID: "ctr-abc"}
 	for name, tc := range map[string]struct {
-		memory    *restoreAttempts
-		want      *restoreAttempts
+		memory    *podcontract.ContainerRetryStatus
+		want      *podcontract.ContainerRetryStatus
 		wantFound bool
 	}{
 		"no record":          {},
@@ -258,36 +258,36 @@ func TestStartAttempt(t *testing.T) {
 	for name, tc := range map[string]struct {
 		annotation string
 		timeout    int
-		record     *restoreAttempts
-		want       *restoreAttempts
+		record     *podcontract.ContainerRetryStatus
+		want       *podcontract.ContainerRetryStatus
 		wantErr    string
 	}{
 		"the first attempt": {
 			annotation: "2", timeout: 60,
-			want: &restoreAttempts{Limit: 2, Attempt: 1, Deadline: now.Add(time.Minute), ContainerID: "ctr-abc"},
+			want: &podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 1, Deadline: now.Add(time.Minute), ContainerID: "ctr-abc", PodUID: "restore-pod-uid"},
 		},
 		"the first attempt without a timeout": {
 			annotation: "2",
-			want:       &restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "ctr-abc"},
+			want:       &podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 1, ContainerID: "ctr-abc", PodUID: "restore-pod-uid"},
 		},
 		"an interrupted attempt keeps its limit and deadline": {
 			annotation: "5", timeout: 60,
-			record: &restoreAttempts{Limit: 1, Attempt: 2, Deadline: now.Add(30 * time.Second), ContainerID: "ctr-old"},
-			want:   &restoreAttempts{Limit: 1, Attempt: 2, Deadline: now.Add(30 * time.Second), ContainerID: "ctr-abc"},
+			record: &podcontract.ContainerRetryStatus{RetryLimit: 1, Attempt: 2, Deadline: now.Add(30 * time.Second), ContainerID: "ctr-old"},
+			want:   &podcontract.ContainerRetryStatus{RetryLimit: 1, Attempt: 2, Deadline: now.Add(30 * time.Second), ContainerID: "ctr-abc"},
 		},
 		"an interrupted attempt without a timeout": {
 			annotation: "1", timeout: 60,
-			record: &restoreAttempts{Limit: 1, Attempt: 2, ContainerID: "ctr-old"},
-			want:   &restoreAttempts{Limit: 1, Attempt: 2, ContainerID: "ctr-abc"},
+			record: &podcontract.ContainerRetryStatus{RetryLimit: 1, Attempt: 2, ContainerID: "ctr-old"},
+			want:   &podcontract.ContainerRetryStatus{RetryLimit: 1, Attempt: 2, ContainerID: "ctr-abc"},
 		},
 		"the deadline passed": {
 			annotation: "1", timeout: 60,
-			record:  &restoreAttempts{Limit: 1, Attempt: 2, Deadline: now.Add(-time.Second), ContainerID: "ctr-old"},
+			record:  &podcontract.ContainerRetryStatus{RetryLimit: 1, Attempt: 2, Deadline: now.Add(-time.Second), ContainerID: "ctr-old"},
 			wantErr: "restore timed out at 2026-11-09T11:59:59Z, before attempt 2 could start",
 		},
 		"the deadline is now": {
 			annotation: "1", timeout: 60,
-			record:  &restoreAttempts{Limit: 1, Attempt: 2, Deadline: now, ContainerID: "ctr-old"},
+			record:  &podcontract.ContainerRetryStatus{RetryLimit: 1, Attempt: 2, Deadline: now, ContainerID: "ctr-old"},
 			wantErr: "restore timed out at",
 		},
 		"an invalid Pod limit": {annotation: "two", timeout: 60, wantErr: "must be a non-negative integer"},
@@ -319,8 +319,8 @@ func TestStartAttempt(t *testing.T) {
 
 func TestForgetAttempts(t *testing.T) {
 	op := newAttemptOperation(t, nil)
-	putAttempts(op.controller, op.pod.UID, "main", restoreAttempts{Limit: 1, Attempt: 1, ContainerID: "ctr-abc"})
-	putAttempts(op.controller, op.pod.UID, "sidecar", restoreAttempts{Limit: 1, Attempt: 1, ContainerID: "ctr-sidecar"})
+	putAttempts(op.controller, op.pod.UID, "main", podcontract.ContainerRetryStatus{RetryLimit: 1, Attempt: 1, ContainerID: "ctr-abc"})
+	putAttempts(op.controller, op.pod.UID, "sidecar", podcontract.ContainerRetryStatus{RetryLimit: 1, Attempt: 1, ContainerID: "ctr-sidecar"})
 
 	op.forgetAttempts()
 

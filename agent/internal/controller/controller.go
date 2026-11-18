@@ -110,8 +110,10 @@ type NodeController struct {
 	// begins before kubelet publishes the container in the Pod status.
 	startedRestoreContainers sync.Map
 
-	// restoreAttemptRecords holds, per restoreContainerKey, the restoreAttempts
-	// of a destination whose restore allows retries.
+	// restoreAttemptRecords holds, per restoreContainerKey, the
+	// podcontract.ContainerRetryStatus that records the attempts of a
+	// destination whose restore allows retries. It goes with the Pod, so a new
+	// Pod starts a new restore.
 	restoreAttemptRecords sync.Map
 
 	// contentIndexer is the PodSnapshotContent informer's indexer, indexed by source pod
@@ -1157,7 +1159,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		if errors.As(err, &incompatible) {
 			// The placeholder is left running: killing it restarts the container
 			// straight back into the same refusal.
-			if record.Limit > 0 {
+			if record.RetryLimit > 0 {
 				op.forgetAttempts()
 			}
 			return incompatible
