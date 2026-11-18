@@ -315,8 +315,9 @@ func buildMemberPodSnapshot(group *snapshotv1alpha1.PodGroupSnapshot, rank int) 
 		member.Source.PodRef,
 		containers,
 	)
-	snap.Spec.PodGroup = &snapshotv1alpha1.PodGroupMembership{
-		Name: group.Name, UID: group.UID, MemberID: member.ID,
+	snap.Spec.PodGroup = &snapshotv1alpha1.PodGroupSnapshotMembership{
+		ObjectIdentity: snapshotv1alpha1.ObjectIdentity{Name: group.Name, UID: group.UID},
+		MemberID:       member.ID,
 	}
 	return snap
 }
