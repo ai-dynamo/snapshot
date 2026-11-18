@@ -73,7 +73,10 @@ func newCaptureGroup() *captureGroup {
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(g.group,
 				snapshotv1alpha1.GroupVersion.WithKind(snapshotv1alpha1.KindPodGroupSnapshot))},
 		}}
-		snap.Spec.PodGroup = &snapshotv1alpha1.PodGroupMembership{Name: g.group.Name, UID: g.group.UID, MemberID: id}
+		snap.Spec.PodGroup = &snapshotv1alpha1.PodGroupSnapshotMembership{
+			ObjectIdentity: snapshotv1alpha1.ObjectIdentity{Name: g.group.Name, UID: g.group.UID},
+			MemberID:       id,
+		}
 		g.group.Status.Members[rank].PodSnapshot = &snapshotv1alpha1.ObjectIdentity{Name: snap.Name, UID: snap.UID}
 		g.snaps = append(g.snaps, snap)
 		content := makeWorkOrder("content-"+id, "node-a", id)
