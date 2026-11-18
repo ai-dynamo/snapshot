@@ -119,8 +119,8 @@ class is the default; see [Default class](#default-class).
 | Class deleted under content | Content loses the only description of where its snapshots are. | Protection finalizer; a terminating class still resolves for existing content. Force-removing the finalizer leaves content with the existing `StoreInactive` handling from SNEP-237. |
 | Secret missing or revoked | An S3 class's Secret is deleted or rotated to an invalid key. | The class goes `Ready=False`, reason `CredentialsUnavailable`, and new bindings stop. In-flight operations fail with the existing credential errors; nothing is deleted on an access error. |
 | Agent holds credentials | Today only PageBroker and the operator see S3 credentials. The agent now reads the class's Secret and writes it to a local file for PageBroker. | The Secret must live in the Snapshot namespace. The operator keeps the agent's Role limited by `resourceNames` to the Secrets and ConfigMaps that classes reference; a node can still read the credentials of every store, where today it holds one. The file is written to the memory-backed volume the two containers already share, mode `0600`, under a per-transaction directory removed on Commit or Abort. Accepted trade-off against giving PageBroker a Kubernetes client; see Alternatives. |
-| Duplicate or overlapping location | Two classes describe the same place, through the same fields, through an alias such as a second endpoint hostname, or through a nested prefix; cleanup through one could reach the other's content. | The operator refuses `Ready` for the later class with reason `DuplicateStore` or `StoreOverlap` and names the other; see [Store uniqueness](#store-uniqueness). |
-| Nested store in another cluster | Another cluster or installation registers a class above or below this one's prefix in the same bucket or claim. The scan cannot see it, and a sweep through the parent could delete the child's data. | The ancestor-marker check refuses the child when the parent registered first. A parent registered later is not detected, so a sweep looks only inside its own `artifacts/` and deletes only orphans named by a UUID, and deleting content removes only its own recorded handles. Data written by something that leaves no marker is not protected. |
+| Duplicate location | Two classes describe the same place, through the same fields or through an alias such as a second endpoint hostname; cleanup through one could reach the other's content. | The operator refuses `Ready` for the later class with reason `DuplicateStore` and names the other; see [Store uniqueness](#store-uniqueness). |
+| Nested stores | One store's location is a parent of another's, in this cluster or another. | Allowed, because each store keeps its snapshots under its own `artifacts/`: a sweep looks only there and deletes only orphans named by a UUID, and deleting content removes only its own recorded handles. The API rejects a location inside another store's `artifacts/`. Data written by something that leaves no marker is not protected. |
 | Old agent, new class | During a rolling upgrade an agent that predates this proposal receives content bound to a non-default class. | It passes its startup store to PageBroker, whose `storeID` does not match the content's; PageBroker returns `STORE_MISMATCH` and the capture fails before any I/O. The existing retry picks it up after the node upgrades. |
 | Restore from several S3 stores | The native restore engine holds one session per PageBroker process, with one endpoint and one set of credentials, and reads its CA bundle and addressing mode once at start. | Restores from the same store run in parallel; a restore from another store waits until they drain, then PageBroker starts a new session. A long restore delays other stores, and a waiting transaction can expire. An S3 class whose CA bundle or addressing mode differs from PageBroker's startup values cannot restore. Parallel restore across stores is a follow-up; see [Agent and PageBroker](#agent-and-pagebroker). |
 | Default misconfigured | Two classes set `isDefault: true`, or the default is deleted and unnamed `PodSnapshot`s fail. | The admission policy denies both. If it is absent or bypassed, the oldest marked class wins with `DefaultConflict` on the others, and a Warning event flags a deleted default; see [Default class](#default-class). |
@@ -136,9 +136,11 @@ union: `type` names the backend and exactly that block is set. Its location
 fields are the `storeID` inputs defined in `../../../api/storage` and are
 immutable (CEL `self == oldSelf`). `reclaimPolicy`, credentials and TLS settings
 stay editable; an edit to `reclaimPolicy` applies to content bound afterwards.
+A class name is at most 63 characters, because it is used as a label value.
 
 ```go
 // +kubebuilder:resource:scope=Cluster
+// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="name must be at most 63 characters"
 type SnapshotStorageClass struct {
     metav1.TypeMeta   `json:",inline"`
     metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -162,6 +164,7 @@ type SnapshotStorageClassSpec struct {
 }
 
 // A claim in the Snapshot namespace that the chart already mounts.
+// +kubebuilder:validation:XValidation:rule="!has(self.basePath) || !self.basePath.split('/').exists(p, p == 'artifacts')",message="basePath must not contain an artifacts segment"
 type PVCStoreSpec struct {
     ClaimName string `json:"claimName"`
     BasePath  string `json:"basePath,omitempty"` // Default "/", the whole claim.
@@ -169,6 +172,7 @@ type PVCStoreSpec struct {
 
 // Endpoint, Region, Bucket and Prefix are storeID inputs; the rest are access
 // settings and stay editable.
+// +kubebuilder:validation:XValidation:rule="!has(self.prefix) || !self.prefix.split('/').exists(p, p == 'artifacts')",message="prefix must not contain an artifacts segment"
 type S3StoreSpec struct {
     Endpoint string `json:"endpoint"`
     Region   string `json:"region"`
@@ -190,7 +194,7 @@ type SnapshotStorageClassStatus struct {
 ```
 
 `Ready` carries the reasons `ClaimNotMounted`, `CredentialsUnavailable`,
-`DuplicateStore`, `StoreOverlap`, `StoreUnreachable` and `Terminating`. A
+`DuplicateStore`, `StoreUnreachable` and `Terminating`. A
 separate `DefaultConflict` condition is True on a class marked `isDefault`
 while an older class is also marked; `Ready` is unaffected.
 
@@ -221,9 +225,10 @@ type CheckpointStorageBinding struct {
 #### Resolution
 
 1. The `SnapshotJob` reconciler resolves the template's class before it starts
-   the source Pod. A missing, not-Ready or terminating class sets
-   `InvalidSpec` and no pod is launched, so a long run is not spent on a
-   snapshot that cannot be bound.
+   the source Pod, so a long run is not spent on a snapshot that cannot be
+   bound. A missing or terminating class sets `InvalidSpec`, which is terminal.
+   A not-Ready class is a wait: the job reports `StorageClassNotReady`, launches
+   no pod, and continues when the class becomes Ready.
 2. The `PodSnapshot` reconciler reads `spec.storageClassName`, or the class
    marked `isDefault: true`; none marked fails with `StorageClassNotFound`.
 3. At binding it requires `Ready=True` and no deletion timestamp, else it sets
@@ -232,10 +237,15 @@ type CheckpointStorageBinding struct {
    `SnapshotStorageClass` picks up later changes. This check is the authority:
    the job check is early, this one is where the `storeID` is frozen.
 4. It creates the `PodSnapshotContent` with `spec.storage.storeID`,
-   `storageClassName` and `reclaimPolicy`, labeled `nvidia.com/snapshot-storage-class=<name>`.
+   `storageClassName` and `reclaimPolicy`, labeled
+   `nvidia.com/snapshot-storage-class=<name>`. It then re-reads the class from
+   the API server; if the class is terminating or gone, it deletes the new
+   content and fails the snapshot with `StorageClassTerminating`.
 5. The class reconciler's `nvidia.com/snapshotstorageclass-protection`
    finalizer is removed only when the class is terminating and no content
-   carries its label or, for content with no class name, its `storeID`.
+   names it in `spec.storage.storageClassName` or, with no class name, carries
+   its `storeID`. The check is a live list on the spec fields; the label is
+   editable and only serves queries.
 
 #### Default class
 
@@ -259,48 +269,40 @@ disappear unnoticed. Two layers hold that.
 
 #### Store uniqueness
 
-One location has exactly one class. When a class is created, the class
-reconciler runs these checks in order:
+One location has exactly one class, and no store sits inside another store's
+snapshots. The API rejects a `prefix` or `basePath` with a path segment named
+`artifacts`, the directory every store keeps its snapshots in, so no class can
+be placed inside another store's `artifacts/`, in this cluster or another. When
+a class is created, the class reconciler then runs two checks:
 
-1. **Digest.** Another class with the same `storeID` is `DuplicateStore`.
-2. **Overlap.** Another class on the same claim or in the same S3 bucket whose
-   `basePath` or prefix is a parent or child of this one's is `StoreOverlap`;
-   siblings such as `team-a/` and `team-b/` are allowed. A location inside
-   another store's `artifacts/` directory is also `StoreOverlap`. The scan reads the
-   class informer cache and compares only immutable location fields, so a result
-   changes only when a class is added or deleted. The later
+1. **Digest.** Another class with the same `storeID` is `DuplicateStore`. The
+   scan reads the class informer cache and compares only immutable location
+   fields, so a result changes only when a class is added or deleted. The later
    class by `creationTimestamp`, ties by name, is refused, so two classes
    created at once get the same answer in any reconcile order.
-3. **Ancestor markers.** The operator reads the marker at each ancestor prefix
-   (S3) or ancestor directory under the claim root (PVC). A marker for another
-   store is `StoreOverlap`, including a location inside that store's
-   `artifacts/`; this sees stores registered by another cluster, which the scan
-   cannot. A read the credentials deny, or a missing marker, is
-   skipped, so a class whose credentials cover only its own prefix still
-   reaches `Ready`. Sweeps do not repeat it: they delete only inside their own
-   prefix, so a parent registered later changes nothing for them.
-4. **Marker.** Before `Ready`, the operator creates `<location>/.snapshot-store`,
+2. **Marker.** Before `Ready`, the operator creates `<location>/.snapshot-store`,
    a JSON file with a `version`, the cluster ID (the UID of the `kube-system`
    namespace), the class name and the `storeID`, create-only (`If-None-Match: *`
    on S3, `O_EXCL` on PVC). A marker is the class's own only when all three
    match; any other marker is `DuplicateStore`, so a class with the same name
-   in another cluster is refused. The
-   storage arbitrates, so two classes created at once, in this cluster or
-   another, cannot both win, and a bucket reached through two hostnames is
-   caught. Sweeps read it again before they delete.
+   in another cluster is refused. The storage arbitrates, so two classes
+   created at once, in this cluster or another, cannot both win, and a bucket
+   reached through two hostnames is caught. Sweeps read it again before they
+   delete.
 
 When a class is deleted, the operator removes its marker before it removes the
-finalizer, and only if the marker names this cluster, class and `storeID`; a marker that
-is already gone counts as removed. A failed delete is retried on a backoff while
-the class stays terminating, with reason `StoreUnreachable`, or
+finalizer, and only if the marker names this cluster, class and `storeID`; a
+marker that is already gone counts as removed. A failed delete is retried on a
+backoff while the class stays terminating, with reason `StoreUnreachable`, or
 `CredentialsUnavailable` when the credentials are the cause. An administrator
 can force-remove the finalizer; the marker then stays, is reported, and is
 never overwritten, so it must be deleted by hand before the location is reused.
 
-Descendants are not checked: a class registered above an existing store in
-another cluster cannot be found without listing the whole prefix, so it reaches
-`Ready`, and [Maintenance](#maintenance) limits what a sweep can delete. Only Snapshot
-writes markers, so data placed there by anything else is not detected.
+Stores may nest outside `artifacts/`: `team-a/` and `team-a/prod/` are two
+stores. Each keeps its snapshots under its own `artifacts/`, a sweep looks only
+there, and deleting content removes only its own handles, so neither can reach
+the other's data; see [Maintenance](#maintenance). Only Snapshot writes markers,
+so data placed there by anything else is not detected.
 
 #### Agent and PageBroker
 
@@ -491,10 +493,11 @@ the old operator ignores both and reads `storage.yaml`.
 
 ### Test Plan
 
-- **API:** CEL rejects two backend blocks, none, or a location change.
-- **Operator:** Ready/NotReady for each reason; digest, overlap, ancestor-marker
-  and marker detection, including two classes created at once, a stale marker
-  and a denied ancestor read; a marker from another cluster with the same class
+- **API:** CEL rejects two backend blocks, none, a location change, a name over
+  63 characters, or an `artifacts` path segment.
+- **Operator:** Ready/NotReady for each reason; digest and marker
+  detection, including two classes created at once and a stale marker; nested
+  stores are accepted; a marker from another cluster with the same class
   name is refused; default resolution with two marked classes and with none;
   the `default` class is created only when no class exists; terminating class, finalizer, `Retain`, registry rebuild.
 - **Admission policy:** rejects a second default and deleting the default,
@@ -504,7 +507,7 @@ the old operator ignores both and reads `storage.yaml`.
   on a missing class, a `status.storeID` mismatch, or a claim with no mount.
 - **Maintenance:** a sweep stops when its own marker is missing or foreign, and
   looks only inside `artifacts/`, deleting only UUID-named orphans, on S3 and on
-  a PVC. A class inside another store's `artifacts/` is refused. A directory
+  a PVC. A nested store's data survives its parent's sweep. A directory
   retained under `Retain` survives sweeps.
 - **PageBroker:** per-request `StorageBackend`, client cache, two stores live;
   restores from two stores queue and run in turn.
