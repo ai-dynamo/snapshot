@@ -284,7 +284,9 @@ def test_framework_checkpoint_restore_serves_inference(
         # run: the restore proxy replaces it. Had it loaded a model, its log
         # would show the pre-checkpoint line and the "restore" would be an
         # ordinary cold start wearing a Restored condition.
-        restore_logs = k8s.pod_logs(config.namespace, run.restore_pod, tail_lines=2000)
+        restore_logs = k8s.pod_logs(
+            config.namespace, run.restore_pod, tail_lines=2000, strict=True
+        )
         assert "pre-checkpoint output=" not in restore_logs, (
             "the restore container loaded a model itself instead of being restored"
         )
