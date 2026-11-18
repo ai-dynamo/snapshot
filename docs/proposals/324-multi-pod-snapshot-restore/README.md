@@ -501,9 +501,10 @@ the leader for a global validation. Every agent then posts to the `admitted`
 barrier once its own checks pass, and the agent of the leader's Pod posts only
 after the leader has accepted the topology, so the barrier completes, and the
 attempt commits, only when every member and the leader have accepted. Admission
-therefore changes nothing in any workload, and a mismatch, an invalid sharing
-topology, a Pod IP that is not IPv4, or a member that never becomes ready ends
-the attempt as `Refused` with every source as Snapshot found it.
+therefore changes nothing in any workload: a mismatch, an invalid sharing
+topology, or a Pod IP that is not IPv4 ends the attempt as `Refused`, and a
+member that never becomes ready ends it at its deadline as `DeadlineExceeded`,
+in both cases with every source as Snapshot found it.
 
 Once the attempt commits, each agent sets the `Started` condition on its
 member's `PodSnapshotContent`, which is the object it already reconciles and the
@@ -890,6 +891,18 @@ member tears its communicators down before it reports `ready-for-snapshot`, so a
 refused capture leaves its source untouched by Snapshot but possibly unable to
 communicate, which the `Refused` message states.
 
+A group member's capture retries follow
+[SNEP-394](../../design/394-capture-retry/README.md) only where they keep the
+members consistent. Before the commit, a member retries nothing: a failure
+refuses the attempt, and the owner retries with a new `PodGroupSnapshot`, since
+a session serves one attempt. After the commit, a member repeats only its dump,
+against its workload while it stays suspended and SNEP-394's dumpability check
+passes, within the retry budget and the group's deadline. A repeat needs no
+second `net-freeze` barrier, since the member's network stays frozen. A recovery
+that would revive or suspend the workload again, or start another attempt, would
+resume it after its peers' network cut, so the member fails with `MemberFailed`
+instead, which fails the group.
+
 Restore is not idempotent, so an agent that restarts during a restore relies on
 two durable facts rather than on its memory. It first looks for
 `restore-complete` with the attempt's ID: if the file exists, the member was
@@ -1213,7 +1226,7 @@ remain a compatible addition.
 | Resource or contract | Change | Purpose |
 | --- | --- | --- |
 | `PodSnapshot` and `PodSnapshotContent` | No schema change; group-owned children carry an owner reference and a member-ID label, take their settings from the member's template, and cannot be restored on their own, and the agent sets a new `Started` condition on a member's `PodSnapshotContent` before its first irreversible step | The agent reads group parameters from the parent group, each member keeps its own settings, and the operator learns which sources Snapshot changed |
-| Artifact manifest | Adds an optional `podGroup` section with the capture ID, the member's own ID, and the ordered member table of Pod UIDs, containers, and Pod IPs, plus each process's rendezvous file path | Restore admission checks that all members come from one capture and builds the IP map from the artifacts |
+| Artifact manifest | Adds an optional `podGroup` section with the capture ID, the member's own ID, and the ordered member table of Pod UIDs, containers, and Pod IPs | Restore admission checks that all members come from one capture and builds the IP map from the artifacts |
 | Restore Pod contract | New scheduling gate `nvidia.com/restore-group`, set by the owner at creation, through `podcontract.BuildGroupTarget`, with the group restore startup probe and the control volume; new annotation `nvidia.com/restore-group-uid: <PodGroupRestore UID>`, written only by the operator, together with the target's single-pair `nvidia.com/restore-container-map`, in the same conditional patch that removes the gate; on a node without the NRI plugin, the destination's own command must be inert, as for a standalone restore | One template for every replica, no node held before the request is complete, an NRI plugin that decides without an API read, the `PodGroupRestore` as the only source of the mapping, and one attempt per Pod, never inherited through a reused name |
 | `restore-complete` file | Adds an `attempt` key holding the `PodGroupRestore` UID next to `pid`, keeping the existing format | Lets a restarted agent prove release for this attempt |
 | Restore Pod conditions | New condition `nvidia.com/RestoreStarted`, set to True before the agent first changes the Pod, under a field manager of its own, and never removed or relabelled; new condition `nvidia.com/GroupRestoreFailed`, set to True with the group's reason when a member fails for one, in the same update as `nvidia.com/Restored`; `nvidia.com/Restored` keeps its public reasons and gains only `GroupPending`, an agent-internal wait reason like today's `SnapshotPending` | Restart safety, an exact `startedAt`, and the group's reasons with `ClassifyRestoreOutcome` unchanged |
@@ -1532,8 +1545,8 @@ review that settles the open questions in [Appendix A](#a-open-questions).
 5. **Cross-namespace restore.** Would restoring a group into another namespace
    justify a cluster-scoped, group-level content resource?
 6. **Availability.** Which evidence, such as the observed rate of
-   `CoordinatorLost` and the measured takeover time against the hold and probe
-   budgets, would justify keeping attempts alive across a coordinator restart,
+   `CoordinatorLost` and the measured takeover time against the hold and library
+   timeouts, would justify keeping attempts alive across a coordinator restart,
    by clustering several agents' embedded servers with replicated buckets?
 
 ### B. Changes from the prototype
@@ -2000,9 +2013,6 @@ type PodGroupManifest struct {
 	MemberID string `yaml:"memberID"`
 	// Members is the ordered member table, so its index is the rank.
 	Members []PodGroupManifestMember `yaml:"members"`
-	// RendezvousFiles are the endpoint files that this member's processes read
-	// at restore, such as NCCL_CHECKPOINT_KVS_PATH, all inside the control volume.
-	RendezvousFiles []string `yaml:"rendezvousFiles,omitempty"`
 }
 
 type PodGroupManifestMember struct {
