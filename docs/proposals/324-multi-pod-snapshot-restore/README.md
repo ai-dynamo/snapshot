@@ -171,7 +171,8 @@ with the owner, which keeps a group whose members share GPU memory across nodes
 within one fabric domain. A restore refused before it claims its Pods leaves them gated, so a new
 attempt can name them, whereas a claimed Pod serves only its attempt, and the
 owner replaces it if that attempt fails. Finally, a plain `PodSnapshot` or a single restore Pod never contacts the
-coordinator, so existing users are unaffected.
+coordinator, so existing users are unaffected, apart from the new version of
+cuInterpose's protocol ([API](#api)).
 
 ### User Stories
 
@@ -211,7 +212,7 @@ Redis-compatible server.
 | Sessions live only as long as the coordinator that holds them, so an attempt in flight ends if the agent that hosts its session restarts. | Each session lives in the agent on the node of the attempt's rank-0 member, which the attempt depends on anyway, since a restarted agent fails its own member; losing it is fail-stop and reported as `CoordinatorLost`, sessions on other nodes are unaffected, and a broken connection that reconnects does not fail an attempt. Every session pattern is safe to repeat, so replicating sessions later changes only the coordinator. |
 | Sessions hosted on the same node share the coordinator's memory, so a compromised workload can fill it with records forged through its relay and make concurrent attempts' data writes fail until its own attempt ends at its deadline. Every client the coordinator admits is an agent, and agents are one trust domain: in the coordinator's shared NATS account, a compromised agent can change another attempt's keys, for example through the reply subject of a request, which its permissions don't cover. | The sessions that the cap affects still end promptly, since their control keys live outside it, libraries are bounded per session, each bucket bounds how many watches its members open, and the cap protects the coordinator itself. A compromised agent gains nothing it lacks already, since the agent's ServiceAccount can patch any Pod, and the token review keeps everything that isn't an agent out. Beta revisits both limits together: one NATS account per attempt to isolate agents from each other, and memory isolated per session once cuInterpose's largest records are measured, while a ValidatingAdmissionPolicy that lets the agent change only Pods' metadata and status narrows what a compromised agent can do. |
 | The agent sits on every coordination path, and an agent can restart in the middle of a restore. | The agent records its intent before CRIU starts and treats `restore-complete` as proof of release, so a restarted agent never replays CRIU and never kills a released workload. |
-| Importing GPU memory shared from another node after a native CUDA restore depends on a driver fix, and cuInterpose currently infers the kind of an imported FABRIC handle from its opaque contents. | Cross-node sharing in alpha requires a driver with the fix, and a public query for the handle kind is a beta prerequisite. |
+| Importing GPU memory through a FABRIC handle after a native CUDA restore, from another node or within one Pod, depends on a driver fix, and cuInterpose reads the kind of an imported FABRIC handle from byte 44 of the driver's private handle layout, 1 for memory and 3 for multicast. | FABRIC sharing in alpha requires a user-mode driver with the fix in every process that imports a FABRIC handle ([Dependencies](#dependencies)). cuInterpose refuses an import whose kind byte holds any other value, so a layout change fails the import rather than misreading the handle, and a public query for the handle kind is a beta prerequisite. |
 | CUDA Checkpoint's prepare and resume phases are not released yet. | Until they are, an application whose communicators use a transport that Snapshot cannot preserve, such as RDMA, calls NCCL Checkpoint's prepare and restore itself, and NCCL restores after release through the library endpoint. Over NVLink, an existing communicator continues without either call, since cuInterpose restores its memory and Snapshot preserves its connections. |
 | A group restore Pod's container starts only after its claim, so its startup probe runs while the restore waits for its peers. | A group target's probe allows the longest deadline, a day, so it never expires before the restore's own deadline; the agent fails a member at that deadline and stops its workload, so the probe never decides an outcome. |
 | A restored process keeps its captured hostname namespace, so `gethostname()` returns its source's hostname, while the target Pod's hostname and `/etc/hosts` name the target. A workload that resolves its own hostname after release reaches loopback or nothing, and one that reports `gethostname()` as its identity names its source. | Preserved connections don't depend on names, and eager vLLM restored under new target hostnames. Workloads take their current identity from the Pod's metadata, refreshed at restore, select their network interfaces explicitly rather than through their hostname, and don't resolve their own hostname after release. |
@@ -672,11 +673,15 @@ SNEP-295 preserves CUDA memory shared between the processes of one Pod, and
 this SNEP extends it across Pods while keeping its per-process machinery and its
 fail-stop semantics. Where the GPU fabric supports cross-node sharing, the shim
 now admits FABRIC allocations and multicast objects, and their handles stay real
-at runtime: an export returns the driver's own handle and an import goes to the
-driver, so Snapshot never sits on the application's import path, while the shim
+at runtime: an export returns the driver's own handle and an import passes the
+handle to the driver, so an import never contacts its creator, while the shim
 records every handle so that the handle itself becomes the key that joins an
-importer to its creator on another node. Each shared allocation is still saved
-once, on its creator's node, and no allocation bytes therefore cross nodes.
+importer to its creator on another node. Each shim also keeps every handle that
+a restore replaced, mapped to its newest replacement, and translates a handle
+through that map before it imports it, so a handle that the application kept
+from before the checkpoint imports the restored memory. Each shared allocation
+is still saved once, on its creator's node, and no allocation bytes therefore
+cross nodes.
 
 Every Pod that uses cuInterpose keeps a short-lived relay that fans each command
 out to its processes over their per-process sockets, and the relay of the
@@ -691,37 +696,50 @@ handle table, which maps every old fabric handle to the one its creator exported
 after re-creating the memory. Members without cuInterpose run no relay, and
 since every agent learns from the admission exchange which ranks run one, they
 all agree on the leader without an election: an agent that starts a relay
-passes it its own rank, the leader's rank, and the ranks that run a relay, so
-the leader knows itself and its gathers wait only for those ranks. Ranks are
+passes it its own rank, the ranks that run a relay, and the attempt's deadline,
+so each relay knows the leader, the lowest of those ranks, and the leader's
+gathers wait only for those ranks. Ranks are
 fixed and a restore takes the flag from the capture's artifacts, so the same
 member leads at capture and at restore, and when no member uses cuInterpose,
 there are no relays and no rounds, and the `admitted` barrier waits for no
-leader's verdict. A Pod that is not part of a group keeps today's behavior and
-never opens a session.
+leader's verdict. A Pod that is not part of a group never opens a session, and
+its relay leads a group of one, so FABRIC sharing between its own processes is
+captured and restored, and an import from another Pod is refused at inspection.
 
 Each phase then runs as a round of Figure 3 through one generic envelope: the
-command names the step and carries arguments that the leader derives from the
-group state, and each reply carries a status and a step-specific result that the
-leader folds back into it. Relays never see the plan, because they only dispatch
-each command to the local handler that its step names, so a capture and a
+command names the step and carries only that step's arguments, which the leader
+derives from the group state, and each reply carries a status and a
+step-specific result that the leader checks, for example the bytes copied
+against the expected carrier bytes, and folds back into it. Relays never see
+the plan, because they only dispatch each command to the local handler that its
+step names, so a capture and a
 restore are simply two lists of steps, and a new phase costs one row in the
 table below and one handler in the shim.
 
 | Step | Arguments | Result |
 | --- | --- | --- |
 | `INSPECT`, `BEGIN_CHECKPOINT` | None | Records describing allocations, fabric handles, and multicast teams |
-| `SAVE_ALLOCATIONS`, `LOAD_ALLOCATIONS` | Expected carrier bytes, so each relay checks that its shims copied every shared allocation in full | Bytes copied and, at restore, the new handles of re-created allocations |
+| `SAVE_ALLOCATIONS` | The process that saves each shared allocation, keyed by rank and PID, so a process whose allocation another Pod saves restores it by import | Bytes copied |
+| `LOAD_ALLOCATIONS` | None | Bytes copied, and the new handles of re-created FABRIC allocations |
 | `RESTORE_MULTICAST_CREATORS` | None | The new handles of re-created multicast objects |
-| `RESTORE_UNICAST`, `RESTORE_MULTICAST_IMPORTERS`, `RESTORE_MULTICAST_DEVICES`, `RESTORE_MULTICAST_BINDINGS` | The handle table, so each importer finds the new handle from the old one it recorded | Status only |
-| `PREPARE_MULTICAST`, `PREPARE_UNICAST` | None | Status only |
+| `RESTORE_UNICAST`, `RESTORE_MULTICAST_IMPORTERS` | The handle table, so each importer finds the new handle from the old one it recorded | Status only |
+| `PREPARE_MULTICAST`, `PREPARE_UNICAST`, `RESTORE_MULTICAST_DEVICES`, `RESTORE_MULTICAST_BINDINGS` | None | Status only |
 
 Only three step boundaries need the whole group to finish before the next step
 starts: after `LOAD_ALLOCATIONS` and after `RESTORE_MULTICAST_CREATORS`, because
 importers need the new handles, and after `RESTORE_MULTICAST_DEVICES`, because
 the driver waits for the whole multicast team before a bind or a mapping
 completes. The other boundaries are kept for uniformity and easier debugging,
-since a round costs well under a millisecond, and the round deadline doubles as
-the watchdog for a multicast team that never forms.
+since a round costs well under a millisecond.
+
+A round has no timeout of its own. SNEP-295's per-process timeouts bound each
+relay's work in a step, by default an hour to save or load allocations and 10
+seconds for any other step, including a bind that waits for a multicast team
+that never forms. Beyond them, the leader waits for replies, and every other
+relay for its next command, until the attempt deadline. A relay that reaches the
+deadline waits up to 60 seconds for the session to end with `DeadlineExceeded`
+and exits with that reason, so a relay whose clock runs ahead of the
+coordinator's never replaces it.
 
 cuInterpose deliberately does not register as a CUDA Checkpoint client: CUDA
 does not order callbacks across clients, so nothing would guarantee that
@@ -968,9 +986,9 @@ The guarantees assume crash-stop failures, trusted agents, and one serving
 coordinator per attempt. For safety, a key keeps the first value inserted under
 it until it is deleted, a barrier counts each member once, and a session ends
 once, after which every client that is still connected learns how. For
-progress, every wait ends at its phase timeout, when the session ends, or at the
-attempt deadline, which an agent that cannot reach the coordinator enforces on
-its own, a few seconds late to allow for clock skew. A lost member fails the
+progress, no wait outlives the session, which ends at the latest at the attempt
+deadline, and an agent that cannot reach the coordinator enforces that deadline
+on its own, a few seconds late to allow for clock skew. A lost member fails the
 attempt one grace period after its connection is seen closing. Nothing orders operations by clock, although
 deadline accuracy depends on timing assumptions: the deadline counts from the
 creation time that the API server records, measured against the clock of the
@@ -995,7 +1013,7 @@ released members are unaffected.
 | Bound | Value | Enforced by |
 | --- | --- | --- |
 | Attempt deadline | `spec.deadlineSeconds` from creation, at most a day | The coordinator and the operator, with reason `DeadlineExceeded` |
-| Phase timeout | The operation's own timeout plus a margin, never beyond the attempt deadline | Each barrier and each cuInterpose round |
+| Step timeout | Each operation's own timeout, such as SNEP-295's per-process timeouts in a cuInterpose step. No barrier or round has one, so each waits until the attempt deadline. | The agent, and each relay for its own processes |
 | Group target startup probe | One-second checks for the longest deadline, a day, so it never expires before the restore's deadline | The group target contract, `podcontract.BuildGroupTarget` |
 | Post-release rendezvous | NCCL Checkpoint's own timeout, 300 seconds by default | Only libraries that restore after release |
 
@@ -1189,9 +1207,12 @@ remain a compatible addition.
 
 [Appendix D](#d-api-definitions) gives the complete Go types with their
 validation rules, the artifact metadata, and the Pod-contract constants. The
-session's bucket names and key layout and the framing between agents and relays
-are internal and versioned, so a version mismatch fails admission rather than
-surfacing later. The operator needs full
+session's bucket names and key layout are internal and versioned, so a version
+mismatch fails admission rather than surfacing later. The relay ships in the
+agent's image and speaks version 2 of cuInterpose's protocol to the shims, so
+the capture of a Pod whose shim predates that version, because the Pod started
+before Snapshot was upgraded, fails at inspection, before anything changes.
+The operator needs full
 access to the new kinds, read access to the agent Pods, and `patch` on Pods,
 which it uses only to claim a target, conditionally on its `resourceVersion`:
 to write its binding and its map and remove its gate. The agents need
@@ -1338,12 +1359,13 @@ after alpha.
 
 - [SNEP-295](https://github.com/ai-dynamo/snapshot/issues/295), cuInterpose,
   which this SNEP extends across Pods.
-- For GPU memory shared across nodes, a CUDA driver in which FABRIC handles
-  exported on another node can be imported after a native CUDA restore, and
-  fabric-domain access for restore Pods, for example through an IMEX channel
-  granted by a ComputeDomain. Validation used libcuda 620.70.06 from the
-  public `cuda-compat` package inside the containers, over unchanged 580 node
-  drivers.
+- For GPU memory shared through FABRIC handles, CUDA user-mode driver
+  (`libcuda.so`) 620.58 or newer in every process that imports such a handle,
+  since an older one does not recreate the import's fabric event after a native
+  CUDA restore, and, across nodes, fabric-domain access for restore Pods, for
+  example through an IMEX channel granted by a ComputeDomain. Validation used
+  libcuda 620.70.06 from the public `cuda-compat` package inside the
+  containers, over unchanged 580 node drivers.
 - A CRIU build with the inet-socket update hook, which is currently available
   only on CRIU's development branch, so the agent must pin the commit it builds.
 - For communicators over RDMA, NCCL 2.31 or newer for NCCL Checkpoint, and
@@ -1421,8 +1443,8 @@ and an unchanged result for the existing single-Pod suite.
 
 **Beta** requires integration with CUDA Checkpoint's prepare and resume phases,
 including the `resume` barrier that orders the resume phase across members;
-a released driver with the cross-node import fix and a public way to identify
-FABRIC handle kinds; scale measured beyond 16 Pods; decisions on IPv6, on the
+a public way to identify FABRIC handle kinds; scale measured beyond 16 Pods;
+decisions on IPv6, on the
 coordinator's availability model, on isolating sessions' memory and limits, and
 on an enforced execution hold, informed by operational evidence; admission
 that verifies a group's fabric domain before CRIU; and an API
