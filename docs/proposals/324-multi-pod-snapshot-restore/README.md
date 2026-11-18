@@ -501,8 +501,8 @@ barrier once its own checks pass, and the agent of the leader's Pod posts only
 after the leader has accepted the topology, so the barrier completes, and the
 attempt commits, only when every member and the leader have accepted. Admission
 therefore changes nothing in any workload, and a mismatch, an invalid sharing
-topology, or a member that never becomes ready ends the attempt as `Refused`
-with every source as Snapshot found it.
+topology, a Pod IP that is not IPv4, or a member that never becomes ready ends
+the attempt as `Refused` with every source as Snapshot found it.
 
 Once the attempt commits, each agent sets the `Started` condition on its
 member's `PodSnapshotContent`, which is the object it already reconciles and the
@@ -618,8 +618,8 @@ attempt fails.
 
 The agents' admission waits for the operator's, which pins nothing until it
 passes. Each agent then resolves its member's artifact, runs the existing
-compatibility checks, and contributes its new Pod IP, its Pod and container
-identity, the capture ID from its artifact, and whether it runs a relay. Every
+compatibility checks, and contributes its new Pod IP, the capture ID from its
+artifact, and whether it runs a relay. Every
 agent therefore ends admission holding the complete IP map, built from the
 member table in its own artifact and the new IPs, together with the assurance
 that all members restore the same capture.
@@ -846,10 +846,13 @@ plugin holds, which is also why a group has at most 256 members.
 
 Every failure takes the same path: the session ends with a reason, every
 pending wait returns with it, every relay and CUDA phase exits with an error,
-and each agent then acts on its own member's record. A
-member without a record is left as Snapshot found it, which before the commit
-holds for every member, since INSPECT only reads and nothing else has run, so
-the attempt ends as `Refused`. A member with a record fails, fail-stop as in
+and each agent then acts on its own member's record. An agent fails the session
+with `Refused` until its member calls the `admitted` barrier, since INSPECT only
+reads and nothing else has run, and with `MemberFailed` from then on, since its
+arrival may already let the other members commit. A failure that its relay
+reports takes the same reason, whatever reason the relay names. A member without
+a record is left as Snapshot found it, which before the commit holds for every
+member. A member with a record fails, fail-stop as in
 SNEP-295, so its agent terminates its source or fails its restore, and a member
 whose `restore-complete` exists keeps running. Failing a restore terminates the
 member's restored processes, including threads blocked on the CUDA lock or
@@ -967,7 +970,10 @@ the coordinator relies on nothing else.
   stays lost beyond the grace period, with `MemberFailed`; when a member
   presents the epoch of a session it lost, with `CoordinatorLost`; and before
   the commit, as [the coordination session](#the-coordination-session)
-  describes.
+  describes. An agent fails a session with the reason that
+  [Failure handling and recovery](#failure-handling-and-recovery) gives, but
+  from the deadline on it fails nothing and waits for the session to end, so a
+  clock that runs ahead of the coordinator's never replaces `DeadlineExceeded`.
 
 A session ends exactly once: it closes when every member has left, or it fails
 with the first reason it receives. Each agent holds one connection per hosted
