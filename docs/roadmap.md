@@ -30,31 +30,32 @@ Releases [v0.2.0](https://github.com/ai-dynamo/snapshot/releases/tag/v0.2.0) and
 
 ### In Progress
 
-- **Coordinated multi-Pod checkpoint and restore (alpha).** Checkpoint and restore a group of cooperating Pods as one unit. This is the building block for prefill/decode serving and, later, for models that span nodes ([#324](https://github.com/ai-dynamo/snapshot/issues/324)).
+- **Coordinated multi-Pod checkpoint and restore (alpha).** Checkpoint and restore a group of cooperating Pods as one unit. This is the building block for prefill/decode serving and for models that span nodes ([#324](https://github.com/ai-dynamo/snapshot/issues/324)).
+- **Prefill/decode serving.** Restore prefill and decode workers independently or together ([#847](https://github.com/ai-dynamo/snapshot/issues/847), [#324](https://github.com/ai-dynamo/snapshot/issues/324)).
+- **Multi-node on NVLink.** Restore a model that spans nodes connected by multi-node NVLink. This needs NVIDIA driver support for sharing GPU memory across nodes ([#611](https://github.com/ai-dynamo/snapshot/issues/611)).
 - **Retries and fallback.** A failed checkpoint or restore is retried, and a restore that cannot succeed falls back to a normal cold start instead of leaving the workload stuck ([#319](https://github.com/ai-dynamo/snapshot/issues/319), [#244](https://github.com/ai-dynamo/snapshot/issues/244), [#247](https://github.com/ai-dynamo/snapshot/issues/247)).
 - **Reuse snapshots.** Restore a workload from a snapshot that already exists, across workloads, namespaces, and clusters, so the same model is not checkpointed over and over ([#604](https://github.com/ai-dynamo/snapshot/issues/604), [#740](https://github.com/ai-dynamo/snapshot/issues/740), [#809](https://github.com/ai-dynamo/snapshot/pull/809)).
 - **Stock vLLM out of the box.** Use the upstream vLLM image with no wrapper script or custom image ([#44](https://github.com/ai-dynamo/snapshot/issues/44), [#234](https://github.com/ai-dynamo/snapshot/issues/234); help wanted).
 - **Faster restores.** Overlap loading GPU state with the rest of the restore ([#710](https://github.com/ai-dynamo/snapshot/issues/710), [#943](https://github.com/ai-dynamo/snapshot/issues/943)).
-- **More guides.** Walkthroughs for llm-d, Argo CD, vCluster, and DGX Spark ([#990](https://github.com/ai-dynamo/snapshot/issues/990), [#654](https://github.com/ai-dynamo/snapshot/issues/654), [#840](https://github.com/ai-dynamo/snapshot/issues/840), [#624](https://github.com/ai-dynamo/snapshot/issues/624); some are good first issues).
+- **Node-local cache (phase 1).** Optionally keep a copy of a snapshot on a node's fast local storage (such as NVMe), so later restores on that node read from it instead of the snapshot store. Snapshot status shows which nodes hold a copy, and administrators can warm nodes ahead of time with their own tools ([#644](https://github.com/ai-dynamo/snapshot/issues/644), design proposal [#918](https://github.com/ai-dynamo/snapshot/pull/918)).
+- **Storage per workload (object storage).** A workload can use its own S3-compatible bucket as its snapshot store instead of the cluster default ([#248](https://github.com/ai-dynamo/snapshot/issues/248), design proposal [#889](https://github.com/ai-dynamo/snapshot/pull/889)).
 
 ## Q1 2027 (January to March)
 
 Planned. Scope and order may shift as Q4 work lands.
 
 - **Coordinated multi-Pod checkpoint and restore (beta).** Harden it using feedback from the alpha ([#984](https://github.com/ai-dynamo/snapshot/issues/984)).
-- **Multi-node on NVLink.** Restore a model that spans nodes connected by multi-node NVLink. This needs NVIDIA driver support for sharing GPU memory across nodes ([#611](https://github.com/ai-dynamo/snapshot/issues/611)).
-- **Prefill/decode serving.** Restore prefill and decode workers independently or together ([#847](https://github.com/ai-dynamo/snapshot/issues/847), [#324](https://github.com/ai-dynamo/snapshot/issues/324)).
+- **Multi-node on more networks.** Multi-node restore on InfiniBand and RoCE networks, in addition to NVLink. Builds on coordinated multi-Pod checkpoint and restore ([#324](https://github.com/ai-dynamo/snapshot/issues/324)).
 - **SGLang and TensorRT-LLM out of the box.** The same no-wrapper experience as vLLM ([#45](https://github.com/ai-dynamo/snapshot/issues/45), [#236](https://github.com/ai-dynamo/snapshot/issues/236); help wanted).
-- **Node-local cache.** Keep a copy of a snapshot on a node's fast local storage, and pre-warm nodes ahead of a scale-up, so restores do not have to read from the snapshot store ([#644](https://github.com/ai-dynamo/snapshot/issues/644), design proposal [#918](https://github.com/ai-dynamo/snapshot/pull/918)).
-- **Storage per workload.** A workload can use its own snapshot store instead of the cluster default ([#248](https://github.com/ai-dynamo/snapshot/issues/248), design proposal [#889](https://github.com/ai-dynamo/snapshot/pull/889)).
+- **Node-local cache (phase 2).** Pre-warm nodes: copy a snapshot to selected nodes ahead of a scale-up, so even the first restore on those nodes is fast ([#644](https://github.com/ai-dynamo/snapshot/issues/644)).
 - **Faster restores with ModelExpress.** Running replicas hand model weights to new replicas over the network, so a new replica restores faster from a smaller snapshot. vLLM first ([#927](https://github.com/ai-dynamo/snapshot/issues/927)).
 - **Metrics.** Prometheus metrics for checkpoints and restores, so operators can see durations and failures ([#665](https://github.com/ai-dynamo/snapshot/issues/665), [#879](https://github.com/ai-dynamo/snapshot/issues/879)).
+- **More guides.** Walkthroughs for llm-d, Argo CD, vCluster, and DGX Spark ([#990](https://github.com/ai-dynamo/snapshot/issues/990), [#654](https://github.com/ai-dynamo/snapshot/issues/654), [#840](https://github.com/ai-dynamo/snapshot/issues/840), [#624](https://github.com/ai-dynamo/snapshot/issues/624); some are good first issues).
 
 ## Q2 2027 (April to June)
 
 Direction. Expect this list to be refined as Q1 progresses.
 
-- **Multi-node on more networks.** Multi-node restore on InfiniBand and RoCE networks, in addition to NVLink. Builds on coordinated multi-Pod checkpoint and restore ([#324](https://github.com/ai-dynamo/snapshot/issues/324)).
 - **ModelExpress for SGLang and TensorRT-LLM.** The same faster restore as vLLM ([#927](https://github.com/ai-dynamo/snapshot/issues/927)).
 - **Snapshot-aware placement.** Prefer nodes that can restore a snapshot and already hold a cached copy of it when a restore is scheduled ([#644](https://github.com/ai-dynamo/snapshot/issues/644)).
 - **Smaller, faster snapshots.** Optional compression of snapshots, with hardware-assisted decompression where available ([#573](https://github.com/ai-dynamo/snapshot/issues/573), [#938](https://github.com/ai-dynamo/snapshot/issues/938)).
@@ -71,6 +72,7 @@ Directions we are exploring. They have no date, and most have no issue yet. An i
 - **Heterogeneous GPUs.** Restore on a different GPU model than the one a snapshot came from.
 - **Protected snapshots.** Signing and encryption of snapshots, and confidential computing ([#563](https://github.com/ai-dynamo/snapshot/issues/563)).
 - **Sandboxed runtimes.** Run snapshotted workloads under gVisor or Kata Containers.
+- **Storage per workload (PVC).** The same for a workload's own PVC ([#248](https://github.com/ai-dynamo/snapshot/issues/248)).
 - **More storage options.** Different storage for different parts of a snapshot, direct storage-to-GPU paths, and peer-to-peer checkpoints.
 
 ## Shape the Roadmap
