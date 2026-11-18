@@ -291,7 +291,7 @@ func podGroupMemberPodSnapshotName(group *snapshotv1alpha1.PodGroupSnapshot, mem
 // buildMemberPodSnapshot builds the PodSnapshot of the member at rank. It
 // takes the labels, annotations and container settings from the member's
 // template; the controller owns the rest: the name, a controller owner
-// reference to the group, the group labels, and spec.source from the member.
+// reference to the group, spec.podGroup, and spec.source from the member.
 func buildMemberPodSnapshot(group *snapshotv1alpha1.PodGroupSnapshot, rank int) *snapshotv1alpha1.PodSnapshot {
 	member := &group.Spec.Members[rank]
 	var podLabels, annotations map[string]string
@@ -303,12 +303,7 @@ func buildMemberPodSnapshot(group *snapshotv1alpha1.PodGroupSnapshot, rank int) 
 			annotations = maps.Clone(template.Metadata.Annotations)
 		}
 	}
-	if podLabels == nil {
-		podLabels = make(map[string]string, 2)
-	}
-	podLabels[snapshotv1alpha1.PodGroupLabel] = group.Name
-	podLabels[snapshotv1alpha1.PodGroupMemberLabel] = member.ID
-	return newPodSnapshot(
+	snap := newPodSnapshot(
 		metav1.ObjectMeta{
 			Name:        podGroupMemberPodSnapshotName(group, member),
 			Namespace:   group.Namespace,
@@ -321,6 +316,10 @@ func buildMemberPodSnapshot(group *snapshotv1alpha1.PodGroupSnapshot, rank int) 
 		member.Source.PodRef,
 		containers,
 	)
+	snap.Spec.PodGroup = &snapshotv1alpha1.PodGroupMembership{
+		Name: group.Name, UID: group.UID, MemberID: member.ID,
+	}
+	return snap
 }
 
 // isMemberPodSnapshot reports whether snap is the PodSnapshot of the member at

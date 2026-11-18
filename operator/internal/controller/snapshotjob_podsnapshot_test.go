@@ -113,8 +113,6 @@ func TestBuildPodSnapshot(t *testing.T) {
 	for _, reserved := range []string{
 		snapshotv1alpha1.SnapshotJobOwnerLabel,
 		snapshotv1alpha1.SnapshotJobOwnerUIDLabel,
-		snapshotv1alpha1.PodGroupLabel,
-		snapshotv1alpha1.PodGroupMemberLabel,
 	} {
 		t.Run("rejects reserved label "+reserved, func(t *testing.T) {
 			bad := minimalSnapshotJob()
