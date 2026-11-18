@@ -36,7 +36,7 @@ each container start, at kubelet's back-off of up to 5 minutes.
 
 ## What Changes
 
-The change has four steps, in the order they run:
+The change has five steps, in the order they run:
 
 1. **Detect the new container at creation.** kubelet creates a destination
    container again only when the Pod's restart policy allows it. The NRI plugin
@@ -54,14 +54,19 @@ The change has four steps, in the order they run:
    Writing the status first is what lets the new restore survive an agent
    restart.
    - The write gets 500 ms of NRI's 2 s budget.
-4. **Run the restore again through the existing recovery path.** While its
+4. **Read the Pod from the API server until the cache catches up.** While its
    cache still shows the restore as ended, the restore queue will read the Pod
    from the API server, so a stale terminal copy does not mark it handled. The
    first pass that sees the restore back in progress will also drop the
-   agent's in-memory record that the ended restore was handled. The pass will
-   then resume the destinations as after an agent restart: a destination whose
-   workload still runs keeps it, and only its post-restore action runs again.
-   The destination that started again will be restored into its new container.
+   agent's in-memory record that the ended restore was handled.
+5. **Run the restore again through the existing recovery path.** The pass will
+   check each restored container's `restore-complete`. The container that
+   started again had its result cleared, so the agent will restore it again.
+   Every other restored container in the Pod still has its `restore-complete`,
+   so the agent will leave its process running. For such a container, the
+   agent will repeat only the PodSnapshot's `lifecycle.postRestore` action,
+   when there is one. It will send the HTTP POST again, or find the file
+   already created.
 
 A container that starts again while the Pod's restore still runs will not start
 a new restore. If its destination already has a result, its proxy will exit
