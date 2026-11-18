@@ -106,10 +106,6 @@ func (op *restoreOperation) startAttempt(ctx context.Context) (*podcontract.Cont
 	if !found {
 		record = op.firstAttempt(limit, now)
 	} else {
-		if now.Before(record.RetryAt) {
-			op.log.V(1).Info("Restore retry is not due yet", "retry_at", record.RetryAt.UTC().Format(time.RFC3339))
-			return nil, errRetryScheduled
-		}
 		next := record.Attempt
 		if !record.RetryAt.IsZero() {
 			next++
@@ -120,6 +116,10 @@ func (op *restoreOperation) startAttempt(ctx context.Context) (*podcontract.Cont
 		}
 		if next > record.RetryLimit+1 {
 			return nil, op.retriesExhausted(ctx, record, false, fmt.Errorf("attempt %d is over the limit of %d", next, record.RetryLimit+1))
+		}
+		if now.Before(record.RetryAt) {
+			op.log.V(1).Info("Restore retry is not due yet", "retry_at", record.RetryAt.UTC().Format(time.RFC3339))
+			return nil, errRetryScheduled
 		}
 		record.Attempt = next
 		record.RetryAt = time.Time{}
