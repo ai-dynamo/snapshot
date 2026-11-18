@@ -573,8 +573,9 @@ func TestClassifyExistingPodSnapshot(t *testing.T) {
 		desired, err := buildPodSnapshot(sj, pod)
 		require.NoError(t, err)
 		existing := desired.DeepCopy()
-		existing.Spec.PodGroup = &snapshotv1alpha1.PodGroupMembership{
-			Name: "group", UID: "group-uid", MemberID: "worker-0",
+		existing.Spec.PodGroup = &snapshotv1alpha1.PodGroupSnapshotMembership{
+			ObjectIdentity: snapshotv1alpha1.ObjectIdentity{Name: "group", UID: "group-uid"},
+			MemberID:       "worker-0",
 		}
 		r := makeSnapshotJobReconciler(s, existing)
 		_, err = r.classifyExistingPodSnapshot(context.Background(), sj, desired, errors.New("AlreadyExists"))

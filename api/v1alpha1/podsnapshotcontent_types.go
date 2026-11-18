@@ -54,7 +54,7 @@ type PodSnapshotContentSpec struct {
 	// The PodSnapshot controller copies this field unchanged from the bound
 	// PodSnapshot.
 	// +optional
-	PodGroup *PodGroupMembership `json:"podGroup,omitempty"`
+	PodGroup *PodGroupSnapshotMembership `json:"podGroup,omitempty"`
 }
 
 // PodSnapshotReference is a cross-namespace reference to a PodSnapshot.
