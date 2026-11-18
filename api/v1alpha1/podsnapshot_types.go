@@ -70,7 +70,7 @@ type PodSnapshotSpec struct {
 	// The PodGroupSnapshot controller sets this field on the member snapshots
 	// it creates.
 	// +optional
-	PodGroup *PodGroupMembership `json:"podGroup,omitempty"`
+	PodGroup *PodGroupSnapshotMembership `json:"podGroup,omitempty"`
 }
 
 // PodSnapshotSource identifies the workload a PodSnapshot was taken from.
