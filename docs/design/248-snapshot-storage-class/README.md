@@ -477,6 +477,37 @@ storage:
     additionalClaims: []
 ```
 
+A claim name is all `additionalClaims` needs, because the chart derives the
+rest. For each name it adds a volume and a mount at
+`/snapshot-stores/<claimName>` to the operator and to the agent pod's agent and
+PageBroker containers, as it already does for the default claim at
+`/checkpoints`; Kubernetes mounts them when those pods restart. The name is
+unique in the namespace and a valid path segment, so no two claims share a
+path and nobody has to choose one. The chart writes the same name-to-path
+mapping into the agent's `config.yaml` and the names into the operator's
+`--mounted-claims` flag, so a class's `claimName` always resolves to the
+directory that was mounted. The claims must already exist in the release
+namespace and be mountable on every agent node. The list is the whole set, so
+an upgrade repeats the claims it keeps:
+
+```yaml
+storage:
+  pvc:
+    additionalClaims:
+      - team-a-snapshots   # /snapshot-stores/team-a-snapshots
+      - team-b-snapshots   # /snapshot-stores/team-b-snapshots
+---
+apiVersion: snapshot.nvidia.com/v1alpha1
+kind: SnapshotStorageClass
+metadata:
+  name: team-b
+spec:
+  type: PVC
+  pvc:
+    claimName: team-b-snapshots   # Which mounted claim.
+    basePath: /prod               # A directory inside it, not the mount path.
+```
+
 Classes require `operator.bindNewContents` and `pageBroker.artifactAddressing`;
 the chart fails the render otherwise.
 
