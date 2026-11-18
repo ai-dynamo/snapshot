@@ -10,53 +10,9 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	ktypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
-
-// restoreAttempts is a destination container's record of its restore
-// attempts. A restore that allows retries keeps it in the agent's memory and
-// copies it to the Pod's retry status annotation, which a restarted agent
-// reads it back from. It goes with the Pod, so a new Pod starts a new restore.
-type restoreAttempts struct {
-	// Limit is the retry limit, resolved at the first attempt.
-	Limit int
-	// Attempt is the current or last attempt, from 1.
-	Attempt int
-	// Deadline is set at the first attempt and ends every attempt. Zero means
-	// the restore has no timeout.
-	Deadline time.Time
-	// ContainerID is the container the attempt ran in.
-	ContainerID string
-	// RetryAt is when an in-place retry falls due, and zero otherwise.
-	RetryAt time.Time
-	// LastFailure is the last failed attempt, and nil before one failed.
-	LastFailure *podcontract.FailureSummary
-}
-
-func attemptsFromStatus(entry podcontract.ContainerRetryStatus) restoreAttempts {
-	return restoreAttempts{
-		Limit:       entry.RetryLimit,
-		Attempt:     entry.Attempt,
-		Deadline:    entry.Deadline,
-		ContainerID: entry.ContainerID,
-		RetryAt:     entry.RetryAt,
-		LastFailure: entry.LastFailure,
-	}
-}
-
-func (r restoreAttempts) status(podUID ktypes.UID) podcontract.ContainerRetryStatus {
-	return podcontract.ContainerRetryStatus{
-		Attempt:     r.Attempt,
-		RetryLimit:  r.Limit,
-		Deadline:    r.Deadline,
-		ContainerID: r.ContainerID,
-		RetryAt:     r.RetryAt,
-		LastFailure: r.LastFailure,
-		PodUID:      podUID,
-	}
-}
 
 // attemptSeed copies a Pod's retry status annotation into memory once, before
 // the agent loads any record of the Pod.
@@ -94,7 +50,7 @@ func (w *NodeController) seedAttempts(pod *corev1.Pod) error {
 					podcontract.RestoreRetryStatusAnnotation, container)
 				return
 			}
-			w.restoreAttemptRecords.LoadOrStore(restoreContainerKey(pod.UID, container), attemptsFromStatus(entry))
+			w.restoreAttemptRecords.LoadOrStore(restoreContainerKey(pod.UID, container), entry)
 		}
 	})
 	return seed.err
@@ -102,7 +58,7 @@ func (w *NodeController) seedAttempts(pod *corev1.Pod) error {
 
 // loadAttempts returns the destination's attempt record, and false when it
 // has none yet.
-func (op *restoreOperation) loadAttempts() (*restoreAttempts, bool, error) {
+func (op *restoreOperation) loadAttempts() (*podcontract.ContainerRetryStatus, bool, error) {
 	if err := op.controller.seedAttempts(op.pod); err != nil {
 		return nil, false, err
 	}
@@ -110,13 +66,13 @@ func (op *restoreOperation) loadAttempts() (*restoreAttempts, bool, error) {
 	if !found {
 		return nil, false, nil
 	}
-	record := value.(restoreAttempts)
+	record := value.(podcontract.ContainerRetryStatus)
 	return &record, true, nil
 }
 
 // storeAttempts keeps the destination's record and queues the Pod's retry
 // status annotation for a write, which runs outside the restore.
-func (op *restoreOperation) storeAttempts(record *restoreAttempts) {
+func (op *restoreOperation) storeAttempts(record *podcontract.ContainerRetryStatus) {
 	op.controller.restoreAttemptRecords.Store(restoreContainerKey(op.pod.UID, op.destination), *record)
 	op.controller.queueRetryStatus(op.pod)
 }
@@ -132,7 +88,7 @@ func (op *restoreOperation) storeAttempts(record *restoreAttempts) {
 // since one agent never runs two passes of a Pod at once. The attempt runs
 // again within the same deadline and keeps its number, as an agent restart
 // always repeated it.
-func (op *restoreOperation) startAttempt(ctx context.Context) (*restoreAttempts, error) {
+func (op *restoreOperation) startAttempt(ctx context.Context) (*podcontract.ContainerRetryStatus, error) {
 	now := op.controller.nowFn()
 	limit, err := op.retryLimit()
 	if err != nil {
@@ -140,7 +96,7 @@ func (op *restoreOperation) startAttempt(ctx context.Context) (*restoreAttempts,
 	}
 	if limit == 0 {
 		record := op.firstAttempt(limit, now)
-		op.log = op.log.WithValues("attempt", record.Attempt, "retry_limit", record.Limit)
+		op.log = op.log.WithValues("attempt", record.Attempt, "retry_limit", record.RetryLimit)
 		return record, nil
 	}
 	record, found, err := op.loadAttempts()
@@ -162,22 +118,27 @@ func (op *restoreOperation) startAttempt(ctx context.Context) (*restoreAttempts,
 			return nil, op.retriesExhausted(ctx, record, true, fmt.Errorf("restore timed out at %s, before attempt %d could start",
 				record.Deadline.UTC().Format(time.RFC3339), next))
 		}
-		if next > record.Limit+1 {
-			return nil, op.retriesExhausted(ctx, record, false, fmt.Errorf("attempt %d is over the limit of %d", next, record.Limit+1))
+		if next > record.RetryLimit+1 {
+			return nil, op.retriesExhausted(ctx, record, false, fmt.Errorf("attempt %d is over the limit of %d", next, record.RetryLimit+1))
 		}
 		record.Attempt = next
 		record.RetryAt = time.Time{}
 	}
 	record.ContainerID = op.containerID
 	op.storeAttempts(record)
-	op.log = op.log.WithValues("attempt", record.Attempt, "retry_limit", record.Limit)
+	op.log = op.log.WithValues("attempt", record.Attempt, "retry_limit", record.RetryLimit)
 	return record, nil
 }
 
 // firstAttempt is attempt 1 of a restore, with the limit and the deadline
 // that ends every attempt.
-func (op *restoreOperation) firstAttempt(limit int, now time.Time) *restoreAttempts {
-	record := &restoreAttempts{Limit: limit, Attempt: 1, ContainerID: op.containerID}
+func (op *restoreOperation) firstAttempt(limit int, now time.Time) *podcontract.ContainerRetryStatus {
+	record := &podcontract.ContainerRetryStatus{
+		Attempt:     1,
+		RetryLimit:  limit,
+		ContainerID: op.containerID,
+		PodUID:      op.pod.UID,
+	}
 	if timeout := op.controller.config.Restore.RestoreTimeout(); timeout > 0 {
 		record.Deadline = now.Add(timeout)
 	}
@@ -186,7 +147,7 @@ func (op *restoreOperation) firstAttempt(limit int, now time.Time) *restoreAttem
 
 // announceAttempt emits RestoreRequested for every attempt that starts. A
 // restore that allows retries names the attempt in it.
-func (op *restoreOperation) announceAttempt(ctx context.Context, record *restoreAttempts) {
+func (op *restoreOperation) announceAttempt(ctx context.Context, record *podcontract.ContainerRetryStatus) {
 	keysAndValues := []any{
 		"content_uid", op.artifact.ContentUID,
 		"source_container", op.artifact.SourceContainerName,
@@ -197,8 +158,8 @@ func (op *restoreOperation) announceAttempt(ctx context.Context, record *restore
 	}
 	op.log.Info("Restore target detected, triggering external restore", keysAndValues...)
 	message := fmt.Sprintf("Restore requested from PodSnapshot %s for destination %s", op.artifact.SnapshotName, op.destination)
-	if record.Limit > 0 {
-		message += fmt.Sprintf(restoreRequestedAttemptSuffix, record.Attempt, record.Limit+1)
+	if record.RetryLimit > 0 {
+		message += fmt.Sprintf(restoreRequestedAttemptSuffix, record.Attempt, record.RetryLimit+1)
 	}
 	emitPodEvent(ctx, op.controller.clientset, op.log, op.pod, snapshotEventComponent, corev1.EventTypeNormal, restoreRequestedReason, message)
 }

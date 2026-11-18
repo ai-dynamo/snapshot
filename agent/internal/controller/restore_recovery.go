@@ -114,8 +114,8 @@ func restoreRetryBackoff(attempt int) time.Duration {
 	return min(backoff, restoreRetryMaxBackoff)
 }
 
-func budgetLeft(record *restoreAttempts, now time.Time) budget {
-	left := budget{attempts: record.Limit + 1 - record.Attempt, time: time.Duration(math.MaxInt64)}
+func budgetLeft(record *podcontract.ContainerRetryStatus, now time.Time) budget {
+	left := budget{attempts: record.RetryLimit + 1 - record.Attempt, time: time.Duration(math.MaxInt64)}
 	if !record.Deadline.IsZero() {
 		left.time = record.Deadline.Sub(now) - restoreRetryBackoff(record.Attempt)
 	}
@@ -145,13 +145,13 @@ func restoreFailureOf(err error) *executor.RestoreFailure {
 // the runtime shows it now. An agent that is stopping chooses nothing: it may
 // stop halfway through, and the next agent finds the attempt unfinished
 // instead.
-func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, record *restoreAttempts, err error, stopped bool) error {
+func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, record *podcontract.ContainerRetryStatus, err error, stopped bool) error {
 	if ctx.Err() != nil {
 		op.log.Info("Agent stopping; leaving the restore attempt to the next agent", "error", err.Error())
 		return errRestoreInterrupted
 	}
 	failure := restoreFailureOf(err)
-	if stopped || (!failure.ContainerChanged && record.Limit > 0 && !op.containerRunning(ctx)) {
+	if stopped || (!failure.ContainerChanged && record.RetryLimit > 0 && !op.containerRunning(ctx)) {
 		failure = stoppedDuringAttempt(failure)
 		err = failure
 	}
@@ -179,8 +179,8 @@ func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, recor
 
 // recordLastFailure saves the failure that ended the restore for the retry
 // status. A restore without retries keeps no record.
-func (op *restoreOperation) recordLastFailure(record *restoreAttempts, f *executor.RestoreFailure) {
-	if record.Limit == 0 {
+func (op *restoreOperation) recordLastFailure(record *podcontract.ContainerRetryStatus, f *executor.RestoreFailure) {
+	if record.RetryLimit == 0 {
 		return
 	}
 	record.LastFailure = failureSummary(f)
@@ -225,8 +225,8 @@ func (op *restoreOperation) containerRunning(ctx context.Context) bool {
 // ends so that an attempt does not run on for a container that is gone.
 // endAttempt reports whether that happened. A restore that allows no retries
 // runs as before.
-func (op *restoreOperation) watchContainer(ctx context.Context, record *restoreAttempts) (attemptCtx context.Context, endAttempt func() bool) {
-	if record.Limit == 0 {
+func (op *restoreOperation) watchContainer(ctx context.Context, record *podcontract.ContainerRetryStatus) (attemptCtx context.Context, endAttempt func() bool) {
+	if record.RetryLimit == 0 {
 		return ctx, func() bool { return false }
 	}
 	attemptCtx, cancel := context.WithCancelCause(ctx)
@@ -250,25 +250,25 @@ func stoppedDuringAttempt(f *executor.RestoreFailure) *executor.RestoreFailure {
 
 // reportFailedAttempt emits RestoreAttemptFailed for a restore that allows
 // retries. With a limit of 0 the restore fails as it always has.
-func (op *restoreOperation) reportFailedAttempt(ctx context.Context, record *restoreAttempts, f *executor.RestoreFailure, recovery string) {
+func (op *restoreOperation) reportFailedAttempt(ctx context.Context, record *podcontract.ContainerRetryStatus, f *executor.RestoreFailure, recovery string) {
 	op.log.Info("Restore attempt failed", "step", string(f.Step), "error", f.Error(), "recovery", recovery)
-	if record.Limit == 0 {
+	if record.RetryLimit == 0 {
 		return
 	}
 	emitPodEvent(ctx, op.controller.clientset, op.log, op.pod, snapshotEventComponent, corev1.EventTypeWarning, restoreAttemptFailedReason,
-		fmt.Sprintf(restoreAttemptFailedMessage, record.Attempt, record.Limit+1, op.destination, f.Error(), recovery))
+		fmt.Sprintf(restoreAttemptFailedMessage, record.Attempt, record.RetryLimit+1, op.destination, f.Error(), recovery))
 }
 
 // retriesExhausted emits RestoreRetriesExhausted for a restore that allowed
 // retries and returns the error that ends it. A restore can run out of
 // attempts or, with attempts left, out of time.
-func (op *restoreOperation) retriesExhausted(ctx context.Context, record *restoreAttempts, outOfTime bool, cause error) error {
-	if record.Limit == 0 {
+func (op *restoreOperation) retriesExhausted(ctx context.Context, record *podcontract.ContainerRetryStatus, outOfTime bool, cause error) error {
+	if record.RetryLimit == 0 {
 		return cause
 	}
 	err := fmt.Errorf("restore used all %d attempts: %w", record.Attempt, cause)
 	if outOfTime {
-		err = fmt.Errorf("restore ran out of time after attempt %d of %d: %w", record.Attempt, record.Limit+1, cause)
+		err = fmt.Errorf("restore ran out of time after attempt %d of %d: %w", record.Attempt, record.RetryLimit+1, cause)
 	}
 	emitPodEvent(ctx, op.controller.clientset, op.log, op.pod, snapshotEventComponent, corev1.EventTypeWarning, restoreRetriesExhaustedReason,
 		fmt.Sprintf(restoreRetriesExhaustedMessage, op.destination, err.Error()))
