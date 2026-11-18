@@ -119,10 +119,11 @@ class is the default; see [Default class](#default-class).
 | Class deleted under content | Content loses the only description of where its snapshots are. | Protection finalizer; a terminating class still resolves for existing content. Force-removing the finalizer leaves content with the existing `StoreInactive` handling from SNEP-237. |
 | Secret missing or revoked | An S3 class's Secret is deleted or rotated to an invalid key. | The class goes `Ready=False`, reason `CredentialsUnavailable`, and new bindings stop. In-flight operations fail with the existing credential errors; nothing is deleted on an access error. |
 | Agent holds credentials | Today only PageBroker and the operator see S3 credentials. The agent now reads the class's Secret and writes it to a local file for PageBroker. | The Secret must live in the Snapshot namespace. The operator keeps the agent's Role limited by `resourceNames` to the Secrets and ConfigMaps that classes reference; a node can still read the credentials of every store, where today it holds one. The file is written to the memory-backed volume the two containers already share, mode `0600`, under a per-transaction directory removed on Commit or Abort. Accepted trade-off against giving PageBroker a Kubernetes client; see Alternatives. |
+| Shared workload identity | Classes without a Secret are all reached with one identity, that of the agent's and the operator's service accounts. | That identity needs access to every such store, so credentials do not separate those stores from each other; use a Secret per class where separation matters. Instance metadata is excluded, so a broken identity fails instead of falling back to the node's role. |
 | Duplicate location | Two classes describe the same place, through the same fields or through an alias such as a second endpoint hostname; cleanup through one could reach the other's content. | The operator refuses `Ready` for the later class with reason `DuplicateStore` and names the other; see [Store uniqueness](#store-uniqueness). |
 | Nested stores | One store's location is a parent of another's, in this cluster or another. | Allowed, because each store keeps its snapshots under its own `artifacts/`: a sweep looks only there and deletes only orphans named by a UUID, and deleting content removes only its own recorded handles. The API rejects a location inside another store's `artifacts/`. Data written by something that leaves no marker is not protected. |
 | Old agent, new class | During a rolling upgrade an agent that predates this proposal receives content bound to a non-default class. | It passes its startup store to PageBroker, whose `storeID` does not match the content's; PageBroker returns `STORE_MISMATCH` and the capture fails before any I/O. The existing retry picks it up after the node upgrades. |
-| Restore from several S3 stores | The native restore engine holds one session per PageBroker process, with one endpoint and one set of credentials, and reads its CA bundle and addressing mode once at start. | Restores from the same store run in parallel; a restore from another store waits until they drain, then PageBroker starts a new session. A long restore delays other stores, and a waiting transaction can expire. An S3 class whose CA bundle or addressing mode differs from PageBroker's startup values cannot restore. Parallel restore across stores is a follow-up; see [Agent and PageBroker](#agent-and-pagebroker). |
+| Restore from several S3 stores | The native restore engine holds one session per PageBroker process, fixed to one endpoint, one region and one set of credentials, and reads its CA bundle and addressing mode once at start. | Restores whose stores share the endpoint, region and credentials run in parallel; a restore that differs in any of them waits until the others drain, then PageBroker replaces the session. A long restore delays the others, and a waiting transaction can expire. An S3 class whose CA bundle or addressing mode differs from PageBroker's startup values cannot restore. Parallel restore across sessions is a follow-up; see [Agent and PageBroker](#agent-and-pagebroker). |
 | Default misconfigured | Two classes set `isDefault: true`, or the default is deleted and unnamed `PodSnapshot`s fail. | The admission policy denies both. If it is absent or bypassed, the oldest marked class wins with `DefaultConflict` on the others, and a Warning event flags a deleted default; see [Default class](#default-class). |
 
 ## Design Details
@@ -179,8 +180,8 @@ type S3StoreSpec struct {
     Bucket   string `json:"bucket"`
     Prefix   string `json:"prefix,omitempty"`
     // A Secret in the Snapshot namespace holding a shared-credentials file.
-    // The key defaults to "credentials".
-    CredentialsSecretRef corev1.SecretKeySelector `json:"credentialsSecretRef"`
+    // The key defaults to "credentials". Omitted: workload identity is used.
+    CredentialsSecretRef *corev1.SecretKeySelector `json:"credentialsSecretRef,omitempty"`
     Addressing string `json:"addressing,omitempty"` // virtual or path.
     AllowHTTP  bool   `json:"allowHttp,omitempty"`
     // The key defaults to "ca.crt".
@@ -348,14 +349,18 @@ rendered by the chart into the agent's `config.yaml` and the operator's
 `--mounted-claims` flag.
 
 Payload restores do not use that client. They go through the native restore
-engine, which holds one session per PageBroker process, with one endpoint and
-one set of credentials, and reads its CA bundle and addressing mode once at
-start. Restores from the session's store run in parallel, as today. A restore
-from another store waits until they drain; PageBroker then ends the session and
-starts one for that store. Until restores run in parallel across stores, a long
-restore delays other stores and a waiting transaction can expire, and an S3
-class whose CA bundle or addressing mode differs from PageBroker's startup
-values, taken from `storage.s3`, cannot restore.
+engine, which holds one session per PageBroker process and reads its CA bundle
+and addressing mode once at start. A session is fixed to one endpoint, one
+region and one set of credentials for its whole life. Restores whose stores
+share all three run in parallel in one session, as today; that includes stores
+in the same region that use the same workload identity. When the next restore
+differs in any of the three, or the credentials have changed, it waits until
+the running restores drain; PageBroker then ends the session and starts one
+with the new settings. This reuses the path that replaces a failed session
+today. Until restores run in parallel across sessions, a long restore delays
+the others and a waiting transaction can expire, and an S3 class whose CA
+bundle or addressing mode differs from PageBroker's startup values, taken from
+`storage.s3`, cannot restore.
 
 #### Credential delivery
 
@@ -372,10 +377,18 @@ transaction through the staging volume it shares with PageBroker:
    directories whose transaction is gone. The volume is RAM, so a crash leaves
    nothing on the node.
 
+A class with no `credentialsSecretRef` uses workload identity. The agent writes
+no credentials file and leaves `credentials_file` empty; PageBroker and the
+operator then use the SDK default credential chain under their own service
+accounts, with instance metadata excluded so the node's role is never used.
+Those credentials refresh on their own.
+
 The directory is per transaction, not per store: concurrent transactions never
 share a file, and a rotated Secret reaches the next transaction while an
-in-flight one keeps its key. A retried checkpoint or restore is a new
-transaction with a new ID and directory, so it reads the Secret again. Sharing
+in-flight one keeps its key. For a restore payload the new key takes effect
+when the restore session is replaced; see [Agent and PageBroker](#agent-and-pagebroker).
+A retried checkpoint or restore is a new transaction with a new ID and
+directory, so it reads the Secret again. Sharing
 happens in PageBroker's client cache.
 
 #### Maintenance
@@ -408,6 +421,7 @@ is gone keeps its finalizer and gets `StoreInactive`, as in SNEP-237.
   agent's Role so its `resourceNames` list only the Secrets and ConfigMaps that
   classes reference; every node can still read every store's credentials. The
   agent's ClusterRole gains `get`/`list`/`watch` on `snapshotstorageclasses`.
+  A class without a Secret uses the service accounts' workload identity.
   The agent writes a Secret only to the staging tmpfs, never to the node
   filesystem or logs.
 - **PageBroker.** No Kubernetes client, RBAC or long-lived credentials; it
@@ -436,7 +450,9 @@ selects PVC or S3; `s3.endpoint`, `region`, `bucket`, `prefix`, `addressing`,
 `caBundleConfigMapRef` and `caBundleConfigMapKey` become the class's `s3` fields;
 `pvc.name` becomes `claimName`, with the class `basePath` at the claim root.
 `pvc.basePath` stays the container mount path, and `pvc.create`, `size` and
-`storageClass` still only provision the claim. What changes is delivery: the
+`storageClass` still only provision the claim. An empty
+`s3.credentialsSecretRef` gives a `default` class with no Secret. What changes
+is delivery: the
 chart no longer mounts the S3 Secret, which is read through the API and passed
 per transaction. The CA ConfigMap stays mounted in PageBroker, because the
 native restore engine reads its CA bundle and addressing mode once at start.
@@ -490,6 +506,8 @@ the old operator ignores both and reads `storage.yaml`.
 
 - SNEP-237 artifact addressing: bound content, `storeID`, `ArtifactTarget` and
   `PublishedArtifact`; images that accept a per-request `StorageBackend`.
+- Default credential chain support in PageBroker and the operator's cleanup,
+  for classes without a Secret; tracked in issue 988.
 
 ### Test Plan
 
@@ -503,14 +521,15 @@ the old operator ignores both and reads `storage.yaml`.
 - **Admission policy:** rejects a second default and deleting the default,
   and accepts moving it; without it, deleting the default emits the Warning.
 - **Agent:** Secret fetch, file permissions and removal on Commit, Abort and
-  crash; mount mapping for default and extra claims; `StorageClassUnavailable`
+  crash; no credentials file for a class without a Secret; mount mapping for default and extra claims; `StorageClassUnavailable`
   on a missing class, a `status.storeID` mismatch, or a claim with no mount.
 - **Maintenance:** a sweep stops when its own marker is missing or foreign, and
   looks only inside `artifacts/`, deleting only UUID-named orphans, on S3 and on
   a PVC. A nested store's data survives its parent's sweep. A directory
   retained under `Retain` survives sweeps.
 - **PageBroker:** per-request `StorageBackend`, client cache, two stores live;
-  restores from two stores queue and run in turn.
+  restores from stores that differ in endpoint, region or credentials queue and
+  run in turn; stores that share them restore in parallel.
 - **End to end:** two S3 and one PVC class in one cluster, checkpoint and
   cross-node restore through each; a class terminates only after its content is
   gone; old content stays put when the default moves; rolling upgrade with an
@@ -529,5 +548,5 @@ the old operator ignores both and reads `storage.yaml`.
 - **Mounting arbitrary PVCs at runtime.** Needs the agent to mount claims or a
   restart per claim; deferred and recorded as the limitation.
 - **Parallel restore from several stores.** Needs a restore worker per store
-  connection or a change in the native engine; deferred, with the per-store
+  connection or a change in the native engine; deferred, with the session
   queue as the interim.
