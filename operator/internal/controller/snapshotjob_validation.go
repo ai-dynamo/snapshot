@@ -43,8 +43,6 @@ func validatePodSnapshotTemplateMetadata(sj *snapshotv1alpha1.SnapshotJob) error
 	for _, reserved := range []string{
 		snapshotv1alpha1.SnapshotJobOwnerLabel,
 		snapshotv1alpha1.SnapshotJobOwnerUIDLabel,
-		snapshotv1alpha1.PodGroupLabel,
-		snapshotv1alpha1.PodGroupMemberLabel,
 	} {
 		if _, found := metadata.Labels[reserved]; found {
 			errs = append(errs, field.Forbidden(labelsPath.Key(reserved), "label is controller-owned"))
