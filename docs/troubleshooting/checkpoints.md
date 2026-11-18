@@ -142,14 +142,21 @@ lowest-ranked relay checks the group's topology. Nothing has changed in any
 workload yet, so the attempt ends as `Refused` and every member is left as
 Snapshot found it. A member that fails at any step fails the attempt for every
 other member. Each of them then fails at the step it was waiting in, with the
-reason the first member gave, such as `Refused` or `MemberFailed`.
+reason the first member gave, such as `Refused` or `MemberFailed`. From the
+attempt's deadline on, the attempt ends as `DeadlineExceeded` instead, whichever
+member failed.
 
 **Likely causes:**
 
 - The Pod has no IP yet
-- Another member refused first
-- The attempt's deadline passed before every member arrived
-- The cuInterpose relay refused the group's topology, for example memory one Pod imports that no member exported, which its error names
+- The Pod's IP is not IPv4 (`is not an IPv4 address`), which a pod group needs
+- The cuInterpose relay refused the group's topology, for example memory one Pod imports that no member exported. Its error follows `inspect cuinterpose:`
+- Another member refused first (`Refused`), and its agent's log carries the step
+- A member never arrived, for example one whose `checkpointReadinessProbe` never passed, so the attempt's deadline passed (`DeadlineExceeded`)
+
+```bash
+kubectl get pod <source-pod> -n <ns> -o jsonpath='{.status.podIP}'
+```
 
 ### recording that the member started
 
@@ -191,8 +198,8 @@ ends first. The source has stopped by then.
 
 **Likely causes:**
 
-- Another member failed, and its agent's log carries the step
-- The attempt's deadline passed
+- Another member failed (`MemberFailed`), and its agent's log carries the step
+- The attempt's deadline passed (`DeadlineExceeded`)
 - The coordinator was lost (`CoordinatorLost`)
 
 ```bash

@@ -134,18 +134,29 @@ that exited between the checkpoint request and the dump leaves nothing to map.
 
 For a member of a pod group, the agent checks that the checkpoint is the
 member's own part of a group capture. It publishes the restore Pod's IP and the
-capture it restores, then waits for every other member's and for every member
-to accept. Nothing has been restored yet, so the attempt ends as `Refused`. A
+capture it restores, then waits for every other member's. It checks that it can
+keep its connections to the other members, and waits for every member to
+accept. Nothing has been restored yet, so the attempt ends as `Refused`. A
 member that fails at any step fails the attempt for every other member. Each of
 them then fails at the step it was waiting in, with the reason the first member
-gave, such as `Refused` or `MemberFailed`.
+gave, such as `Refused` or `MemberFailed`. From the attempt's deadline on, the
+attempt ends as `DeadlineExceeded` instead, whichever member failed.
 
 **Likely causes:**
 
 - The checkpoint was captured on its own, or by another member of the group
-- The members restore different captures
-- Another member refused first
-- The attempt's deadline passed before every member arrived
+- The checkpoint's pod group section has a version this agent does not restore (`pod group section has version`). Restore with the agent version that took the checkpoint
+- The restore has a different number of members than the capture had (`the capture had <n> members, the restore has <m>`)
+- The members restore different captures, which the message names
+- The restore Pod's IP, or a Pod IP the checkpoint recorded, is not IPv4 (`is not an IPv4 address` or `maps IPv4 addresses only`), which a pod group needs
+- Two members had one Pod IP at capture, or have one now, or the checkpoint records a Pod IP that does not parse. The message names the IPs
+- The restore cannot hold the connections it keeps: the node's kernel lacks nf_tables, or the agent cannot use it in the restore Pod's network namespace (`can hold connections`)
+- Another member refused first (`Refused`), and its agent's log carries the step
+- A member never arrived, so the attempt's deadline passed (`DeadlineExceeded`)
+
+```bash
+kubectl get pod <restore-pod> -n <ns> -o jsonpath='{.status.podIP}'
+```
 
 ### recording that the member started
 
@@ -214,8 +225,8 @@ on for the connections that had it, and lets CRIU continue.
 
 **Likely causes:**
 
-- Another member failed, or the attempt's deadline passed before every member restored its sockets
-- The agent could not write the hold's nftables table in the Pod's network namespace, for example on a node whose kernel lacks nf_tables
+- Another member failed (`MemberFailed`), or the attempt's deadline passed before every member restored its sockets (`DeadlineExceeded`)
+- The agent could not write the hold's nftables table in the Pod's network namespace
 - nsrestore exited before CRIU restored the sockets, and then the agent log also names the step nsrestore failed at
 
 ```bash
@@ -385,8 +396,8 @@ first, and the agent then terminates the restored processes.
 
 **Likely causes:**
 
-- Another member failed, and its agent's log carries the step
-- The attempt's deadline passed
+- Another member failed (`MemberFailed`), and its agent's log carries the step
+- The attempt's deadline passed (`DeadlineExceeded`)
 - The coordinator was lost (`CoordinatorLost`)
 
 ```bash
