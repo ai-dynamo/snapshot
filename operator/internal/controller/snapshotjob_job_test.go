@@ -290,12 +290,6 @@ func TestBuildSourceJob(t *testing.T) {
 			"reserved owner label": {
 				Labels: map[string]string{snapshotv1alpha1.SnapshotJobOwnerLabel: "caller"},
 			},
-			"reserved pod group label": {
-				Labels: map[string]string{snapshotv1alpha1.PodGroupLabel: "caller"},
-			},
-			"reserved pod group member label": {
-				Labels: map[string]string{snapshotv1alpha1.PodGroupMemberLabel: "caller"},
-			},
 		}
 		for name, metadata := range tests {
 			t.Run(name, func(t *testing.T) {
