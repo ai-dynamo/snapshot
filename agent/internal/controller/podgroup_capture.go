@@ -38,12 +38,6 @@ type captureMember struct {
 	deadline time.Time
 }
 
-// cachedCaptureMember is what captureMemberOf found for one content UID.
-type cachedCaptureMember struct {
-	uid    ktypes.UID
-	member *captureMember
-}
-
 // invalidMemberError reports a PodSnapshotContent with invalid group membership.
 type invalidMemberError struct{ message string }
 
@@ -115,13 +109,11 @@ func (w *NodeController) captureMemberOf(ctx context.Context, content *snapshotv
 	return member, true, nil
 }
 
-// forgetCaptureMember drops what the agent holds for a content that ended or
-// is gone.
-func (w *NodeController) forgetCaptureMember(name string) {
+// forgetCaptureOutcome drops a retained result once its content is final or gone.
+func (w *NodeController) forgetCaptureOutcome(name string) {
 	if w.podGroups == nil {
 		return
 	}
-	w.podGroups.captureMembers.Delete(name)
 	w.podGroups.captureOutcomes.Delete(name)
 }
 

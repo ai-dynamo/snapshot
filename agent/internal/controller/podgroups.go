@@ -57,11 +57,6 @@ type podGroups struct {
 	// Run sets it.
 	restores cache.Indexer
 
-	// captureMembers holds, by PodSnapshotContent name, the content's part in
-	// a pod group, or nil for a content captured on its own: a member's
-	// PodSnapshot and its group never change it.
-	captureMembers sync.Map
-
 	// captureOutcomes and restoreOutcomes hold, by PodSnapshotContent name
 	// and by restore Pod UID, the end of an attempt this agent ran, until its
 	// report is written. A started member never runs again, so a report that

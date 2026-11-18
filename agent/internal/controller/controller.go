@@ -1516,13 +1516,13 @@ func (w *NodeController) enqueueContent(obj interface{}) {
 	}
 }
 
-// forgetContent releases an unstarted member's source before discarding the
-// validated identity that cleanup needs after its parents are gone.
+// forgetContent releases an unstarted member's source and discards its
+// retained result. Cleanup uses the membership carried by the content.
 func (w *NodeController) forgetContent(ctx context.Context, obj any) {
 	if content, ok := contentFromInformerObj(obj); ok {
 		w.leaveUnstartedMemberSource(ctx, content)
 		w.checkpointGates.Delete(content.Name)
-		w.forgetCaptureMember(content.Name)
+		w.forgetCaptureOutcome(content.Name)
 	}
 }
 

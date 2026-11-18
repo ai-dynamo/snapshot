@@ -881,9 +881,9 @@ func TestDeletedCaptureMemberLeavesSourceAsFound(t *testing.T) {
 				_, err := dynClient.Resource(podSnapshotContentGVR).Update(ctx, content, metav1.UpdateOptions{})
 				require.NoError(t, err)
 				require.Eventually(t, func() bool {
-					_, cached := w.podGroups.captureMembers.Load(content.GetName())
-					return !cached
-				}, 5*time.Second, 10*time.Millisecond, "the deleting update was reconciled")
+					_, labeled := getPod(t, w, "inference", "worker-0").Labels[snapshotv1alpha1.CaptureEligibleLabel]
+					return !labeled
+				}, 5*time.Second, 10*time.Millisecond, "the deleting update releases the source")
 				require.NoError(t, w.client.Delete(ctx, g.snaps[0]))
 				require.NoError(t, w.client.Delete(ctx, g.group))
 			}
@@ -926,9 +926,6 @@ func TestCaptureDeleteAfterCacheEviction(t *testing.T) {
 				})
 			}
 			w, _ := groupCaptureController(t, nil, g, nil, nil)
-			member, _, err := w.captureMemberOf(t.Context(), g.contents[0])
-			require.NoError(t, err)
-			require.NotNil(t, member)
 			content := mustUnstructured(t, g.contents[0])
 			require.NoError(t, w.contentIndexer.Delete(content))
 			require.NoError(t, w.client.Delete(t.Context(), g.snaps[0]))

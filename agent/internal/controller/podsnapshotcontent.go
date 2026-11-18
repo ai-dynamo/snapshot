@@ -104,7 +104,7 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 		w.checkpointGates.Delete(name)
 		// A queued delete still needs the identity after the index drops its content.
 		if content != nil {
-			w.forgetCaptureMember(name)
+			w.forgetCaptureOutcome(name)
 		}
 		return nil
 	}
