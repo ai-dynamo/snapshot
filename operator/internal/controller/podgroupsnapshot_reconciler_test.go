@@ -1348,3 +1348,67 @@ func TestPodGroupSnapshotRefusesChildWithAnotherMembership(t *testing.T) {
 		})
 	}
 }
+
+// TestPodGroupSnapshotReconciler_ConfirmsGroupBeforeCreatingMembers keeps a
+// stale active group from creating member work after deletion or replacement.
+func TestPodGroupSnapshotReconciler_ConfirmsGroupBeforeCreatingMembers(t *testing.T) {
+	deleting := pgGroup("a", "b")
+	deleting.DeletionTimestamp = ptr.To(metav1.Now())
+	replaced := pgGroup("a", "b")
+	replaced.UID = "replacement-group-uid"
+	readErr := errors.New("group read unavailable")
+
+	for _, tc := range []struct {
+		name         string
+		liveGroup    *snapshotv1alpha1.PodGroupSnapshot
+		readErr      error
+		membersExist bool
+		wantMembers  int
+		wantReads    int
+	}{
+		{name: "active group", liveGroup: pgGroup("a", "b"), wantMembers: 2, wantReads: 1},
+		{name: "deleting group", liveGroup: deleting, wantReads: 1},
+		{name: "replaced group", liveGroup: replaced, wantReads: 1},
+		{name: "missing group", wantReads: 1},
+		{name: "group read fails", liveGroup: pgGroup("a", "b"), readErr: readErr, wantReads: 1},
+		{name: "all members exist", liveGroup: pgGroup("a", "b"), membersExist: true, wantMembers: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			group := pgGroup("a", "b")
+			cached := append(pgReadyCluster("a", "b"), group)
+			live := pgReadyCluster("a", "b")
+			if tc.liveGroup != nil {
+				live = append(live, tc.liveGroup)
+			}
+			if tc.membersExist {
+				for rank := range group.Spec.Members {
+					cached = append(cached, pgMemberObjects(group, rank, nil, nil)...)
+					live = append(live, pgMemberObjects(group, rank, nil, nil)...)
+				}
+			}
+			r, _ := makeLaggingPodGroupReconciler(t, cached, live)
+			reads := 0
+			r.NonCacheReadClient = interceptor.NewClient(r.NonCacheReadClient.(client.WithWatch), interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*snapshotv1alpha1.PodGroupSnapshot); ok {
+						reads++
+						if tc.readErr != nil {
+							return tc.readErr
+						}
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			})
+
+			_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(group)})
+
+			if tc.readErr != nil {
+				require.ErrorIs(t, err, tc.readErr)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Len(t, listMemberPodSnapshots(t, r), tc.wantMembers)
+			assert.Equal(t, tc.wantReads, reads, "confirm once, only when member work is missing")
+		})
+	}
+}
