@@ -336,6 +336,150 @@ func TestGroupRestoreRecordsTheCommitBeforeItsFirstIrreversibleStep(t *testing.T
 	}
 }
 
+func TestGroupCheckpointDumpsOnlyOnceEveryMemberArrivesAtNetFreeze(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		peerFails bool
+		wantSteps []string
+		wantStep  Step
+	}{
+		{
+			name:      "the peer arrives late",
+			wantSteps: []string{"record", "the peer arrives at net-freeze", "dump"},
+		},
+		{
+			name:      "the peer fails instead of arriving",
+			peerFails: true,
+			wantSteps: []string{"record", "the peer fails"},
+			wantStep:  StepGroupBarrier,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			member, peer := joinMembers(t)
+			steps := make(chan string, 4)
+			letGo := make(chan struct{})
+			peerEnded := runLatePeer(t, peer, group.Admission{PodIP: netip.MustParseAddr("10.0.0.2")},
+				group.NetFreeze, tc.peerFails, letGo, steps)
+			socket := serveCheckpointStaging(t, t.TempDir())
+			// Only the dump is replaced. The GPU checkpoint before net-freeze
+			// runs, with no CUDA process to checkpoint.
+			originalDump := dumpCheckpointFunc
+			t.Cleanup(func() { dumpCheckpointFunc = originalDump })
+			dumpCheckpointFunc = func(context.Context, *criurpc.CriuOpts, *types.CRIUSettings, *types.CheckpointManifest,
+				*types.CheckpointContainerSnapshot, string, *checkpointPhaseTimings, logr.Logger,
+			) error {
+				steps <- "dump"
+				return nil
+			}
+			cfg := &types.AgentConfig{
+				Storage:    types.StorageSpec{BasePath: t.TempDir()},
+				PageBroker: types.PageBrokerSpec{ControlSocketPath: socket},
+			}
+			committed := make(chan struct{})
+			req := CheckpointRequest{
+				ContentUID: "content-uid", ContainerName: "main", PodIP: "10.0.0.1", Group: member,
+				Committed: func(context.Context) error {
+					steps <- "record"
+					close(committed)
+					return nil
+				},
+			}
+			var err error
+			returned := make(chan struct{})
+			go func() {
+				defer close(returned)
+				_, err = checkpoint(groupTestContext(t), nil, testr.New(t), req, cfg, inspectNothing(t))
+			}()
+
+			holdPeer(t, committed, returned, letGo)
+			<-returned
+
+			assert.Equal(t, tc.wantStep, StepOf(err), "%v", err)
+			if tc.peerFails {
+				require.ErrorIs(t, err, &session.AbortError{Reason: session.ReasonMemberFailed})
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tc.wantSteps, received(steps))
+			require.NoError(t, (<-peerEnded).err)
+		})
+	}
+}
+
+func TestGroupRestoreCompletesOnlyOnceEveryMemberArrivesAtRelease(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		peerFails bool
+		wantSteps []string
+		wantStep  Step
+		want      RestoreResult
+	}{
+		{
+			name:      "the peer arrives late",
+			wantSteps: []string{"unmount staging", "validate", "the peer arrives at release", "unmount bundle"},
+			want:      RestoreResult{PlaceholderHostPID: 123, RestoredPID: 4242},
+		},
+		{
+			name:      "the peer fails instead of arriving",
+			peerFails: true,
+			// A failed restore unmounts the bundle too, in its cleanup.
+			wantSteps: []string{"unmount staging", "validate", "the peer fails", "unmount bundle"},
+			wantStep:  StepGroupBarrier,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			member, peer := joinMembers(t)
+			steps := make(chan string, 8)
+			letGo := make(chan struct{})
+			peerEnded := runLatePeer(t, peer, group.Admission{PodIP: netip.MustParseAddr("10.0.0.2"), CaptureID: "capture-1"},
+				group.Release, tc.peerFails, letGo, steps)
+			base := writeGroupArtifact(t, capturedAs("member-0", "member-0", "member-1"))
+			socket := serveCheckpointStaging(t, t.TempDir())
+			// nsrestore, which runs CRIU in the placeholder, and the check of
+			// the process it restored are replaced.
+			originalExec, originalValidate := execNSRestoreFunc, validateRestoredProcessFunc
+			t.Cleanup(func() { execNSRestoreFunc, validateRestoredProcessFunc = originalExec, originalValidate })
+			execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot,
+				nsmount.MountPoint, string, *pagebroker.CustomStorageExecution,
+			) (*RestoreInNamespaceResult, error) {
+				return &RestoreInNamespaceResult{RestoredPID: 4242}, nil
+			}
+			validated := make(chan struct{})
+			validateRestoredProcessFunc = func(string, int, logr.Logger) error {
+				steps <- "validate"
+				close(validated)
+				return nil
+			}
+			req := RestoreRequest{
+				BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+				TargetPodIP: "10.0.0.1", WithoutProxy: true, SkipCompatCheck: true, Group: member,
+				PageBrokerControlSocketPath: socket, PageBrokerRestoreMode: "staged",
+			}
+			var restored RestoreResult
+			var err error
+			returned := make(chan struct{})
+			go func() {
+				defer close(returned)
+				restored, err = Restore(groupTestContext(t), &restoreFakeRuntime{}, testr.New(t), req,
+					&cleanupMounter{events: steps})
+			}()
+
+			holdPeer(t, validated, returned, letGo)
+			<-returned
+
+			assert.Equal(t, tc.wantStep, StepOf(err), "%v", err)
+			if tc.peerFails {
+				require.ErrorIs(t, err, &session.AbortError{Reason: session.ReasonMemberFailed})
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tc.want, restored)
+			assert.Equal(t, tc.wantSteps, received(steps))
+			require.NoError(t, (<-peerEnded).err)
+		})
+	}
+}
+
 func TestRestoreRefusesAPodGroupMembersArtifactOnItsOwn(t *testing.T) {
 	base := writeGroupArtifact(t, capturedAs("member-0", "member-0", "member-1"))
 	mounter := stoppingMounter{stop: func() error {
@@ -437,8 +581,77 @@ func runPeer(t *testing.T, peer *group.Member, own group.Admission, next string)
 	return ended
 }
 
-// serveCheckpointStaging answers a capture's PageBroker requests until the test
-// ends: its preparation with staging, and its abort.
+// peerDelay is how long holdPeer holds a late peer back, which gives a member
+// that does not wait for it the time to go on without it.
+const peerDelay = 50 * time.Millisecond
+
+// runLatePeer runs a peer as runPeer does, but holds it after the admitted
+// barrier until letGo is closed. The peer then arrives at next or, if fails
+// is set, fails the attempt instead, as a peer whose own step before next
+// failed would. It records which on steps, before it does it.
+func runLatePeer(t *testing.T, peer *group.Member, own group.Admission, next string, fails bool,
+	letGo <-chan struct{}, steps chan<- string,
+) <-chan peerOutcome {
+	t.Helper()
+	ctx := groupTestContext(t)
+	ended := make(chan peerOutcome, 1)
+	go func() {
+		outcome := peerOutcome{err: peer.Admit(ctx, own)}
+		if outcome.err == nil {
+			outcome.err = peer.Barrier(ctx, group.Admitted)
+		}
+		if outcome.err == nil {
+			outcome.committed = true
+			select {
+			case <-letGo:
+				if fails {
+					steps <- "the peer fails"
+				} else {
+					steps <- "the peer arrives at " + next
+					outcome.err = peer.Barrier(ctx, next)
+				}
+			case <-ctx.Done():
+				outcome.err = ctx.Err()
+			}
+		}
+		_ = peer.Fail(ctx)
+		ended <- outcome
+	}()
+	return ended
+}
+
+// holdPeer waits until the member has reached its last step before a barrier,
+// then holds the late peer back for peerDelay before it closes letGo. It fails
+// the test if the member returns before then.
+func holdPeer(t *testing.T, reached, returned <-chan struct{}, letGo chan<- struct{}) {
+	t.Helper()
+	select {
+	case <-reached:
+	case <-returned:
+		t.Fatal("the member returned before it reached the barrier")
+	}
+	select {
+	case <-time.After(peerDelay):
+	case <-returned:
+		t.Fatal("the member returned while its peer was held back")
+	}
+	close(letGo)
+}
+
+// received closes steps, once nothing sends on it any more, and returns what
+// it holds.
+func received(steps chan string) []string {
+	close(steps)
+	var all []string
+	for step := range steps {
+		all = append(all, step)
+	}
+	return all
+}
+
+// serveCheckpointStaging answers the PageBroker requests of a capture or a
+// staged restore until the test ends: its preparation with staging, its
+// commit, and its abort.
 func serveCheckpointStaging(t *testing.T, staging string) string {
 	t.Helper()
 	listener := listenPageBroker(t)
@@ -453,11 +666,18 @@ func serveCheckpointStaging(t *testing.T, staging string) string {
 			request, err := readPageBrokerTestRequest(connection)
 			if err == nil {
 				response := &pagebroker.Response{}
-				if request.GetPrepareStagedCheckpoint() != nil {
+				switch {
+				case request.GetPrepareStagedCheckpoint() != nil:
 					response.Result = &pagebroker.Response_StagedCheckpointDirectory{
 						StagedCheckpointDirectory: &pagebroker.StagedCheckpointDirectory{ImageDirectory: &staging},
 					}
-				} else {
+				case request.GetStagedRestore() != nil:
+					response.Result = &pagebroker.Response_StagedRestoreDirectory{
+						StagedRestoreDirectory: &pagebroker.StagedRestoreDirectory{ImageDirectory: &staging},
+					}
+				case request.GetCommit() != nil:
+					response.Result = &pagebroker.Response_CommitComplete{CommitComplete: &pagebroker.CommitComplete{}}
+				default:
 					response.Result = &pagebroker.Response_AbortComplete{AbortComplete: &pagebroker.AbortComplete{}}
 				}
 				err = replyPageBrokerTest(connection, request, response)
