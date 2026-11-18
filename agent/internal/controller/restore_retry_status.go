@@ -92,7 +92,7 @@ func (w *NodeController) writeRetryStatus(ctx context.Context, key retryStatusKe
 	prefix := string(key.uid) + "/"
 	w.restoreAttemptRecords.Range(func(k, v any) bool {
 		if container, ok := strings.CutPrefix(k.(string), prefix); ok {
-			status[container] = v.(restoreAttempts).status(key.uid)
+			status[container] = v.(podcontract.ContainerRetryStatus)
 		}
 		return true
 	})
