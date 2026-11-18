@@ -1037,22 +1037,27 @@ func TestPodGroupSnapshotReconciler_Deletion(t *testing.T) {
 }
 
 func TestPodGroupSnapshotReconciler_MapsContentToGroup(t *testing.T) {
-	group := pgGroup("a")
-	member := buildMemberPodSnapshot(group, 0)
-	member.UID = "member-uid"
-	standalone := &snapshotv1alpha1.PodSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "standalone", Namespace: pgNamespace}}
-	r, _ := makePodGroupReconciler(t, group, member, standalone)
-	content := func(name string) *snapshotv1alpha1.PodSnapshotContent {
-		return &snapshotv1alpha1.PodSnapshotContent{Spec: snapshotv1alpha1.PodSnapshotContentSpec{
-			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: pgNamespace, Name: name},
-		}}
-	}
+	r, _ := makePodGroupReconciler(t)
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			t.Error("the event mapper must not read the API")
+			return errors.New("unexpected Get")
+		},
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			t.Error("the event mapper must not read the API")
+			return errors.New("unexpected List")
+		},
+	})
+	content := &snapshotv1alpha1.PodSnapshotContent{Spec: snapshotv1alpha1.PodSnapshotContentSpec{
+		PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: pgNamespace, Name: "deleted-member"},
+		PodGroup:       &snapshotv1alpha1.PodGroupMembership{Name: "group", UID: "group-uid", MemberID: "a"},
+	}}
 	ctx := context.Background()
 
 	assert.Equal(t, []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: pgNamespace, Name: "group"}}},
-		r.podSnapshotContentToPodGroupSnapshot(ctx, content("group-a")))
-	assert.Empty(t, r.podSnapshotContentToPodGroupSnapshot(ctx, content("standalone")))
-	assert.Empty(t, r.podSnapshotContentToPodGroupSnapshot(ctx, content("missing")))
+		r.podSnapshotContentToPodGroupSnapshot(ctx, content))
+	content.Spec.PodGroup = nil
+	assert.Empty(t, r.podSnapshotContentToPodGroupSnapshot(ctx, content))
 }
 
 func TestPodGroupSnapshotReconciler_HeldByUnfinishedRestores(t *testing.T) {

@@ -23,7 +23,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -369,10 +368,9 @@ func podGroupSnapshotRequeue(observed podGroupSnapshotObservation, status *snaps
 }
 
 // SetupWithManager watches the group, the PodSnapshots it owns, every
-// PodSnapshotContent, because the agent's Started condition lives on the
-// content, and every PodGroupRestore, which may hold the group's finalizer: a
-// content maps to its PodSnapshot, and from there to the group that controls
-// it, and a restore maps to the group it restores.
+// PodSnapshotContent and every PodGroupRestore. The agent reports Started on
+// the content, whose immutable membership names its group. A restore names
+// the group it restores and may hold the group's finalizer.
 func (r *PodGroupSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.NonCacheReadClient == nil {
 		return errors.New("pod group snapshot reconciler requires a non-cache read client")
@@ -405,29 +403,17 @@ func podGroupRestoreToPodGroupSnapshot(_ context.Context, obj client.Object) []r
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: restore.Namespace, Name: restore.Spec.SnapshotRef.Name}}}
 }
 
-// podSnapshotContentToPodGroupSnapshot maps a PodSnapshotContent to the group
-// that controls its PodSnapshot, if any.
-func (r *PodGroupSnapshotReconciler) podSnapshotContentToPodGroupSnapshot(ctx context.Context, obj client.Object) []reconcile.Request {
-	ref, err := podSnapshotRefFromContentObj(obj)
-	if err != nil {
-		log.FromContext(ctx).Error(err, "Failed to map PodSnapshotContent to PodGroupSnapshot")
+// podSnapshotContentToPodGroupSnapshot maps a content to the group named by
+// its immutable membership.
+func (r *PodGroupSnapshotReconciler) podSnapshotContentToPodGroupSnapshot(_ context.Context, obj client.Object) []reconcile.Request {
+	content, ok := obj.(*snapshotv1alpha1.PodSnapshotContent)
+	if !ok || content.Spec.PodGroup == nil {
 		return nil
 	}
-	if ref.Name == "" {
-		return nil
-	}
-	snap := &snapshotv1alpha1.PodSnapshot{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}, snap); err != nil {
-		if !apierrors.IsNotFound(err) {
-			log.FromContext(ctx).Error(err, "Failed to get PodSnapshot for PodSnapshotContent", "podSnapshot", ref.Name)
-		}
-		return nil
-	}
-	owner := metav1.GetControllerOf(snap)
-	if owner == nil || !isPodGroupSnapshotOwner(owner) {
-		return nil
-	}
-	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: snap.Namespace, Name: owner.Name}}}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{
+		Namespace: content.Spec.PodSnapshotRef.Namespace,
+		Name:      content.Spec.PodGroup.Name,
+	}}}
 }
 
 // isPodGroupSnapshotOwner reports whether an owner reference names a
