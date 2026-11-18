@@ -486,11 +486,17 @@ waiting period on the workload's lifeline.
 ### Group checkpoint
 
 Capture starts once the operator has created a member `PodSnapshot` for every
-Pod in the group, each owned by the group and labeled with its member ID, so that
-the agent receiving the member's `PodSnapshotContent` follows the owner
-reference to the `PodGroupSnapshot` and reads the member's rank, the group's size,
-and the group's UID, which names the session, without any change to the existing
-resources. Each agent
+Pod in the group. Each one is owned by the group and names it in an immutable
+`spec.podGroup`, with the group's name and UID and the member's ID, which the
+`PodSnapshot` controller copies unchanged into the member's
+`PodSnapshotContent`. The agent therefore decides from the content alone whether
+it captures a member: a content without the field is captured on its own, and
+one with it only as that member, never on its own, even when pod groups are off
+in the agent. It validates the membership against the `PodGroupSnapshot`, which
+must exist with that UID, list that member with the content's source Pod, and
+record the content's `PodSnapshot` for it, waiting while the group has not
+recorded it yet, and reads the member's rank, the group's size, and the group's
+UID, which names the session. Each agent
 waits until its member is safe to capture, which the member's settings define
 as for any `PodSnapshot`: `ready-for-snapshot` by default, or the member's own
 `checkpointReadinessProbe`. It then connects to the session and contributes its Pod IP, its Pod
@@ -634,8 +640,8 @@ in its Pod, and restores the processes with CRIU using the group IP map. CRIU
 stops before it resumes the restored tasks, with every socket still in repair
 mode, until every member has restored its sockets at the `sockets-restored`
 barrier. Each agent then lifts its hold, turns keepalive back on for the
-preserved connections that had it, and lets CRIU resume the tasks, which keeps
-the hold short and leaves the Pod network open
+preserved connections, and lets CRIU resume the tasks, which keeps the hold
+short and leaves the Pod network open
 for the connections that libraries create later; this is safe because the
 restored workload stays parked until `restore-complete`, so kernel traffic
 resumes while application traffic does not. Only after that does `nsrestore`
@@ -842,11 +848,10 @@ Neither CRIU's lock nor the agent's hold stops the kernel's TCP timers, so
 retransmission and user timeouts, and keepalive at capture, keep running while a
 peer is dumped or restored, and a long interruption can still break a preserved
 connection ([snapshot#577](https://github.com/ai-dynamo/snapshot/issues/577)).
-At restore, the agent clears `SO_KEEPALIVE` in its copy of the CRIU image on
-each preserved connection that has it, and records which ones, so no keepalive
-probe can abort a preserved connection while a peer is still restoring. It
-turns keepalive back on through `pidfd_getfd` for those connections only, at the
-`sockets-restored` barrier, before the tasks resume. Taking each
+At restore, the agent clears `SO_KEEPALIVE` in its copy of the CRIU image, so no
+keepalive probe can abort a preserved connection while a peer is still
+restoring, and turns it back on through `pidfd_getfd` at the `sockets-restored`
+barrier, before the tasks resume. Taking each
 hold as late and lifting it as early as possible shortens that window but does
 not remove it, which is why qualification measures the whole interruption,
 including staggered dumps, and documents the supported limits. Connections
@@ -1214,8 +1219,8 @@ their own signals, and a member without a template gets the defaults of a
 member's `PodSnapshotContent`, as for any `PodSnapshot`, so every restore uses
 them and a `PodGroupRestore` carries none; settings captured for a source
 container apply to the destination it is mapped to. The controller sets everything else
-on the member's `PodSnapshot`: its name, owner reference, and group labels, and
-its source from the member. The template is therefore a type of its own rather
+on the member's `PodSnapshot`: its name, owner reference, and `spec.podGroup`,
+and its source from the member. The template is therefore a type of its own rather
 than SnapshotJob's `PodSnapshotTemplate`, which also names the target
 containers, and a test fails whenever SNEP-411's settings
 gain a field, so that a new one, such as a hook before capture, reaches groups
@@ -1226,7 +1231,7 @@ remain a compatible addition.
 
 | Resource or contract | Change | Purpose |
 | --- | --- | --- |
-| `PodSnapshot` and `PodSnapshotContent` | No schema change; group-owned children carry an owner reference and a member-ID label, take their settings from the member's template, and cannot be restored on their own, and the agent sets a new `Started` condition on a member's `PodSnapshotContent` before its first irreversible step | The agent reads group parameters from the parent group, each member keeps its own settings, and the operator learns which sources Snapshot changed |
+| `PodSnapshot` and `PodSnapshotContent` | An optional, immutable `spec.podGroup` (`name`, `uid`, `memberID`) names the group a member belongs to, set by the group controller and copied unchanged into the content; group-owned children also carry an owner reference, take their settings from the member's template, and cannot be restored on their own, and the agent sets a new `Started` condition on a member's `PodSnapshotContent` before its first irreversible step | The agent reads group parameters from the parent group, each member keeps its own settings, and the operator learns which sources Snapshot changed |
 | Artifact manifest | Adds an optional `podGroup` section with the capture ID, the member's own ID, and the ordered member table of Pod UIDs, containers, and Pod IPs | Restore admission checks that all members come from one capture and builds the IP map from the artifacts |
 | Restore Pod contract | New scheduling gate `nvidia.com/restore-group`, set by the owner at creation, through `podcontract.BuildGroupTarget`, with the group restore startup probe and the control volume; new annotation `nvidia.com/restore-group-uid: <PodGroupRestore UID>`, written only by the operator, together with the target's single-pair `nvidia.com/restore-container-map`, in the same conditional patch that removes the gate; on a node without the NRI plugin, the destination's own command must be inert, as for a standalone restore | One template for every replica, no node held before the request is complete, an NRI plugin that decides without an API read, the `PodGroupRestore` as the only source of the mapping, and one attempt per Pod, never inherited through a reused name |
 | `restore-complete` file | Adds an `attempt` key holding the `PodGroupRestore` UID next to `pid`, keeping the existing format | Lets a restarted agent prove release for this attempt |
@@ -1503,6 +1508,7 @@ review that settles the open questions in [Appendix A](#a-open-questions).
   group served by vLLM on GB300 twice, with FABRIC memory shared across the
   Pods, and restored it in place three times with identical outputs.
 - 2026-11-18: Aligned with the cuInterpose and agent PRs.
+- 2026-11-18: Group membership in an immutable `spec.podGroup` instead of labels.
 
 ## Alternatives
 
@@ -1649,11 +1655,6 @@ const (
 
 // Control-plane keys, next to the existing ones in constants.go.
 const (
-	// PodGroupLabel holds the PodGroupSnapshot's name, and PodGroupMemberLabel
-	// the member ID, on each PodSnapshot that a PodGroupSnapshot owns.
-	PodGroupLabel       = "nvidia.com/snapshot-podgroup"
-	PodGroupMemberLabel = "nvidia.com/snapshot-podgroup-member"
-
 	// PodGroupProtocolsAnnotation on the agent DaemonSet's Pod template, and so
 	// on every agent Pod created from it, lists the group protocol versions that
 	// the agent supports, comma-separated, for example "v1" or "v1,v2".
@@ -1670,6 +1671,7 @@ const (
 type ObjectIdentity struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	Name string `json:"name"`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
@@ -1681,6 +1683,7 @@ type ObjectIdentity struct {
 type TargetPodReference struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	Name string `json:"name"`
 	// +optional
 	// +kubebuilder:validation:MinLength=1
@@ -1690,12 +1693,28 @@ type TargetPodReference struct {
 
 // ---------------------------------------------------------------- capture
 
+// PodGroupSnapshotMembership names the PodGroupSnapshot, by name and UID, and
+// the member that a PodSnapshot is for. The PodGroupSnapshot controller sets it
+// on each member's PodSnapshot, as spec.podGroup, and the PodSnapshot
+// controller copies it unchanged into the PodSnapshotContent, whose
+// spec.snapshotRef namespace the group lives in. A content with it is captured
+// as that member, never on its own. Both specs are immutable, and so is the
+// field.
+type PodGroupSnapshotMembership struct {
+	ObjectIdentity `json:",inline"`
+	// +kubebuilder:validation:MaxLength=63
+	MemberID string `json:"memberID"`
+}
+
+// PodSnapshotSpec and PodSnapshotContentSpec each gain:
+//
+//	// +optional
+//	PodGroup *PodGroupSnapshotMembership `json:"podGroup,omitempty"`
+
 // PodGroupMemberTemplate holds the settings that a member's PodSnapshot
 // receives, and only those whose meaning in a group is defined. The
-// controller sets the rest: the PodSnapshot's name, owner reference, and group
-// labels, and spec.source from the member.
-// +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-podgroup' in self.metadata.labels)",message="metadata.labels must not set controller-owned label nvidia.com/snapshot-podgroup"
-// +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-podgroup-member' in self.metadata.labels)",message="metadata.labels must not set controller-owned label nvidia.com/snapshot-podgroup-member"
+// controller sets the rest: the PodSnapshot's name, owner reference, and
+// spec.podGroup, and spec.source from the member.
 type PodGroupMemberTemplate struct {
 	// Metadata holds labels and annotations copied to the member's PodSnapshot.
 	// +optional
