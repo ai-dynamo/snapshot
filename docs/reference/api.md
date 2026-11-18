@@ -35,7 +35,7 @@ The namespaced binding for one container's snapshot; consumed by restore.
 | `source.podRef.uid`        | string   | no       | UID of the source pod, so the agent dumps that exact pod and not a same-named recreation.                           |
 | `source.podRef.containers` | []string | yes      | Container(s) to checkpoint. Exactly one in `v1alpha1`; each must be a DNS label.                                    |
 | `containers`               | []ContainerSnapshotConfig | no       | Settings for a checkpointed container, by `name`. At most one entry. See [Container settings](#container-settings). |
-| `podGroup` | PodGroupMembership | no | Coordinated checkpoint membership. Omitted means standalone. See [Pod Group Membership](#pod-group-membership). |
+| `podGroup` | PodGroupSnapshotMembership | no | Coordinated checkpoint membership. Omitted means standalone. See [Pod Group Membership](#pod-group-membership). |
 
 `status`:
 
@@ -60,7 +60,7 @@ when it binds a `PodSnapshot`; callers never create it.
 | `source.nodeName`       | string       | yes      | Node the source pod runs on; selects the node agent that performs the dump.                                                                                                                                      |
 | `storage.storeID`       | string       | no       | Backend-neutral store binding, immutable with the rest of `spec`. When `storage` is present, the ID must be `store-v1-` followed by 64 lowercase hexadecimal characters. Omitted by legacy filesystem producers. |
 | `containers`            | []ContainerSnapshotConfig | no       | The `PodSnapshot`'s [container settings](#container-settings), with defaults filled in. Every restore of this checkpoint uses them, even after the `PodSnapshot` or `SnapshotJob` changes or is gone.            |
-| `podGroup` | PodGroupMembership | no | Coordinated checkpoint membership. Omitted means standalone. See [Pod Group Membership](#pod-group-membership). |
+| `podGroup` | PodGroupSnapshotMembership | no | Coordinated checkpoint membership. Omitted means standalone. See [Pod Group Membership](#pod-group-membership). |
 
 `status`:
 
@@ -170,11 +170,11 @@ explains. Its failures name the steps
 
 ### Pod Group Membership
 
-`PodGroupMembership` identifies one member of a coordinated checkpoint:
+`PodGroupSnapshotMembership` identifies one member of a coordinated checkpoint:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | string | yes | Name of the `PodGroupSnapshot`, at most 63 characters. |
+| `name` | string | yes | Name of the `PodGroupSnapshot`, a valid object name of at most 253 characters. |
 | `uid` | string | yes | UID of the group, 1 to 128 characters. |
 | `memberID` | string | yes | Member ID in the group, a DNS label of at most 63 characters. |
 
