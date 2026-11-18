@@ -18,7 +18,7 @@ import (
 	snapshotv1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
-func TestPodGroupMembershipAdmission(t *testing.T) {
+func TestPodGroupSnapshotMembershipAdmission(t *testing.T) {
 	cl := startPodGroupEnv(t)
 	valid := func() map[string]any {
 		return map[string]any{"name": "group.example", "uid": "group-uid", "memberID": "worker-0"}
@@ -46,14 +46,18 @@ func TestPodGroupMembershipAdmission(t *testing.T) {
 			}{
 				{"valid", func(map[string]any) {}, ""},
 				{"maximum-lengths", func(m map[string]any) {
-					m["name"] = strings.Repeat("a", 63)
+					m["name"] = strings.Repeat("a.", 126) + "a"
 					m["uid"] = strings.Repeat("u", 128)
 					m["memberID"] = strings.Repeat("m", 63)
 				}, ""},
 				{"missing-name", func(m map[string]any) { delete(m, "name") }, "podGroup.name"},
 				{"empty-name", func(m map[string]any) { m["name"] = "" }, "podGroup.name"},
 				{"invalid-name", func(m map[string]any) { m["name"] = "Group" }, "podGroup.name"},
-				{"long-name", func(m map[string]any) { m["name"] = strings.Repeat("a", 64) }, "podGroup.name"},
+				{"slash-name", func(m map[string]any) { m["name"] = "bad/name" }, "podGroup.name"},
+				{"percent-name", func(m map[string]any) { m["name"] = "bad%name" }, "podGroup.name"},
+				{"dot-name", func(m map[string]any) { m["name"] = "." }, "podGroup.name"},
+				{"double-dot-name", func(m map[string]any) { m["name"] = ".." }, "podGroup.name"},
+				{"long-name", func(m map[string]any) { m["name"] = strings.Repeat("a.", 126) + "aa" }, "podGroup.name"},
 				{"missing-uid", func(m map[string]any) { delete(m, "uid") }, "podGroup.uid"},
 				{"empty-uid", func(m map[string]any) { m["uid"] = "" }, "podGroup.uid"},
 				{"long-uid", func(m map[string]any) { m["uid"] = strings.Repeat("u", 129) }, "podGroup.uid"},
