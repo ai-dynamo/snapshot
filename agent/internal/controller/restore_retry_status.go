@@ -5,6 +5,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"strings"
 	"time"
@@ -103,8 +104,9 @@ func (w *NodeController) writeRetryStatus(ctx context.Context, key retryStatusKe
 			return err
 		}
 	}
+	digest := retryStatusDigest(value)
 	written, wasWritten := w.retryStatusWritten.Load(key.uid)
-	if (wasWritten && written.(string) == value) || (!wasWritten && value == "") {
+	if (wasWritten && written.([sha256.Size]byte) == digest) || (!wasWritten && value == "") {
 		return nil
 	}
 	configuration := corev1apply.Pod(key.name, key.namespace).WithUID(key.uid)
@@ -121,6 +123,12 @@ func (w *NodeController) writeRetryStatus(ctx context.Context, key retryStatusKe
 	if err != nil {
 		return err
 	}
-	w.retryStatusWritten.Store(key.uid, value)
+	w.retryStatusWritten.Store(key.uid, digest)
 	return nil
+}
+
+// retryStatusDigest is what retryStatusWritten keeps of a value: enough to
+// tell whether a write would change it, without a second copy of every entry.
+func retryStatusDigest(value string) [sha256.Size]byte {
+	return sha256.Sum256([]byte(value))
 }

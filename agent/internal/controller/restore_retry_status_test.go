@@ -115,6 +115,10 @@ func TestWriteRetryStatusSkipsAValueAlreadyWritten(t *testing.T) {
 	putAttempts(w, pod.UID, "engine-0", podcontract.ContainerRetryStatus{Attempt: 1, RetryLimit: 2, ContainerID: "engine-0-id", PodUID: pod.UID})
 	w.queueRetryStatus(pod)
 	writeQueuedRetryStatus(w)
+	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	written, _ := w.retryStatusWritten.Load(pod.UID)
+	assert.Equal(t, retryStatusDigest(live.Annotations[podcontract.RestoreRetryStatusAnnotation]), written)
 
 	w.queueRetryStatus(pod)
 	writeQueuedRetryStatus(w)
@@ -246,7 +250,7 @@ func TestForgetRestorePodForgetsItsAttempts(t *testing.T) {
 	op := w.newRestoreOperation(pod, retryStatusPlan(), "engine-0", "engine-0-id", w.nowFn())
 	_, _, err := op.loadAttempts()
 	require.NoError(t, err)
-	w.retryStatusWritten.Store(pod.UID, "written")
+	w.retryStatusWritten.Store(pod.UID, retryStatusDigest("written"))
 
 	w.forgetRestorePod(pod)
 
