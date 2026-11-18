@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -119,20 +120,21 @@ type VisibleGPULister func() (VisibleGPUs, error)
 
 // ListVisibleGPUs returns a lister for the container whose host PID is pid. On
 // its first call it reads the container's cards from the driver's procfs, or,
-// when that cannot answer exactly (MIG, no device cgroup rules, or a card the
-// driver does not name), runs nvidia-smi -L inside the container's mount and
-// PID namespaces and sorts its cards by the bus IDs in the host's driver
-// procfs. Every later call gets the same answer.
+// when that cannot answer exactly (MIG, or no device cgroup rules), runs
+// nvidia-smi -L inside the container's mount and PID namespaces and sorts its
+// cards by the bus IDs in the host's driver procfs. When procfs lists the
+// cards but does not name one of them, nvidia-smi -L names it; see
+// nameUnnamedGPUs. Every later call gets the same answer.
 // nvidia-smi spends most of its time initializing NVML, 0.1 to 0.2 s on an idle
 // eight-GPU node and seconds while other processes start CUDA, so a capture or
 // restore lists once for both its MIG check and GPU discovery.
 //
-// The model comes from the same source as the UUIDs, and the driver version
-// from the kernel module's version file: nothing else on the restore path
-// gets to look at the source node's GPUs, so what is not read here cannot be
-// compared later. nvidia-smi runs only against the module version it was
-// built for, so that file holds the version nvidia-smi would report, and
-// every container on the node shares it.
+// The model comes from the same source as the UUIDs, except for a card procfs
+// does not name, and the driver version from the kernel module's version
+// file: nothing else on the restore path gets to look at the source node's
+// GPUs, so what is not read here cannot be compared later. nvidia-smi runs
+// only against the module version it was built for, so that file holds the
+// version nvidia-smi would report, and every container on the node shares it.
 //
 // Under DRA this is the only path that reports GPUs at all, because the
 // kubelet publishes no nvidia.com/gpu devices when the NVIDIA DRA driver
@@ -140,6 +142,7 @@ type VisibleGPULister func() (VisibleGPUs, error)
 func ListVisibleGPUs(ctx context.Context, hostProcPath string, pid int, spec *specs.Spec) VisibleGPULister {
 	return sync.OnceValues(func() (VisibleGPUs, error) {
 		if visible, ok := listProcfsGPUs(hostProcPath, pid, spec); ok {
+			nameUnnamedGPUs(ctx, hostProcPath, pid, visible.GPUs.Devices)
 			return visible, nil
 		}
 		ctx, cancel := context.WithTimeout(ctx, nvidiaSMITimeout)
@@ -165,11 +168,10 @@ func ListVisibleGPUs(ctx context.Context, hostProcPath string, pid int, spec *sp
 // nvidia-smi -L lists them in. It avoids NVML, which brings up every GPU it can
 // open and takes seconds when other processes on the node, such as a GMS
 // sidecar, start CUDA at the same time. It reports !ok whenever it cannot
-// answer exactly: when the container's spec has no device cgroup rules, when
-// the container has MIG capability nodes, because procfs does not list
-// slices, and when the driver names one of its cards "Unknown" or not at all,
-// as the 580 driver does for the GB10 in DGX Spark: the model recorded on a
-// checkpoint is the one nvidia-smi reports.
+// answer exactly: when the container's spec has no device cgroup rules, and
+// when the container has MIG capability nodes, because procfs does not list
+// slices. Each card's model is the one procfs writes, which can be "Unknown"
+// or nothing; ListVisibleGPUs asks nvidia-smi for those.
 func listProcfsGPUs(hostProcPath string, pid int, spec *specs.Spec) (VisibleGPUs, bool) {
 	if spec == nil || spec.Linux == nil || spec.Linux.Resources == nil || len(spec.Linux.Resources.Devices) == 0 {
 		return VisibleGPUs{}, false
@@ -205,13 +207,9 @@ func listProcfsGPUs(hostProcPath string, pid int, spec *specs.Spec) (VisibleGPUs
 		if err != nil || !deviceRulesAllowReadWrite(rules, nvidiaMajor, number) {
 			continue
 		}
-		model := fields["Model"]
-		if model == "" || strings.EqualFold(model, "Unknown") {
-			return VisibleGPUs{}, false
-		}
 		busID := strings.ToLower(entry.Name())
 		busIDs = append(busIDs, busID)
-		devices[busID] = compat.GPUDevice{UUID: uuid, ProductName: model}
+		devices[busID] = compat.GPUDevice{UUID: uuid, ProductName: fields["Model"]}
 	}
 	if len(busIDs) == 0 {
 		return VisibleGPUs{}, false
@@ -223,6 +221,47 @@ func listProcfsGPUs(hostProcPath string, pid int, spec *specs.Spec) (VisibleGPUs
 	}
 	visible.GPUs.DriverVersion = readDriverVersion(hostProcPath)
 	return visible, true
+}
+
+// nameUnnamedGPUs gives each card the driver's procfs does not name the model
+// nvidia-smi -L reports for its UUID. The 580 driver writes "Model: Unknown"
+// for the GB10 in DGX Spark, while nvidia-smi on the same host reports
+// "NVIDIA GB10", the name a checkpoint records. procfs has already listed the
+// cards, their order and the driver version, so nvidia-smi adds names and
+// nothing else, and only on nodes where procfs leaves a card unnamed. A card
+// nvidia-smi does not name keeps what procfs wrote, and so does every card
+// when nvidia-smi cannot run in the container: discovery must not start to
+// fail where procfs answered before. The compatibility checks treat "Unknown"
+// as no model.
+func nameUnnamedGPUs(ctx context.Context, hostProcPath string, pid int, devices []compat.GPUDevice) {
+	if !slices.ContainsFunc(devices, unnamedGPU) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, nvidiaSMITimeout)
+	defer cancel()
+
+	output, err := nsenterNvidiaSMI(ctx, hostProcPath, pid, "-L")
+	if err != nil {
+		logr.FromContextOrDiscard(ctx).Info(
+			"Cannot ask nvidia-smi for the GPU models the driver's procfs does not name; keeping the procfs names",
+			"pid", pid, "error", err.Error())
+		return
+	}
+	names := map[string]string{}
+	for _, device := range parseNvidiaSmiList(string(output)).GPUs.Devices {
+		names[device.UUID] = device.ProductName
+	}
+	for i := range devices {
+		if name := names[devices[i].UUID]; unnamedGPU(devices[i]) && name != "" {
+			devices[i].ProductName = name
+		}
+	}
+}
+
+// unnamedGPU reports a card whose procfs model is empty or "Unknown".
+func unnamedGPU(device compat.GPUDevice) bool {
+	model := strings.TrimSpace(device.ProductName)
+	return model == "" || strings.EqualFold(model, "Unknown")
 }
 
 // sortByHostBusID puts cards in PCI bus order using the bus IDs in the host's

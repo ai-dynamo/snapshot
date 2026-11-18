@@ -155,9 +155,11 @@ commit-level history for each release is on its
   checkpoints taken after the upgrade get it; take older ones again.
 - `PodSnapshotContent.status.source` records the GPU model nvidia-smi reports
   on nodes whose driver procfs names the GPU `Unknown`, such as DGX Spark (GB10)
-  with driver 580 (#921), instead of `Unknown`. The `gpu-model` restore check
-  compares that name, so a checkpoint taken on such a node before the upgrade
-  does not restore onto one after it; take it again.
+  with driver 580 (#921). It keeps `Unknown` when nvidia-smi in the container
+  cannot name the GPU. The `gpu-model` restore check treats `Unknown` on either
+  side as no model, as it does an empty name: checkpoints that recorded it
+  restore onto the same GPUs, and the check never refuses it against another
+  model.
 
 ### Deprecated
 
