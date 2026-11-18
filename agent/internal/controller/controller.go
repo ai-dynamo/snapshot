@@ -1209,7 +1209,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 
 	attemptCtx, endAttempt := op.watchContainer(restoreCtx, record)
 	restored, err := op.executeRestore(attemptCtx)
-	stopped := endAttempt()
+	containerStopped := endAttempt()
 	if err != nil {
 		var incompatible *compat.IncompatibleError
 		if errors.As(err, &incompatible) {
@@ -1223,7 +1223,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 
 		var cleanupErr *executor.RestoreCleanupError
 		if !errors.As(err, &cleanupErr) {
-			return op.attemptFailed(ctx, restoreCtx, record, err, stopped)
+			return op.attemptFailed(ctx, restoreCtx, record, err, containerStopped)
 		}
 		logWithStep(op.log, err).Error(cleanupErr, "Restore completed with cleanup errors")
 		emitPodEvent(ctx, w.clientset, op.log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreCleanupFailed", cleanupErr.Error())
