@@ -1094,10 +1094,10 @@ func TestSnapshotReconciler_CascadeDeleteRequeuesUntilContentGone(t *testing.T) 
 func TestSnapshotReconcilerBuildContentCopiesPodGroup(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
-		membership *snapshotv1alpha1.PodGroupMembership
+		membership *snapshotv1alpha1.PodGroupSnapshotMembership
 	}{
 		{name: "standalone"},
-		{name: "member", membership: &snapshotv1alpha1.PodGroupMembership{Name: "group", UID: "group-uid", MemberID: "worker-0"}},
+		{name: "member", membership: &snapshotv1alpha1.PodGroupSnapshotMembership{ObjectIdentity: snapshotv1alpha1.ObjectIdentity{Name: "group", UID: "group-uid"}, MemberID: "worker-0"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			snap := makeSnapshotForReconcile()

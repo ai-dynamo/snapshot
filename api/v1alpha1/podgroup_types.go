@@ -84,6 +84,7 @@ type ObjectIdentity struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	Name string `json:"name"`
 
 	// UID of the object.
@@ -94,26 +95,16 @@ type ObjectIdentity struct {
 	UID types.UID `json:"uid"`
 }
 
-// PodGroupMembership identifies one member of a coordinated checkpoint. The
-// PodGroupSnapshot controller sets it on the member's PodSnapshot, and the
-// PodSnapshot controller copies it unchanged into the PodSnapshotContent.
+// PodGroupSnapshotMembership identifies one member of a coordinated checkpoint.
+// Its name and UID identify the PodGroupSnapshot. The PodGroupSnapshot
+// controller sets it on the member's PodSnapshot, and the PodSnapshot
+// controller copies it unchanged into the PodSnapshotContent.
 // A content with this membership is checkpointed with its group, never alone.
 // The group is in the PodSnapshot's namespace, or spec.snapshotRef.namespace
 // on a cluster-scoped PodSnapshotContent.
-type PodGroupMembership struct {
-	// Name of the PodGroupSnapshot.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
-	Name string `json:"name"`
-
-	// UID of the PodGroupSnapshot, which identifies the checkpoint attempt.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Type=string
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=128
-	UID types.UID `json:"uid"`
+type PodGroupSnapshotMembership struct {
+	// ObjectIdentity names the PodGroupSnapshot.
+	ObjectIdentity `json:",inline"`
 
 	// MemberID identifies the member in the PodGroupSnapshot's spec.members.
 	// Its rank is that member's position in the list.
