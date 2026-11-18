@@ -67,7 +67,7 @@ For the experiment setup, the per stage breakdown, and the full results, see [Pe
   restart or a move to another node.
 
 Snapshot currently focuses on inference cold-start; further use cases are on the
-roadmap.
+[roadmap](docs/roadmap.md).
 
 ## Who It Is For
 
@@ -158,7 +158,7 @@ one or eight GPUs, make the workload snapshot-ready, checkpoint it, and restore 
 Current limitations:
 
 - Linux nodes on x86_64 or arm64.
-- Workloads, including multi-GPU workloads, must run on a single node. Multi-node is on the roadmap.
+- Workloads, including multi-GPU workloads, must run on a single node. Multi-node is on the [roadmap](docs/roadmap.md).
 - vGPU is not supported.
 - Runs only on NVIDIA GPUs supported by the required CUDA driver.
 
@@ -178,7 +178,7 @@ Current limitations:
 
 The full documentation set lives in [`docs/`](docs/README.md), in these sections:
 
-- [Overview](docs/README.md#overview) - What Snapshot is, core concepts, architecture, performance, and limitations.
+- [Overview](docs/README.md#overview) - What Snapshot is, core concepts, architecture, performance, limitations, and the [roadmap](docs/roadmap.md).
 - [Get Started](docs/README.md#get-started) - Prerequisites, installation, and a first checkpoint and restore.
 - [Using Snapshot](docs/README.md#using-snapshot) - The checkpoint and restore flow for each inference framework.
 - [Operate](docs/README.md#operate) - Configure and tune storage, and upgrade Snapshot.
