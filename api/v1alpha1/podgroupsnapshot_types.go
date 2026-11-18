@@ -67,16 +67,14 @@ type PodGroupSnapshotMember struct {
 // restore of the member uses them.
 //
 // The controller owns everything else on that PodSnapshot: its name, owner
-// reference and group labels, and spec.source, which it takes from the member.
+// reference, spec.podGroup, and spec.source, which it takes from the member.
 // This is a type of its own rather than SnapshotJob's PodSnapshotTemplate
 // because a member's source already names its containers.
-// +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-podgroup' in self.metadata.labels)",message="metadata.labels must not set controller-owned label nvidia.com/snapshot-podgroup"
-// +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-podgroup-member' in self.metadata.labels)",message="metadata.labels must not set controller-owned label nvidia.com/snapshot-podgroup-member"
 // +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-job' in self.metadata.labels)",message="metadata.labels must not set controller-owned label nvidia.com/snapshot-job"
 // +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-job-uid' in self.metadata.labels)",message="metadata.labels must not set controller-owned label nvidia.com/snapshot-job-uid"
 type PodGroupMemberTemplate struct {
 	// Metadata holds labels and annotations copied to the member's
-	// PodSnapshot. The group's own labels are reserved for the controller.
+	// PodSnapshot. SnapshotJob ownership labels are reserved for its controller.
 	// +optional
 	Metadata *PodSnapshotTemplateMetadata `json:"metadata,omitempty"`
 
@@ -193,7 +191,7 @@ type PodGroupSnapshotStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=podgroupsnap
-// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="metadata.name must be no more than 63 characters because member PodSnapshots carry it as a label value"
+// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="metadata.name must be no more than 63 characters to bound member PodSnapshot names"
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.members) || self.status.members.all(m, m.rank < size(self.spec.members) && self.spec.members[m.rank].id == m.id)",message="status.members rank must be the member's position in spec.members"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.members) || (has(self.status) && has(self.status.members) && oldSelf.status.members.all(o, self.status.members.exists(n, n.id == o.id)))",message="status.members entries cannot be removed"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status",description="Ready condition"
