@@ -133,11 +133,11 @@ func restoreFailureOf(err error) *executor.RestoreFailure {
 // attemptFailed chooses what follows a failed attempt. A retry in the same
 // container is saved in the record for a later pass to start; anything else
 // ends the restore, including a failure that changed the container. A stop
-// changed it, whether it was reported during the attempt, as stopped says, or
-// the runtime shows it now.
-func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, record *podcontract.ContainerRetryStatus, err error, stopped bool) error {
+// changed it, whether it was reported during the attempt, as containerStopped
+// says, or the runtime shows it now.
+func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, record *podcontract.ContainerRetryStatus, err error, containerStopped bool) error {
 	failure := restoreFailureOf(err)
-	if stopped || (!failure.ContainerChanged && record.RetryLimit > 0 && !op.containerRunning(ctx)) {
+	if containerStopped || (!failure.ContainerChanged && record.RetryLimit > 0 && !op.containerRunning(ctx)) {
 		failure = stoppedDuringAttempt(failure)
 		err = failure
 	}
@@ -196,9 +196,9 @@ func (op *restoreOperation) watchContainer(ctx context.Context, record *podcontr
 	op.controller.runningAttempts.Store(op.containerID, cancel)
 	return attemptCtx, func() bool {
 		op.controller.runningAttempts.Delete(op.containerID)
-		stopped := errors.Is(context.Cause(attemptCtx), errContainerStopped)
+		containerStopped := errors.Is(context.Cause(attemptCtx), errContainerStopped)
 		cancel(nil)
-		return stopped
+		return containerStopped
 	}
 }
 
