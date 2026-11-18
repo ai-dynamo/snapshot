@@ -70,14 +70,16 @@ func newCaptureGroup() *captureGroup {
 		})
 		snap := &snapshotv1alpha1.PodSnapshot{ObjectMeta: metav1.ObjectMeta{
 			Name: "pair-" + id, Namespace: "inference", UID: types.UID("pair-" + id + "-uid"),
-			Labels: map[string]string{snapshotv1alpha1.PodGroupLabel: "pair", snapshotv1alpha1.PodGroupMemberLabel: id},
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(g.group,
 				snapshotv1alpha1.GroupVersion.WithKind(snapshotv1alpha1.KindPodGroupSnapshot))},
 		}}
+		snap.Spec.PodGroup = &snapshotv1alpha1.PodGroupMembership{Name: g.group.Name, UID: g.group.UID, MemberID: id}
+		g.group.Status.Members[rank].PodSnapshot = &snapshotv1alpha1.ObjectIdentity{Name: snap.Name, UID: snap.UID}
 		g.snaps = append(g.snaps, snap)
 		content := makeWorkOrder("content-"+id, "node-a", id)
 		content.Spec.PodSnapshotRef = snapshotv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name, UID: snap.UID}
 		content.Spec.Source.PodRef = snapshotv1alpha1.PodReference{Name: podName, UID: podUID, Containers: []string{"main"}}
+		content.Spec.PodGroup = snap.Spec.PodGroup.DeepCopy()
 		g.contents = append(g.contents, content)
 		pod := makeSourcePod()
 		pod.Name, pod.UID = podName, podUID
@@ -672,75 +674,156 @@ func TestGroupCheckpointIsBoundByTheGroupsDeadlineOnly(t *testing.T) {
 }
 
 func TestCaptureMemberOf(t *testing.T) {
-	t.Run("a member", func(t *testing.T) {
+	t.Run("a registered member", func(t *testing.T) {
 		g := newCaptureGroup()
-		w, _ := groupCaptureController(t, nil, g, nil, nil)
-		member, err := w.captureMemberOf(within(t), g.contents[1])
+		w, _ := groupCaptureController(t, nil, g, nil, &interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, readsSnapshot := obj.(*snapshotv1alpha1.PodSnapshot); readsSnapshot {
+					t.Fatal("recognition read a PodSnapshot")
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		})
+		member, registered, err := w.captureMemberOf(within(t), g.contents[1])
 		require.NoError(t, err)
+		require.True(t, registered)
 		require.NotNil(t, member)
 		assert.Equal(t, captureGroupUID, member.attempt)
 		assert.Equal(t, "worker", member.id)
 		assert.Equal(t, client.ObjectKey{Namespace: "inference", Name: "pair"}, member.group)
 		assert.WithinDuration(t, g.group.CreationTimestamp.Add(600*time.Second), member.deadline, time.Second)
-
 		node, err := w.captureSessionNode(member)(within(t))
 		require.NoError(t, err)
 		assert.Equal(t, "node-a", node)
 	})
 
-	t.Run("a content captured on its own", func(t *testing.T) {
+	t.Run("standalone recognition makes no API read", func(t *testing.T) {
 		g := newCaptureGroup()
-		g.snaps[0].Labels, g.snaps[0].OwnerReferences = nil, nil
-		w, _ := groupCaptureController(t, nil, g, nil, nil)
-		member, err := w.captureMemberOf(within(t), g.contents[0])
+		g.contents[0].Spec.PodGroup = nil
+		var reads int
+		w, _ := groupCaptureController(t, nil, g, nil, &interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				reads++
+				return c.Get(ctx, key, obj, opts...)
+			},
+		})
+		member, registered, err := w.captureMemberOf(within(t), g.contents[0])
 		require.NoError(t, err)
+		assert.True(t, registered)
 		assert.Nil(t, member)
+		assert.Zero(t, reads)
 	})
 
-	t.Run("pod groups off", func(t *testing.T) {
-		g := newCaptureGroup()
-		w, _ := groupCaptureController(t, nil, g, nil, nil)
-		w.podGroups = nil
-		member, err := w.captureMemberOf(within(t), g.contents[0])
-		require.NoError(t, err)
-		assert.Nil(t, member, "without pod groups every content is captured on its own")
-	})
+	for _, metadata := range []string{"removed", "changed"} {
+		t.Run("child metadata "+metadata+" does not affect recognition", func(t *testing.T) {
+			g := newCaptureGroup()
+			g.snaps[0].Labels, g.snaps[0].OwnerReferences = nil, nil
+			if metadata == "changed" {
+				g.snaps[0].Labels = map[string]string{
+					"nvidia.com/snapshot-podgroup":        "another",
+					"nvidia.com/snapshot-podgroup-member": "stranger",
+				}
+				g.snaps[0].OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: snapshotv1alpha1.GroupVersion.String(), Kind: snapshotv1alpha1.KindPodGroupSnapshot,
+					Name: "another", UID: "another-uid",
+				}}
+			}
+			w, _ := groupCaptureController(t, nil, g, nil, nil)
+			member, registered, err := w.captureMemberOf(within(t), g.contents[0])
+			require.NoError(t, err)
+			require.True(t, registered)
+			require.NotNil(t, member)
+			assert.Equal(t, captureGroupUID, member.attempt)
+			assert.Equal(t, captureMemberIDs[0], member.id)
+		})
+	}
 
 	for name, tc := range map[string]struct {
 		modify func(*captureGroup)
+		off    bool
 		want   string
 	}{
-		"no controller": {
-			modify: func(g *captureGroup) { g.snaps[0].OwnerReferences = nil },
-			want:   "does not control it",
-		},
-		"another group's UID": {
-			modify: func(g *captureGroup) { g.snaps[0].OwnerReferences[0].UID = "another-uid" },
-			want:   "not another-uid",
-		},
-		"no such member": {
-			modify: func(g *captureGroup) { g.snaps[0].Labels[snapshotv1alpha1.PodGroupMemberLabel] = "stranger" },
-			want:   `no member "stranger"`,
-		},
-		"another source Pod": {
-			modify: func(g *captureGroup) { g.group.Spec.Members[0].Source.PodRef.Name = "elsewhere" },
-			want:   "is Pod elsewhere, not worker-0",
-		},
+		"pod groups off":                      {off: true, want: "pod groups are off"},
+		"missing group":                       {modify: func(g *captureGroup) { g.group.Name = "elsewhere" }, want: "is gone"},
+		"replaced group":                      {modify: func(g *captureGroup) { g.group.UID = "replacement" }, want: "has UID replacement"},
+		"unknown member":                      {modify: func(g *captureGroup) { g.contents[0].Spec.PodGroup.MemberID = "stranger" }, want: "no member"},
+		"another source Pod":                  {modify: func(g *captureGroup) { g.group.Spec.Members[0].Source.PodRef.Name = "elsewhere" }, want: "source Pod"},
+		"another source UID":                  {modify: func(g *captureGroup) { g.contents[0].Spec.Source.PodRef.UID = "replacement" }, want: "source Pod"},
+		"another pinned snapshot":             {modify: func(g *captureGroup) { g.group.Status.Members[0].PodSnapshot.Name = "elsewhere" }, want: "pins PodSnapshot"},
+		"same snapshot name with another UID": {modify: func(g *captureGroup) { g.group.Status.Members[0].PodSnapshot.UID = "replacement" }, want: "pins PodSnapshot"},
+		"missing snapshot UID":                {modify: func(g *captureGroup) { g.contents[0].Spec.PodSnapshotRef.UID = "" }, want: "no PodSnapshot UID"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			g := newCaptureGroup()
-			tc.modify(g)
+			if tc.modify != nil {
+				tc.modify(g)
+			}
 			fc := &fakeCheckpointer{}
 			w, _ := groupCaptureController(t, nil, g, fc.fn, nil)
-
-			_, err := w.captureMemberOf(within(t), g.contents[0])
+			if tc.off {
+				w.podGroups = nil
+			}
+			_, _, err := w.captureMemberOf(within(t), g.contents[0])
 			require.ErrorContains(t, err, tc.want)
 			require.ErrorAs(t, err, new(*invalidMemberError))
-
 			require.NoError(t, w.reconcileCapture(within(t), "content-leader"))
 			assert.False(t, fc.wasCalled())
 			assert.Equal(t, reasonInvalidPodGroupMember,
 				condition(getContent(t, w, "content-leader"), snapshotv1alpha1.PodSnapshotConditionFailed).Reason)
+		})
+	}
+}
+
+func TestCaptureWaitsForItsPinWithoutAnotherObjectEvent(t *testing.T) {
+	g := newCaptureGroup()
+	pin := g.group.Status.Members[0].PodSnapshot
+	g.group.Status.Members[0].PodSnapshot = nil
+	g.pods[0].Status.ContainerStatuses[0].Ready = false
+	w, _ := groupCaptureController(t, nil, g, nil, nil)
+	var delays []time.Duration
+	w.requeueCaptureFn = func(name string, after time.Duration) {
+		delays = append(delays, after)
+		w.captureQueue.Add(name)
+	}
+	require.NoError(t, w.reconcileCapture(within(t), "content-leader"))
+	require.Equal(t, []time.Duration{captureMemberRetryInterval}, delays)
+	assert.NotContains(t, getPod(t, w, "inference", "worker-0").Labels, snapshotv1alpha1.CaptureEligibleLabel)
+
+	stored := &snapshotv1alpha1.PodGroupSnapshot{}
+	require.NoError(t, w.client.Get(t.Context(), client.ObjectKeyFromObject(g.group), stored))
+	stored.Status.Members[0].PodSnapshot = pin
+	require.NoError(t, w.client.Update(t.Context(), stored))
+
+	require.Eventually(t, func() bool { return w.captureQueue.Len() > 0 }, time.Second, time.Millisecond)
+	name, shutdown := w.captureQueue.Get()
+	require.False(t, shutdown)
+	require.Equal(t, "content-leader", name)
+	require.NoError(t, w.reconcileCapture(within(t), name))
+	w.captureQueue.Done(name)
+	assert.Equal(t, "true", getPod(t, w, "inference", "worker-0").Labels[snapshotv1alpha1.CaptureEligibleLabel],
+		"the scheduled retry advances to readiness without a Pod or content event")
+}
+
+func TestCapturePinWaitIsBoundByDeadline(t *testing.T) {
+	for _, remaining := range []time.Duration{250 * time.Millisecond, 0} {
+		t.Run(remaining.String(), func(t *testing.T) {
+			g := newCaptureGroup()
+			g.group.CreationTimestamp = metav1.NewTime(time.Now().Truncate(time.Second))
+			g.group.Status.Members[0].PodSnapshot = nil
+			w, _ := groupCaptureController(t, nil, g, nil, nil)
+			deadline := g.group.CreationTimestamp.Add(time.Duration(g.group.Spec.DeadlineSeconds) * time.Second)
+			w.nowFn = func() time.Time { return deadline.Add(-remaining) }
+			var delays []time.Duration
+			w.requeueCaptureFn = func(_ string, after time.Duration) { delays = append(delays, after) }
+			require.NoError(t, w.reconcileCapture(within(t), "content-leader"))
+			assert.NotContains(t, getPod(t, w, "inference", "worker-0").Labels, snapshotv1alpha1.CaptureEligibleLabel)
+			if remaining > 0 {
+				assert.Equal(t, []time.Duration{remaining}, delays)
+			} else {
+				assert.Empty(t, delays)
+				assert.Equal(t, session.ReasonDeadlineExceeded,
+					condition(getContent(t, w, "content-leader"), snapshotv1alpha1.PodSnapshotConditionFailed).Reason)
+			}
 		})
 	}
 }
@@ -843,7 +926,7 @@ func TestCaptureDeleteAfterCacheEviction(t *testing.T) {
 				})
 			}
 			w, _ := groupCaptureController(t, nil, g, nil, nil)
-			member, err := w.captureMemberOf(t.Context(), g.contents[0])
+			member, _, err := w.captureMemberOf(t.Context(), g.contents[0])
 			require.NoError(t, err)
 			require.NotNil(t, member)
 			content := mustUnstructured(t, g.contents[0])

@@ -63,7 +63,7 @@ The reason is on the member's `PodSnapshot` and in the group's status:
 
 | Reason | Cause | What to do |
 | --- | --- | --- |
-| `InvalidPodGroupMember` | The `PodSnapshot` carries the group's labels, but the group does not control it or does not list the member | Do not create or label member `PodSnapshot`s yourself. The `PodGroupSnapshot` creates them |
+| `InvalidPodGroupMember` | The content's `podGroup` membership is invalid, or the agent's group support is disabled | Let `PodGroupSnapshot` create member snapshots and enable pod groups on their agents. See [Pod Group Membership](../reference/api.md#pod-group-membership) |
 | `CoordinatorUnreachable` | The node agent could not join the group's attempt before its deadline. The agent's log shows what it waited for | Check that the agent Pod on the rank-0 member's node is Ready |
 | `CheckpointInterrupted` | The node agent restarted after the member started, so the source was terminated | Take a new `PodGroupSnapshot` |
 

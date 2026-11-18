@@ -44,8 +44,7 @@ type cachedCaptureMember struct {
 	member *captureMember
 }
 
-// invalidMemberError reports a PodSnapshotContent whose PodSnapshot names a
-// pod group it is not a member of.
+// invalidMemberError reports a PodSnapshotContent with invalid group membership.
 type invalidMemberError struct{ message string }
 
 func (e *invalidMemberError) Error() string { return e.message }
@@ -54,75 +53,66 @@ func invalidMember(format string, args ...any) error {
 	return &invalidMemberError{message: fmt.Sprintf(format, args...)}
 }
 
-// captureMemberOf returns content's part in a pod group, or nil for a content
-// captured on its own. A member's PodSnapshot carries the group labels and is
-// controlled by the PodGroupSnapshot they name, whose UID its owner reference
-// records; the member's rank is its position in the group's spec.members.
-// Without pod groups, every content is captured on its own.
-func (w *NodeController) captureMemberOf(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent) (*captureMember, error) {
-	if w.podGroups == nil {
-		return nil, nil
-	}
-	if cached, ok := w.podGroups.captureMembers.Load(content.Name); ok && cached.(cachedCaptureMember).uid == content.UID {
-		return cached.(cachedCaptureMember).member, nil
-	}
-	ref := content.Spec.PodSnapshotRef
-	snap := &snapshotv1alpha1.PodSnapshot{}
-	if err := w.client.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, snap); err != nil {
-		return nil, fmt.Errorf("read PodSnapshot %s/%s: %w", ref.Namespace, ref.Name, err)
-	}
-	if ref.UID != "" && snap.UID != ref.UID {
-		return nil, fmt.Errorf("PodSnapshot %s/%s has UID %s, not %s", ref.Namespace, ref.Name, snap.UID, ref.UID)
-	}
-	var member *captureMember
-	if groupName, grouped := snap.Labels[snapshotv1alpha1.PodGroupLabel]; grouped {
-		var err error
-		if member, err = w.resolveCaptureMember(ctx, content, snap, groupName); err != nil {
-			return nil, err
-		}
-	}
-	w.podGroups.captureMembers.Store(content.Name, cachedCaptureMember{uid: content.UID, member: member})
-	return member, nil
-}
+// captureMemberRetryInterval paces registration checks while the group
+// controller records the child's identity.
+const captureMemberRetryInterval = time.Second
 
-// resolveCaptureMember reads the PodGroupSnapshot that snap's labels name, and
-// checks that it controls snap and names content's source Pod as the member.
-func (w *NodeController) resolveCaptureMember(
-	ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, snap *snapshotv1alpha1.PodSnapshot, groupName string,
-) (*captureMember, error) {
-	id := snap.Labels[snapshotv1alpha1.PodGroupMemberLabel]
-	owner := metav1.GetControllerOf(snap)
-	if owner == nil || owner.Kind != snapshotv1alpha1.KindPodGroupSnapshot ||
-		owner.APIVersion != snapshotv1alpha1.GroupVersion.String() || owner.Name != groupName {
-		return nil, invalidMember("PodSnapshot %s/%s is labeled for PodGroupSnapshot %s, which does not control it",
-			snap.Namespace, snap.Name, groupName)
+// captureMemberOf resolves content's immutable membership. registered is false
+// only while a valid member waits for its status pin; member then carries the
+// deadline that bounds the wait. A nil member with registered true is standalone.
+func (w *NodeController) captureMemberOf(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent) (*captureMember, bool, error) {
+	ref := content.Spec.PodGroup
+	if ref == nil {
+		return nil, true, nil
 	}
-	key := client.ObjectKey{Namespace: snap.Namespace, Name: groupName}
+	if w.podGroups == nil {
+		return nil, false, invalidMember("content %s names a pod group, but pod groups are off", content.Name)
+	}
+	if ref.Name == "" || ref.UID == "" || ref.MemberID == "" {
+		return nil, false, invalidMember("content %s has incomplete pod group membership", content.Name)
+	}
+	snapshot := content.Spec.PodSnapshotRef
+	if snapshot.UID == "" {
+		return nil, false, invalidMember("group member content %s has no PodSnapshot UID", content.Name)
+	}
+	key := client.ObjectKey{Namespace: snapshot.Namespace, Name: ref.Name}
 	podGroup := &snapshotv1alpha1.PodGroupSnapshot{}
 	if err := w.client.Get(ctx, key, podGroup); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, invalidMember("PodGroupSnapshot %s, which controls PodSnapshot %s, is gone", key, snap.Name)
+			return nil, false, invalidMember("PodGroupSnapshot %s of content %s is gone", key, content.Name)
 		}
-		return nil, fmt.Errorf("read PodGroupSnapshot %s: %w", key, err)
+		return nil, false, fmt.Errorf("read PodGroupSnapshot %s: %w", key, err)
 	}
-	if podGroup.UID != owner.UID {
-		return nil, invalidMember("PodGroupSnapshot %s has UID %s, not %s, which controls PodSnapshot %s",
-			key, podGroup.UID, owner.UID, snap.Name)
+	if podGroup.UID != ref.UID {
+		return nil, false, invalidMember("PodGroupSnapshot %s has UID %s, not %s", key, podGroup.UID, ref.UID)
 	}
-	rank := slices.IndexFunc(podGroup.Spec.Members, func(m snapshotv1alpha1.PodGroupSnapshotMember) bool { return m.ID == id })
+	rank := slices.IndexFunc(podGroup.Spec.Members, func(m snapshotv1alpha1.PodGroupSnapshotMember) bool {
+		return m.ID == ref.MemberID
+	})
 	if rank < 0 {
-		return nil, invalidMember("PodGroupSnapshot %s has no member %q", key, id)
+		return nil, false, invalidMember("PodGroupSnapshot %s has no member %q", key, ref.MemberID)
 	}
 	source, captured := podGroup.Spec.Members[rank].Source.PodRef, content.Spec.Source.PodRef
-	if source.Name != captured.Name || (source.UID != "" && captured.UID != "" && source.UID != captured.UID) {
-		return nil, invalidMember("member %q of PodGroupSnapshot %s is Pod %s, not %s", id, key, source.Name, captured.Name)
+	if source.Name != captured.Name || source.UID != captured.UID || !slices.Equal(source.Containers, captured.Containers) {
+		return nil, false, invalidMember("member %q of PodGroupSnapshot %s has source Pod %s (uid %s), not %s (uid %s), or different containers",
+			ref.MemberID, key, source.Name, source.UID, captured.Name, captured.UID)
 	}
-	return &captureMember{
-		group:    key,
-		attempt:  podGroup.UID,
-		id:       id,
+	member := &captureMember{
+		group: key, attempt: ref.UID, id: ref.MemberID,
 		deadline: podGroup.CreationTimestamp.Add(time.Duration(podGroup.Spec.DeadlineSeconds) * time.Second),
-	}, nil
+	}
+	i := slices.IndexFunc(podGroup.Status.Members, func(m snapshotv1alpha1.PodGroupSnapshotMemberStatus) bool {
+		return m.ID == ref.MemberID
+	})
+	if i < 0 || podGroup.Status.Members[i].PodSnapshot == nil {
+		return member, false, nil
+	}
+	pin := podGroup.Status.Members[i].PodSnapshot
+	if pin.Name != snapshot.Name || pin.UID != snapshot.UID {
+		return nil, false, invalidMember("member %q of PodGroupSnapshot %s pins PodSnapshot %s (uid %s), not %s (uid %s)",
+			ref.MemberID, key, pin.Name, pin.UID, snapshot.Name, snapshot.UID)
+	}
+	return member, true, nil
 }
 
 // forgetCaptureMember drops what the agent holds for a content that ended or
@@ -366,7 +356,7 @@ func (w *NodeController) leaveUnstartedMemberSource(ctx context.Context, content
 	if contentStarted(content) {
 		return
 	}
-	member, err := w.captureMemberOf(ctx, content)
+	member, _, err := w.captureMemberOf(ctx, content)
 	if err != nil || member == nil {
 		return
 	}

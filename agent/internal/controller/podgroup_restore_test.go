@@ -999,7 +999,7 @@ func TestRunChecksThatPodGroupRestoresAreReadable(t *testing.T) {
 
 func TestRunWithoutGroupRestoreCRDServesStandaloneCapture(t *testing.T) {
 	g := newCaptureGroup()
-	g.snaps[0].Labels, g.snaps[0].OwnerReferences = nil, nil
+	g.contents[0].Spec.PodGroup = nil
 	w := makeTestController(t, nil)
 	w.client = crfake.NewClientBuilder().WithScheme(contentScheme(t)).
 		WithObjects(g.snaps[0], g.contents[0], g.pods[0]).

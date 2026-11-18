@@ -113,12 +113,21 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	if outcome := w.pendingCaptureOutcome(content); outcome != nil {
 		return w.recordCaptureOutcome(ctx, content, outcome)
 	}
-	member, err := w.captureMemberOf(ctx, content)
+	member, registered, err := w.captureMemberOf(ctx, content)
 	if err != nil {
 		if errors.As(err, new(*invalidMemberError)) {
 			return w.setSnapshotContentFailed(ctx, content, reasonInvalidPodGroupMember, err)
 		}
 		return err
+	}
+
+	if !registered {
+		now := w.nowFn()
+		if !now.Before(member.deadline) {
+			return w.setSnapshotContentFailed(ctx, content, session.ReasonDeadlineExceeded, context.DeadlineExceeded)
+		}
+		w.requeueCaptureFn(name, min(captureMemberRetryInterval, member.deadline.Sub(now)))
+		return nil
 	}
 
 	// The immutable content UID and container own the artifact path. A recreated content object

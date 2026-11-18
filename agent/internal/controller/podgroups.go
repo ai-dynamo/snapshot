@@ -26,8 +26,8 @@ const (
 	// name it, and podcontract.ClassifyRestoreOutcome reads it as not final.
 	reasonGroupPending = "GroupPending"
 
-	// reasonInvalidPodGroupMember fails a PodSnapshotContent whose PodSnapshot
-	// names a pod group it is not a member of.
+	// reasonInvalidPodGroupMember fails a content with invalid membership or
+	// one that requires group support while it is disabled.
 	reasonInvalidPodGroupMember = "InvalidPodGroupMember"
 
 	// reasonCoordinatorUnreachable fails a member that could not join its
