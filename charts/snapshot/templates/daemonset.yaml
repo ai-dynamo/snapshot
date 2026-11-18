@@ -2,6 +2,11 @@
 {{- if hasKey .Values.image.pageBroker "tag" -}}
 {{- fail "image.pageBroker.tag is unsupported: set image.agent.tag to select matching agent and PageBroker images" -}}
 {{- end -}}
+{{- range $key := list "transferBufferCount" "transferChunkBytes" "maxPinnedBytes" -}}
+{{- if hasKey $.Values.pageBroker $key -}}
+{{- fail (printf "pageBroker.%s was removed: set pageBroker.stagingBytesPerGPU, the pinned staging memory per GPU (transferBufferCount x transferChunkBytes before)" $key) -}}
+{{- end -}}
+{{- end -}}
 {{- $socket := include "snapshot.runtimeSocket" . -}}
 {{- $socketDir := $socket | dir -}}
 {{- $storageDir := include "snapshot.runtimeStorageDir" . -}}
@@ -213,12 +218,8 @@ spec:
             {{- end }}
             - --max-concurrent-requests
             - {{ .Values.pageBroker.maxConcurrentRequests | quote }}
-            - --custom-storage-buffer-count
-            - {{ .Values.pageBroker.transferBufferCount | int64 | quote }}
-            - --custom-storage-chunk-bytes
-            - {{ .Values.pageBroker.transferChunkBytes | int64 | quote }}
-            - --custom-storage-max-pinned-bytes
-            - {{ .Values.pageBroker.maxPinnedBytes | int64 | quote }}
+            - --custom-storage-staging-bytes-per-gpu
+            - {{ .Values.pageBroker.stagingBytesPerGPU | int64 | quote }}
             {{- if and .Values.pageBroker.artifactAddressing (eq .Values.storage.type "pvc") }}
             # Enable only with a broker implementing the PVC artifact backend.
             - --storage-config
