@@ -389,15 +389,15 @@ RESTORE = (
         ("m", "C", "A", "every member admitted: the attempt commits", 1),
         ("m", "A", "O", "RestoreStarted condition on the restore Pod, before anything irreversible"),
         ("m", "A", "W", "hold only the preserved connections"),
-        ("m", "A", "N", "nsrestore with the IP map, session socket, progress pipe"),
-        ("s", "N", "CRIU restore, kept peer sockets, group IP remap"),
-        ("m", "N", "A", "progress: processes restored", 1),
-        ("s", "W", "wait for restore-complete: no shared memory, communicator, or peer use"),
-        ("g", "par"),
+        ("m", "A", "N", "nsrestore with the IP map, relay session socket, peer sync socket"),
+        ("s", "N", "CRIU restore, kept peer sockets in repair mode with keepalive off, group IP remap"),
+        ("m", "N", "A", "post-restore: sockets restored, tasks not resumed", 1),
         ("m", "A", "C", "barrier snapshot/sockets-restored"),
         ("m", "C", "A", "every rank restored its sockets", 1),
-        ("m", "A", "W", "lift the hold"),
-        ("e", "and"),
+        ("m", "A", "W", "lift the hold, turn keepalive back on"),
+        ("m", "A", "N", "continue"),
+        ("s", "N", "CRIU resumes the tasks"),
+        ("s", "W", "wait for restore-complete: no shared memory, communicator, or peer use"),
         ("s", "N", "CUDA restore, then unlock; until then a CUDA call blocks"),
         ("m", "N", "L", "run the relay in restore mode"),
         ("m", "N", "R", "run the relays in restore mode"),
@@ -420,7 +420,6 @@ RESTORE = (
         ("x",),
         ("s", "L", "final INSPECT round, compare with the saved records under the handle table, Insert Done"),
         ("m", "R", "N", "relays exit 0", 1),
-        ("x",),
         ("m", "N", "A", "restore succeeded", 1),
         ("m", "A", "W", "write the rendezvous endpoint in coordination/"),
         ("m", "A", "C", "beta: barrier snapshot/resume"),
@@ -567,18 +566,18 @@ def lifecycle():
 
 def phases():
     """Two columns: each step of a group checkpoint and a group restore, with
-    the commit line, and the restore fork where the sockets-restored barrier
-    runs alongside CUDA restore and the cuInterpose rounds."""
+    the commit line, and the bracket in which a restored workload waits."""
     b = []
-    W, w, H40, H56, gap = 790, 330, 40, 56, 16
+    W, w, H40, gap = 790, 330, 40, 16
 
     def commit(x, y):
         b.append(T(x, y, "commit", "tm", 12, anchor="start"))
         b.append(line(x + 52, y, x + w, y, cls="frm", marker=None, dash="5 4", width=1.2))
 
     def column(x, title, steps, y=50):
+        """Draw steps down one column and return where each box ends."""
         b.append(T(x + w / 2, 30, title, "tx", 15, True))
-        prev = None
+        prev, bottoms = None, {}
         for st in steps:
             if st[0] == "COMMIT":
                 commit(x, y + 6)
@@ -588,8 +587,9 @@ def phases():
                 b.append(line(x + w / 2, prev, x + w / 2, y - 2))
             b.extend(box(x, y, w, H40, st[0], st[1]))
             prev = y + H40
+            bottoms[st[1]] = prev
             y += H40 + gap
-        return y, prev
+        return y, bottoms
 
     # Checkpoint: every step in sequence.
     ck_bottom, _ = column(30, "Checkpoint", [
@@ -607,45 +607,27 @@ def phases():
         ("g", "CRIU dump, network locked"),
     ])
 
-    # Restore: sequence, then a fork, then a join.
+    # Restore: every step in sequence. CRIU stops before the restored tasks
+    # resume until every member has restored its sockets.
     x = 390
-    y, prev = column(x, "Restore", [
+    y3, bottoms = column(x, "Restore", [
         ("p", "Admission: all-gather, IP map"),
         ("p", "Barrier: admitted"),
         ("COMMIT",),
         ("g", "Record: RestoreStarted condition"),
         ("g", "Hold flows, CRIU restore"),
+        ("p", "Barrier: sockets-restored"),
+        ("g", "Lift the hold, keepalive on, tasks resume"),
+        ("g", "CUDA restore and unlock"),
+        ("t", "Rounds: inspect, rebuild, verify"),
+        ("g", "Write the rendezvous endpoint"),
+        ("p", "Beta: barrier resume"),
+        ("a", "Beta: CUDA resume, libraries rendezvous"),
+        ("p", "Barrier: release, restore-complete"),
+        ("g", "Workload resumes"),
     ])
-    lx, lw = x, 150                      # left branch: the barrier
-    rx, rw = x + w - 168, 168            # right branch: CUDA, then rounds
-    lcx, rcx = lx + lw / 2, rx + rw / 2
-    b.append(line(lcx, prev, lcx, y - 2))
-    b.append(line(rcx, prev, rcx, y - 2))
-    b.append(T((lcx + rcx) / 2, (prev + y) / 2, "in parallel", "tm", 12))
-    b.extend(box(lx, y, lw, H56, "p", "Sockets-restored", "barrier, lift the hold"))
-    b.extend(box(rx, y, rw, H56, "g", "CUDA restore", "and unlock"))
-    left_bottom = y + H56
-    y2 = y + H56 + gap
-    b.append(line(rcx, y + H56, rcx, y2 - 2))
-    b.extend(box(rx, y2, rw, H56, "t", "Rounds", "inspect, rebuild, verify"))
-    right_bottom = y2 + H56
-    y3 = y2 + H56 + gap + 8
-    b.append(line(lcx, left_bottom, lcx, y3 - 2))
-    b.append(line(rcx, right_bottom, rcx, y3 - 2))
-    wait_top = y - gap                   # bottom of the CRIU restore box
-    prev = None
-    for k, label in (("g", "Write the rendezvous endpoint"),
-                     ("p", "Beta: barrier resume"),
-                     ("a", "Beta: CUDA resume, libraries rendezvous"),
-                     ("p", "Barrier: release, restore-complete"),
-                     ("g", "Workload resumes")):
-        if prev is not None:
-            b.append(line(x + w / 2, prev, x + w / 2, y3 - 2))
-        b.extend(box(x, y3, w, H40, k, label))
-        if label.startswith("Barrier: release"):
-            wait_bottom = y3 + H40
-        prev = y3 + H40
-        y3 += H40 + gap
+    wait_top = bottoms["Hold flows, CRIU restore"]
+    wait_bottom = bottoms["Barrier: release, restore-complete"]
 
     # The workload waits from CRIU restore until restore-complete.
     bx = x + w + 14
@@ -666,8 +648,8 @@ def phases():
         "admitted barrier, commit, the Started record, CUDA prepare (beta), a revalidation round, destructive cuInterpose "
         "rounds, CUDA lock and checkpoint, net-freeze barrier, CRIU dump with its network lock. Restore: admission, admitted "
         "barrier, commit, the RestoreStarted record, CRIU restore under a narrow "
-        "hold, then in parallel the sockets-restored barrier and CUDA restore with the cuInterpose rounds, then the "
-        "rendezvous endpoint, the resume barrier and CUDA resume once CUDA Checkpoint's resume phase is released (beta), "
+        "hold, the sockets-restored barrier, after which the hold lifts and the tasks resume, CUDA restore, the "
+        "cuInterpose rounds, the rendezvous endpoint, the resume barrier and CUDA resume once CUDA Checkpoint's resume phase is released (beta), "
         "and the release barrier, after which the workload resumes; the "
         "workload waits from CRIU restore until restore-complete.", b)
 
@@ -684,10 +666,9 @@ def main():
              "BEGIN_CHECKPOINT round, three destructive rounds, CUDA lock and checkpoint, net-freeze barrier, CRIU "
              "dump.", *CHECKPOINT, width=960)
     sequence("restore.svg", "Group restore up to release",
-             "Admission, commit, CRIU restore under a narrow hold, sockets-restored barrier in parallel with CUDA "
-             "restore and the cuInterpose rounds, resume barrier and CUDA resume (beta), release barrier; the workload "
-             "waits "
-             "from CRIU restore until restore-complete.", *RESTORE, width=1000)
+             "Admission, commit, CRIU restore under a narrow hold, the sockets-restored barrier before the restored "
+             "tasks resume, CUDA restore and the cuInterpose rounds, resume barrier and CUDA resume (beta), release "
+             "barrier, and the workload waits from CRIU restore until restore-complete.", *RESTORE, width=1000)
     sequence("library-rendezvous.svg", "Library rendezvous through the session",
              "Rank 0 of a communicator sets a new unique ID through its agent's library endpoint, and the other "
              "ranks read it through theirs.", *LIBRARIES, width=860)
