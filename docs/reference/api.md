@@ -35,6 +35,7 @@ The namespaced binding for one container's snapshot; consumed by restore.
 | `source.podRef.uid`        | string   | no       | UID of the source pod, so the agent dumps that exact pod and not a same-named recreation.                           |
 | `source.podRef.containers` | []string | yes      | Container(s) to checkpoint. Exactly one in `v1alpha1`; each must be a DNS label.                                    |
 | `containers`               | []ContainerSnapshotConfig | no       | Settings for a checkpointed container, by `name`. At most one entry. See [Container settings](#container-settings). |
+| `podGroup` | PodGroupMembership | no | Coordinated checkpoint membership. Omitted means standalone. See [Pod Group Membership](#pod-group-membership). |
 
 `status`:
 
@@ -59,6 +60,7 @@ when it binds a `PodSnapshot`; callers never create it.
 | `source.nodeName`       | string       | yes      | Node the source pod runs on; selects the node agent that performs the dump.                                                                                                                                      |
 | `storage.storeID`       | string       | no       | Backend-neutral store binding, immutable with the rest of `spec`. When `storage` is present, the ID must be `store-v1-` followed by 64 lowercase hexadecimal characters. Omitted by legacy filesystem producers. |
 | `containers`            | []ContainerSnapshotConfig | no       | The `PodSnapshot`'s [container settings](#container-settings), with defaults filled in. Every restore of this checkpoint uses them, even after the `PodSnapshot` or `SnapshotJob` changes or is gone.            |
+| `podGroup` | PodGroupMembership | no | Coordinated checkpoint membership. Omitted means standalone. See [Pod Group Membership](#pod-group-membership). |
 
 `status`:
 
@@ -166,6 +168,22 @@ explains. Its failures name the steps
 `checking the post-restore action` and `running the post-restore action`; see
 [Troubleshoot Restores](../troubleshooting/restores.md#checking-the-post-restore-action).
 
+### Pod Group Membership
+
+`PodGroupMembership` identifies one member of a coordinated checkpoint:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Name of the `PodGroupSnapshot`, at most 63 characters. |
+| `uid` | string | yes | UID of the group, 1 to 128 characters. |
+| `memberID` | string | yes | Member ID in the group, a DNS label of at most 63 characters. |
+
+The group controller sets the membership on each member's `PodSnapshot`.
+The snapshot controller copies it unchanged into `PodSnapshotContent`.
+A content with membership is checkpointed with its group, never alone.
+The group is in the snapshot's namespace, or `spec.snapshotRef.namespace` on
+cluster-scoped content. Membership is immutable with the rest of the spec.
+
 ### PodGroupSnapshot
 
 > [!NOTE]
@@ -191,8 +209,7 @@ most 63 characters.
 
 A member without a `podSnapshotTemplate` gets the default settings of a
 `PodSnapshot`. The template's labels must not set
-`nvidia.com/snapshot-podgroup`, `nvidia.com/snapshot-podgroup-member`,
-`nvidia.com/snapshot-job`, or `nvidia.com/snapshot-job-uid`, which the
+`nvidia.com/snapshot-job` or `nvidia.com/snapshot-job-uid`, which the
 controllers own.
 
 With 256 members whose templates hold very long values, the object and its

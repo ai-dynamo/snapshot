@@ -321,7 +321,7 @@ spec:
                         metadata:
                           description: |-
                             Metadata holds labels and annotations copied to the member's
-                            PodSnapshot. The group's own labels are reserved for the controller.
+                            PodSnapshot. SnapshotJob ownership labels are reserved for its controller.
                           properties:
                             annotations:
                               additionalProperties:
@@ -351,14 +351,6 @@ spec:
                               !format.qualifiedName().validate(k).hasValue())'
                       type: object
                       x-kubernetes-validations:
-                      - message: metadata.labels must not set controller-owned label
-                          nvidia.com/snapshot-podgroup
-                        rule: '!has(self.metadata) || !has(self.metadata.labels) ||
-                          !(''nvidia.com/snapshot-podgroup'' in self.metadata.labels)'
-                      - message: metadata.labels must not set controller-owned label
-                          nvidia.com/snapshot-podgroup-member
-                        rule: '!has(self.metadata) || !has(self.metadata.labels) ||
-                          !(''nvidia.com/snapshot-podgroup-member'' in self.metadata.labels)'
                       - message: metadata.labels must not set controller-owned label
                           nvidia.com/snapshot-job
                         rule: '!has(self.metadata) || !has(self.metadata.labels) ||
@@ -627,8 +619,8 @@ spec:
         - spec
         type: object
         x-kubernetes-validations:
-        - message: metadata.name must be no more than 63 characters because member
-            PodSnapshots carry it as a label value
+        - message: metadata.name must be no more than 63 characters to bound member
+            PodSnapshot names
           rule: size(self.metadata.name) <= 63
         - message: status.members rank must be the member's position in spec.members
           rule: '!has(self.status) || !has(self.status.members) || self.status.members.all(m,

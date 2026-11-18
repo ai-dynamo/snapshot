@@ -45,15 +45,11 @@ func newPodSnapshot(
 	}
 }
 
-// controllerOwnedLabels are the labels by which the SnapshotJob and
-// PodGroupSnapshot controllers find the PodSnapshots they own. A template of
-// either kind may set none of them, as the CRDs also refuse, so neither
-// controller can count or adopt the other's PodSnapshot.
+// controllerOwnedLabels are the SnapshotJob ownership labels. Neither kind's
+// template may assign them to the PodSnapshots it creates.
 var controllerOwnedLabels = []string{
 	snapshotv1alpha1.SnapshotJobOwnerLabel,
 	snapshotv1alpha1.SnapshotJobOwnerUIDLabel,
-	snapshotv1alpha1.PodGroupLabel,
-	snapshotv1alpha1.PodGroupMemberLabel,
 }
 
 // validateTemplateMetadata rejects template labels and annotations that the

@@ -71,12 +71,6 @@ func TestPodGroupSnapshotAdmission(t *testing.T) {
 				Containers: []snapshotv1.ContainerSnapshotConfig{{Name: "sidecar"}},
 			}
 		}, "podSnapshotTemplate.containers must name containers in source.podRef.containers"},
-		{"template-sets-group-label", func(s *snapshotv1.PodGroupSnapshotSpec) {
-			s.Members[0].PodSnapshotTemplate = templateWithLabel(snapshotv1.PodGroupLabel)
-		}, "metadata.labels must not set controller-owned label " + snapshotv1.PodGroupLabel},
-		{"template-sets-member-label", func(s *snapshotv1.PodGroupSnapshotSpec) {
-			s.Members[0].PodSnapshotTemplate = templateWithLabel(snapshotv1.PodGroupMemberLabel)
-		}, "metadata.labels must not set controller-owned label " + snapshotv1.PodGroupMemberLabel},
 		{"template-sets-snapshotjob-label", func(s *snapshotv1.PodGroupSnapshotSpec) {
 			s.Members[0].PodSnapshotTemplate = templateWithLabel(snapshotv1.SnapshotJobOwnerLabel)
 		}, "metadata.labels must not set controller-owned label " + snapshotv1.SnapshotJobOwnerLabel},
@@ -228,17 +222,14 @@ func TestPodGroupSnapshotAdmission(t *testing.T) {
 	}
 }
 
-// TestTemplatesReserveEachOthersOwnershipLabels checks that neither kind's
-// PodSnapshot template can set the labels the other kind's controller selects
-// its PodSnapshots by.
-func TestTemplatesReserveEachOthersOwnershipLabels(t *testing.T) {
+// TestSnapshotJobTemplateReservesOwnershipLabels checks the ownership labels
+// that SnapshotJob templates cannot set.
+func TestSnapshotJobTemplateReservesOwnershipLabels(t *testing.T) {
 	cl := startPodGroupEnv(t)
 	for _, tc := range []struct {
 		name, label string
 		refused     bool
 	}{
-		{"group", snapshotv1.PodGroupLabel, true},
-		{"group-member", snapshotv1.PodGroupMemberLabel, true},
 		{"job", snapshotv1.SnapshotJobOwnerLabel, true},
 		{"job-uid", snapshotv1.SnapshotJobOwnerUIDLabel, true},
 		{"another", "example.com/team", false},

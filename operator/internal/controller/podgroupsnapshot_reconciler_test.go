@@ -219,15 +219,16 @@ func TestPodGroupSnapshotReconciler_CreatesMembersWithTheirOwnSettings(t *testin
 	for _, snap := range []snapshotv1alpha1.PodSnapshot{head, worker} {
 		require.NotEmpty(t, snap.Name)
 		assert.True(t, metav1.IsControlledBy(&snap, group), snap.Name)
-		assert.Equal(t, "group", snap.Labels[snapshotv1alpha1.PodGroupLabel], snap.Name)
+		assert.NotContains(t, snap.Labels, "nvidia.com/snapshot-podgroup")
+		assert.NotContains(t, snap.Labels, "nvidia.com/snapshot-podgroup-member")
 	}
-	assert.Equal(t, "head", head.Labels[snapshotv1alpha1.PodGroupMemberLabel])
+	assert.Equal(t, &snapshotv1alpha1.PodGroupMembership{Name: group.Name, UID: group.UID, MemberID: "head"}, head.Spec.PodGroup)
 	assert.Equal(t, "head", head.Labels["role"])
 	assert.Equal(t, map[string]string{"note": "serves HTTP"}, head.Annotations)
 	assert.Equal(t, group.Spec.Members[0].Source, head.Spec.Source)
 	assert.Equal(t, containerSettings("main"), head.Spec.Containers)
 
-	assert.Equal(t, "worker", worker.Labels[snapshotv1alpha1.PodGroupMemberLabel])
+	assert.Equal(t, &snapshotv1alpha1.PodGroupMembership{Name: group.Name, UID: group.UID, MemberID: "worker"}, worker.Spec.PodGroup)
 	assert.Equal(t, "worker", worker.Labels["role"])
 	assert.Empty(t, worker.Annotations)
 	assert.Equal(t, group.Spec.Members[1].Source, worker.Spec.Source)
@@ -353,12 +354,12 @@ func TestPodGroupSnapshotReconciler_RefusesBeforeCreatingAnything(t *testing.T) 
 			name: "a template that sets the group label",
 			mutate: func(group *snapshotv1alpha1.PodGroupSnapshot) []client.Object {
 				group.Spec.Members[1].PodSnapshotTemplate = &snapshotv1alpha1.PodGroupMemberTemplate{
-					Metadata: &snapshotv1alpha1.PodSnapshotTemplateMetadata{Labels: map[string]string{snapshotv1alpha1.PodGroupLabel: "x"}},
+					Metadata: &snapshotv1alpha1.PodSnapshotTemplateMetadata{Labels: map[string]string{snapshotv1alpha1.SnapshotJobOwnerLabel: "x"}},
 				}
 				return nil
 			},
 			wantReason: snapshotv1alpha1.PodGroupReasonRefused,
-			wantInMsg:  "spec.members[1].podSnapshotTemplate.metadata.labels[" + snapshotv1alpha1.PodGroupLabel + "]: Forbidden: label is controller-owned",
+			wantInMsg:  "spec.members[1].podSnapshotTemplate.metadata.labels[" + snapshotv1alpha1.SnapshotJobOwnerLabel + "]: Forbidden: label is controller-owned",
 		},
 		{
 			name: "a template that sets the SnapshotJob label",
@@ -1327,4 +1328,31 @@ func TestPodGroupSnapshotReconciler_RecordsNothingWhenTheConfirmationFails(t *te
 	assert.Equal(t, before.ResourceVersion, after.ResourceVersion, "nothing is recorded")
 	assert.Equal(t, before.Status, after.Status)
 	assert.Empty(t, drainEvents(recorder))
+}
+
+func TestPodGroupSnapshotRefusesChildWithAnotherMembership(t *testing.T) {
+	for _, field := range []string{"name", "uid", "memberID", "absent"} {
+		t.Run(field, func(t *testing.T) {
+			group := pgGroup("a")
+			existing := buildMemberPodSnapshot(group, 0)
+			switch field {
+			case "name":
+				existing.Spec.PodGroup.Name = "another"
+			case "uid":
+				existing.Spec.PodGroup.UID = "another"
+			case "memberID":
+				existing.Spec.PodGroup.MemberID = "another"
+			case "absent":
+				existing.Spec.PodGroup = nil
+			}
+			existing.UID = "existing-snapshot"
+			r, _ := makePodGroupReconciler(t, append(pgReadyCluster("a"), group, existing)...)
+			reconcileGroup(t, r)
+			stored := getGroup(t, r)
+			assert.Equal(t, metav1.ConditionTrue, groupCondition(t, stored, snapshotv1alpha1.PodGroupConditionFailed).Status)
+			assert.Equal(t, snapshotv1alpha1.PodGroupReasonRefused,
+				groupCondition(t, stored, snapshotv1alpha1.PodGroupConditionFailed).Reason)
+			assert.Nil(t, stored.Status.Members[0].PodSnapshot)
+		})
+	}
 }

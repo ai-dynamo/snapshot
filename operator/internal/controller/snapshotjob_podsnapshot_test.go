@@ -113,8 +113,6 @@ func TestBuildPodSnapshot(t *testing.T) {
 	for _, reserved := range []string{
 		snapshotv1alpha1.SnapshotJobOwnerLabel,
 		snapshotv1alpha1.SnapshotJobOwnerUIDLabel,
-		snapshotv1alpha1.PodGroupLabel,
-		snapshotv1alpha1.PodGroupMemberLabel,
 	} {
 		t.Run("rejects reserved label "+reserved, func(t *testing.T) {
 			bad := minimalSnapshotJob()
@@ -208,7 +206,7 @@ func TestSnapshotJobReconcileFailsRefusedTemplateBeforePodSnapshotCreate(t *test
 	pod := sourcePodForJob(job)
 
 	sj.Spec.PodSnapshotTemplate.Metadata = &snapshotv1alpha1.PodSnapshotTemplateMetadata{
-		Labels: map[string]string{snapshotv1alpha1.PodGroupLabel: "caller"},
+		Labels: map[string]string{snapshotv1alpha1.SnapshotJobOwnerLabel: "caller"},
 	}
 	sj.Status.SourceJobUID = job.UID
 	r := makeSnapshotJobReconciler(s, sj, job, pod)
@@ -569,6 +567,18 @@ func TestClassifyExistingPodSnapshot(t *testing.T) {
 		_, err = r.classifyExistingPodSnapshot(context.Background(), sj, desired, errors.New("AlreadyExists"))
 		require.Error(t, err)
 		assert.ErrorIs(t, err, errPodSnapshotNameConflict)
+	})
+
+	t.Run("group membership is refused on adoption", func(t *testing.T) {
+		desired, err := buildPodSnapshot(sj, pod)
+		require.NoError(t, err)
+		existing := desired.DeepCopy()
+		existing.Spec.PodGroup = &snapshotv1alpha1.PodGroupMembership{
+			Name: "group", UID: "group-uid", MemberID: "worker-0",
+		}
+		r := makeSnapshotJobReconciler(s, existing)
+		_, err = r.classifyExistingPodSnapshot(context.Background(), sj, desired, errors.New("AlreadyExists"))
+		require.ErrorIs(t, err, errPodSnapshotNameConflict)
 	})
 
 	t.Run("cache lag: NotFound surfaces the original AlreadyExists for requeue", func(t *testing.T) {
