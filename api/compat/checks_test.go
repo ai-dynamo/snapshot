@@ -582,6 +582,59 @@ func TestGPUModelCheck(t *testing.T) {
 			target: Environment{GPUDevices: []GPUDevice{{UUID: "GPU-a"}}},
 		},
 		{
+			// An agent that read the model from the driver's procfs recorded
+			// its placeholder for the GB10 in DGX Spark (#921). It is no more a
+			// model than an empty name, so the same GPU restores.
+			name:   "checkpoint recorded the procfs placeholder Unknown",
+			source: gpus("Unknown"),
+			target: gpus("NVIDIA GB10"),
+		},
+		{
+			// A newer agent still records the placeholder when nvidia-smi
+			// cannot run in the container.
+			name:   "target discovery read the procfs placeholder",
+			source: gpus("NVIDIA GB10"),
+			target: gpus(" unknown "),
+		},
+		{
+			name:   "the placeholder on both sides",
+			source: gpus("Unknown", "Unknown"),
+			target: gpus("Unknown", "Unknown"),
+		},
+		{
+			// The placeholder is no model whatever the other side reads, as
+			// with an empty name: the model rule cannot refuse it, and the
+			// cpu, driver and count rules still apply.
+			name:   "the placeholder against a different known model",
+			source: gpus("Unknown"),
+			target: gpus("NVIDIA B200"),
+		},
+		{
+			name:   "known models still differ next to the placeholder rule",
+			source: gpus("NVIDIA GB10"),
+			target: gpus("NVIDIA B200"),
+			want: []Mismatch{{
+				Check:  CheckGPUModel,
+				Source: "NVIDIA GB10 x1",
+				Target: "NVIDIA B200 x1",
+			}},
+		},
+		{
+			// As with an empty name, one unnamed GPU makes the whole set
+			// unknown: partial data cannot prove the models differ.
+			name:   "the placeholder next to a known model",
+			source: gpus("Unknown", "NVIDIA B200"),
+			target: gpus("NVIDIA H100", "NVIDIA H100"),
+		},
+		{
+			// The placeholder silences the model rule only. A different
+			// number of GPUs is still the count rule's refusal.
+			name:   "the placeholder on a different number of GPUs",
+			source: gpus("Unknown"),
+			target: gpus("NVIDIA GB10", "NVIDIA GB10"),
+			want:   []Mismatch{{Check: CheckGPUCount, Source: "1", Target: "2"}},
+		},
+		{
 			// Nothing to name is not another name, so the model rule stays
 			// quiet and the count rule is the one that refuses.
 			name:   "no GPUs on the target at all",

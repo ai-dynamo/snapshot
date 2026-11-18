@@ -359,6 +359,195 @@ func TestListVisibleGPUsReturnsCommandFailure(t *testing.T) {
 	}
 }
 
+// writeContainerGPU lists a card in the driver procfs seen from the root of the
+// container whose host PID is 42, and gives the container its /dev node.
+func writeContainerGPU(t *testing.T, hostProc, busID, information, minor string) {
+	t.Helper()
+	root := filepath.Join(hostProc, "42", "root")
+	dir := filepath.Join(root, "proc", "driver", "nvidia", "gpus", busID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "information"), []byte(information), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "dev"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "dev", "nvidia"+minor), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A card the driver's procfs names is listed from procfs alone: nvidia-smi
+// does not run.
+func TestListVisibleGPUsReadsNamedCardsFromProcfs(t *testing.T) {
+	calls := filepath.Join(t.TempDir(), "calls")
+	installFakeNSenter(t, "echo call >> "+calls+"\nexit 99\n")
+	hostProc := fakeHostProc(t, "615.71.09")
+	writeContainerGPU(t, hostProc, "0000:18:00.0",
+		"Model: \t\t NVIDIA B200\nGPU UUID: \t GPU-a\nBus Location: \t 0000:18:00.0\nDevice Minor: \t 0\n", "0")
+
+	got, err := ListVisibleGPUs(context.Background(), hostProc, 42, gpuRulesSpec(0))()
+	want := VisibleGPUs{GPUs: compat.GPUInfo{
+		DriverVersion: "615.71.09",
+		Devices:       []compat.GPUDevice{{UUID: "GPU-a", ProductName: "NVIDIA B200"}},
+	}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("ListVisibleGPUs() = %#v, %v, want %#v without nvidia-smi", got, err, want)
+	}
+	if recorded, err := os.ReadFile(calls); !os.IsNotExist(err) {
+		t.Fatalf("nvidia-smi ran %q on a node whose procfs names every card (%v)", recorded, err)
+	}
+}
+
+// gb10UUID stands in for the UUID of the GB10 in a DGX Spark.
+const gb10UUID = "GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f"
+
+// writeGB10 lists, in the container's procfs, the information file a DGX
+// Spark with driver 580.142 writes, but for gb10UUID: the driver names the
+// card "Unknown".
+func writeGB10(t *testing.T, hostProc string) {
+	t.Helper()
+	writeContainerGPU(t, hostProc, "000f:01:00.0",
+		"Model: \t\t Unknown\nIRQ:   \t\t 476\nGPU UUID: \t "+gb10UUID+"\nVideo BIOS: \t 9a.0b.25.00.00\n"+
+			"Bus Type: \t PCIe\nDMA Size: \t 41 bits\nDMA Mask: \t 0x1ffffffffff\nBus Location: \t 000f:01:00.0\n"+
+			"Device Minor: \t 0\nGPU Firmware: \t 580.142\nGPU Excluded:\t No\n", "0")
+}
+
+// assertListedOnce lists the GPUs twice, as the MIG check and GPU discovery
+// do, and checks both answers and that nvidia-smi ran once.
+func assertListedOnce(t *testing.T, visible VisibleGPULister, calls string, want VisibleGPUs) {
+	t.Helper()
+	for range 2 {
+		got, err := visible()
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("ListVisibleGPUs() = %#v, %v, want %#v", got, err, want)
+		}
+	}
+	if recorded, err := os.ReadFile(calls); err != nil || string(recorded) != "call\n" {
+		t.Fatalf("nvidia-smi ran %q times, want once (%v)", recorded, err)
+	}
+}
+
+// The 580 driver's procfs names the GB10 in DGX Spark "Unknown". The model
+// then comes from nvidia-smi, and the rest of the listing from procfs.
+func TestListVisibleGPUsAsksNvidiaSMIWhenProcfsDoesNotNameTheCard(t *testing.T) {
+	hostProc := fakeHostProc(t, "580.142")
+	writeGB10(t, hostProc)
+	calls := filepath.Join(t.TempDir(), "calls")
+	installFakeNSenter(t, fmt.Sprintf(`
+echo call >> %s
+test "$5" = "-L"
+printf '%%s\n' 'GPU 0: NVIDIA GB10 (UUID: %s)'
+`, calls, gb10UUID))
+
+	assertListedOnce(t, ListVisibleGPUs(context.Background(), hostProc, 42, gpuRulesSpec(0)), calls, VisibleGPUs{GPUs: compat.GPUInfo{
+		DriverVersion: "580.142",
+		Devices:       []compat.GPUDevice{{UUID: gb10UUID, ProductName: "NVIDIA GB10"}},
+	}})
+}
+
+// procfs listed the card before nvidia-smi was asked for its name, so a
+// container without a working nvidia-smi still gets the listing, with the name
+// procfs wrote, as it did before nvidia-smi was asked at all. So does a card
+// nvidia-smi does not list.
+func TestListVisibleGPUsKeepsProcfsNameWhenNvidiaSMICannotNameTheCard(t *testing.T) {
+	for _, tc := range []struct{ name, nsenter string }{
+		{"nvidia-smi fails", "exit 17\n"},
+		{"nvidia-smi lists another card", "printf '%s\\n' 'GPU 0: NVIDIA B200 (UUID: GPU-other)'\n"},
+		{"nvidia-smi lists no name", "printf '%s\\n' 'GPU 0: [N/A] (UUID: " + gb10UUID + ")'\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hostProc := fakeHostProc(t, "580.142")
+			writeGB10(t, hostProc)
+			calls := filepath.Join(t.TempDir(), "calls")
+			installFakeNSenter(t, "echo call >> "+calls+"\n"+tc.nsenter)
+
+			assertListedOnce(t, ListVisibleGPUs(context.Background(), hostProc, 42, gpuRulesSpec(0)), calls, VisibleGPUs{GPUs: compat.GPUInfo{
+				DriverVersion: "580.142",
+				Devices:       []compat.GPUDevice{{UUID: gb10UUID, ProductName: "Unknown"}},
+			}})
+		})
+	}
+}
+
+// On a node with a named and an unnamed card, nvidia-smi names only the
+// unnamed one, even when it names the other card differently, and procfs keeps
+// the bus order. The driver may write the placeholder in any case and padding.
+func TestListVisibleGPUsNamesOnlyTheCardsProcfsDoesNotName(t *testing.T) {
+	hostProc := fakeHostProc(t, "580.142")
+	writeContainerGPU(t, hostProc, "0000:18:00.0",
+		"Model: \t\t NVIDIA B200\nGPU UUID: \t GPU-a\nDevice Minor: \t 0\n", "0")
+	writeContainerGPU(t, hostProc, "000f:01:00.0",
+		"Model: \t\t  unknown  \nGPU UUID: \t "+gb10UUID+"\nDevice Minor: \t 1\n", "1")
+	calls := filepath.Join(t.TempDir(), "calls")
+	installFakeNSenter(t, fmt.Sprintf(`
+echo call >> %s
+printf '%%s\n' 'GPU 0: NVIDIA H100 (UUID: GPU-a)' 'GPU 1: NVIDIA GB10 (UUID: %s)'
+`, calls, gb10UUID))
+
+	assertListedOnce(t, ListVisibleGPUs(context.Background(), hostProc, 42, gpuRulesSpec(0, 1)), calls, VisibleGPUs{GPUs: compat.GPUInfo{
+		DriverVersion: "580.142",
+		Devices: []compat.GPUDevice{
+			{UUID: "GPU-a", ProductName: "NVIDIA B200"},
+			{UUID: gb10UUID, ProductName: "NVIDIA GB10"},
+		},
+	}})
+}
+
+// A capture or restore whose context is already done cannot run nvidia-smi;
+// the procfs listing still stands.
+func TestListVisibleGPUsKeepsProcfsNameWhenTheContextIsDone(t *testing.T) {
+	hostProc := fakeHostProc(t, "580.142")
+	writeGB10(t, hostProc)
+	installFakeNSenter(t, "printf '%s\\n' 'GPU 0: NVIDIA GB10 (UUID: "+gb10UUID+")'\n")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	got, err := ListVisibleGPUs(ctx, hostProc, 42, gpuRulesSpec(0))()
+	want := VisibleGPUs{GPUs: compat.GPUInfo{
+		DriverVersion: "580.142",
+		Devices:       []compat.GPUDevice{{UUID: gb10UUID, ProductName: "Unknown"}},
+	}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("ListVisibleGPUs() = %#v, %v, want %#v", got, err, want)
+	}
+}
+
+// Where procfs cannot list the cards at all, nvidia-smi is the only answer, so
+// its failure is still discovery's, even with a card procfs does not name.
+func TestListVisibleGPUsReturnsCommandFailureWhenProcfsCannotList(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		spec  *specs.Spec
+		setup func(t *testing.T, root string)
+	}{
+		{name: "no device cgroup rules", spec: &specs.Spec{}},
+		{name: "MIG capability nodes", spec: gpuRulesSpec(0), setup: func(t *testing.T, root string) {
+			if err := os.MkdirAll(filepath.Join(root, "dev", "nvidia-caps"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "dev", "nvidia-caps", "nvidia-cap1"), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hostProc := fakeHostProc(t, "580.142")
+			writeGB10(t, hostProc)
+			if tc.setup != nil {
+				tc.setup(t, filepath.Join(hostProc, "42", "root"))
+			}
+			installFakeNSenter(t, "exit 17\n")
+
+			if _, err := ListVisibleGPUs(context.Background(), hostProc, 42, tc.spec)(); err == nil || !strings.Contains(err.Error(), "pid 42") {
+				t.Fatalf("ListVisibleGPUs error = %v, want the nsenter failure for pid 42", err)
+			}
+		})
+	}
+}
+
 // Without the module's version file, the GPUs are still listed and the
 // driver version is unknown.
 func TestListVisibleGPUsWithoutDriverVersion(t *testing.T) {
@@ -1236,13 +1425,13 @@ func TestOrderDRAUUIDsByRuntimeRejectsMismatches(t *testing.T) {
 }
 
 func TestListProcfsGPUs(t *testing.T) {
-	writeCard := func(t *testing.T, root, busID, uuid, minor string) {
+	writeCard := func(t *testing.T, root, busID, uuid, minor, model string) {
 		t.Helper()
 		dir := filepath.Join(root, "proc", "driver", "nvidia", "gpus", busID)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		information := "Model: \t\t NVIDIA B200\nGPU UUID: \t " + uuid + "\nBus Location: \t " + busID + "\nDevice Minor: \t " + minor + "\n"
+		information := "Model: \t\t " + model + "\nGPU UUID: \t " + uuid + "\nBus Location: \t " + busID + "\nDevice Minor: \t " + minor + "\n"
 		if err := os.WriteFile(filepath.Join(dir, "information"), []byte(information), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -1255,9 +1444,9 @@ func TestListProcfsGPUs(t *testing.T) {
 			t.Fatal(err)
 		}
 		// Minors do not follow bus order, as on real nodes.
-		writeCard(t, root, "0000:29:00.0", "GPU-b", "0")
-		writeCard(t, root, "0000:18:00.0", "GPU-a", "6")
-		writeCard(t, root, "0000:3a:00.0", "GPU-hidden", "3")
+		writeCard(t, root, "0000:29:00.0", "GPU-b", "0", "NVIDIA B200")
+		writeCard(t, root, "0000:18:00.0", "GPU-a", "6", "NVIDIA B200")
+		writeCard(t, root, "0000:3a:00.0", "GPU-hidden", "3", "NVIDIA B200")
 		for _, minor := range []string{"0", "6"} {
 			if err := os.WriteFile(filepath.Join(root, "dev", "nvidia"+minor), nil, 0o644); err != nil {
 				t.Fatal(err)
@@ -1311,6 +1500,38 @@ func TestListProcfsGPUs(t *testing.T) {
 		}
 		if len(visible.GPUs.Devices) != 1 || visible.GPUs.Devices[0].UUID != "GPU-b" {
 			t.Fatalf("devices = %#v, want only GPU-b", visible.GPUs.Devices)
+		}
+	})
+
+	// The 580 driver names the GB10 in DGX Spark "Unknown". procfs still
+	// lists the card exactly; ListVisibleGPUs asks nvidia-smi for its name.
+	t.Run("a card the driver does not name is listed as procfs names it", func(t *testing.T) {
+		for _, model := range []string{"Unknown", ""} {
+			hostProc, root := setup(t)
+			writeCard(t, root, "0000:29:00.0", "GPU-b", "0", model)
+			visible, ok := listProcfsGPUs(hostProc, 42, gpuRulesSpec(0, 3, 6))
+			want := []compat.GPUDevice{{UUID: "GPU-a", ProductName: "NVIDIA B200"}, {UUID: "GPU-b", ProductName: model}}
+			if !ok || !reflect.DeepEqual(visible.GPUs.Devices, want) {
+				t.Errorf("listProcfsGPUs() = %#v, %v for model %q, want %#v", visible.GPUs.Devices, ok, model, want)
+			}
+		}
+	})
+
+	// The cgroup allows minors 0 and 3: GPU-hidden (3) has no /dev node, and
+	// the cgroup denies GPU-a (6). Neither one is listed, so neither one's
+	// name sends ListVisibleGPUs to nvidia-smi.
+	t.Run("a card the container cannot open is not listed unnamed", func(t *testing.T) {
+		for _, card := range []struct{ busID, uuid, minor string }{
+			{"0000:3a:00.0", "GPU-hidden", "3"},
+			{"0000:18:00.0", "GPU-a", "6"},
+		} {
+			hostProc, root := setup(t)
+			writeCard(t, root, card.busID, card.uuid, card.minor, "Unknown")
+			visible, ok := listProcfsGPUs(hostProc, 42, gpuRulesSpec(0, 3))
+			want := []compat.GPUDevice{{UUID: "GPU-b", ProductName: "NVIDIA B200"}}
+			if !ok || !reflect.DeepEqual(visible.GPUs.Devices, want) {
+				t.Errorf("listProcfsGPUs() = %#v, %v with %s unnamed, want %#v", visible.GPUs.Devices, ok, card.uuid, want)
+			}
 		}
 	})
 
