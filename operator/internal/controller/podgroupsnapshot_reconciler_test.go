@@ -351,17 +351,6 @@ func TestPodGroupSnapshotReconciler_RefusesBeforeCreatingAnything(t *testing.T) 
 			wantInMsg:  `PodSnapshot "group-b" already exists`,
 		},
 		{
-			name: "a template that sets the group label",
-			mutate: func(group *snapshotv1alpha1.PodGroupSnapshot) []client.Object {
-				group.Spec.Members[1].PodSnapshotTemplate = &snapshotv1alpha1.PodGroupMemberTemplate{
-					Metadata: &snapshotv1alpha1.PodSnapshotTemplateMetadata{Labels: map[string]string{snapshotv1alpha1.SnapshotJobOwnerLabel: "x"}},
-				}
-				return nil
-			},
-			wantReason: snapshotv1alpha1.PodGroupReasonRefused,
-			wantInMsg:  "spec.members[1].podSnapshotTemplate.metadata.labels[" + snapshotv1alpha1.SnapshotJobOwnerLabel + "]: Forbidden: label is controller-owned",
-		},
-		{
 			name: "a template that sets the SnapshotJob label",
 			mutate: func(group *snapshotv1alpha1.PodGroupSnapshot) []client.Object {
 				group.Spec.Members[1].PodSnapshotTemplate = &snapshotv1alpha1.PodGroupMemberTemplate{
@@ -1037,17 +1026,6 @@ func TestPodGroupSnapshotReconciler_Deletion(t *testing.T) {
 }
 
 func TestPodGroupSnapshotReconciler_MapsContentToGroup(t *testing.T) {
-	r, _ := makePodGroupReconciler(t)
-	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
-		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-			t.Error("the event mapper must not read the API")
-			return errors.New("unexpected Get")
-		},
-		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
-			t.Error("the event mapper must not read the API")
-			return errors.New("unexpected List")
-		},
-	})
 	content := &snapshotv1alpha1.PodSnapshotContent{Spec: snapshotv1alpha1.PodSnapshotContentSpec{
 		PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: pgNamespace, Name: "deleted-member"},
 		PodGroup:       &snapshotv1alpha1.PodGroupMembership{Name: "group", UID: "group-uid", MemberID: "a"},
@@ -1055,9 +1033,9 @@ func TestPodGroupSnapshotReconciler_MapsContentToGroup(t *testing.T) {
 	ctx := context.Background()
 
 	assert.Equal(t, []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: pgNamespace, Name: "group"}}},
-		r.podSnapshotContentToPodGroupSnapshot(ctx, content))
+		podSnapshotContentToPodGroupSnapshot(ctx, content))
 	content.Spec.PodGroup = nil
-	assert.Empty(t, r.podSnapshotContentToPodGroupSnapshot(ctx, content))
+	assert.Empty(t, podSnapshotContentToPodGroupSnapshot(ctx, content))
 }
 
 func TestPodGroupSnapshotReconciler_HeldByUnfinishedRestores(t *testing.T) {
