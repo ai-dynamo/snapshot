@@ -229,20 +229,19 @@ pub fn cuMemExportToShareableHandle(
         .memblocks
         .get_mut(&id)
         .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+    // CUDA refuses to export an imported handle, unicast or multicast.
+    if memblock.reference().creator_pid != namespace_pid {
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
+    }
     if let Memblock::Unicast(allocation) = memblock
         && allocation.properties.requestedHandleTypes.0 & kind.0 == 0
     {
         return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
-    // The ticket identifies an allocation without retaining its backing, so it cannot
-    // extend the allocation's lifetime as a CUDA export FD would.
-    let fd = sharing::create(memblock.reference()).map_err(|error| {
-        Error::io(
-            "create shareable handle ticket",
-            std::io::Error::other(error),
-        )
-    })?;
-    memblock.export(namespace_pid)?;
+    // Like a CUDA export FD, an open ticket keeps the creator's export after the creator
+    // releases the allocation, so a peer can still import it.
+    let reference = memblock.export(namespace_pid)?;
+    let fd = runtime::export_cache()?.issue(reference)?;
     unsafe { out.cast::<i32>().write(fd.into_raw_fd()) };
     Ok(())
 }

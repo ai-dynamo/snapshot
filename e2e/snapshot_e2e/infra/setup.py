@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import ssl
 import subprocess
@@ -390,11 +391,98 @@ def snapshot_helm_overrides(
 ) -> list[str]:
     """Helm --set assignments for every install and upgrade of the chart."""
     overrides = parse_helm_overrides(helm_set, os.environ.get("SNAPSHOT_E2E_HELM_SET"))
+    if expected_image_digests():
+        # A rebuild can republish a tag, and a node that still caches the old
+        # image would run it under IfNotPresent. Pull every image so the digest
+        # check after rollout compares against what the registry serves now.
+        overrides[:0] = [f"{value}.pullPolicy=Always" for value in IMAGE_VALUES.values()]
     if mode == "vcluster" and host_namespace:
         # Other clusters may share the vCluster's nodes: restore only this
         # vCluster's Pods. First, so the user's overrides still win.
         overrides.insert(0, f"daemonset.nriHostNamespace={host_namespace}")
     return overrides
+
+
+# Chart value prefix of each image the Snapshot release runs, keyed by the last
+# path component of its repository.
+IMAGE_VALUES = {
+    "operator": "image.operator",
+    "agent": "image.agent",
+    "pagebroker": "image.pageBroker",
+}
+DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def expected_image_digests() -> dict[str, str]:
+    """Digests the installed images must have, from SNAPSHOT_E2E_IMAGE_DIGESTS.
+
+    A JSON object keyed by image name, as e2e-pr.yaml records its candidate.
+    Empty when unset: the suite then trusts the tag.
+    """
+    raw = os.environ.get("SNAPSHOT_E2E_IMAGE_DIGESTS", "").strip()
+    if not raw:
+        return {}
+    try:
+        digests = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SetupError(f"SNAPSHOT_E2E_IMAGE_DIGESTS is not JSON: {exc}") from exc
+    if not isinstance(digests, dict) or not digests:
+        raise SetupError("SNAPSHOT_E2E_IMAGE_DIGESTS must be a non-empty JSON object")
+    for image, digest in digests.items():
+        if image not in IMAGE_VALUES:
+            raise SetupError(
+                f"SNAPSHOT_E2E_IMAGE_DIGESTS names unknown image {image!r}; "
+                f"expected one of {', '.join(IMAGE_VALUES)}"
+            )
+        if not isinstance(digest, str) or not DIGEST_PATTERN.match(digest):
+            raise SetupError(f"SNAPSHOT_E2E_IMAGE_DIGESTS[{image!r}] is not a sha256 digest")
+    return digests
+
+
+def image_name(image: str) -> str:
+    """Last path component of an image reference, without its tag or digest."""
+    name = image.split("@", 1)[0].rsplit("/", 1)[-1]
+    return name.split(":", 1)[0]
+
+
+def running_image_mismatches(
+    pods: Sequence[client.V1Pod], expected: dict[str, str]
+) -> list[str]:
+    """Describe every way the running containers differ from the expected digests."""
+    problems = []
+    seen = set()
+    for pod in pods:
+        statuses = [
+            *(pod.status.init_container_statuses or []),
+            *(pod.status.container_statuses or []),
+        ]
+        for status in statuses:
+            name = image_name(status.image or "")
+            if name not in expected:
+                continue
+            seen.add(name)
+            # containerd reports repo@sha256:..., Docker prefixes docker-pullable://.
+            running = (status.image_id or "").rsplit("@", 1)[-1]
+            if running != expected[name]:
+                problems.append(
+                    f"{pod.metadata.name}/{status.name} runs {name} {running or 'unknown'}, "
+                    f"expected {expected[name]}"
+                )
+    for name in sorted(set(expected) - seen):
+        problems.append(f"no running container uses the {name} image")
+    return problems
+
+
+def verify_running_images(*, namespace: str, release: str, expected: dict[str, str]) -> None:
+    selector = ",".join([SNAPSHOT_LABEL, f"app.kubernetes.io/instance={release}"])
+    pods = client.CoreV1Api().list_namespaced_pod(
+        namespace=namespace, label_selector=selector
+    ).items
+    problems = running_image_mismatches(pods, expected)
+    if problems:
+        raise SetupError("Snapshot is not running the expected images: " + "; ".join(problems))
+    for name, digest in sorted(expected.items()):
+        log(f"Snapshot {name} runs {digest}")
 
 
 def setup_snapshot_readiness(args: argparse.Namespace, context: SetupContext) -> None:
@@ -405,6 +493,13 @@ def setup_snapshot_readiness(args: argparse.Namespace, context: SetupContext) ->
         release=args.snapshot_release,
         timeout_seconds=args.ready_timeout_seconds,
     )
+    expected = expected_image_digests()
+    if expected:
+        verify_running_images(
+            namespace=args.test_namespace,
+            release=args.snapshot_release,
+            expected=expected,
+        )
 
 
 def setup_snapshot_uninstall(args: argparse.Namespace, context: SetupContext) -> None:

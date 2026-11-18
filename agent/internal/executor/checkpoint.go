@@ -18,6 +18,7 @@ import (
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
+	"golang.org/x/sys/unix"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/criu"
@@ -80,11 +81,12 @@ func (e *sourceNeedsRecoveryError) Error() string { return e.cause.Error() }
 
 func (e *sourceNeedsRecoveryError) Unwrap() error { return e.cause }
 
-func sourceNeedsRecovery(err error, cudaHostPIDs []int, cuInterposePrepared, customStorageUsed bool) error {
+func sourceNeedsRecovery(err error, cudaHostPIDs []int, cuInterposePrepared, customStorageUsed bool, dumpRetriesUsed int) error {
 	return &sourceNeedsRecoveryError{cause: err, suspended: SuspendedSource{
 		GPUPIDs:             slices.Clone(cudaHostPIDs),
 		CuInterposePrepared: cuInterposePrepared,
 		CustomStorageUsed:   customStorageUsed,
+		DumpRetriesUsed:     dumpRetriesUsed,
 	}}
 }
 
@@ -102,6 +104,16 @@ type SuspendedSource struct {
 	// with the driver. That execution is torn down before recovery runs, so an in-place
 	// restore has nothing to restore from and the source can only be terminated.
 	CustomStorageUsed bool
+
+	// DumpRetriesUsed is how much of the retry budget this attempt already spent repeating
+	// its dump, so one budget covers repeats and fresh attempts alike.
+	DumpRetriesUsed int
+}
+
+// SuspendedSourceFailure marks err as having left the source suspended, carrying what
+// recovery needs to decide what becomes of it.
+func SuspendedSourceFailure(err error, suspended SuspendedSource) error {
+	return &sourceNeedsRecoveryError{cause: err, suspended: suspended}
 }
 
 // SuspendedSourceOf returns what a failed capture left behind, and whether the failure left
@@ -132,6 +144,14 @@ type CheckpointRequest struct {
 	// DumpRetriesRemaining is what is left of the capture's retry budget, spent repeating
 	// the dump while the workload is still suspended and still dumpable.
 	DumpRetriesRemaining int
+
+	// DumpWorthRepeating reports whether repeating could reach a different outcome,
+	// and when it could not, why. It is asked only after a dump has failed. Nil
+	// repeats whenever the workload is still dumpable.
+	DumpWorthRepeating func(err error) (bool, string)
+	// OnDumpRepeat reports each repeat as it is taken, so a repeat is visible while the
+	// capture is still running rather than only in how it ended. Nil reports nothing.
+	OnDumpRepeat func(repeat int, err error)
 
 	// Pod carries the image reference and limits the target container runs with, read from
 	// the live pod by the caller rather than here: the capture path has no API
@@ -252,9 +272,13 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		return nil, failStep(StepConfigureCheckpoint, err)
 	}
 
-	captureTimings, err := captureCheckpointFunc(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu, req.DumpRetriesRemaining)
+	captureTimings, err := captureCheckpointFunc(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu, req.DumpRetriesRemaining, req.DumpWorthRepeating, req.OnDumpRepeat)
 	if err != nil {
-		return nil, sourceNeedsRecovery(err, state.CUDAHostPIDs, data.CuInterpose.UsesCoordinator(), usePageBrokerGPU)
+		repeats := 0
+		if captureTimings != nil {
+			repeats = captureTimings.DumpRetries
+		}
+		return nil, sourceNeedsRecovery(err, state.CUDAHostPIDs, data.CuInterpose.UsesCoordinator(), usePageBrokerGPU, repeats)
 	}
 
 	dumpComplete = true
@@ -502,11 +526,31 @@ func configureCheckpoint(
 	return criuOpts, m, nil
 }
 
+// DumpSpaceError names the directory a dump ran out of room in. PageBroker
+// chooses that directory, so it is not always the node's staging volume, and a
+// caller measuring the wrong filesystem would reach the wrong conclusion about
+// whether retrying could ever help.
+type DumpSpaceError struct {
+	Dir string
+	Err error
+}
+
+func (e *DumpSpaceError) Error() string { return e.Err.Error() }
+func (e *DumpSpaceError) Unwrap() error { return e.Err }
+
+// withDumpDirectory records where a dump was writing when it filled the volume.
+func withDumpDirectory(err error, dir string) error {
+	if err == nil || !errors.Is(err, unix.ENOSPC) {
+		return err
+	}
+	return &DumpSpaceError{Dir: dir, Err: err}
+}
+
 // captureCheckpointFunc is overridden in tests: captureCheckpoint runs CRIU
 // against a live process tree, which a unit test cannot satisfy.
 var captureCheckpointFunc = captureCheckpoint
 
-func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger, gpu *pagebroker.CustomStorageExecution, retriesRemaining int) (*checkpointPhaseTimings, error) {
+func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger, gpu *pagebroker.CustomStorageExecution, retriesRemaining int, worthRepeating func(error) (bool, string), onRepeat func(int, error)) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
 
 	// GPU capture must finish before CRIU and filesystem capture.
@@ -528,15 +572,23 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	}
 
 	for attempt := 0; ; attempt++ {
-		err := dumpCheckpointFunc(ctx, criuOpts, criuSettings, data, state, checkpointDir, timings, log)
+		err := withDumpDirectory(dumpCheckpointFunc(ctx, criuOpts, criuSettings, data, state, checkpointDir, timings, log), checkpointDir)
 		if err == nil {
 			return timings, nil
 		}
 		if recordedTree == nil {
-			return nil, err
+			return timings, err
 		}
 		if attempt >= retriesRemaining {
-			return nil, err
+			return timings, err
+		}
+		// Asked before the tree is probed: a dump nothing could make fit is not worth
+		// repeating however seizable the workload still is.
+		if worthRepeating != nil {
+			if ok, reason := worthRepeating(err); !ok {
+				log.V(1).Info("Not repeating the dump", "reason", reason)
+				return timings, err
+			}
 		}
 		// The probe decides, not the shape of the failure: the suspend is already
 		// paid for, and repeating the dump is only safe while CRIU can still seize
@@ -544,19 +596,29 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 		dumpable, reason := dumpableFunc(snapshotruntime.HostProcPath, recordedTree)
 		if !dumpable {
 			log.V(1).Info("Not repeating the dump", "reason", reason)
-			return nil, err
+			return timings, err
 		}
-		log.Info("Repeating the dump against the suspended workload", "attempt", attempt+1, "error", err.Error())
-		timings.DumpRetries++
 		select {
 		case <-ctx.Done():
-			return nil, err
+			return timings, err
 		case <-time.After(dumpRetryDelay(attempt)):
 		}
 		// select picks at random when the wait and the cancellation are both ready,
 		// so the deadline gets the last word rather than one dump in two.
 		if ctx.Err() != nil {
-			return nil, err
+			return timings, err
+		}
+		// Counted as the repeat's dump starts, so a capture cancelled in the backoff
+		// does not spend a retry it never took.
+		timings.DumpRetries++
+		log.Info("Repeating the dump against the suspended workload", "attempt", timings.DumpRetries, "error", err.Error())
+		if onRepeat != nil {
+			onRepeat(timings.DumpRetries, err)
+			// Reporting is bounded but not instant, and the next statement starts a
+			// dump against a workload that is still suspended.
+			if ctx.Err() != nil {
+				return timings, err
+			}
 		}
 	}
 }
