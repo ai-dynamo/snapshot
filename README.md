@@ -14,6 +14,8 @@ Snapshot provides the checkpoint and restore primitives for GPU pods.
 Orchestration (which pods to checkpoint, when, and how the checkpoints are
 restored) is left to the systems that integrate it.
 
+See the [roadmap](docs/roadmap.md) for what has shipped and what is planned.
+
 > [!NOTE]
 > Snapshot's APIs may still change, so it is not yet recommended for
 > production-critical workloads.
