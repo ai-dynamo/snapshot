@@ -17,6 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -323,7 +324,8 @@ func podSnapshotHasExpectedIdentity(actual, desired *snapshotv1alpha1.PodSnapsho
 	actualSource := actual.Spec.Source.PodRef
 	desiredSource := desired.Spec.Source.PodRef
 	if actualSource.Name != desiredSource.Name || actualSource.UID != desiredSource.UID ||
-		len(actualSource.Containers) != len(desiredSource.Containers) {
+		len(actualSource.Containers) != len(desiredSource.Containers) ||
+		!ptr.Equal(actual.Spec.PodGroup, desired.Spec.PodGroup) {
 		return false
 	}
 	for i := range actualSource.Containers {

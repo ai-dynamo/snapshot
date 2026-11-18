@@ -569,6 +569,18 @@ func TestClassifyExistingPodSnapshot(t *testing.T) {
 		assert.ErrorIs(t, err, errPodSnapshotNameConflict)
 	})
 
+	t.Run("group membership is refused on adoption", func(t *testing.T) {
+		desired, err := buildPodSnapshot(sj, pod)
+		require.NoError(t, err)
+		existing := desired.DeepCopy()
+		existing.Spec.PodGroup = &snapshotv1alpha1.PodGroupMembership{
+			Name: "group", UID: "group-uid", MemberID: "worker-0",
+		}
+		r := makeSnapshotJobReconciler(s, existing)
+		_, err = r.classifyExistingPodSnapshot(context.Background(), sj, desired, errors.New("AlreadyExists"))
+		require.ErrorIs(t, err, errPodSnapshotNameConflict)
+	})
+
 	t.Run("cache lag: NotFound surfaces the original AlreadyExists for requeue", func(t *testing.T) {
 		r := makeSnapshotJobReconciler(s) // nothing seeded
 		desired, err := buildPodSnapshot(sj, pod)
