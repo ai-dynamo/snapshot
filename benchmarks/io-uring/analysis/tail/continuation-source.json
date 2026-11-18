@@ -1,0 +1,16 @@
+{
+  "protocol_total_cells": 80,
+  "input_scope": "Saved per-run window metrics and execution metadata; raw request exports are not included.",
+  "segments": [
+    {
+      "file": "initial-runs.json",
+      "sha256": "1365418edb3847d4f8586d69e851a67e34ee7c73d88865c81bb4ab49a06971cb",
+      "directory": "io-uring-benchmark-tail-20261028"
+    },
+    {
+      "file": "continuation-runs.json",
+      "sha256": "3e741d5479c7a498bb9221f79c26974256d4035281791791a3c99c1a96b8f5ad",
+      "directory": "io-uring-benchmark-tail-20261028-cont2"
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "raw_export_hashes_verified": 80,
+  "invalid_cells": [],
+  "primary_profile_requests": 518327,
+  "report_recomputed_from_raw_matches_saved": true,
+  "recent_segment_steady_p99_exploratory": {
+    "pairs": 5,
+    "ratio": 0.9755305154816509,
+    "individual_ratios": [
+      1.0099295916940976,
+      0.9825906972571903,
+      0.9199565799207479,
+      0.9981215107617176,
+      0.9695937433934976
+    ],
+    "ci95": [
+      0.932601216006311,
+      1.0204359272778984
+    ],
+    "interpretation": "interval excludes more than 3% higher latency"
+  },
+  "mean_run_throughput_rps": {
+    "blocked": 85.95877081419815,
+    "restored-blocked": 86.39013827399647
+  },
+  "cpu_quota_pressure_samples": 0,
+  "max_throttled_period_fraction": 0.0046820132657042525,
+  "primary_window_request_count": 310037,
+  "chunk_gap_missing_requests_steady": 325
+}

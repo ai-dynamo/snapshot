@@ -1,0 +1,892 @@
+{
+  "state": "complete",
+  "accepted_cells": 40,
+  "runs": [
+    {
+      "cell": "formal-tc2-dynamo-vllm-r6-restored-blocked-i128-o16-c128",
+      "repeat": 6,
+      "condition": "restored-blocked",
+      "gpu_uuid": "GPU-8e5288f5-6a8d-bf53-5f54-1d297232e747",
+      "requests_per_second": 86.63262295159309,
+      "telemetry": {
+        "c590-dyn-b-frontend-59bcc64f5d-dfc7t": {
+          "valid": true,
+          "sampled_seconds": 299.327749573,
+          "cpu_cores": 0.1498610805847125,
+          "throttled_period_fraction": 0.0022279985146676567,
+          "throttled_usec": 120350,
+          "cpu_max": "100000 100000",
+          "cpu_quota_pressure": false
+        },
+        "c590-dyn-b-vllmdecodeworker-77d9fb0c-6846448b8c-xqsgr": {
+          "valid": true,
+          "sampled_seconds": 299.658469927,
+          "cpu_cores": 1.1546256579508254,
+          "throttled_period_fraction": 0.0,
+          "throttled_usec": 0,
+          "cpu_max": "800000 100000",
+          "cpu_quota_pressure": false
+        },
+        "c590-load-0-9hnzt": {
+          "valid": true,
+          "sampled_seconds": 300.193636728,
+          "cpu_cores": 1.3385443321841097,
+          "throttled_period_fraction": 0.0,
+          "throttled_usec": 0,
+          "cpu_max": "800000 100000",
+          "cpu_quota_pressure": false,
+          "client_capacity_gate": "pass"
+        }
+      },
+      "windows": {
+        "early": {
+          "requests": 7886,
+          "request_start_window_s": [
+            0,
+            90
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 87.62222222222222,
+          "request_latency_p99_ms": 1916.2159420999997,
+          "request_latency_p95_ms": 1616.22370625,
+          "time_to_first_token_p99_ms": 1035.66002905,
+          "decode_duration_p99_ms": 1154.7473427499995,
+          "largest_chunk_gap_p99_ms": 523.21930945,
+          "requests_with_observed_chunk_gaps": 7886,
+          "requests_without_observed_chunk_gaps": 0
+        },
+        "steady": {
+          "requests": 15629,
+          "request_start_window_s": [
+            120,
+            300
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 86.82777777777778,
+          "request_latency_p99_ms": 1898.4624989199992,
+          "request_latency_p95_ms": 1649.7038293999997,
+          "time_to_first_token_p99_ms": 1044.8859507599998,
+          "decode_duration_p99_ms": 1224.2714124,
+          "largest_chunk_gap_p99_ms": 561.5596902,
+          "requests_with_observed_chunk_gaps": 15627,
+          "requests_without_observed_chunk_gaps": 2
+        },
+        "full": {
+          "requests": 26033,
+          "request_start_window_s": [
+            0,
+            300
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 86.77666666666667,
+          "request_latency_p99_ms": 1911.55964744,
+          "request_latency_p95_ms": 1636.3181007999988,
+          "time_to_first_token_p99_ms": 1041.81173004,
+          "decode_duration_p99_ms": 1224.75721008,
+          "largest_chunk_gap_p99_ms": 555.7538157,
+          "requests_with_observed_chunk_gaps": 26031,
+          "requests_without_observed_chunk_gaps": 2
+        }
+      }
+    },
+    {
+      "cell": "formal-tc2-dynamo-vllm-r6-blocked-i128-o16-c128",
+      "repeat": 6,
+      "condition": "blocked",
+      "gpu_uuid": "GPU-a62c54ce-3074-92b9-ad56-72b549ca6cf4",
+      "requests_per_second": 86.12297973537753,
+      "telemetry": {
+        "c590-dyn-b-frontend-57c95d75d4-569zh": {
+          "valid": true,
+          "sampled_seconds": 300.320697918,
+          "cpu_cores": 0.143381259761714,
+          "throttled_period_fraction": 0.0026455026455026454,
+          "throttled_usec": 137981,
+          "cpu_max": "100000 100000",
+          "cpu_quota_pressure": false
+        },
+        "c590-load-0-9hnzt": {
+          "valid": true,
+          "sampled_seconds": 299.150794804,
+          "cpu_cores": 1.3246610702125448,
+          "throttled_period_fraction": 0.0,
+          "throttled_usec": 0,
+          "cpu_max": "800000 100000",
+          "cpu_quota_pressure": false,
+          "client_capacity_gate": "pass"
+        },
+        "c590-dyn-b-vllmdecodeworker-8fbf0514-56fd574d55-jbjtm": {
+          "valid": true,
+          "sampled_seconds": 299.58792485,
+          "cpu_cores": 1.1193701353881522,
+          "throttled_period_fraction": 0.0,
+          "throttled_usec": 0,
+          "cpu_max": "800000 100000",
+          "cpu_quota_pressure": false
+        }
+      },
+      "windows": {
+        "early": {
+          "requests": 7827,
+          "request_start_window_s": [
+            0,
+            90
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 86.96666666666667,
+          "request_latency_p99_ms": 1844.7729463599999,
+          "request_latency_p95_ms": 1591.1656279999997,
+          "time_to_first_token_p99_ms": 1047.2318092399998,
+          "decode_duration_p99_ms": 1063.45749902,
+          "largest_chunk_gap_p99_ms": 485.20421024999996,
+          "requests_with_observed_chunk_gaps": 7826,
+          "requests_without_observed_chunk_gaps": 1
+        },
+        "steady": {
+          "requests": 15509,
+          "request_start_window_s": [
+            120,
+            300
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 86.16111111111111,
+          "request_latency_p99_ms": 1879.7968834,
+          "request_latency_p95_ms": 1550.8605663999997,
+          "time_to_first_token_p99_ms": 1050.3699568399998,
+          "decode_duration_p99_ms": 1103.0769645999999,
+          "largest_chunk_gap_p99_ms": 476.21427552999995,
+          "requests_with_observed_chunk_gaps": 15488,
+          "requests_without_observed_chunk_gaps": 21
+        },
+        "full": {
+          "requests": 25896,
+          "request_start_window_s": [
+            0,
+            300
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 86.32,
+          "request_latency_p99_ms": 1842.22170855,
+          "request_latency_p95_ms": 1563.56658175,
+          "time_to_first_token_p99_ms": 1047.4576505,
+          "decode_duration_p99_ms": 1095.1585966999999,
+          "largest_chunk_gap_p99_ms": 483.66950113999997,
+          "requests_with_observed_chunk_gaps": 25874,
+          "requests_without_observed_chunk_gaps": 22
+        }
+      }
+    },
+    {
+      "cell": "formal-tc2-dynamo-vllm-r7-blocked-i128-o16-c128",
+      "repeat": 7,
+      "condition": "blocked",
+      "gpu_uuid": "GPU-1d93f352-617e-fe05-c2cb-ce84af38f697",
+      "requests_per_second": 86.63481465330025,
+      "telemetry": {
+        "c590-dyn-b-vllmdecodeworker-c4fae150-78876d4fc4-49lb9": {
+          "valid": true,
+          "sampled_seconds": 298.553352785,
+          "cpu_cores": 1.1699511954620032,
+          "throttled_period_fraction": 0.0,
+          "throttled_usec": 0,
+          "cpu_max": "800000 100000",
+          "cpu_quota_pressure": false
+        },
+        "c590-dyn-b-frontend-7cc884fb6-bcj9c": {
+          "valid": true,
+          "sampled_seconds": 300.331749782,
+          "cpu_cores": 0.1459257039317748,
+          "throttled_period_fraction": 0.00384172109104879,
+          "throttled_usec": 135237,
+          "cpu_max": "100000 100000",
+          "cpu_quota_pressure": false
+        },
+        "c590-load-0-9hnzt": {
+          "valid": true,
+          "sampled_seconds": 299.187447115,
+          "cpu_cores": 1.3319441903149982,
+          "throttled_period_fraction": 0.0,
+          "throttled_usec": 0,
+          "cpu_max": "800000 100000",
+          "cpu_quota_pressure": false,
+          "client_capacity_gate": "pass"
+        }
+      },
+      "windows": {
+        "early": {
+          "requests": 7962,
+          "request_start_window_s": [
+            0,
+            90
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 88.46666666666667,
+          "request_latency_p99_ms": 1932.5378996,
+          "request_latency_p95_ms": 1546.69289695,
+          "time_to_first_token_p99_ms": 1039.29436439,
+          "decode_duration_p99_ms": 1100.08234162,
+          "largest_chunk_gap_p99_ms": 565.7833254,
+          "requests_with_observed_chunk_gaps": 7961,
+          "requests_without_observed_chunk_gaps": 1
+        },
+        "steady": {
+          "requests": 15514,
+          "request_start_window_s": [
+            120,
+            300
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 86.18888888888888,
+          "request_latency_p99_ms": 1895.6059347999999,
+          "request_latency_p95_ms": 1660.3852566499997,
+          "time_to_first_token_p99_ms": 1041.0183704899998,
+          "decode_duration_p99_ms": 1110.08006321,
+          "largest_chunk_gap_p99_ms": 533.8449142999998,
+          "requests_with_observed_chunk_gaps": 15514,
+          "requests_without_observed_chunk_gaps": 0
+        },
+        "full": {
+          "requests": 26037,
+          "request_start_window_s": [
+            0,
+            300
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 86.79,
+          "request_latency_p99_ms": 1913.5204039599996,
+          "request_latency_p95_ms": 1654.5111905999984,
+          "time_to_first_token_p99_ms": 1041.29456496,
+          "decode_duration_p99_ms": 1130.52062132,
+          "largest_chunk_gap_p99_ms": 537.2261904599999,
+          "requests_with_observed_chunk_gaps": 26035,
+          "requests_without_observed_chunk_gaps": 2
+        }
+      }
+    },
+    {
+      "cell": "formal-tc2-dynamo-vllm-r7-restored-blocked-i128-o16-c128",
+      "repeat": 7,
+      "condition": "restored-blocked",
+      "gpu_uuid": "GPU-1d93f352-617e-fe05-c2cb-ce84af38f697",
+      "requests_per_second": 86.04328699013365,
+      "telemetry": {
+        "c590-dyn-b-frontend-6856d7b59b-pl8tm": {
+          "valid": true,
+          "sampled_seconds": 299.321769372,
+          "cpu_cores": 0.14496394996941706,
+          "throttled_period_fraction": 0.002263296869105998,
+          "throttled_usec": 107942,
+          "cpu_max": "100000 100000",
+          "cpu_quota_pressure": false
+        },
+        "c590-load-0-9hnzt": {
+          "valid": true,
+          "sampled_seconds": 300.156382426,
+          "cpu_cores": 1.3297288192710677,
+          "throttled_period_fraction": 0.0,
+          "throttled_usec": 0,
+          "cpu_max": "800000 100000",
+          "cpu_quota_pressure": false,
+          "client_capacity_gate": "pass"
+        },
+        "c590-dyn-b-vllmdecodeworker-86cebe2a-7f6cf78579-qp2xb": {
+          "valid": true,
+          "sampled_seconds": 299.66135991,
+          "cpu_cores": 1.172495469904844,
+          "throttled_period_fraction": 0.0,
+          "throttled_usec": 0,
+          "cpu_max": "800000 100000",
+          "cpu_quota_pressure": false
+        }
+      },
+      "windows": {
+        "early": {
+          "requests": 7809,
+          "request_start_window_s": [
+            0,
+            90
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 86.76666666666667,
+          "request_latency_p99_ms": 1837.1178273599999,
+          "request_latency_p95_ms": 1591.9101135999997,
+          "time_to_first_token_p99_ms": 1050.63965028,
+          "decode_duration_p99_ms": 1092.90680352,
+          "largest_chunk_gap_p99_ms": 501.84185192999996,
+          "requests_with_observed_chunk_gaps": 7808,
+          "requests_without_observed_chunk_gaps": 1
+        },
+        "steady": {
+          "requests": 15511,
+          "request_start_window_s": [
+            120,
+            300
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 86.17222222222222,
+          "request_latency_p99_ms": 1862.6047571999998,
+          "request_latency_p95_ms": 1633.878017,
+          "time_to_first_token_p99_ms": 1060.000646,
+          "decode_duration_p99_ms": 1251.5815961999997,
+          "largest_chunk_gap_p99_ms": 487.75552609,
+          "requests_with_observed_chunk_gaps": 15498,
+          "requests_without_observed_chunk_gaps": 13
+        },
+        "full": {
+          "requests": 25880,
+          "request_start_window_s": [
+            0,
+            300
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 86.26666666666667,
+          "request_latency_p99_ms": 1866.3055915399998,
+          "request_latency_p95_ms": 1628.4943761499997,
+          "time_to_first_token_p99_ms": 1053.39280201,
+          "decode_duration_p99_ms": 1135.5966038699994,
+          "largest_chunk_gap_p99_ms": 497.25766634999997,
+          "requests_with_observed_chunk_gaps": 25866,
+          "requests_without_observed_chunk_gaps": 14
+        }
+      }
+    },
+    {
+      "cell": "formal-tc2-dynamo-vllm-r8-restored-blocked-i128-o16-c128",
+      "repeat": 8,
+      "condition": "restored-blocked",
+      "gpu_uuid": "GPU-8e5288f5-6a8d-bf53-5f54-1d297232e747",
+      "requests_per_second": 87.4088111439151,
+      "telemetry": {
+        "c590-dyn-b-frontend-6cd7bb9c78-768bd": {
+          "valid": true,
+          "sampled_seconds": 299.318695861,
+          "cpu_cores": 0.14658474263958202,
+          "throttled_period_fraction": 0.002237970906378217,
+          "throttled_usec": 35615,
+          "cpu_max": "100000 100000",
+          "cpu_quota_pressure": false
+        },
+        "c590-dyn-b-vllmdecodeworker-7e67e7ff-5b94658d75-l5fpt": {
+          "valid": true,
+          "sampled_seconds": 299.669282266,
+          "cpu_cores": 1.1145780090450588,
+          "throttled_period_fraction": 0.0,
+          "throttled_usec": 0,
+          "cpu_max": "800000 100000",
+          "cpu_quota_pressure": false
+        },
+        "c590-load-0-9hnzt": {
+          "valid": true,
+          "sampled_seconds": 299.204292021,
+          "cpu_cores": 1.3365452657742374,
+          "throttled_period_fraction": 0.0,
+          "throttled_usec": 0,
+          "cpu_max": "800000 100000",
+          "cpu_quota_pressure": false,
+          "client_capacity_gate": "pass"
+        }
+      },
+      "windows": {
+        "early": {
+          "requests": 7809,
+          "request_start_window_s": [
+            0,
+            90
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 86.76666666666667,
+          "request_latency_p99_ms": 1772.81868848,
+          "request_latency_p95_ms": 1659.9025682,
+          "time_to_first_token_p99_ms": 1040.88302208,
+          "decode_duration_p99_ms": 1081.29394028,
+          "largest_chunk_gap_p99_ms": 527.41046712,
+          "requests_with_observed_chunk_gaps": 7809,
+          "requests_without_observed_chunk_gaps": 0
+        },
+        "steady": {
+          "requests": 15802,
+          "request_start_window_s": [
+            120,
+            300
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 87.78888888888889,
+          "request_latency_p99_ms": 1828.4957927099997,
+          "request_latency_p95_ms": 1493.9071414999999,
+          "time_to_first_token_p99_ms": 1052.32691203,
+          "decode_duration_p99_ms": 1078.10014178,
+          "largest_chunk_gap_p99_ms": 477.78698826,
+          "requests_with_observed_chunk_gaps": 15799,
+          "requests_without_observed_chunk_gaps": 3
+        },
+        "full": {
+          "requests": 26264,
+          "request_start_window_s": [
+            0,
+            300
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 87.54666666666667,
+          "request_latency_p99_ms": 1824.76949021,
+          "request_latency_p95_ms": 1533.3109229499996,
+          "time_to_first_token_p99_ms": 1041.60558675,
+          "decode_duration_p99_ms": 1079.3754585,
+          "largest_chunk_gap_p99_ms": 500.46090720000007,
+          "requests_with_observed_chunk_gaps": 26261,
+          "requests_without_observed_chunk_gaps": 3
+        }
+      }
+    },
+    {
+      "cell": "formal-tc2-dynamo-vllm-r8-blocked-i128-o16-c128",
+      "repeat": 8,
+      "condition": "blocked",
+      "gpu_uuid": "GPU-8e5288f5-6a8d-bf53-5f54-1d297232e747",
+      "requests_per_second": 85.656322196651,
+      "telemetry": {
+        "c590-dyn-b-vllmdecodeworker-7cc9c06d-644d497ff8-scvxb": {
+          "valid": true,
+          "sampled_seconds": 299.673032676,
+          "cpu_cores": 1.186702289573355,
+          "throttled_period_fraction": 0.0,
+          "throttled_usec": 0,
+          "cpu_max": "800000 100000",
+          "cpu_quota_pressure": false
+        },
+        "c590-dyn-b-frontend-76d4c46d6d-kd9hj": {
+          "valid": true,
+          "sampled_seconds": 300.327225008,
+          "cpu_cores": 0.1422193642246794,
+          "throttled_period_fraction": 0.002733307301835221,
+          "throttled_usec": 115306,
+          "cpu_max": "100000 100000",
+          "cpu_quota_pressure": false
+        },
+        "c590-load-0-9hnzt": {
+          "valid": true,
+          "sampled_seconds": 299.162565711,
+          "cpu_cores": 1.3329770489574901,
+          "throttled_period_fraction": 0.0,
+          "throttled_usec": 0,
+          "cpu_max": "800000 100000",
+          "cpu_quota_pressure": false,
+          "client_capacity_gate": "pass"
+        }
+      },
+      "windows": {
+        "early": {
+          "requests": 7833,
+          "request_start_window_s": [
+            0,
+            90
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 87.03333333333333,
+          "request_latency_p99_ms": 1921.41239116,
+          "request_latency_p95_ms": 1819.2764961999999,
+          "time_to_first_token_p99_ms": 1268.87118672,
+          "decode_duration_p99_ms": 1064.52652672,
+          "largest_chunk_gap_p99_ms": 542.5399843900001,
+          "requests_with_observed_chunk_gaps": 7808,
+          "requests_without_observed_chunk_gaps": 25
+        },
+        "steady": {
+          "requests": 15361,
+          "request_start_window_s": [
+            120,
+            300
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 85.33888888888889,
+          "request_latency_p99_ms": 1987.5892325999998,
+          "request_latency_p95_ms": 1746.562528,
+          "time_to_first_token_p99_ms": 1043.3489425999999,
+          "decode_duration_p99_ms": 1164.0332922,
+          "largest_chunk_gap_p99_ms": 846.6977187299999,
+          "requests_with_observed_chunk_gaps": 15360,
+          "requests_without_observed_chunk_gaps": 1
+        },
+        "full": {
+          "requests": 25755,
+          "request_start_window_s": [
+            0,
+            300
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 85.85,
+          "request_latency_p99_ms": 1994.0241728199999,
+          "request_latency_p95_ms": 1767.9909080999998,
+          "time_to_first_token_p99_ms": 1047.4790470799999,
+          "decode_duration_p99_ms": 1178.4613508399998,
+          "largest_chunk_gap_p99_ms": 848.3892174,
+          "requests_with_observed_chunk_gaps": 25728,
+          "requests_without_observed_chunk_gaps": 27
+        }
+      }
+    },
+    {
+      "cell": "formal-tc2-dynamo-vllm-r9-blocked-i128-o16-c128",
+      "repeat": 9,
+      "condition": "blocked",
+      "gpu_uuid": "GPU-1d93f352-617e-fe05-c2cb-ce84af38f697",
+      "requests_per_second": 86.01954710463488,
+      "telemetry": {
+        "c590-dyn-b-vllmdecodeworker-9c1c5d41-75d9f9799f-fwdt5": {
+          "valid": true,
+          "sampled_seconds": 299.605111871,
+          "cpu_cores": 1.1562393539839027,
+          "throttled_period_fraction": 0.0,
+          "throttled_usec": 0,
+          "cpu_max": "800000 100000",
+          "cpu_quota_pressure": false
+        },
+        "c590-dyn-b-frontend-7c5bf7c4d6-4sq24": {
+          "valid": true,
+          "sampled_seconds": 299.320462342,
+          "cpu_cores": 0.14232135907676802,
+          "throttled_period_fraction": 0.001504324934185784,
+          "throttled_usec": 44125,
+          "cpu_max": "100000 100000",
+          "cpu_quota_pressure": false
+        },
+        "c590-load-0-9hnzt": {
+          "valid": true,
+          "sampled_seconds": 300.142517289,
+          "cpu_cores": 1.329767557109202,
+          "throttled_period_fraction": 0.0,
+          "throttled_usec": 0,
+          "cpu_max": "800000 100000",
+          "cpu_quota_pressure": false,
+          "client_capacity_gate": "pass"
+        }
+      },
+      "windows": {
+        "early": {
+          "requests": 7855,
+          "request_start_window_s": [
+            0,
+            90
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 87.27777777777777,
+          "request_latency_p99_ms": 1922.44051788,
+          "request_latency_p95_ms": 1628.8446965999995,
+          "time_to_first_token_p99_ms": 1270.59916456,
+          "decode_duration_p99_ms": 1091.0489307999999,
+          "largest_chunk_gap_p99_ms": 478.15144138999995,
+          "requests_with_observed_chunk_gaps": 7852,
+          "requests_without_observed_chunk_gaps": 3
+        },
+        "steady": {
+          "requests": 15492,
+          "request_start_window_s": [
+            120,
+            300
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 86.06666666666666,
+          "request_latency_p99_ms": 1897.9740513499999,
+          "request_latency_p95_ms": 1542.1047623999998,
+          "time_to_first_token_p99_ms": 1037.8217956600001,
+          "decode_duration_p99_ms": 1209.62507295,
+          "largest_chunk_gap_p99_ms": 490.35687265999996,
+          "requests_with_observed_chunk_gaps": 15488,
+          "requests_without_observed_chunk_gaps": 4
+        },
+        "full": {
+          "requests": 25907,
+          "request_start_window_s": [
+            0,
+            300
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 86.35666666666667,
+          "request_latency_p99_ms": 1903.5492581999995,
+          "request_latency_p95_ms": 1617.1602120999987,
+          "time_to_first_token_p99_ms": 1050.5350661399998,
+          "decode_duration_p99_ms": 1129.8870853799995,
+          "largest_chunk_gap_p99_ms": 487.15208796999974,
+          "requests_with_observed_chunk_gaps": 25900,
+          "requests_without_observed_chunk_gaps": 7
+        }
+      }
+    },
+    {
+      "cell": "formal-tc2-dynamo-vllm-r9-restored-blocked-i128-o16-c128",
+      "repeat": 9,
+      "condition": "restored-blocked",
+      "gpu_uuid": "GPU-1d93f352-617e-fe05-c2cb-ce84af38f697",
+      "requests_per_second": 86.51818110195634,
+      "telemetry": {
+        "c590-dyn-b-frontend-7fb59b8db4-2r7fm": {
+          "valid": true,
+          "sampled_seconds": 299.315085147,
+          "cpu_cores": 0.14175290222730447,
+          "throttled_period_fraction": 0.0046820132657042525,
+          "throttled_usec": 136472,
+          "cpu_max": "100000 100000",
+          "cpu_quota_pressure": false
+        },
+        "c590-load-0-9hnzt": {
+          "valid": true,
+          "sampled_seconds": 299.198472745,
+          "cpu_cores": 1.3328470140282969,
+          "throttled_period_fraction": 0.0,
+          "throttled_usec": 0,
+          "cpu_max": "800000 100000",
+          "cpu_quota_pressure": false,
+          "client_capacity_gate": "pass"
+        },
+        "c590-dyn-b-vllmdecodeworker-48e3148b-7c79b6bc4c-nclbm": {
+          "valid": true,
+          "sampled_seconds": 299.687327869,
+          "cpu_cores": 1.1537395406693336,
+          "throttled_period_fraction": 0.0,
+          "throttled_usec": 0,
+          "cpu_max": "800000 100000",
+          "cpu_quota_pressure": false
+        }
+      },
+      "windows": {
+        "early": {
+          "requests": 7936,
+          "request_start_window_s": [
+            0,
+            90
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 88.17777777777778,
+          "request_latency_p99_ms": 1751.71305955,
+          "request_latency_p95_ms": 1539.9091637499998,
+          "time_to_first_token_p99_ms": 1045.5675729999998,
+          "decode_duration_p99_ms": 1010.6444412,
+          "largest_chunk_gap_p99_ms": 475.90933669999987,
+          "requests_with_observed_chunk_gaps": 7936,
+          "requests_without_observed_chunk_gaps": 0
+        },
+        "steady": {
+          "requests": 15510,
+          "request_start_window_s": [
+            120,
+            300
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 86.16666666666667,
+          "request_latency_p99_ms": 1894.4087275199997,
+          "request_latency_p95_ms": 1592.3931249999991,
+          "time_to_first_token_p99_ms": 1059.32421337,
+          "decode_duration_p99_ms": 1116.15689572,
+          "largest_chunk_gap_p99_ms": 504.5991686400002,
+          "requests_with_observed_chunk_gaps": 15509,
+          "requests_without_observed_chunk_gaps": 1
+        },
+        "full": {
+          "requests": 26006,
+          "request_start_window_s": [
+            0,
+            300
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 86.68666666666667,
+          "request_latency_p99_ms": 1841.3425012000002,
+          "request_latency_p95_ms": 1584.83587575,
+          "time_to_first_token_p99_ms": 1056.3722349999998,
+          "decode_duration_p99_ms": 1094.05800975,
+          "largest_chunk_gap_p99_ms": 489.46479464,
+          "requests_with_observed_chunk_gaps": 26005,
+          "requests_without_observed_chunk_gaps": 1
+        }
+      }
+    },
+    {
+      "cell": "formal-tc2-dynamo-vllm-r10-restored-blocked-i128-o16-c128",
+      "repeat": 10,
+      "condition": "restored-blocked",
+      "gpu_uuid": "GPU-8e5288f5-6a8d-bf53-5f54-1d297232e747",
+      "requests_per_second": 86.38146439201073,
+      "telemetry": {
+        "c590-load-0-9hnzt": {
+          "valid": true,
+          "sampled_seconds": 299.173437231,
+          "cpu_cores": 1.3297183221946107,
+          "throttled_period_fraction": 0.0,
+          "throttled_usec": 0,
+          "cpu_max": "800000 100000",
+          "cpu_quota_pressure": false,
+          "client_capacity_gate": "pass"
+        },
+        "c590-dyn-b-vllmdecodeworker-2498cfcc-cc5456fc8-g4jw9": {
+          "valid": true,
+          "sampled_seconds": 299.705166353,
+          "cpu_cores": 1.1588760822057926,
+          "throttled_period_fraction": 0.0,
+          "throttled_usec": 0,
+          "cpu_max": "800000 100000",
+          "cpu_quota_pressure": false
+        },
+        "c590-dyn-b-frontend-58846469c8-lsvrz": {
+          "valid": true,
+          "sampled_seconds": 299.326790509,
+          "cpu_cores": 0.1381556189129573,
+          "throttled_period_fraction": 0.0023594180102241447,
+          "throttled_usec": 99031,
+          "cpu_max": "100000 100000",
+          "cpu_quota_pressure": false
+        }
+      },
+      "windows": {
+        "early": {
+          "requests": 7935,
+          "request_start_window_s": [
+            0,
+            90
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 88.16666666666667,
+          "request_latency_p99_ms": 1833.5059549999999,
+          "request_latency_p95_ms": 1595.2083660999997,
+          "time_to_first_token_p99_ms": 1047.1527624999999,
+          "decode_duration_p99_ms": 1091.6535623,
+          "largest_chunk_gap_p99_ms": 539.52298529,
+          "requests_with_observed_chunk_gaps": 7934,
+          "requests_without_observed_chunk_gaps": 1
+        },
+        "steady": {
+          "requests": 15443,
+          "request_start_window_s": [
+            120,
+            300
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 85.79444444444445,
+          "request_latency_p99_ms": 1858.21523738,
+          "request_latency_p95_ms": 1595.1882767,
+          "time_to_first_token_p99_ms": 1045.33347276,
+          "decode_duration_p99_ms": 1200.5746531799998,
+          "largest_chunk_gap_p99_ms": 541.0570185,
+          "requests_with_observed_chunk_gaps": 15440,
+          "requests_without_observed_chunk_gaps": 3
+        },
+        "full": {
+          "requests": 25939,
+          "request_start_window_s": [
+            0,
+            300
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 86.46333333333334,
+          "request_latency_p99_ms": 1879.9009738799994,
+          "request_latency_p95_ms": 1610.2573012999994,
+          "time_to_first_token_p99_ms": 1046.45387454,
+          "decode_duration_p99_ms": 1149.5732750399993,
+          "largest_chunk_gap_p99_ms": 546.0140233799999,
+          "requests_with_observed_chunk_gaps": 25935,
+          "requests_without_observed_chunk_gaps": 4
+        }
+      }
+    },
+    {
+      "cell": "formal-tc2-dynamo-vllm-r10-blocked-i128-o16-c128",
+      "repeat": 10,
+      "condition": "blocked",
+      "gpu_uuid": "GPU-a62c54ce-3074-92b9-ad56-72b549ca6cf4",
+      "requests_per_second": 85.55411937193455,
+      "telemetry": {
+        "c590-dyn-b-vllmdecodeworker-dd508183-554dc4ff46-8wg44": {
+          "valid": true,
+          "sampled_seconds": 299.60003768,
+          "cpu_cores": 1.1662875969769135,
+          "throttled_period_fraction": 0.0,
+          "throttled_usec": 0,
+          "cpu_max": "800000 100000",
+          "cpu_quota_pressure": false
+        },
+        "c590-load-0-9hnzt": {
+          "valid": true,
+          "sampled_seconds": 300.2563139,
+          "cpu_cores": 1.3327920295900229,
+          "throttled_period_fraction": 0.0,
+          "throttled_usec": 0,
+          "cpu_max": "800000 100000",
+          "cpu_quota_pressure": false,
+          "client_capacity_gate": "pass"
+        },
+        "c590-dyn-b-frontend-5f9bdc8f58-qwjkr": {
+          "valid": true,
+          "sampled_seconds": 299.314926734,
+          "cpu_cores": 0.1394879448732064,
+          "throttled_period_fraction": 0.003117692907248636,
+          "throttled_usec": 107065,
+          "cpu_max": "100000 100000",
+          "cpu_quota_pressure": false
+        }
+      },
+      "windows": {
+        "early": {
+          "requests": 7832,
+          "request_start_window_s": [
+            0,
+            90
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 87.02222222222223,
+          "request_latency_p99_ms": 1882.8086470899998,
+          "request_latency_p95_ms": 1619.4713952,
+          "time_to_first_token_p99_ms": 1049.6944296099998,
+          "decode_duration_p99_ms": 1087.7392065499998,
+          "largest_chunk_gap_p99_ms": 543.2090112000001,
+          "requests_with_observed_chunk_gaps": 7808,
+          "requests_without_observed_chunk_gaps": 24
+        },
+        "steady": {
+          "requests": 15367,
+          "request_start_window_s": [
+            120,
+            300
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 85.37222222222222,
+          "request_latency_p99_ms": 1916.48847782,
+          "request_latency_p95_ms": 1663.2934383,
+          "time_to_first_token_p99_ms": 1059.1438994799998,
+          "decode_duration_p99_ms": 1106.15426706,
+          "largest_chunk_gap_p99_ms": 551.7564286899999,
+          "requests_with_observed_chunk_gaps": 15360,
+          "requests_without_observed_chunk_gaps": 7
+        },
+        "full": {
+          "requests": 25710,
+          "request_start_window_s": [
+            0,
+            300
+          ],
+          "sparse_p99": false,
+          "request_start_rate_per_second": 85.7,
+          "request_latency_p99_ms": 1925.11128685,
+          "request_latency_p95_ms": 1656.71917135,
+          "time_to_first_token_p99_ms": 1062.4754386,
+          "decode_duration_p99_ms": 1172.12865726,
+          "largest_chunk_gap_p99_ms": 564.0145576800014,
+          "requests_with_observed_chunk_gaps": 25679,
+          "requests_without_observed_chunk_gaps": 31
+        }
+      }
+    }
+  ],
+  "execution_segment": {
+    "directory": "io-uring-benchmark-tail-20261028-cont2",
+    "events": [],
+    "startup_failures": {
+      "formal-tc2-dynamo-vllm-r6-restored-blocked-startup": [],
+      "formal-tc2-dynamo-vllm-r6-blocked-startup": [],
+      "formal-tc2-dynamo-vllm-r7-blocked-startup": [],
+      "formal-tc2-dynamo-vllm-r7-restored-blocked-startup": [],
+      "formal-tc2-dynamo-vllm-r8-restored-blocked-startup": [],
+      "formal-tc2-dynamo-vllm-r8-blocked-startup": [],
+      "formal-tc2-dynamo-vllm-r9-blocked-startup": [],
+      "formal-tc2-dynamo-vllm-r9-restored-blocked-startup": [],
+      "formal-tc2-dynamo-vllm-r10-restored-blocked-startup": [],
+      "formal-tc2-dynamo-vllm-r10-blocked-startup": []
+    }
+  }
+}
