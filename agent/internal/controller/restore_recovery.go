@@ -163,7 +163,7 @@ func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, recor
 		backoff := restoreRetryBackoff(record.Attempt)
 		record.RetryAt = now.Add(backoff)
 		record.LastFailure = failureSummary(failure)
-		op.saveAttempts(record)
+		op.storeAttempts(record)
 		op.reportFailedAttempt(ctx, record, failure, fmt.Sprintf(recoveryRetryInPlace, backoff))
 		return errRetryScheduled
 	case retriesExhausted:
@@ -184,7 +184,7 @@ func (op *restoreOperation) recordLastFailure(record *restoreAttempts, f *execut
 		return
 	}
 	record.LastFailure = failureSummary(f)
-	op.saveAttempts(record)
+	op.storeAttempts(record)
 }
 
 // failureSummary is a failed attempt as the retry status annotation reports
