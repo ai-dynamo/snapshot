@@ -335,7 +335,7 @@ func TestRunRestoreWithoutRetriesFailsAsBefore(t *testing.T) {
 	assert.Empty(t, h.events(restoreRetriesExhaustedReason))
 }
 
-func TestRunRestoreEndsWhenADueRetryHasNothingLeft(t *testing.T) {
+func TestRunRestoreEndsWhenARetryHasNothingLeft(t *testing.T) {
 	for name, tc := range map[string]struct {
 		record  func(now time.Time) podcontract.ContainerRetryStatus
 		wantErr string
@@ -349,6 +349,18 @@ func TestRunRestoreEndsWhenADueRetryHasNothingLeft(t *testing.T) {
 		"over the limit": {
 			record: func(now time.Time) podcontract.ContainerRetryStatus {
 				return podcontract.ContainerRetryStatus{RetryLimit: 1, Attempt: 2, Deadline: now.Add(time.Minute), RetryAt: now.Add(-time.Second), ContainerID: "ctr-abc"}
+			},
+			wantErr: "restore used all 2 attempts: attempt 3 is over the limit of 2",
+		},
+		"past the deadline before the retry is due": {
+			record: func(now time.Time) podcontract.ContainerRetryStatus {
+				return podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 1, Deadline: now.Add(-time.Second), RetryAt: now.Add(5 * time.Second), ContainerID: "ctr-abc"}
+			},
+			wantErr: "restore ran out of time after attempt 1 of 3: restore timed out at",
+		},
+		"over the limit before the retry is due": {
+			record: func(now time.Time) podcontract.ContainerRetryStatus {
+				return podcontract.ContainerRetryStatus{RetryLimit: 1, Attempt: 2, Deadline: now.Add(time.Minute), RetryAt: now.Add(time.Second), ContainerID: "ctr-abc"}
 			},
 			wantErr: "restore used all 2 attempts: attempt 3 is over the limit of 2",
 		},
