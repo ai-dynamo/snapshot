@@ -126,9 +126,20 @@ func (h *harness) start() {
 // restart replaces the coordinator, as a restart of its host would: the new
 // coordinator recreates the sessions of specs, with new epochs, before it
 // admits anyone, and every member's connection breaks and reconnects to it.
-// The old coordinator shuts down only once no member reaches it, so no member
-// learns from it that it went away.
 func (h *harness) restart(specs ...server.Spec) {
+	h.t.Helper()
+	h.replace()
+	for _, spec := range specs {
+		require.NoError(h.t, h.srv.Ensure(within(h.t), spec))
+	}
+	h.srv.MarkReady()
+}
+
+// replace replaces the coordinator with one that holds no session and admits
+// no one until MarkReady, and breaks every member's connection, which
+// reconnects to it. The old coordinator shuts down only once no member reaches
+// it, so no member learns from it that it went away.
+func (h *harness) replace() {
 	h.t.Helper()
 	old := h.srv
 	h.start()
@@ -137,10 +148,14 @@ func (h *harness) restart(specs ...server.Spec) {
 		p.cut()
 	}
 	require.NoError(h.t, old.Shutdown(within(h.t)))
-	for _, spec := range specs {
-		require.NoError(h.t, h.srv.Ensure(within(h.t), spec))
-	}
-	h.srv.MarkReady()
+}
+
+// authorizerFunc is a server.Authorizer made of a function.
+type authorizerFunc func(ctx context.Context, uid types.UID, member, token string, held bool) error
+
+// Authorize implements server.Authorizer.
+func (f authorizerFunc) Authorize(ctx context.Context, uid types.UID, member, token string, held bool) error {
+	return f(ctx, uid, member, token, held)
 }
 
 // testSession is the session of one attempt, whose members are named member-0

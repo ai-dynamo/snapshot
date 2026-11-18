@@ -9,6 +9,8 @@ import (
 	"math"
 	"strings"
 	"time"
+
+	"github.com/nats-io/nats.go"
 )
 
 // The limits a session's buckets have unless the coordinator is configured
@@ -16,14 +18,14 @@ import (
 // size of its values, the library bucket also its number of keys, none reserves
 // memory, and every session shares the coordinator's memory cap. The control
 // bucket lives in file storage, outside that cap, and has a size of its own:
-// see ControlBytes. MaxValue is SNEP-324's default, to revisit once
-// the largest cuInterpose record has been measured on the largest supported
-// topology. Meta carries the value limits a session actually has, and the
-// client refuses a larger value itself.
+// see ControlBytes. MaxValue also bounds configured values so concurrent reads
+// fit the client's shared reply subscription. Meta carries the value limits a
+// session actually has, and the client refuses a larger value itself.
 const (
 	// MaxValue is the largest value the Snapshot bucket holds: agent and relay
-	// records, which can describe a whole topology.
-	MaxValue = 32 << 20
+	// records, which can describe a whole topology. Concurrent replies must fit
+	// the client's shared reply subscription, including their framing.
+	MaxValue = nats.DefaultSubPendingBytesLimit/MaxConcurrentGets - PayloadHeadroom
 
 	// MaxLibraryValue is the largest value the library bucket holds. NCCL's
 	// communicator identifiers take 128 bytes.
@@ -126,8 +128,8 @@ func MaxMetaBytes(members int) int {
 // Eight is twice four, the most keys a member is sized to watch at once on one
 // bucket. Every watch is an ordered consumer, and a reconnect replaces each one
 // with a new consumer while the old one is still being deleted, so a member's
-// share is twice what it watches at once. On the control bucket, the client
-// watches the session's end and the Barrier in progress: two. On the Snapshot
+// share is twice what it watches at once. On the control bucket, one watch
+// follows barrier arrivals and the session's end together. On the Snapshot
 // bucket, it watches each Get with a wait of a key that is absent, such as one
 // by the agent and one by its cuInterpose relay: two. On the library bucket,
 // the agent's library endpoint waits through Get for the keys its Pod's
@@ -143,7 +145,7 @@ const (
 	MaxConcurrentGets = 2
 
 	// PayloadHeadroom is what the coordinator's largest message may carry
-	// beyond the Snapshot bucket's largest value: the headers of a write, and
+	// beyond the largest value of any bucket: the headers of a write, and
 	// what a read's reply adds, which ReplyHeadroom bounds. The key in a
 	// write's subject does not count.
 	PayloadHeadroom = 64 << 10
@@ -156,14 +158,22 @@ const (
 	ReplyHeadroom = 8 << 10
 )
 
+// MaxPayload is the largest message the coordinator accepts, for a Snapshot
+// bucket whose largest value is maxValue: the largest value of any bucket, and
+// PayloadHeadroom. That value is maxValue, or the largest Meta of a session of
+// MaxMembers members when maxValue is smaller.
+func MaxPayload(maxValue int) int {
+	return max(maxValue, ControlValueBytes(MaxMembers)) + PayloadHeadroom
+}
+
 // MaxPending is how many bytes the coordinator buffers for a connection, of
 // what it has sent and the connection has not taken yet, before it drops the
-// connection as a slow consumer: MaxConcurrentGets of the largest messages it
-// accepts, for a Snapshot bucket whose largest value is maxValue. A client
+// connection as a slow consumer: MaxConcurrentGets of its largest messages,
+// MaxPayload, for a Snapshot bucket whose largest value is maxValue. A client
 // budgets its reads within it, in bytes, each the largest value of its bucket
 // and ReplyHeadroom, so concurrent Gets never cost a reconnect, and a small
 // read goes on beside the largest ones.
-func MaxPending(maxValue int) int64 { return MaxConcurrentGets * int64(maxValue+PayloadHeadroom) }
+func MaxPending(maxValue int) int64 { return MaxConcurrentGets * int64(MaxPayload(maxValue)) }
 
 // MaxNameLength bounds a member ID and a barrier name.
 const MaxNameLength = 253

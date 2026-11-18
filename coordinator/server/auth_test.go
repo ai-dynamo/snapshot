@@ -4,7 +4,9 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"net"
 	"testing"
@@ -17,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // pending is how long a test watches a call to check that it has not returned.
@@ -169,7 +172,9 @@ func TestAuthentication(t *testing.T) {
 			spec := h.ensure(1)
 			m := h.connect(spec, 0)
 			require.NoError(t, h.srv.Remove(within(t), spec.UID))
-			require.ErrorIs(t, awaitEnd(t, m), &session.AbortError{Reason: session.ReasonCancelled})
+			var abort *session.AbortError
+			require.ErrorAs(t, awaitEnd(t, m), &abort)
+			require.Contains(t, []string{session.ReasonCancelled, session.ReasonCoordinatorLost}, abort.Reason)
 			// The group resource is gone, so the Authorizer does not place the
 			// member. A held session still needs its placement, which a lagging
 			// cache may not show yet.
@@ -212,6 +217,39 @@ func TestAuthentication(t *testing.T) {
 		require.NoError(t, h.srv.Ensure(within(t), spec))
 		require.NoError(t, <-connected)
 	})
+}
+
+func TestSessionAppearsDuringAuthorization(t *testing.T) {
+	var h *harness
+	var spec Spec
+	lookups := make(chan bool, 2)
+	auth := authorizeFunc(func(ctx context.Context, _ types.UID, _, _ string, held bool) error {
+		lookups <- held
+		if held {
+			return ErrPermissionDenied
+		}
+		return h.srv.Ensure(ctx, spec)
+	})
+	h = newHarness(t, func(cfg *Config) { cfg.Authorizer = auth })
+	spec = h.spec(1)
+	nc, err := h.dial(spec, spec.Members[0].ID, agentToken, 1)
+	if nc != nil {
+		defer nc.Close()
+	}
+	require.ErrorIs(t, err, nats.ErrAuthorization, "placement was not checked for the session that appeared")
+	assert.False(t, <-lookups)
+	nc, err = h.dial(spec, spec.Members[0].ID, agentToken, 1)
+	if nc != nil {
+		defer nc.Close()
+	}
+	require.ErrorIs(t, err, nats.ErrAuthorization, "a retry must check placement")
+	assert.True(t, <-lookups)
+}
+
+type authorizeFunc func(context.Context, types.UID, string, string, bool) error
+
+func (f authorizeFunc) Authorize(ctx context.Context, uid types.UID, member, token string, held bool) error {
+	return f(ctx, uid, member, token, held)
 }
 
 // TestReadiness covers the gate: until MarkReady, every client is refused, and
@@ -286,6 +324,70 @@ func TestEpochFence(t *testing.T) {
 	require.ErrorIs(t, awaitEnd(t, fresh), session.ErrCoordinatorLost)
 	late := h.connect(spec2, 2)
 	require.ErrorIs(t, awaitEnd(t, late), session.ErrCoordinatorLost, "a member that had not connected yet")
+}
+
+// TestReadOnlyWithoutSession covers a member that presents an epoch while the
+// coordinator holds no session for its attempt: the coordinator admits it
+// read-only. Once the host creates the session, the member can still bind its
+// buckets, read meta, and watch keys. So it finds the other epoch, and learns
+// that its session is gone. None of its writes reaches the session.
+func TestReadOnlyWithoutSession(t *testing.T) {
+	h := newHarness(t)
+	ctx := within(t)
+	spec := h.spec(2)
+	uid, id := string(spec.UID), spec.Members[0].ID
+	// lost is the epoch of the session the member joined, which the
+	// coordinator no longer holds.
+	const lost = 1
+	violations := make(chan error, 64)
+	nc, err := h.dial(spec, id, agentToken, lost,
+		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
+			select {
+			case violations <- err:
+			default:
+			}
+		}))
+	require.NoError(t, err)
+	defer nc.Close()
+	require.NoError(t, h.srv.Ensure(ctx, spec))
+
+	// What the client's verification does: bind the control bucket and read
+	// meta. What its waits do: watch keys.
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+	control, err := js.KeyValue(ctx, session.ControlBucket(uid))
+	require.NoError(t, err)
+	entry, err := control.Get(ctx, session.KeyMeta)
+	require.NoError(t, err)
+	var meta session.Meta
+	require.NoError(t, json.Unmarshal(entry.Value(), &meta))
+	require.NotEqual(t, uint64(lost), meta.Epoch, "the member must find another epoch")
+	watchUntil(t, control, session.KeyEnded, func(map[string]bool) bool { return true })
+
+	for name, subject := range map[string]string{
+		"its arrival":     session.Subject(session.ControlBucket(uid), session.BarrierKey("admitted", id)),
+		"its departure":   session.Subject(session.ControlBucket(uid), session.LeftKey(id)),
+		"the end":         session.Subject(session.ControlBucket(uid), session.KeyEnded),
+		"an agent's key":  session.Subject(session.SnapshotBucket(uid), "snapshot.k"),
+		"a library's key": session.Subject(session.LibraryBucket(uid), "library.k"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _ = nc.Request(subject, []byte(session.ReasonRefused), pending)
+			requireViolation(t, violations, `Publish to "`+subject+`"`)
+		})
+	}
+	// Meta is the only record the session holds.
+	for _, bucket := range session.Buckets(uid) {
+		stream, err := h.srv.js.Stream(ctx, "KV_"+bucket)
+		require.NoError(t, err)
+		info, err := stream.Info(ctx)
+		require.NoError(t, err)
+		want := uint64(0)
+		if bucket == session.ControlBucket(uid) {
+			want = 1
+		}
+		assert.Equal(t, want, info.State.Msgs, "the records of bucket %s", bucket)
+	}
 }
 
 // pipeAddr is the address of an in-process connection.

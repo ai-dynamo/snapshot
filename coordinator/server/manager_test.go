@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -108,6 +109,14 @@ func TestEnsure(t *testing.T) {
 		spec.UID = types.UID(strings.Repeat("u", session.MaxAttemptLength))
 		require.NoError(t, h.srv.Ensure(within(t), spec))
 	})
+}
+
+// TestEnsureTheLargestMeta checks that a coordinator whose largest value is
+// smaller than the largest Meta writes the Meta of a session of
+// session.MaxMembers members with the longest IDs.
+func TestEnsureTheLargestMeta(t *testing.T) {
+	h := newHarness(t, func(cfg *Config) { cfg.MaxValue, cfg.MaxLibraryValue = 1<<10, 1<<10 })
+	require.NoError(t, h.srv.Ensure(within(t), h.longestSpec(session.MaxMembers)))
 }
 
 // TestEndAtTheMemoryCap covers a session that every member left, or whose
@@ -403,7 +412,7 @@ func TestRemove(t *testing.T) {
 
 // TestEnsureCancelledWhileWatching is a stress test. It ends Ensure's context
 // while follow may still be creating the session's watch: as soon as the
-// session's Snapshot bucket reports the watch's consumer. nats.go may never
+// session's control bucket reports the watch's consumer. nats.go may never
 // close the channel of a watch cancelled as it is created
 // (nats-io/nats.go#2223), so an Ensure that waited for that channel would
 // never return, and, since Ensure holds control, neither would Remove or
@@ -413,11 +422,15 @@ func TestRemove(t *testing.T) {
 // fix, the test hung in 1 of 8 concurrent runs of 100 under -race.
 func TestEnsureCancelledWhileWatching(t *testing.T) {
 	h := newHarness(t)
+	var cancellations atomic.Int64
 	for i := range 100 {
 		spec := h.spec(1)
 		ctx, cancel := context.WithCancel(context.Background())
 		watched, err := h.srv.conn.Subscribe(fmt.Sprintf("%s.KV_%s.*", natsserver.JSAdvisoryConsumerCreatedPre,
-			session.SnapshotBucket(string(spec.UID))), func(*nats.Msg) { cancel() })
+			session.ControlBucket(string(spec.UID))), func(*nats.Msg) {
+			cancellations.Add(1)
+			cancel()
+		})
 		require.NoError(t, err)
 		err = returns(t, fmt.Sprintf("Ensure %d", i), func() error { return h.srv.Ensure(ctx, spec) })
 		cancel()
@@ -429,6 +442,8 @@ func TestEnsureCancelledWhileWatching(t *testing.T) {
 			return h.srv.Remove(within(t), spec.UID)
 		}))
 	}
+	t.Logf("consumer-created hook cancellations: %d", cancellations.Load())
+	require.Positive(t, cancellations.Load(), "the consumer-created hook never cancelled Ensure")
 	require.NoError(t, returns(t, "Shutdown", func() error { return h.srv.Shutdown(within(t)) }))
 }
 

@@ -63,3 +63,35 @@ func TestStoreDir(t *testing.T) {
 		require.Error(t, err)
 	})
 }
+
+func TestStoreDirRefusesSymlinks(t *testing.T) {
+	for name, suffix := range map[string]string{"bare": "", "slash": "/", "dot": "/."} {
+		t.Run(name, func(t *testing.T) {
+			target := t.TempDir()
+			marker := filepath.Join(target, "keep")
+			require.NoError(t, os.WriteFile(marker, []byte("keep"), 0o600))
+			link := filepath.Join(t.TempDir(), "store")
+			require.NoError(t, os.Symlink(target, link))
+			_, err := newStoreDir(link + suffix)
+			require.Error(t, err)
+			require.ErrorContains(t, err, "symlink")
+			value, err := os.ReadFile(marker)
+			require.NoError(t, err)
+			require.Equal(t, "keep", string(value))
+		})
+	}
+}
+
+func TestStoreDirRefusesAnotherOwner(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("changing a directory's owner requires root")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "keep")
+	require.NoError(t, os.WriteFile(marker, []byte("keep"), 0o600))
+	require.NoError(t, os.Chown(dir, 1, -1))
+	_, err := newStoreDir(dir)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "owner")
+	require.FileExists(t, marker)
+}

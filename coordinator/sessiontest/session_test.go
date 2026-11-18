@@ -78,14 +78,21 @@ func TestBarrier(t *testing.T) {
 
 	t.Run("a released barrier returns at once", func(t *testing.T) {
 		ctx := within(t)
-		sessions := h.session(t, 2).connectAll(t)
+		ses := h.session(t, 2)
+		sessions := ses.connectAll(t)
 		first := barrier(ctx, sessions[0], "resume")
 		require.NoError(t, sessions[1].Barrier(ctx, "resume"))
 		require.NoError(t, <-first)
 		for _, s := range sessions {
+			key := session.BarrierKey("resume", ses.spec.Members[s.Rank()].ID)
+			before, err := ses.raw(t, s.Rank()).Get(ctx, key)
+			require.NoError(t, err)
 			start := time.Now()
 			require.NoError(t, s.Barrier(ctx, "resume"))
 			assert.Less(t, time.Since(start), pending)
+			after, err := ses.raw(t, s.Rank()).Get(ctx, key)
+			require.NoError(t, err)
+			assert.Equal(t, before.Revision(), after.Revision(), "an arrival keeps its stream position")
 		}
 	})
 
@@ -161,6 +168,31 @@ func TestBarrier(t *testing.T) {
 		s := h.session(t, 1).connect(t, 0)
 		require.ErrorIs(t, s.Barrier(within(t), "a.b"), session.ErrInvalid)
 	})
+}
+
+func TestBarrierReleasedBeforeSessionEnd(t *testing.T) {
+	h := newHarness(t)
+	for round := range 50 {
+		ctx := within(t)
+		ses := h.session(t, 2)
+		members := ses.connectAll(t)
+		peer := make(chan error, 1)
+		go func() {
+			err := members[0].Barrier(ctx, "committed")
+			if err == nil {
+				err = members[0].Fail(ctx, session.ReasonRefused)
+			}
+			peer <- err
+		}()
+		awaitKey(t, ses.raw(t, 1), session.BarrierKey("committed", ses.spec.Members[0].ID))
+		err := members[1].Barrier(ctx, "committed")
+		require.NoError(t, <-peer, "round %d", round)
+		require.NoError(t, err, "round %d: the release precedes the end", round)
+		for _, member := range members {
+			awaitDone(t, member)
+			require.NoError(t, member.Close())
+		}
+	}
 }
 
 // TestWaitsShareTheConsumerLimit covers a bucket's consumer limit, which a
@@ -241,7 +273,8 @@ func TestWaitsFreeTheirConsumers(t *testing.T) {
 	freed(snapshot, 0)
 
 	wait := barrier(ctx, sessions[0], "admitted")
-	ses.awaitConsumers(t, control, idle+1)
+	awaitKey(t, ses.raw(t, 1), session.BarrierKey("admitted", ses.spec.Members[0].ID))
+	ses.awaitConsumers(t, control, idle)
 	require.NoError(t, sessions[1].Barrier(ctx, "admitted"))
 	require.NoError(t, <-wait)
 	freed(control, idle)
@@ -486,9 +519,8 @@ func TestClose(t *testing.T) {
 	require.ErrorIs(t, sessions[1].Err(), &session.AbortError{Reason: session.ReasonMemberFailed})
 }
 
-// TestCloseWhileWatching is a stress test. It closes members while their
-// watches may still be being created: the one that follows the session's end,
-// which Connect starts, and a Barrier's. nats.go may never close the channel
+// TestCloseWhileWatching closes members while their shared control watch may
+// still be being created and a Barrier is in progress. nats.go may never close the channel
 // of a watch cancelled as it is created (nats-io/nats.go#2223), so a client
 // that waited for that channel would never return from Close or the Barrier.
 // Nothing makes a Close land in that window, which only a hook in production

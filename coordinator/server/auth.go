@@ -83,7 +83,7 @@ type authenticator struct{ s *Server }
 // Check implements natsserver.Authentication. It admits the coordinator's own
 // in-process connections, and a member's connection once the coordinator is
 // ready, the client is admissible, the Authorizer admits it, and admit does,
-// granting it session.MemberPermissions. It refuses every other client. A
+// granting it the permissions admit returns. It refuses every other client. A
 // refusal that any client can cause, with a name or an epoch it makes up, is
 // logged at V(1) only, so a flood of them cannot fill the log.
 func (au authenticator) Check(c natsserver.ClientAuthentication) bool {
@@ -111,11 +111,13 @@ func (au authenticator) Check(c natsserver.ClientAuthentication) bool {
 	a := s.lookup(uid)
 	ctx, cancel := context.WithTimeout(context.Background(), AuthorizeTimeout)
 	defer cancel()
-	if !admissible(log, a, member, epoch) || !s.authorize(ctx, log, a, uid, member, opts.Token) ||
-		!s.admit(ctx, log, uid, member, epoch) {
+	if !admissible(log, a, member, epoch) || !s.authorize(ctx, log, a, uid, member, opts.Token) {
 		return false
 	}
-	p := session.MemberPermissions(attempt, member)
+	p, ok := s.admit(ctx, log, uid, member, epoch, a)
+	if !ok {
+		return false
+	}
 	c.RegisterUser(&natsserver.User{
 		Username: opts.Username,
 		Account:  s.account,
@@ -198,24 +200,36 @@ func admissible(log logr.Logger, a *attempt, member string, epoch uint64) bool {
 	return true
 }
 
-// admit decides whether an authorized member may connect: if it is still
-// admissible, and, if it presents the epoch of a session this coordinator
-// recreated after losing the one the member joined, once it has failed that
-// session with session.ReasonCoordinatorLost. So a member that lost its
-// session is never admitted to a session it could write to. A member that
-// cannot be fenced so is refused, and retries.
-func (s *Server) admit(ctx context.Context, log logr.Logger, uid types.UID, member string, epoch uint64) bool {
+// admit decides whether an authorized member may connect, and with which
+// permissions, from the session it finds: one lookup decides both. A member
+// that is no longer admissible is refused. A member that presents the epoch of
+// a session this coordinator recreated, after losing the one the member
+// joined, is admitted once that session has failed with
+// session.ReasonCoordinatorLost. A member that cannot be fenced so is refused,
+// and retries. A member that presents an epoch while the coordinator holds no
+// session for its attempt is admitted, so it learns that its session is gone.
+// It gets session.ReadOnlyPermissions, so the server keeps it from writing to a
+// session the host creates for the attempt later, under the same bucket names.
+// Every other member gets session.MemberPermissions.
+// A session the Authorizer did not see requires a new authorization.
+func (s *Server) admit(ctx context.Context, log logr.Logger, uid types.UID, member string,
+	epoch uint64, authorized *attempt) (session.Permissions, bool) {
 	a := s.lookup(uid)
 	switch {
+	case a != nil && a != authorized:
+		log.V(1).Info("Refused a member whose session changed during authorization")
+		return session.Permissions{}, false
 	case !admissible(log, a, member, epoch):
-		return false
-	case a == nil, epoch == 0, epoch == a.epoch:
-		return true
+		return session.Permissions{}, false
+	case a == nil:
+		return session.ReadOnlyPermissions(string(uid), member), true
+	case epoch == 0, epoch == a.epoch:
+		return session.MemberPermissions(string(uid), member), true
 	}
 	if err := s.endWith(ctx, a, []byte(session.ReasonCoordinatorLost)); err != nil && !ended(err) {
 		log.Error(err, "Failing a session whose member joined it under an earlier coordinator failed")
-		return false
+		return session.Permissions{}, false
 	}
 	log.Info("Failed a session whose member joined it under an earlier coordinator")
-	return true
+	return session.MemberPermissions(string(uid), member), true
 }

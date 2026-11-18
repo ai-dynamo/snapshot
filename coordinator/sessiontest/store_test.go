@@ -17,6 +17,7 @@ import (
 	"github.com/ai-dynamo/snapshot/coordinator"
 	"github.com/ai-dynamo/snapshot/coordinator/server"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
+	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
@@ -275,10 +276,8 @@ func insert(ns session.Namespace, value string) func(*testing.T, []coordinator.S
 	}
 }
 
-// TestDelete covers Delete: an absent key is no error, and an Insert after a
-// Delete starts afresh. The library bucket limits its keys, so Delete reads
-// first there, and writes nothing for an absent key; in the Snapshot bucket it
-// deletes in one round trip, which leaves a delete marker.
+// TestDelete covers Delete: deleting an absent key is no error and writes no
+// delete marker in any bucket, and an Insert after a Delete starts afresh.
 func TestDelete(t *testing.T) {
 	h := newHarness(t)
 	ctx := within(t)
@@ -293,11 +292,7 @@ func TestDelete(t *testing.T) {
 		store := in(s, ns)
 		before := messages(ns)
 		require.NoError(t, store.Delete(ctx, "never-inserted"), "deleting an absent key")
-		markers := uint64(1)
-		if ns == session.NamespaceLibrary {
-			markers = 0
-		}
-		assert.Equal(t, before+markers, messages(ns), "namespace %s: delete markers for an absent key", ns)
+		assert.Equal(t, before, messages(ns), "namespace %s: delete markers for an absent key", ns)
 		require.NoError(t, store.Insert(ctx, "k", []byte("first")))
 		require.NoError(t, store.Delete(ctx, "k"))
 		require.NoError(t, store.Delete(ctx, "k"), "deleting twice")
@@ -397,6 +392,44 @@ func TestConcurrentLargeGets(t *testing.T) {
 	}
 	for _, line := range h.logs.all() {
 		assert.NotContains(t, line, "Lost the connection", "a Get must not cost the connection")
+	}
+}
+
+func TestFullSizeGetsFitTheClientBuffer(t *testing.T) {
+	const bound = nats.DefaultSubPendingBytesLimit/session.MaxConcurrentGets - session.PayloadHeadroom
+	h := newHarness(t, func(cfg *server.Config) { cfg.MaxValue = bound })
+	ses := h.session(t, 2)
+	sessions := ses.connectAll(t)
+	reader := sessions[0].Snapshot()
+	value := bytes.Repeat([]byte{'v'}, bound)
+	require.NoError(t, sessions[1].Snapshot().Insert(within(t), "large", value))
+
+	for round := range 10 {
+		ctx := within(t)
+		start := make(chan struct{})
+		results := make(chan error, session.MaxConcurrentGets+1)
+		for range session.MaxConcurrentGets {
+			go func() {
+				<-start
+				got, err := reader.Get(ctx, "large", 0)
+				if err == nil && !bytes.Equal(got, value) {
+					err = errors.New("a Get returned another value")
+				}
+				results <- err
+			}()
+		}
+		go func() {
+			<-start
+			results <- reader.Insert(ctx, fmt.Sprintf("write.%d", round), value)
+		}()
+		close(start)
+		for range session.MaxConcurrentGets + 1 {
+			require.NoError(t, <-results)
+		}
+	}
+	for _, line := range h.logs.all() {
+		assert.NotContains(t, strings.ToLower(line), "slow consumer", "no reply may be dropped")
+		assert.NotContains(t, line, "Lost the connection", "reads must not cost a reconnect")
 	}
 }
 

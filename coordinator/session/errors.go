@@ -50,8 +50,11 @@ var (
 	// received its end: the member found a session with another epoch, or
 	// none. It is an *AbortError, so it also matches a session that the
 	// coordinator failed with ReasonCoordinatorLost: one it shut down under,
-	// or recreated after a restart, which it fails as soon as a member that
-	// joined the lost one reconnects.
+	// or one it recreated after a restart. A member that joined the lost
+	// session and reconnects after it is recreated fails the recreated one
+	// with ReasonCoordinatorLost. One that reconnects before learns
+	// ErrCoordinatorLost itself, and never writes to the recreated session,
+	// which cannot commit without it.
 	ErrCoordinatorLost error = &AbortError{Reason: ReasonCoordinatorLost}
 )
 

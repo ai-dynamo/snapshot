@@ -6,11 +6,13 @@ package session
 import (
 	"encoding/json"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -98,6 +100,18 @@ func TestMemberPermissionsFollowTheBuckets(t *testing.T) {
 	assert.Equal(t, []string{"_INBOX.a.m.>"}, permissions.Subscribe)
 }
 
+// TestReadOnlyPermissionsWriteNoKey checks that a read-only member may make
+// every request a member may, and write no key.
+func TestReadOnlyPermissionsWriteNoKey(t *testing.T) {
+	member, readOnly := MemberPermissions("a", "m"), ReadOnlyPermissions("a", "m")
+	requests := slices.DeleteFunc(slices.Clone(member.Publish), func(subject string) bool {
+		return strings.HasPrefix(subject, "$KV.")
+	})
+	assert.Equal(t, requests, readOnly.Publish)
+	assert.Len(t, readOnly.Publish, cap(readOnly.Publish), "the subjects must fill what was allocated for them")
+	assert.Equal(t, member.Subscribe, readOnly.Subscribe)
+}
+
 // TestControlBytes checks the control bucket's size against its parts, with
 // the longest names: each member adds its arrivals and its departure, each as
 // large as the largest record, an arrival of the longest names with the
@@ -157,4 +171,6 @@ func TestMaxPending(t *testing.T) {
 	assert.LessOrEqual(t, ReplyHeadroom, PayloadHeadroom)
 	replies := int64(MaxConcurrentGets*(MaxValue+ReplyHeadroom) + MaxLibraryValue + ReplyHeadroom)
 	assert.LessOrEqual(t, replies, MaxPending(MaxValue))
+	assert.LessOrEqual(t, MaxPending(MaxValue), int64(nats.DefaultSubPendingBytesLimit),
+		"the reads must fit the client's shared reply subscription")
 }

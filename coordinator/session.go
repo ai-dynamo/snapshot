@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -109,6 +108,7 @@ type client struct {
 	meta    session.Meta
 	ranks   map[string]int
 	joined  bool
+	events  *controlWatcher
 
 	// epoch is the epoch the client presents when it connects, zero until it
 	// has read Meta.
@@ -152,38 +152,13 @@ type client struct {
 	wg     sync.WaitGroup
 }
 
-// followEnd ends the session once the ended key appears, or the session is
-// found gone, which await reports. A session never runs without its end being
-// watched, so followEnd watches again after any other failure until the
-// session ends or is closed. It waits attemptTimeout between tries, so a
-// failure that persists, which only a bug should cause, is logged rarely.
-func (s *client) followEnd() {
-	defer s.wg.Done()
-	for {
-		err := s.await(context.Background(), s.control.kv, nil, func(string, []byte, bool) bool { return false })
-		var abort *session.AbortError
-		switch {
-		case errors.As(err, &abort), errors.Is(err, session.ErrClosed):
-			s.finish(err)
-			return
-		case errors.Is(err, net.ErrClosed):
-			return
-		}
-		s.log.Error(err, "Watching the session's end failed; watching again")
-		select {
-		case <-time.After(attemptTimeout):
-		case <-s.closing:
-			return
-		case <-s.done:
-			return
-		}
-	}
-}
-
 // finish ends the session with err, once, and closes its connection, which has
 // nothing left to carry.
 func (s *client) finish(err error) {
 	s.end.Do(func() {
+		if s.events != nil {
+			s.events.end(err)
+		}
 		s.err = err
 		close(s.done)
 		s.endLife()
@@ -256,34 +231,29 @@ func (s *client) Barrier(ctx context.Context, name string) error {
 	if err := session.ValidateName(name); err != nil {
 		return fmt.Errorf("barrier: %w", err)
 	}
+	if err := s.alive(); err != nil {
+		return err
+	}
 	arrival := session.BarrierKey(name, s.member)
-	if err := s.do(ctx, func(ctx context.Context) error {
-		_, err := s.control.kv.Put(ctx, arrival, nil)
-		return err
-	}); err != nil {
-		return err
-	}
-	prefix := session.BarrierKey(name, "")
-	arrived := make(map[string]bool, len(s.ranks))
-	if err := s.await(ctx, s.control.kv, []string{session.BarrierKey(name, "*")}, func(key string, _ []byte,
-		present bool) bool {
-		member := strings.TrimPrefix(key, prefix)
-		if _, ok := s.ranks[member]; ok && present {
-			arrived[member] = true
-		} else {
-			delete(arrived, member)
+	err := s.write(ctx, func(ctx context.Context) error {
+		_, err := s.control.kv.Create(ctx, arrival, nil)
+		if errors.Is(err, jetstream.ErrKeyExists) {
+			return nil
 		}
-		return len(arrived) == len(s.ranks)
-	}); err != nil {
+		return err
+	})
+	if err != nil && (s.Err() == nil || ctx.Err() != nil) {
 		return err
 	}
-	return s.settle(ctx)
+	// An end may close the connection before the arrival's reply arrives.
+	// The shared watch has already recorded whether the barrier released.
+	return s.events.wait(ctx, name)
 }
 
 // Leave implements Session.
 func (s *client) Leave(ctx context.Context) error {
 	left := session.LeftKey(s.member)
-	err := s.do(ctx, func(ctx context.Context) error {
+	err := s.write(ctx, func(ctx context.Context) error {
 		_, err := s.control.kv.Put(ctx, left, nil)
 		return err
 	})
@@ -299,17 +269,24 @@ func (s *client) Fail(ctx context.Context, reason string) error {
 		return err
 	}
 	created, held, err := s.create(ctx, s.control, session.KeyEnded, []byte(reason), controlRead(len(s.meta.Members)))
-	if created {
-		s.finish(&session.AbortError{Reason: reason})
+	if !created {
+		if err == nil {
+			err = session.EndedError(held)
+		}
+		if !errors.Is(err, &session.AbortError{Reason: reason}) {
+			return err
+		}
+	}
+	// The ordered watch records the end before Fail reports it, so earlier
+	// barrier arrivals remain visible and Err already reports the outcome.
+	select {
+	case <-s.done:
 		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.closing:
+		return net.ErrClosed
 	}
-	if err == nil {
-		err = session.EndedError(held)
-	}
-	if errors.Is(err, &session.AbortError{Reason: reason}) {
-		return nil
-	}
-	return err
 }
 
 // do runs op, sending it again while it fails transiently, until it succeeds,
@@ -318,6 +295,21 @@ func (s *client) Fail(ctx context.Context, reason string) error {
 // done. Each try is bounded by attemptTimeout and by a disconnect.
 func (s *client) do(ctx context.Context, op func(context.Context) error) error {
 	return s.retry(ctx, func(ctx context.Context) error { return s.try(ctx, op) })
+}
+
+// write runs op, which writes to the session, as do does, but sends it, the
+// first time and every time again, only once settleToWrite returns. After a
+// reconnect, the attempt's buckets may hold a session the member never joined:
+// one the coordinator recreated after a restart, under the same names. The
+// verification of the reconnect then ends this session with
+// session.ErrCoordinatorLost, and the write is never sent.
+func (s *client) write(ctx context.Context, op func(context.Context) error) error {
+	return s.retry(ctx, func(ctx context.Context) error {
+		if err := s.settleToWrite(ctx); err != nil {
+			return err
+		}
+		return s.try(ctx, op)
+	})
 }
 
 // retry sends an operation through send, which tries it once, as do describes.
@@ -527,19 +519,12 @@ func (s *client) watch(ctx context.Context, kv jetstream.KeyValue, keys []string
 	return w, err
 }
 
-// await watches keys of kv, and the ended key whenever kv is the control
-// bucket, and passes visit every entry of keys, each key's current entry first
-// and then every change, until visit reports true. present is false for a
-// deleted key. Watching ended in the same watch orders the session's end among
-// the entries, so an end recorded after the last entry visit needed does not
-// hide it. Watching another bucket relies on Done instead. opts are the
-// watch's, such as jetstream.MetaOnly, which delivers entries with no values.
+// await watches keys of kv and passes visit each entry, its current value
+// first and then every change, until visit reports true. present is false for
+// a deleted key. The shared control watch ends waits through Done. opts are
+// the watch's, such as jetstream.MetaOnly, which delivers no values.
 func (s *client) await(ctx context.Context, kv jetstream.KeyValue, keys []string,
 	visit func(key string, value []byte, present bool) bool, opts ...jetstream.WatchOpt) error {
-	watchesEnd := kv == s.control.kv
-	if watchesEnd {
-		keys = append(slices.Clone(keys), session.KeyEnded)
-	}
 	w, err := s.watch(ctx, kv, keys, opts...)
 	if err != nil {
 		return err
@@ -564,10 +549,6 @@ func (s *client) await(ctx context.Context, kv jetstream.KeyValue, keys []string
 				w = again
 			case e == nil:
 				// The end of the current entries.
-			case watchesEnd && e.Key() == session.KeyEnded:
-				if e.Operation() == jetstream.KeyValuePut {
-					return session.EndedError(e.Value())
-				}
 			case visit(e.Key(), e.Value(), e.Operation() == jetstream.KeyValuePut):
 				return nil
 			}
