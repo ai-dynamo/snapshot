@@ -153,6 +153,11 @@ commit-level history for each release is on its
   namespace rather than the restore container's (#593), so lookups by PID,
   such as UCX shared-memory endpoints (#802), work after a restore. Only
   checkpoints taken after the upgrade get it; take older ones again.
+- `PodSnapshotContent.status.source` records the GPU model nvidia-smi reports
+  on nodes whose driver procfs names the GPU `Unknown`, such as DGX Spark (GB10)
+  with driver 580 (#921), instead of `Unknown`. The `gpu-model` restore check
+  compares that name, so a checkpoint taken on such a node before the upgrade
+  does not restore onto one after it; take it again.
 
 ### Deprecated
 

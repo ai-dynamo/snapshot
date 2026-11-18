@@ -119,10 +119,10 @@ type VisibleGPULister func() (VisibleGPUs, error)
 
 // ListVisibleGPUs returns a lister for the container whose host PID is pid. On
 // its first call it reads the container's cards from the driver's procfs, or,
-// when that cannot answer exactly (MIG, or no device cgroup rules), runs
-// nvidia-smi -L inside the container's mount and PID namespaces and sorts its
-// cards by the bus IDs in the host's driver procfs. Every later call gets the
-// same answer.
+// when that cannot answer exactly (MIG, no device cgroup rules, or a card the
+// driver does not name), runs nvidia-smi -L inside the container's mount and
+// PID namespaces and sorts its cards by the bus IDs in the host's driver
+// procfs. Every later call gets the same answer.
 // nvidia-smi spends most of its time initializing NVML, 0.1 to 0.2 s on an idle
 // eight-GPU node and seconds while other processes start CUDA, so a capture or
 // restore lists once for both its MIG check and GPU discovery.
@@ -165,9 +165,11 @@ func ListVisibleGPUs(ctx context.Context, hostProcPath string, pid int, spec *sp
 // nvidia-smi -L lists them in. It avoids NVML, which brings up every GPU it can
 // open and takes seconds when other processes on the node, such as a GMS
 // sidecar, start CUDA at the same time. It reports !ok whenever it cannot
-// answer exactly: when the container's spec has no device cgroup rules, and
-// when the container has MIG capability nodes, because procfs does not list
-// slices.
+// answer exactly: when the container's spec has no device cgroup rules, when
+// the container has MIG capability nodes, because procfs does not list
+// slices, and when the driver names one of its cards "Unknown" or not at all,
+// as the 580 driver does for the GB10 in DGX Spark: the model recorded on a
+// checkpoint is the one nvidia-smi reports.
 func listProcfsGPUs(hostProcPath string, pid int, spec *specs.Spec) (VisibleGPUs, bool) {
 	if spec == nil || spec.Linux == nil || spec.Linux.Resources == nil || len(spec.Linux.Resources.Devices) == 0 {
 		return VisibleGPUs{}, false
@@ -203,9 +205,13 @@ func listProcfsGPUs(hostProcPath string, pid int, spec *specs.Spec) (VisibleGPUs
 		if err != nil || !deviceRulesAllowReadWrite(rules, nvidiaMajor, number) {
 			continue
 		}
+		model := fields["Model"]
+		if model == "" || strings.EqualFold(model, "Unknown") {
+			return VisibleGPUs{}, false
+		}
 		busID := strings.ToLower(entry.Name())
 		busIDs = append(busIDs, busID)
-		devices[busID] = compat.GPUDevice{UUID: uuid, ProductName: fields["Model"]}
+		devices[busID] = compat.GPUDevice{UUID: uuid, ProductName: model}
 	}
 	if len(busIDs) == 0 {
 		return VisibleGPUs{}, false
