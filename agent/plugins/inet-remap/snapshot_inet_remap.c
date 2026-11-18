@@ -13,7 +13,6 @@
 #include "criu-plugin.h"
 
 #define SNAPSHOT_INET_REMAP_ENV "SNAPSHOT_CRIU_INET_REMAP_FILE"
-#define SNAPSHOT_INET_REMAP_MAX 256
 #define log_error(fmt, ...) fprintf(stderr, "snapshot inet remap: " fmt, ##__VA_ARGS__)
 #define log_info(fmt, ...) fprintf(stderr, "snapshot inet remap: " fmt, ##__VA_ARGS__)
 
@@ -22,8 +21,11 @@ struct inet_remap_entry {
   uint32_t new_addr;
 };
 
-static struct inet_remap_entry remaps[SNAPSHOT_INET_REMAP_MAX];
+// remaps holds one entry per Pod of the group whose IP changed. A group has at
+// most 256 Pods, so a lookup scans them.
+static struct inet_remap_entry* remaps;
 static size_t remap_count;
+static size_t remap_capacity;
 
 static char*
 trim(char* s)
@@ -60,11 +62,6 @@ parse_mapping_line(const char* path, unsigned int line_no, char* line)
     return -1;
   }
 
-  if (remap_count == SNAPSHOT_INET_REMAP_MAX) {
-    log_error("too many mappings in %s, max %u\n", path, SNAPSHOT_INET_REMAP_MAX);
-    return -1;
-  }
-
   if (inet_pton(AF_INET, old_ip, &old_addr) != 1) {
     log_error("invalid old IPv4 address %s in %s:%u\n", old_ip, path, line_no);
     return -1;
@@ -72,6 +69,18 @@ parse_mapping_line(const char* path, unsigned int line_no, char* line)
   if (inet_pton(AF_INET, new_ip, &new_addr) != 1) {
     log_error("invalid new IPv4 address %s in %s:%u\n", new_ip, path, line_no);
     return -1;
+  }
+
+  if (remap_count == remap_capacity) {
+    size_t capacity = remap_capacity == 0 ? 64 : 2 * remap_capacity;
+    struct inet_remap_entry* grown = realloc(remaps, capacity * sizeof(*remaps));
+
+    if (grown == NULL) {
+      log_error("out of memory loading %s\n", path);
+      return -1;
+    }
+    remaps = grown;
+    remap_capacity = capacity;
   }
 
   remaps[remap_count].old_addr = old_addr.s_addr;
@@ -117,12 +126,21 @@ load_remap_file(const char* path)
   return 0;
 }
 
+static void
+free_remaps(void)
+{
+  free(remaps);
+  remaps = NULL;
+  remap_count = 0;
+  remap_capacity = 0;
+}
+
 static int
 snapshot_inet_remap_init(int stage)
 {
   const char* path;
 
-  remap_count = 0;
+  free_remaps();
   if (stage != CR_PLUGIN_STAGE__RESTORE)
     return 0;
 
@@ -138,7 +156,7 @@ snapshot_inet_remap_exit(int stage, int ret)
 {
   (void)stage;
   (void)ret;
-  remap_count = 0;
+  free_remaps();
 }
 
 static bool

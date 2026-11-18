@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/checkpoint-restore/go-criu/v8/crit"
+	"github.com/checkpoint-restore/go-criu/v8/crit/images/fdinfo"
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/testr"
@@ -201,6 +203,24 @@ func TestGroupRestoreFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
 			wantReason:  session.ReasonRefused,
 		},
 		{
+			name:        "the restore moves both members to one IP",
+			captured:    capturedAs("member-0", "member-0", "member-1"),
+			targetPodIP: "10.0.0.2",
+			wantStep:    StepAdmitGroup,
+			wantReason:  session.ReasonRefused,
+		},
+		{
+			name: "a member's Pod IP at capture is not IPv4",
+			captured: func() *types.PodGroupManifest {
+				captured := capturedAs("member-0", "member-0", "member-1")
+				captured.Members[1].PodIP = netip.MustParseAddr("fd00::2")
+				return captured
+			}(),
+			targetPodIP: "10.0.0.1",
+			wantStep:    StepAdmitGroup,
+			wantReason:  session.ReasonRefused,
+		},
+		{
 			name:          "the first step after the commit fails",
 			captured:      capturedAs("member-0", "member-0", "member-1"),
 			targetPodIP:   "10.0.0.1",
@@ -359,7 +379,7 @@ func TestGroupCheckpointDumpsOnlyOnceEveryMemberArrivesAtNetFreeze(t *testing.T)
 			steps := make(chan string, 4)
 			letGo := make(chan struct{})
 			peerEnded := runLatePeer(t, peer, group.Admission{PodIP: netip.MustParseAddr("10.0.0.2")},
-				group.NetFreeze, tc.peerFails, letGo, steps)
+				tc.peerFails, letGo, steps, group.NetFreeze)
 			socket := serveCheckpointStaging(t, t.TempDir())
 			// Only the dump is replaced. The GPU checkpoint before net-freeze
 			// runs, with no CUDA process to checkpoint.
@@ -432,16 +452,23 @@ func TestGroupRestoreCompletesOnlyOnceEveryMemberArrivesAtRelease(t *testing.T) 
 			steps := make(chan string, 8)
 			letGo := make(chan struct{})
 			peerEnded := runLatePeer(t, peer, group.Admission{PodIP: netip.MustParseAddr("10.0.0.2"), CaptureID: "capture-1"},
-				group.Release, tc.peerFails, letGo, steps)
+				tc.peerFails, letGo, steps, group.SocketsRestored, group.Release)
 			base := writeGroupArtifact(t, capturedAs("member-0", "member-0", "member-1"))
-			socket := serveCheckpointStaging(t, t.TempDir())
-			// nsrestore, which runs CRIU in the placeholder, and the check of
-			// the process it restored are replaced.
+			// The staged copy opens no file, so the member keeps no connection.
+			staging := t.TempDir()
+			writeEmptyFilesImage(t, staging)
+			socket := serveCheckpointStaging(t, staging)
+			// nsrestore, which runs CRIU in the placeholder, is replaced by its
+			// post-restore hook alone, on the peer sync socket. The check of the
+			// process it restored is replaced too.
 			originalExec, originalValidate := execNSRestoreFunc, validateRestoredProcessFunc
 			t.Cleanup(func() { execNSRestoreFunc, validateRestoredProcessFunc = originalExec, originalValidate })
-			execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot,
-				nsmount.MountPoint, string, *pagebroker.CustomStorageExecution,
+			execNSRestoreFunc = func(_ context.Context, _ logr.Logger, _ RestoreRequest, _ *types.RestoreContainerSnapshot,
+				_ nsmount.MountPoint, _ string, _ *pagebroker.CustomStorageExecution, kept *keptConnections,
 			) (*RestoreInNamespaceResult, error) {
+				if err := awaitPeers(kept.nsrestore)(); err != nil {
+					return nil, err
+				}
 				return &RestoreInNamespaceResult{RestoredPID: 4242}, nil
 			}
 			validated := make(chan struct{})
@@ -585,15 +612,17 @@ func runPeer(t *testing.T, peer *group.Member, own group.Admission, next string)
 // that does not wait for it the time to go on without it.
 const peerDelay = 50 * time.Millisecond
 
-// runLatePeer runs a peer as runPeer does, but holds it after the admitted
-// barrier until letGo is closed. The peer then arrives at next or, if fails
-// is set, fails the attempt instead, as a peer whose own step before next
-// failed would. It records which on steps, before it does it.
-func runLatePeer(t *testing.T, peer *group.Member, own group.Admission, next string, fails bool,
-	letGo <-chan struct{}, steps chan<- string,
+// runLatePeer runs a peer as runPeer does, on through every barrier of next
+// but the last, and holds it before the last until letGo is closed. The peer
+// then arrives at that barrier or, if fails is set, fails the attempt
+// instead, as a peer whose own step before it failed would. It records which
+// on steps, before it does it.
+func runLatePeer(t *testing.T, peer *group.Member, own group.Admission, fails bool,
+	letGo <-chan struct{}, steps chan<- string, next ...string,
 ) <-chan peerOutcome {
 	t.Helper()
 	ctx := groupTestContext(t)
+	passed, held := next[:len(next)-1], next[len(next)-1]
 	ended := make(chan peerOutcome, 1)
 	go func() {
 		outcome := peerOutcome{err: peer.Admit(ctx, own)}
@@ -602,13 +631,20 @@ func runLatePeer(t *testing.T, peer *group.Member, own group.Admission, next str
 		}
 		if outcome.err == nil {
 			outcome.committed = true
+		}
+		for _, barrier := range passed {
+			if outcome.err == nil {
+				outcome.err = peer.Barrier(ctx, barrier)
+			}
+		}
+		if outcome.err == nil {
 			select {
 			case <-letGo:
 				if fails {
 					steps <- "the peer fails"
 				} else {
-					steps <- "the peer arrives at " + next
-					outcome.err = peer.Barrier(ctx, next)
+					steps <- "the peer arrives at " + held
+					outcome.err = peer.Barrier(ctx, held)
 				}
 			case <-ctx.Done():
 				outcome.err = ctx.Err()
@@ -720,7 +756,7 @@ func stubCapture(t *testing.T, capture func(*types.CheckpointManifest) (*checkpo
 
 // writeGroupArtifact writes the artifact of content "content" and container
 // "main" under a new base path, which it returns, as a member of the group
-// capture captured.
+// capture captured, with the Pod IP that captured lists for that member.
 func writeGroupArtifact(t *testing.T, captured *types.PodGroupManifest) string {
 	t.Helper()
 	base := t.TempDir()
@@ -730,8 +766,20 @@ func writeGroupArtifact(t *testing.T, captured *types.PodGroupManifest) string {
 	manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
 		types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
 	manifest.PodGroup = captured
+	manifest.K8s.PodIP = captured.Members[captured.Rank()].PodIP.String()
 	require.NoError(t, types.WriteManifest(directory, manifest))
 	return base
+}
+
+// writeEmptyFilesImage writes in dir the image of the files a CRIU dump found
+// open, with none in it.
+func writeEmptyFilesImage(t *testing.T, dir string) {
+	t.Helper()
+	file, err := os.Create(filepath.Join(dir, "files.img"))
+	require.NoError(t, err)
+	defer file.Close()
+	image := &crit.CriuImage{Magic: "FILES", EntryType: &fdinfo.FileEntry{}}
+	require.NoError(t, crit.New(nil, file, "", false, false).Encode(image))
 }
 
 // stoppingMounter stops a restore at its first mount, the first step after

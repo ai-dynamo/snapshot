@@ -38,13 +38,19 @@ var physicalNVIDIADeviceName = regexp.MustCompile(`^nvidia[0-9]+$`)
 // ExecuteRestore opens the image/work directory FDs, configures inherited
 // resources, and calls go-criu Restore. Returns the namespace-relative PID.
 // preRestore, if set, runs once CRIU has checked its options and before it
-// creates any process or mount; an error from it aborts the restore.
+// creates any process or mount; an error from it aborts the restore. peers maps
+// the capture-time IPs of the other members of the Pod's group, whose
+// connections the restore keeps. postRestore, if set, runs once CRIU has restored
+// every process and socket, before it takes sockets out of repair mode and
+// resumes the tasks; an error from it aborts the restore.
 func ExecuteRestore(
 	criuOpts *criurpc.CriuOpts,
 	m *types.CheckpointManifest,
 	checkpointPath string,
 	bundleDir string,
+	peers IPMap,
 	preRestore func() error,
+	postRestore func() error,
 	log logr.Logger,
 ) (int32, func() error, time.Duration, time.Duration, error) {
 	settings := m.CRIUDump.CRIU
@@ -60,7 +66,7 @@ func ExecuteRestore(
 		return 0, nil, 0, 0, err
 	}
 	prepareStart := time.Now()
-	imageDirPath, removeImageDir, err := prepareRestoreImageDir(checkpointPath, scratchDir)
+	imageDirPath, removeImageDir, err := prepareRestoreImageDir(checkpointPath, scratchDir, peers)
 	prepare = time.Since(prepareStart)
 	if err != nil {
 		removeScratch()
@@ -124,7 +130,7 @@ func ExecuteRestore(
 
 	inheritedFiles = registerInheritFDs(c, m.K8s.StdioFDs, log)
 
-	notify := &restoreNotify{log: log, preRestore: preRestore}
+	notify := &restoreNotify{log: log, preRestore: preRestore, postRestore: postRestore}
 	log.V(1).Info("Executing go-criu Restore call")
 	restoreStart := time.Now()
 	if err := c.Restore(criuOpts, notify); err != nil {
@@ -575,6 +581,7 @@ type restoreNotify struct {
 	criulib.NoNotify
 	restoredPID int32
 	preRestore  func() error
+	postRestore func() error
 	log         logr.Logger
 }
 
@@ -591,5 +598,8 @@ func (n *restoreNotify) PreRestore() error {
 func (n *restoreNotify) PostRestore(pid int32) error {
 	n.restoredPID = pid
 	n.log.Info("CRIU post-restore: process restored", "pid", pid)
+	if n.postRestore != nil {
+		return n.postRestore()
+	}
 	return nil
 }

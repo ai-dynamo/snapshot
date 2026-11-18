@@ -16,6 +16,7 @@ import (
 	"github.com/go-logr/logr"
 	"golang.org/x/sys/unix"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/criu"
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/logging"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
@@ -40,6 +41,9 @@ func main() {
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	lsmProfile := flag.String("lsm-profile", "", "CRIU lsm_profile for the restored processes")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
+	var peerIPs criu.IPMap
+	flag.Var(&peerIPs, "peer-ips", "Capture-time to current IPs of the other members of the Pod's group, as old=new,... The restore keeps the TCP connections to them")
+	peerSyncFD := flag.Int("peer-sync-fd", -1, "Inherited socket on which a group member's restore reports its restored sockets and waits for the agent")
 	bundleDir := flag.String("bundle-dir", nsmount.SnapshotBinDst, "Path where the agent binary bundle is mounted in this namespace")
 	flag.Parse()
 
@@ -57,7 +61,15 @@ func main() {
 		CgroupRoot:     *cgroupRoot,
 		LSMProfile:     *lsmProfile,
 		TargetPodIP:    *targetPodIP,
+		PeerIPs:        peerIPs,
 		BundleDir:      *bundleDir,
+	}
+
+	if *peerSyncFD >= 0 {
+		if err := validateInheritedDescriptors([]inheritedDescriptor{{"peer sync socket", *peerSyncFD, unix.S_IFSOCK}}); err != nil {
+			fatal(log, err, "invalid peer sync socket")
+		}
+		opts.PeerSync = os.NewFile(uintptr(*peerSyncFD), "peer-sync")
 	}
 
 	var err error

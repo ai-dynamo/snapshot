@@ -48,9 +48,10 @@ const (
 	StepCommitCheckpoint      Step = "committing PageBroker checkpoint"
 
 	// A member of a pod group, at capture and at restore.
-	StepAdmitGroup       Step = "admitting the pod group"
-	StepRecordGroupStart Step = "recording that the member started"
-	StepGroupBarrier     Step = "waiting for the pod group's other members"
+	StepAdmitGroup          Step = "admitting the pod group"
+	StepRecordGroupStart    Step = "recording that the member started"
+	StepGroupBarrier        Step = "waiting for the pod group's other members"
+	StepKeepPeerConnections Step = "keeping the connections to the pod group's other members"
 )
 
 // StepError carries the step a failure came from. Unwrap keeps the cause
