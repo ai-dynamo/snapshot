@@ -129,9 +129,14 @@ Pod groups are alpha. With `podGroups.enabled`, each agent pod runs the pod
 group coordinator in a container of its own, `coordinator`, which listens on
 the node's IP. It runs as a non-root user with no capabilities, on the host's
 network, so it cannot bind a port below 1024. It shares the agent's
-ServiceAccount, and with it the agent's API rights. Pod groups need a newer
-Kubernetes than the baseline; see
+ServiceAccount, and with it the agent's API rights. See
 [Prerequisites](../get-started/prerequisites.md#pod-groups).
+
+After turning on `podGroups.enabled`, which restarts every agent Pod, wait for
+`kubectl rollout status daemonset/<fullname>-agent --namespace <namespace>`
+to finish before creating group resources, since a target on a node whose
+agent does not support pod groups yet runs its own command (see
+[Group Restore Targets](restore-pod-contract.md#group-restore-targets)).
 
 | Value                                 | Default                                     | Description                                                                                                                        |
 |---------------------------------------|---------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
