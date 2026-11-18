@@ -112,9 +112,11 @@ the new container runs.
 ## Limitation: Nodes Without NRI
 
 Restoring again needs NRI. On a node without it, a container that starts again
-will run its inert command and will not be restored. The workload will be
-restored again in a new restore Pod, such as the one a Deployment creates after
-this one is deleted.
+will run the inert command that the
+[Restore Pod Contract](../../reference/restore-pod-contract.md#nodes-without-the-restore-proxy)
+requires there, and will not be restored. The workload will be restored again in
+a new restore Pod, such as the one a Deployment creates after this one is
+deleted.
 
 Restoring again needs what only the plugin and the proxy give:
 
