@@ -67,6 +67,8 @@ type PodSnapshotSpec struct {
 
 	// PodGroup requires this snapshot to be checkpointed as a member of its
 	// PodGroupSnapshot. Omitted means a standalone checkpoint.
+	// The PodGroupSnapshot controller sets this field on the member snapshots
+	// it creates.
 	// +optional
 	PodGroup *PodGroupMembership `json:"podGroup,omitempty"`
 }
