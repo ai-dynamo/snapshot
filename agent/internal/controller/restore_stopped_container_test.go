@@ -132,7 +132,7 @@ func TestRunRestoreEndsOnlyTheAttemptInTheStoppedContainer(t *testing.T) {
 func TestRunRestoreDoesNotTakeTheDeadlineForAStop(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		h, run := newAttemptHarness(t, retryLimit("2"), nil)
-		putAttempts(h.w, h.pod.UID, "main", restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(50 * time.Millisecond), ContainerID: "ctr-abc"})
+		putAttempts(h.w, h.pod.UID, "main", podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 1, Deadline: h.now.Add(50 * time.Millisecond), ContainerID: "ctr-abc"})
 		h.w.restoreFn = func(ctx context.Context, _ snapshotruntime.Runtime, _ logr.Logger, _ executor.RestoreRequest, _ executor.RestoreMounter) (executor.RestoreResult, error) {
 			<-ctx.Done()
 			return executor.RestoreResult{}, untouched(ctx.Err())
