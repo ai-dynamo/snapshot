@@ -69,8 +69,10 @@ reference beside it. This proposal is that CRD.
 - Provisioning storage. A class points at a PVC or bucket that already exists.
 - Mounting a PVC the chart did not mount. In this iteration a PVC class must
   name a claim already mounted on the operator and every agent.
-- Moving snapshots between stores, or falling back to another store when the
-  chosen one is unavailable.
+- Moving snapshots between stores.
+- Several layers for one content, with reads falling back from the fastest to
+  the slowest. The class stays the one authoritative store; the binding and the
+  PageBroker protocol leave room for layers.
 - Namespaced classes, per-namespace quotas, or RBAC on who may name a class.
 - Changing SNEP-237's artifact layout, `storeID` encoding or publications.
 
@@ -134,8 +136,8 @@ class is the default; see [Default class](#default-class).
 
 A new cluster-scoped kind in `snapshot.nvidia.com/v1alpha1`, a discriminated
 union: `type` names the backend and exactly that block is set. Its location
-fields are the `storeID` inputs defined in `../../../api/storage` and are
-immutable (CEL `self == oldSelf`). `reclaimPolicy`, credentials and TLS settings
+fields are the `storeID` inputs defined in `../../../api/storage`; they and
+`type` are immutable through CEL transition rules. `reclaimPolicy`, credentials and TLS settings
 stay editable; an edit to `reclaimPolicy` applies to content bound afterwards.
 A class name is at most 63 characters, because it is used as a label value.
 
@@ -154,6 +156,7 @@ type SnapshotStorageClass struct {
 type SnapshotStorageClassSpec struct {
     // +kubebuilder:validation:Enum=PVC;S3
     // +unionDiscriminator
+    // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="type is immutable"
     Type StoreType `json:"type"`
     // IsDefault selects this class for PodSnapshots that name none.
     IsDefault bool `json:"isDefault,omitempty"`
@@ -165,6 +168,7 @@ type SnapshotStorageClassSpec struct {
 }
 
 // A claim in the Snapshot namespace that the chart already mounts.
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="pvc is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(self.basePath) || !self.basePath.split('/').exists(p, p == 'artifacts')",message="basePath must not contain an artifacts segment"
 type PVCStoreSpec struct {
     ClaimName string `json:"claimName"`
@@ -173,6 +177,7 @@ type PVCStoreSpec struct {
 
 // Endpoint, Region, Bucket and Prefix are storeID inputs; the rest are access
 // settings and stay editable.
+// +kubebuilder:validation:XValidation:rule="self.endpoint == oldSelf.endpoint && self.region == oldSelf.region && self.bucket == oldSelf.bucket && self.?prefix == oldSelf.?prefix",message="endpoint, region, bucket and prefix are immutable"
 // +kubebuilder:validation:XValidation:rule="!has(self.prefix) || !self.prefix.split('/').exists(p, p == 'artifacts')",message="prefix must not contain an artifacts segment"
 type S3StoreSpec struct {
     Endpoint string `json:"endpoint"`
