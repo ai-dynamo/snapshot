@@ -513,6 +513,7 @@ spec:
                           description: Name of the object.
                           maxLength: 253
                           minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                           type: string
                         uid:
                           description: UID of the object.
@@ -558,6 +559,7 @@ spec:
                           description: Name of the object.
                           maxLength: 253
                           minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                           type: string
                         uid:
                           description: UID of the object.
