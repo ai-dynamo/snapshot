@@ -3,16 +3,20 @@
 #
 # Dockerfile for the snapshot-agent image.
 #
-# Build targets. Two named build contexts are required for the agent: `api`
-# (the agent module depends on it via `replace => ../api`) and `compliance`
-# (attribution helpers shared with the operator image):
+# Build targets. Three named build contexts are required for the agent: `api`
+# and `coordinator` (the agent module depends on them via `replace => ../api`
+# and `replace => ../coordinator`) and `compliance` (attribution helpers shared
+# with the operator image):
 #   docker build --platform linux/amd64 --target agent \   (or linux/arm64)
-#     --build-context api=../api --build-context compliance=../hack/compliance \
+#     --build-context api=../api --build-context coordinator=../coordinator \
+#     --build-context compliance=../hack/compliance \
 #     -t snapshot-agent:latest .
 #
 # Optional targets for CI:
-#   docker build --target linter --build-context api=../api .   # Run linting
-#   docker build --target tester --build-context api=../api .   # Run tests
+#   docker build --target linter --build-context api=../api \
+#     --build-context coordinator=../coordinator .   # Run linting
+#   docker build --target tester --build-context api=../api \
+#     --build-context coordinator=../coordinator .   # Run tests
 
 # =============================================================================
 # Build Arguments
@@ -65,10 +69,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 
 WORKDIR /workspace
 
-# The agent module depends on the api module via `replace => ../api`, so the api
-# module must sit at /api (a sibling of /workspace) for `go mod download` and the Go build to
-# resolve it. Provided via the `api` named build context.
+# The agent module depends on the api and coordinator modules via `replace => ../api` and
+# `replace => ../coordinator`, so both must sit next to /workspace, at /api and /coordinator, for
+# `go mod download` and the Go build to resolve them. Provided via the `api` and `coordinator`
+# named build contexts.
 COPY --from=api . /api/
+COPY --from=coordinator . /coordinator/
 
 COPY go.mod go.sum ./
 RUN go mod download

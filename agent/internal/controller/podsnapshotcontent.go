@@ -806,6 +806,7 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		NodeName:             w.config.NodeName,
 		PodName:              params.Pod.Name,
 		PodNamespace:         params.Pod.Namespace,
+		PodUID:               string(params.Pod.UID),
 		PodIP:                params.Pod.Status.PodIP,
 		Pod:                  podEnvironment(params.Pod, params.ContainerName),
 		Clientset:            w.clientset,

@@ -5,6 +5,7 @@ package types
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -34,6 +35,43 @@ type CheckpointManifest struct {
 	Host     HostManifest      `yaml:"host,omitempty"`
 	// CuInterpose identifies the libraries verified in the source processes.
 	CuInterpose *CuInterposeManifest `yaml:"cuinterpose,omitempty"`
+	// PodGroup records the pod group capture this checkpoint is one member of.
+	// Nil for a Pod captured on its own.
+	PodGroup *PodGroupManifest `yaml:"podGroup,omitempty"`
+}
+
+// PodGroupManifestVersion is the version of PodGroupManifest this agent
+// writes, and the only one it restores.
+const PodGroupManifestVersion = 1
+
+// PodGroupManifest is a member's part in a pod group capture: what a group
+// restore checks every member against, and builds its IP map from. It is the
+// same for every member of one capture except for MemberID.
+type PodGroupManifest struct {
+	Version int `yaml:"version"`
+	// CaptureUID is the PodGroupSnapshot's UID. Every member must restore the
+	// same one.
+	CaptureUID string `yaml:"captureUID"`
+	// MemberID identifies this artifact's own member.
+	MemberID string `yaml:"memberID"`
+	// Members is the ordered member table, so a member's index is its rank.
+	Members []PodGroupManifestMember `yaml:"members"`
+}
+
+// Rank returns the rank of the artifact's own member, its index in Members, or
+// -1 if Members does not list it.
+func (g *PodGroupManifest) Rank() int {
+	return slices.IndexFunc(g.Members, func(m PodGroupManifestMember) bool { return m.ID == g.MemberID })
+}
+
+// PodGroupManifestMember is one member of a pod group capture, as it was at
+// capture.
+type PodGroupManifestMember struct {
+	ID     string `yaml:"id"`
+	PodUID string `yaml:"podUID"`
+	// Containers are the member's captured containers: one today.
+	Containers []string   `yaml:"containers"`
+	PodIP      netip.Addr `yaml:"podIP"`
 }
 
 // ArtifactManifest pins an on-disk checkpoint to the Kubernetes content object
