@@ -207,7 +207,7 @@ Redis-compatible server.
 | Capture is not atomic: each source ends at its own dump, and a failure after the commit terminates every member that has started. Release is not atomic either, since a member can fail before its release while its peers are already released. | Admission catches every condition that can be checked without side effects, every member records when it started, and member results report partial outcomes truthfully, so the owner can retire the group and retry with a new attempt. |
 | Snapshot does not freeze restored processes until release, because CUDA, cuInterpose, and library threads do the reconstruction inside them, so an application thread that runs early could observe a half-rebuilt state. | Release relies on the existing workload contract, which this SNEP extends to every thread that could touch shared memory, communicators, or preserved connections; workloads launched through a wrapper that gates on the contract's signals satisfy it, and an enforced hold is left to future work. |
 | Between CRIU restore and CUDA unlock, a thread that calls CUDA blocks on the lock, which is not a recommended use of CUDA Checkpoint, and a failure in that window could leave such a thread stuck. | The locked window involves no coordination and lasts as long as for a single Pod, failing a restore terminates every restored process, and qualification measures both restore windows and injects failures into each. |
-| CRIU's network lock at capture and the agent's hold at restore pause the traffic of preserved connections while keepalive, retransmission, and user timeouts keep running, so a long dump or a slow peer can break them ([snapshot#577](https://github.com/ai-dynamo/snapshot/issues/577)). | Holds are taken as late and lifted as early as possible, and qualification measures the whole interruption, including staggered dumps, to document the supported limits. |
+| CRIU's network lock at capture and the agent's hold at restore pause the traffic of preserved connections while retransmission and user timeouts keep running, and keepalive too at capture, so a long dump or a slow peer can break them ([snapshot#577](https://github.com/ai-dynamo/snapshot/issues/577)). | Holds are taken as late and lifted as early as possible, a restore turns keepalive back on only once every member has restored its sockets, and qualification measures the whole interruption, including staggered dumps, to document the supported limits. |
 | At capture, CRIU's network lock covers a member's IP traffic only from the moment CRIU freezes it, and never covers RDMA, shared volumes, or external services, while dumps finish at different times. | Members must stop such traffic before reporting `ready-for-snapshot`, as the workload contract requires, and libraries tear down RDMA transports before the dump, which for NCCL means the application calling NCCL Checkpoint's prepare until CUDA's prepare phase does it. |
 | Sessions live only as long as the coordinator that holds them, so an attempt in flight ends if the agent that hosts its session restarts. | Each session lives in the agent on the node of the attempt's rank-0 member, which the attempt depends on anyway, since a restarted agent fails its own member; losing it is fail-stop and reported as `CoordinatorLost`, sessions on other nodes are unaffected, and a broken connection that reconnects does not fail an attempt. Every session pattern is safe to repeat, so replicating sessions later changes only the coordinator. |
 | Sessions hosted on the same node share the coordinator's memory, so a compromised workload can fill it with records forged through its relay and make concurrent attempts' data writes fail until its own attempt ends at its deadline. Every client the coordinator admits is an agent, and agents are one trust domain: in the coordinator's shared NATS account, a compromised agent can change another attempt's keys, for example through the reply subject of a request, which its permissions don't cover. | The sessions that the cap affects still end promptly, since their control keys live outside it, libraries are bounded per session, each bucket bounds how many watches its members open, and the cap protects the coordinator itself. A compromised agent gains nothing it lacks already, since the agent's ServiceAccount can patch any Pod, and the token review keeps everything that isn't an agent out. Beta revisits both limits together: one NATS account per attempt to isolate agents from each other, and memory isolated per session once cuInterpose's largest records are measured, while a ValidatingAdmissionPolicy that lets the agent change only Pods' metadata and status narrows what a compromised agent can do. |
@@ -424,8 +424,9 @@ with every connection it accepted, when the session closes.
 
 Figure 4 shows how the session steps, the cuInterpose rounds, and CUDA
 Checkpoint's phases interleave with the steps Snapshot already performs, where
-each attempt commits, and where a restore runs the `sockets-restored` barrier in
-parallel with CUDA restore and the cuInterpose rounds. Figures 5 and 6 expand
+each attempt commits, and where a restore waits at the `sockets-restored`
+barrier before its tasks resume, CUDA restores, and the cuInterpose rounds run.
+Figures 5 and 6 expand
 both columns into complete sequences, in which every shaded band labeled "round"
 is one instance of Figure 3, drawn with the same messages but without the agent
 hop that Figure 3 details, so that each round can be traced from the leader's
@@ -459,7 +460,7 @@ windows that differ in what its threads may do.
 | Window | CUDA | What Snapshot does | What the workload may do |
 | --- | --- | --- | --- |
 | From CRIU restore to CUDA unlock | Locked, so a CUDA call blocks until the unlock | Restores and unlocks CUDA inside the Pod without any coordination, exactly as for a single Pod | Nothing; a thread that calls CUDA simply blocks |
-| From CUDA unlock to release | Usable | Rebuilds shared memory through the cuInterpose rounds, lifts the TCP hold, and, once CUDA Checkpoint releases it, runs CUDA's resume phase, in which libraries reconnect | Wait: no access to memory shared across Pods, no use of a communicator, and no traffic on a preserved connection |
+| From CUDA unlock to release | Usable | Rebuilds shared memory through the cuInterpose rounds and, once CUDA Checkpoint releases it, runs CUDA's resume phase, in which libraries reconnect | Wait: no access to memory shared across Pods, no use of a communicator, and no traffic on a preserved connection |
 
 The second window is the one that a group lengthens, since it now spans cross-node
 rounds and the barriers after them, and it is also the one in which a running
@@ -628,16 +629,20 @@ Each agent then posts to the `admitted` barrier once its own checks pass. When
 the barrier completes, the attempt commits, and each agent records the
 `nvidia.com/RestoreStarted` condition on its restore Pod before anything
 irreversible happens, holds the preserved connections
-in its Pod, and restores the processes with CRIU using the group IP map. As
-soon as every member has restored its sockets, the `sockets-restored` barrier
-lifts the holds, which keeps that window short and leaves the Pod network open
+in its Pod, and restores the processes with CRIU using the group IP map. CRIU
+stops before it resumes the restored tasks, with every socket still in repair
+mode, until every member has restored its sockets at the `sockets-restored`
+barrier. Each agent then lifts its hold, turns keepalive back on for the
+preserved connections, and lets CRIU resume the tasks, which keeps the hold
+short and leaves the Pod network open
 for the connections that libraries create later; this is safe because the
 restored workload stays parked until `restore-complete`, so kernel traffic
-resumes while application traffic does not. In parallel, `nsrestore` restores
-and unlocks CUDA and runs the relays, whose rounds first match the restored
-processes to the saved records and then rebuild shared memory in lockstep,
-carrying the table of old and new fabric handles from one round to the next.
-Only then do the agents write the rendezvous endpoint.
+resumes while application traffic does not. Only after that does `nsrestore`
+restore and unlock CUDA and run the relays, so each member's CUDA restore waits
+for the slowest member's CRIU restore. The relays' rounds first match the
+restored processes to the saved records and then rebuild shared memory in
+lockstep, carrying the table of old and new fabric handles from one round to the
+next. Only then do the agents write the rendezvous endpoint.
 
 Once CUDA Checkpoint's resume phase is released, the agents also pass a
 `resume` barrier and invoke that phase on every process, so that libraries
@@ -791,17 +796,18 @@ Connections between members of a group must survive relocation, because control
 planes such as MPI cache their peers' addresses and cannot reconnect, yet today
 they come back closed for three independent reasons. The restore-image rewriter
 disconnects every established socket whose peer lives in another image, the
-address remap rewrites only the Pod's own IP, and once CRIU releases a socket
-from repair mode, the kernel may send probes or data that a peer Pod, whose
-sockets do not exist yet, answers with a reset.
+address remap rewrites only the Pod's own IP, and the kernel may send probes or
+data from a restored socket, even one still in repair mode, that a peer Pod,
+whose sockets do not exist yet, answers with a reset.
 
 The group closes all three gaps with information that admission already provides.
 The agent passes CRIU's address-rewrite hook the mapping from every member's old
-IP to its new one, together with the peers whose connections must be kept
-exactly as dumped rather than disconnected. Before CRIU runs, the agent drops,
-inside the Pod's network namespace, only the packets of those preserved
-connections, and it lifts that hold at the `sockets-restored` barrier, by which
-time every peer socket exists; new connections, including library bootstrap
+IP to its new one, and the restore-image rewriter keeps every established
+connection to another member exactly as dumped rather than disconnecting it.
+Before CRIU runs, the agent drops, inside the Pod's network namespace, only the
+packets of those preserved connections, in both directions. It lifts that hold
+at the `sockets-restored` barrier, by which time every peer socket exists, and
+before CRIU resumes any task. New connections, including library bootstrap
 traffic, are never affected.
 
 At capture, the agent takes no hold of its own. Because the agent dumps with
@@ -831,16 +837,19 @@ whatever the application did before it quiesced. The lock therefore protects wha
 connections that the application has stopped using, without replacing that
 contract.
 
-Neither CRIU's lock nor the agent's hold stops the kernel's TCP timers, so keepalive,
-retransmission, and user timeouts keep running while a peer is dumped or
-restored, and a long interruption can still break a preserved connection
-([snapshot#577](https://github.com/ai-dynamo/snapshot/issues/577)). Taking each
+Neither CRIU's lock nor the agent's hold stops the kernel's TCP timers, so
+retransmission and user timeouts, and keepalive at capture, keep running while a
+peer is dumped or restored, and a long interruption can still break a preserved
+connection ([snapshot#577](https://github.com/ai-dynamo/snapshot/issues/577)).
+At restore, the agent clears `SO_KEEPALIVE` in its copy of the CRIU image, so no
+keepalive probe can abort a preserved connection while a peer is still
+restoring, and turns it back on through `pidfd_getfd` at the `sockets-restored`
+barrier, before the tasks resume. Taking each
 hold as late and lifting it as early as possible shortens that window but does
 not remove it, which is why qualification measures the whole interruption,
 including staggered dumps, and documents the supported limits. Connections
 through Service virtual IPs and to peers outside the group are still reset, and
-the mechanism is limited to IPv4 and to the 256 address mappings that the CRIU
-plugin holds, which is also why a group has at most 256 members.
+the mechanism is limited to IPv4.
 
 ### Failure handling and recovery
 
@@ -1103,8 +1112,9 @@ depends on runtime support and stays out of scope; a target's
 `containerMappings` holds one entry, defaults to the container of the same name,
 and is the only source of the mapping, which the operator projects onto the Pod
 as the `restore-container-map` that a standalone restore already uses. A
-single deadline bounds each attempt, and the limit of 256 members is the
-capacity of the address-remap plugin rather than a qualified scale.
+single deadline bounds each attempt, and the limit of 256 members is not a
+qualified scale: the cost of the API's validation rules, the size of a group's
+status, and each session's control store are sized for it.
 
 The `PodGroupSnapshot` controller creates one owned `PodSnapshot` per member, so
 artifacts, storage, and cleanup reuse the per-Pod pipeline, and deleting the group
@@ -1374,6 +1384,9 @@ after alpha.
   containers, over unchanged 580 node drivers.
 - A CRIU build with the inet-socket update hook, which is currently available
   only on CRIU's development branch, so the agent must pin the commit it builds.
+- For TCP connections kept between members, nf_tables in each node's kernel,
+  which restore admission checks, and `pidfd_getfd`, which Linux 5.6 and newer
+  provide.
 - For communicators over RDMA, NCCL 2.31 or newer for NCCL Checkpoint, and
   later a release that restores in CUDA Checkpoint's resume phase.
 - The NATS server, with JetStream, embedded in the coordinator as a Go library,
@@ -1708,8 +1721,8 @@ type PodGroupSnapshotSpec struct {
 	DeadlineSeconds int64 `json:"deadlineSeconds"`
 	// Members in rank order: list order is the rank. The list is atomic, so
 	// CEL compares it in order and the spec's immutability rule also refuses
-	// a reorder; the rule above keeps member IDs unique. 256 is the capacity
-	// of the address-remap plugin.
+	// a reorder; the rule above keeps member IDs unique. The CEL cost of the
+	// rules, the status, and each session's control store are sized for 256.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=256
 	// +listType=atomic
