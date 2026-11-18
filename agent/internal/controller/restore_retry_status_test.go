@@ -88,11 +88,11 @@ func newRetryStatusController(t *testing.T) (*NodeController, *corev1.Pod) {
 // write goes out in that one write, with every destination's entry.
 func TestWriteRetryStatusWritesEveryDestinationOnce(t *testing.T) {
 	w, pod := newRetryStatusController(t)
-	putAttempts(w, pod.UID, "engine-0", restoreAttempts{Limit: 2, Attempt: 2, ContainerID: "engine-0-id"})
+	putAttempts(w, pod.UID, "engine-0", podcontract.ContainerRetryStatus{Attempt: 2, RetryLimit: 2, ContainerID: "engine-0-id", PodUID: pod.UID})
 	w.queueRetryStatus(pod)
-	putAttempts(w, pod.UID, "engine-1", restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "engine-1-id"})
+	putAttempts(w, pod.UID, "engine-1", podcontract.ContainerRetryStatus{Attempt: 1, RetryLimit: 2, ContainerID: "engine-1-id", PodUID: pod.UID})
 	w.queueRetryStatus(pod)
-	putAttempts(w, "another-pod-uid", "engine-0", restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "other-id"})
+	putAttempts(w, "another-pod-uid", "engine-0", podcontract.ContainerRetryStatus{Attempt: 1, RetryLimit: 2, ContainerID: "other-id", PodUID: "another-pod-uid"})
 
 	writeQueuedRetryStatus(w)
 
@@ -112,7 +112,7 @@ func TestWriteRetryStatusWritesEveryDestinationOnce(t *testing.T) {
 
 func TestWriteRetryStatusSkipsAValueAlreadyWritten(t *testing.T) {
 	w, pod := newRetryStatusController(t)
-	putAttempts(w, pod.UID, "engine-0", restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "engine-0-id"})
+	putAttempts(w, pod.UID, "engine-0", podcontract.ContainerRetryStatus{Attempt: 1, RetryLimit: 2, ContainerID: "engine-0-id", PodUID: pod.UID})
 	w.queueRetryStatus(pod)
 	writeQueuedRetryStatus(w)
 
@@ -124,7 +124,7 @@ func TestWriteRetryStatusSkipsAValueAlreadyWritten(t *testing.T) {
 
 func TestWriteRetryStatusRemovesTheAnnotationWithNoRecordsLeft(t *testing.T) {
 	w, pod := newRetryStatusController(t)
-	putAttempts(w, pod.UID, "engine-0", restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "engine-0-id"})
+	putAttempts(w, pod.UID, "engine-0", podcontract.ContainerRetryStatus{Attempt: 1, RetryLimit: 2, ContainerID: "engine-0-id", PodUID: pod.UID})
 	w.queueRetryStatus(pod)
 	writeQueuedRetryStatus(w)
 
@@ -170,7 +170,7 @@ func TestWriteRetryStatusWritesNothingForAPodWithNoRecords(t *testing.T) {
 
 func TestWriteRetryStatusRetriesAFailedWriteThenReportsIt(t *testing.T) {
 	w, pod := newRetryStatusController(t)
-	putAttempts(w, pod.UID, "engine-0", restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "engine-0-id"})
+	putAttempts(w, pod.UID, "engine-0", podcontract.ContainerRetryStatus{Attempt: 1, RetryLimit: 2, ContainerID: "engine-0-id", PodUID: pod.UID})
 	writes := 0
 	w.clientset.(*fake.Clientset).PrependReactor("patch", "pods", func(action clientgotesting.Action) (bool, runtime.Object, error) {
 		if action.GetSubresource() != "" {
@@ -196,7 +196,7 @@ func TestWriteRetryStatusRetriesAFailedWriteThenReportsIt(t *testing.T) {
 
 func TestWriteRetryStatusDropsAPodThatIsGone(t *testing.T) {
 	w, pod := newRetryStatusController(t)
-	putAttempts(w, pod.UID, "engine-0", restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "engine-0-id"})
+	putAttempts(w, pod.UID, "engine-0", podcontract.ContainerRetryStatus{Attempt: 1, RetryLimit: 2, ContainerID: "engine-0-id", PodUID: pod.UID})
 	w.clientset.(*fake.Clientset).PrependReactor("patch", "pods", func(clientgotesting.Action) (bool, runtime.Object, error) {
 		return true, nil, apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, pod.Name)
 	})
@@ -210,7 +210,7 @@ func TestWriteRetryStatusDropsAPodThatIsGone(t *testing.T) {
 
 func TestWriteRetryStatusGivesUpOnShutdown(t *testing.T) {
 	w, pod := newRetryStatusController(t)
-	putAttempts(w, pod.UID, "engine-0", restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "engine-0-id"})
+	putAttempts(w, pod.UID, "engine-0", podcontract.ContainerRetryStatus{Attempt: 1, RetryLimit: 2, ContainerID: "engine-0-id", PodUID: pod.UID})
 	ctx, cancel := context.WithCancel(context.Background())
 	w.clientset.(*fake.Clientset).PrependReactor("patch", "pods", func(clientgotesting.Action) (bool, runtime.Object, error) {
 		cancel()
@@ -241,8 +241,8 @@ func TestRunRetryStatusQueueStopsWhenTheQueueShutsDown(t *testing.T) {
 // starts a new restore.
 func TestForgetRestorePodForgetsItsAttempts(t *testing.T) {
 	w, pod := newRetryStatusController(t)
-	putAttempts(w, pod.UID, "engine-0", restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "engine-0-id"})
-	putAttempts(w, "another-pod-uid", "engine-0", restoreAttempts{Limit: 2, Attempt: 1, ContainerID: "other-id"})
+	putAttempts(w, pod.UID, "engine-0", podcontract.ContainerRetryStatus{Attempt: 1, RetryLimit: 2, ContainerID: "engine-0-id", PodUID: pod.UID})
+	putAttempts(w, "another-pod-uid", "engine-0", podcontract.ContainerRetryStatus{Attempt: 1, RetryLimit: 2, ContainerID: "other-id", PodUID: "another-pod-uid"})
 	op := w.newRestoreOperation(pod, retryStatusPlan(), "engine-0", "engine-0-id", w.nowFn())
 	_, _, err := op.loadAttempts()
 	require.NoError(t, err)

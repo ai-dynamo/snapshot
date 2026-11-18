@@ -25,15 +25,16 @@ import (
 var changedByCRIU = &executor.RestoreFailure{Step: executor.StepRestoreCRIU, Cause: errors.New("criu restore failed"), ContainerChanged: true}
 
 // interrupted is the record an agent leaves when it stops during attempt 1.
-func (h *attemptHarness) interrupted(containerID string) restoreAttempts {
-	return restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(time.Minute), ContainerID: containerID}
+func (h *attemptHarness) interrupted(containerID string) podcontract.ContainerRetryStatus {
+	return podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 1, Deadline: h.now.Add(time.Minute), ContainerID: containerID}
 }
 
 // leaveAttempts sets the retry status an agent left for the destination
 // before it stopped.
-func (h *attemptHarness) leaveAttempts(t *testing.T, record restoreAttempts) {
+func (h *attemptHarness) leaveAttempts(t *testing.T, record podcontract.ContainerRetryStatus) {
 	t.Helper()
-	leaveRetryStatus(t, h.pod, podcontract.RestoreRetryStatus{"main": record.status(h.pod.UID)})
+	record.PodUID = h.pod.UID
+	leaveRetryStatus(t, h.pod, podcontract.RestoreRetryStatus{"main": record})
 }
 
 // restartAgent stands in for an agent restart: the Pod keeps the retry status
@@ -71,27 +72,27 @@ func (h *attemptHarness) runStopping(failure error) error {
 // destination runs now.
 func TestRunRestoreRepeatsAnInterruptedAttempt(t *testing.T) {
 	for name, tc := range map[string]struct {
-		record      func(*attemptHarness) restoreAttempts
+		record      func(*attemptHarness) podcontract.ContainerRetryStatus
 		wantAttempt int
 	}{
 		"with retries": {
-			record:      func(h *attemptHarness) restoreAttempts { return h.interrupted("ctr-abc") },
+			record:      func(h *attemptHarness) podcontract.ContainerRetryStatus { return h.interrupted("ctr-abc") },
 			wantAttempt: 1,
 		},
 		"a retry in place that had started": {
-			record: func(h *attemptHarness) restoreAttempts {
-				return restoreAttempts{Limit: 2, Attempt: 2, Deadline: h.now.Add(time.Minute), ContainerID: "ctr-abc"}
+			record: func(h *attemptHarness) podcontract.ContainerRetryStatus {
+				return podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 2, Deadline: h.now.Add(time.Minute), ContainerID: "ctr-abc"}
 			},
 			wantAttempt: 2,
 		},
 		"the last attempt": {
-			record: func(h *attemptHarness) restoreAttempts {
-				return restoreAttempts{Limit: 1, Attempt: 2, Deadline: h.now.Add(time.Minute), ContainerID: "ctr-abc"}
+			record: func(h *attemptHarness) podcontract.ContainerRetryStatus {
+				return podcontract.ContainerRetryStatus{RetryLimit: 1, Attempt: 2, Deadline: h.now.Add(time.Minute), ContainerID: "ctr-abc"}
 			},
 			wantAttempt: 2,
 		},
 		"in a container kubelet started since": {
-			record:      func(h *attemptHarness) restoreAttempts { return h.interrupted("ctr-old") },
+			record:      func(h *attemptHarness) podcontract.ContainerRetryStatus { return h.interrupted("ctr-old") },
 			wantAttempt: 1,
 		},
 	} {
@@ -105,7 +106,7 @@ func TestRunRestoreRepeatsAnInterruptedAttempt(t *testing.T) {
 
 			assert.Equal(t, 1, h.restores)
 			assert.Equal(t, tc.wantAttempt, h.seen.Attempt)
-			assert.Equal(t, record.Limit, h.seen.Limit)
+			assert.Equal(t, record.RetryLimit, h.seen.RetryLimit)
 			assert.Equal(t, "ctr-abc", h.seen.ContainerID)
 			assert.True(t, record.Deadline.Equal(h.deadline), "the repeat got %s, not the attempt's deadline", h.deadline)
 			assert.Equal(t, []string{"write " + podcontract.RestoreCompleteFile}, h.calls)
@@ -118,7 +119,7 @@ func TestRunRestoreRepeatsAnInterruptedAttempt(t *testing.T) {
 func TestRunRestoreEndsAnInterruptedAttemptPastItsDeadline(t *testing.T) {
 	h, run := newAttemptHarness(t, retryLimit("2"), nil)
 	h.recovering = true
-	h.leaveAttempts(t, restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(-time.Second), ContainerID: "ctr-abc"})
+	h.leaveAttempts(t, podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 1, Deadline: h.now.Add(-time.Second), ContainerID: "ctr-abc"})
 
 	err := run()
 
