@@ -100,7 +100,7 @@ func TestCreateContainerCuInterposeScope(t *testing.T) {
 		},
 		"already launched": {
 			annotations: optedIn(),
-			ctr:         &api.Container{Name: "main", Args: launched, Mounts: []*api.Mount{controlMount, deliveryMount}},
+			ctr:         &api.Container{Name: "main", Args: launched, Mounts: []*api.Mount{controlMount}},
 		},
 		"delivers its own libraries": {
 			annotations: optedIn(),

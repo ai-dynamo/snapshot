@@ -203,7 +203,8 @@ with the `nvidia.com/snapshot-multi-gpu: enabled` annotation. On a
 `SnapshotJob`, set it on `spec.podTemplate.metadata.annotations`.
 
 The annotation is the only addition. When an opted-in Pod starts, the Snapshot
-agent prepares each container that mounts `/snapshot-control`:
+agent prepares each container that mounts `/snapshot-control`, init containers
+included:
 
 - It mounts Snapshot's multi-GPU libraries read-only at `/tmp/snapshot-cuda`.
 - It starts the container's process, from `command` and `args` or from the
@@ -216,7 +217,10 @@ unchanged. The agent also leaves alone a container that mounts a volume at
 `/tmp/snapshot-cuda/cuinterpose-launch`. A Pod that delivers the libraries
 itself keeps working if its `command` starts with the full launcher prefix,
 as shown in [Without NRI](#without-nri). If the agent cannot prepare a
-container, the container does not start, and kubelet retries it.
+container, the container does not start, and kubelet retries it. A container
+created while the agent is not running on the node, for example during an agent
+upgrade, starts unprepared, and its checkpoint fails at
+[inspecting cuinterpose](../troubleshooting/checkpoints.md#inspecting-cuinterpose).
 
 ### Without NRI
 
