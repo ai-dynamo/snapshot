@@ -115,9 +115,11 @@ type NodeController struct {
 	// waits on a sibling neither restores nor notifies it again.
 	finishedRestoreDestinations sync.Map
 
-	// restoreAttemptRecords holds, per restoreContainerKey, the restoreAttempts
-	// of a destination whose restore allows retries, and attemptSeeds, per Pod
-	// UID, the *attemptSeed that copied the Pod's retry status annotation in.
+	// restoreAttemptRecords holds, per restoreContainerKey, the
+	// podcontract.ContainerRetryStatus that records the attempts of a
+	// destination whose restore allows retries, and attemptSeeds, per Pod UID,
+	// the *attemptSeed that copied the Pod's retry status annotation in. A
+	// record goes with the Pod, so a new Pod starts a new restore.
 	restoreAttemptRecords sync.Map
 	attemptSeeds          sync.Map
 	// retryStatusQueue holds the Pods whose retry status annotation lags
@@ -1203,7 +1205,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		if errors.As(err, &incompatible) {
 			// The placeholder is left running: killing it restarts the container
 			// straight back into the same refusal.
-			if record.Limit > 0 {
+			if record.RetryLimit > 0 {
 				op.forgetAttempts()
 			}
 			return incompatible

@@ -108,19 +108,19 @@ func TestRestoreRetryBackoff(t *testing.T) {
 func TestBudgetLeft(t *testing.T) {
 	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
 	for name, tc := range map[string]struct {
-		record restoreAttempts
+		record podcontract.ContainerRetryStatus
 		want   budget
 	}{
 		"less the wait": {
-			record: restoreAttempts{Limit: 2, Attempt: 2, Deadline: now.Add(10 * time.Minute)},
+			record: podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 2, Deadline: now.Add(10 * time.Minute)},
 			want:   budget{attempts: 1, time: 9 * time.Minute},
 		},
 		"the last attempt": {
-			record: restoreAttempts{Limit: 1, Attempt: 2, Deadline: now.Add(10 * time.Minute)},
+			record: podcontract.ContainerRetryStatus{RetryLimit: 1, Attempt: 2, Deadline: now.Add(10 * time.Minute)},
 			want:   budget{time: 9 * time.Minute},
 		},
 		"no deadline": {
-			record: restoreAttempts{Limit: 1, Attempt: 1},
+			record: podcontract.ContainerRetryStatus{RetryLimit: 1, Attempt: 1},
 			want:   budget{attempts: 1, time: time.Duration(math.MaxInt64)},
 		},
 	} {
@@ -259,7 +259,7 @@ func TestRunRestoreEndsWithoutRetryingWhatNoAttemptChanges(t *testing.T) {
 func TestRunRestoreEndsWhenTheAttemptTimedOut(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		h, run := newAttemptHarness(t, retryLimit("2"), nil)
-		putAttempts(h.w, h.pod.UID, "main", restoreAttempts{Limit: 2, Attempt: 1, Deadline: h.now.Add(50 * time.Millisecond), ContainerID: "ctr-abc"})
+		putAttempts(h.w, h.pod.UID, "main", podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 1, Deadline: h.now.Add(50 * time.Millisecond), ContainerID: "ctr-abc"})
 		restore := h.w.restoreFn
 		h.w.restoreFn = func(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req executor.RestoreRequest, mounter executor.RestoreMounter) (executor.RestoreResult, error) {
 			_, _ = restore(ctx, rt, log, req, mounter)
@@ -337,18 +337,18 @@ func TestRunRestoreWithoutRetriesFailsAsBefore(t *testing.T) {
 
 func TestRunRestoreEndsWhenADueRetryHasNothingLeft(t *testing.T) {
 	for name, tc := range map[string]struct {
-		record  func(now time.Time) restoreAttempts
+		record  func(now time.Time) podcontract.ContainerRetryStatus
 		wantErr string
 	}{
 		"past the deadline": {
-			record: func(now time.Time) restoreAttempts {
-				return restoreAttempts{Limit: 2, Attempt: 1, Deadline: now.Add(-time.Second), RetryAt: now.Add(-5 * time.Second), ContainerID: "ctr-abc"}
+			record: func(now time.Time) podcontract.ContainerRetryStatus {
+				return podcontract.ContainerRetryStatus{RetryLimit: 2, Attempt: 1, Deadline: now.Add(-time.Second), RetryAt: now.Add(-5 * time.Second), ContainerID: "ctr-abc"}
 			},
 			wantErr: "restore ran out of time after attempt 1 of 3: restore timed out at",
 		},
 		"over the limit": {
-			record: func(now time.Time) restoreAttempts {
-				return restoreAttempts{Limit: 1, Attempt: 2, Deadline: now.Add(time.Minute), RetryAt: now.Add(-time.Second), ContainerID: "ctr-abc"}
+			record: func(now time.Time) podcontract.ContainerRetryStatus {
+				return podcontract.ContainerRetryStatus{RetryLimit: 1, Attempt: 2, Deadline: now.Add(time.Minute), RetryAt: now.Add(-time.Second), ContainerID: "ctr-abc"}
 			},
 			wantErr: "restore used all 2 attempts: attempt 3 is over the limit of 2",
 		},
