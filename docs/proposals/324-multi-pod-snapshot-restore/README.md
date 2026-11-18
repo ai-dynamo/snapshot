@@ -634,8 +634,8 @@ in its Pod, and restores the processes with CRIU using the group IP map. CRIU
 stops before it resumes the restored tasks, with every socket still in repair
 mode, until every member has restored its sockets at the `sockets-restored`
 barrier. Each agent then lifts its hold, turns keepalive back on for the
-preserved connections, and lets CRIU resume the tasks, which keeps the hold
-short and leaves the Pod network open
+preserved connections that had it, and lets CRIU resume the tasks, which keeps
+the hold short and leaves the Pod network open
 for the connections that libraries create later; this is safe because the
 restored workload stays parked until `restore-complete`, so kernel traffic
 resumes while application traffic does not. Only after that does `nsrestore`
@@ -842,10 +842,11 @@ Neither CRIU's lock nor the agent's hold stops the kernel's TCP timers, so
 retransmission and user timeouts, and keepalive at capture, keep running while a
 peer is dumped or restored, and a long interruption can still break a preserved
 connection ([snapshot#577](https://github.com/ai-dynamo/snapshot/issues/577)).
-At restore, the agent clears `SO_KEEPALIVE` in its copy of the CRIU image, so no
-keepalive probe can abort a preserved connection while a peer is still
-restoring, and turns it back on through `pidfd_getfd` at the `sockets-restored`
-barrier, before the tasks resume. Taking each
+At restore, the agent clears `SO_KEEPALIVE` in its copy of the CRIU image on
+each preserved connection that has it, and records which ones, so no keepalive
+probe can abort a preserved connection while a peer is still restoring. It
+turns keepalive back on through `pidfd_getfd` for those connections only, at the
+`sockets-restored` barrier, before the tasks resume. Taking each
 hold as late and lifting it as early as possible shortens that window but does
 not remove it, which is why qualification measures the whole interruption,
 including staggered dumps, and documents the supported limits. Connections
