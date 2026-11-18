@@ -40,8 +40,9 @@ proposal lets a cluster hold several stores at once and lets each snapshot
 request pick one. An administrator registers a store as a cluster-scoped
 `SnapshotStorageClass`; a `PodSnapshot` or `SnapshotJob` names a class in
 `spec.storageClassName`, or omits it to use the default. Classes are
-added and removed while the cluster runs. The chart renders today's `storage.*`
-values as the default class, so existing installations need no changes.
+added and removed while the cluster runs. On first start the operator creates a
+default class from today's `storage.*` values, so existing installations keep
+working.
 
 ## Motivation
 
@@ -93,13 +94,15 @@ resolves it once and binds the content to that store for its whole life.
 **Retiring a store.** A protection finalizer holds the class while content
 references it. A terminating class takes no new snapshots but still restores
 and cleans up. `reclaimPolicy` decides whether deleting content also deletes
-its snapshots: `Delete` removes them, `Retain` keeps them. The policy is copied
-onto the content at binding and does not change afterwards.
+its snapshots: `Delete` removes them, `Retain` keeps them and marks them in the
+store so cleanup never removes them. The policy is copied onto the content at
+binding and does not change afterwards.
 
-**The default.** The chart renders its `storage.*` values as a class named
-`default` with `isDefault: true`, so an upgraded installation needs no manual
-step. The default may move to another class; bound content keeps its binding.
-At most one class is the default; see [Default class](#default-class).
+**The default.** When the cluster has no class, the operator creates one named
+`default` with `isDefault: true` from the chart's `storage.*` values, so an
+upgraded installation needs no manual step. It never overwrites a class, so the
+default may move to another class; bound content keeps its binding. At most one
+class is the default; see [Default class](#default-class).
 
 ### User Stories
 
@@ -115,10 +118,11 @@ At most one class is the default; see [Default class](#default-class).
 | Class edited after binding | The location fields change; content bound to the old `storeID` would read or delete in the wrong place. Or `reclaimPolicy` flips and existing content loses data it was meant to keep. | Location fields are immutable through CEL, and the policy is frozen on the content at binding. Credentials and TLS settings stay editable because they are not identity inputs. The agent and maintenance compare the class's `status.storeID` with the content's binding before any I/O and refuse a mismatch. |
 | Class deleted under content | Content loses the only description of where its snapshots are. | Protection finalizer; a terminating class still resolves for existing content. Force-removing the finalizer leaves content with the existing `StoreInactive` handling from SNEP-237. |
 | Secret missing or revoked | An S3 class's Secret is deleted or rotated to an invalid key. | The class goes `Ready=False`, reason `CredentialsUnavailable`, and new bindings stop. In-flight operations fail with the existing credential errors; nothing is deleted on an access error. |
-| Agent holds credentials | Today only PageBroker and the operator see S3 credentials. The agent now reads the class's Secret and writes it to a local file for PageBroker. | The Secret must live in the Snapshot namespace; the agent's RBAC is a Role there, not a ClusterRole. The file is written to the memory-backed volume the two containers already share, mode `0600`, under a per-transaction directory removed on Commit or Abort. Accepted trade-off against giving PageBroker a Kubernetes client; see Alternatives. |
+| Agent holds credentials | Today only PageBroker and the operator see S3 credentials. The agent now reads the class's Secret and writes it to a local file for PageBroker. | The Secret must live in the Snapshot namespace. The operator keeps the agent's Role limited by `resourceNames` to the Secrets and ConfigMaps that classes reference; a node can still read the credentials of every store, where today it holds one. The file is written to the memory-backed volume the two containers already share, mode `0600`, under a per-transaction directory removed on Commit or Abort. Accepted trade-off against giving PageBroker a Kubernetes client; see Alternatives. |
 | Duplicate or overlapping location | Two classes describe the same place, through the same fields, through an alias such as a second endpoint hostname, or through a nested prefix; cleanup through one could reach the other's content. | The operator refuses `Ready` for the later class with reason `DuplicateStore` or `StoreOverlap` and names the other; see [Store uniqueness](#store-uniqueness). |
 | Nested store in another cluster | Another cluster or installation registers a class above or below this one's prefix in the same bucket or claim. The scan cannot see it, and a sweep through the parent could delete the child's data. | The ancestor-marker check refuses the child when the parent registered first. A parent registered later is not detected, so a sweep looks only inside its own `artifacts/` and deletes only orphans named by a UUID, and deleting content removes only its own recorded handles. Data written by something that leaves no marker is not protected. |
 | Old agent, new class | During a rolling upgrade an agent that predates this proposal receives content bound to a non-default class. | It passes its startup store to PageBroker, whose `storeID` does not match the content's; PageBroker returns `STORE_MISMATCH` and the capture fails before any I/O. The existing retry picks it up after the node upgrades. |
+| Restore from several S3 stores | The native restore engine holds one session per PageBroker process, with one endpoint and one set of credentials, and reads its CA bundle and addressing mode once at start. | Restores from the same store run in parallel; a restore from another store waits until they drain, then PageBroker starts a new session. A long restore delays other stores, and a waiting transaction can expire. An S3 class whose CA bundle or addressing mode differs from PageBroker's startup values cannot restore. Parallel restore across stores is a follow-up; see [Agent and PageBroker](#agent-and-pagebroker). |
 | Default misconfigured | Two classes set `isDefault: true`, or the default is deleted and unnamed `PodSnapshot`s fail. | The admission policy denies both. If it is absent or bypassed, the oldest marked class wins with `DefaultConflict` on the others, and a Warning event flags a deleted default; see [Default class](#default-class). |
 
 ## Design Details
@@ -199,9 +203,10 @@ name beside the digest, which stays the authority on *where*; the name says
 *how to reach it*. It also gains `reclaimPolicy`, copied from the class at
 binding and immutable, so editing the class later never changes what happens to
 existing content. The class always has a policy (it defaults to `Delete`), so
-every binding sets one. Only content bound before classes existed has neither
-field, or has no class when no class matches its digest; that content keeps
-today's behavior, and an empty policy means `Delete`.
+every binding sets one. Content bound before classes existed has neither field
+and is never rewritten, because the content `spec` is immutable. Its class is
+found by matching its `storeID` against the classes, and its empty policy means
+`Delete`, as today.
 
 ```go
 // PodSnapshotContentSpec.Storage; immutable once set.
@@ -230,7 +235,7 @@ type CheckpointStorageBinding struct {
    `storageClassName` and `reclaimPolicy`, labeled `nvidia.com/snapshot-storage-class=<name>`.
 5. The class reconciler's `nvidia.com/snapshotstorageclass-protection`
    finalizer is removed only when the class is terminating and no content
-   carries its label.
+   carries its label or, for content with no class name, its `storeID`.
 
 #### Default class
 
@@ -248,8 +253,9 @@ disappear unnoticed. Two layers hold that.
    unaffected and no `PodSnapshot` fails. If the default is deleted without
    the policy, a Warning event names the effect: unnamed `PodSnapshot`s fail
    with `StorageClassTerminating` while content references it, and
-   `StorageClassNotFound` after. The chart recreates its `default` class on the
-   next `helm upgrade`.
+   `StorageClassNotFound` after. The operator creates a `default` class only when
+   the cluster has no class at all, so a deleted default is not brought back
+   while another class exists.
 
 #### Store uniqueness
 
@@ -273,15 +279,18 @@ reconciler runs these checks in order:
    skipped, so a class whose credentials cover only its own prefix still
    reaches `Ready`. Sweeps do not repeat it: they delete only inside their own
    prefix, so a parent registered later changes nothing for them.
-4. **Marker.** Before `Ready`, the operator creates `<location>/.snapshot-store`
-   with the class name and `storeID`, create-only (`If-None-Match: *` on S3,
-   `O_EXCL` on PVC). A marker for another class is `DuplicateStore`. The
+4. **Marker.** Before `Ready`, the operator creates `<location>/.snapshot-store`,
+   a JSON file with a `version`, the cluster ID (the UID of the `kube-system`
+   namespace), the class name and the `storeID`, create-only (`If-None-Match: *`
+   on S3, `O_EXCL` on PVC). A marker is the class's own only when all three
+   match; any other marker is `DuplicateStore`, so a class with the same name
+   in another cluster is refused. The
    storage arbitrates, so two classes created at once, in this cluster or
    another, cannot both win, and a bucket reached through two hostnames is
    caught. Sweeps read it again before they delete.
 
 When a class is deleted, the operator removes its marker before it removes the
-finalizer, and only if the marker names this class and `storeID`; a marker that
+finalizer, and only if the marker names this cluster, class and `storeID`; a marker that
 is already gone counts as removed. A failed delete is retried on a backoff while
 the class stays terminating, with reason `StoreUnreachable`, or
 `CredentialsUnavailable` when the credentials are the cause. An administrator
@@ -298,8 +307,8 @@ writes markers, so data placed there by anything else is not detected.
 The agent already carries `storeID` and the artifact identity to PageBroker; it
 adds the resolved store through the `StorageBackend` selector, so PageBroker no
 longer depends on one store fixed at startup. PVC reuses `FilesystemStorage`;
-S3 is the one new kind. `--storage-config` remains only for content that has
-no class. Only new fields are shown.
+S3 is the one new kind. PageBroker's `--storage-config` no longer selects a
+store. Only new fields are shown.
 
 ```protobuf
 message StorageBackend {
@@ -328,13 +337,23 @@ PageBroker trusts `store_id` and `StorageBackend` as it trusts its startup
 configuration today; the binding check is the agent's. It caches S3 clients by
 `store_id`, `addressing`, `allow_http` and a SHA-256 digest of the credentials
 and CA bundle file contents, computed when it builds the client, so rotated
-credentials or a changed setting get a new client. An entry idle for 15 minutes is dropped, the cache holds at most 64 entries, and a
-client with calls in flight is never dropped. A missing class or Secret fails the
-operation with `StorageClassUnavailable`, and nothing is retried against
-another store. For PVC the agent maps `claimName` to a mount path: the default
+credentials or a changed setting get a new client. An entry idle for 15 minutes
+is dropped, the cache holds at most 64 entries, and a client with calls in
+flight is never dropped. A missing class or Secret fails the operation with
+`StorageClassUnavailable`, and nothing is retried against another store. For PVC the agent maps `claimName` to a mount path: the default
 claim at `/checkpoints`, each extra claim at `/snapshot-stores/<claimName>`,
 rendered by the chart into the agent's `config.yaml` and the operator's
 `--mounted-claims` flag.
+
+Payload restores do not use that client. They go through the native restore
+engine, which holds one session per PageBroker process, with one endpoint and
+one set of credentials, and reads its CA bundle and addressing mode once at
+start. Restores from the session's store run in parallel, as today. A restore
+from another store waits until they drain; PageBroker then ends the session and
+starts one for that store. Until restores run in parallel across stores, a long
+restore delays other stores and a waiting transaction can expire, and an S3
+class whose CA bundle or addressing mode differs from PageBroker's startup
+values, taken from `storage.s3`, cannot restore.
 
 #### Credential delivery
 
@@ -360,16 +379,19 @@ happens in PageBroker's client cache.
 #### Maintenance
 
 The backend registry is built from Ready and terminating classes.
-`backendForContent` resolves the content's class by name, checks its `storeID`
-against the binding, and returns that backend. Under the content's
-`reclaimPolicy: Retain`, `delete-content` removes the finalizer without touching
-the store and emits `SnapshotsRetained` with the handle. Sweeps run per class
+`backendForContent` resolves the content's class by name, or by `storeID` for
+content with no class name, checks its `storeID` against the binding, and
+returns that backend. Under the content's `reclaimPolicy: Retain`,
+`delete-content` writes a tombstone, `artifacts/<uid>/.retained`, with the class
+name, `storeID` and time, then removes the finalizer and emits
+`SnapshotsRetained` with the handle; it deletes nothing. Sweeps run per class
 and never cross stores. A sweep first reads the marker at its own
 location and stops, reporting why, if it is missing or names another store. It
 then looks only inside `<location>/artifacts/` and deletes only orphaned
 directories whose name is a UUID, the `PodSnapshotContent` UID that PageBroker
-names them by. This filter is new: today every directory there with a safe name
-and no matching content is an orphan. Other names are left alone. Deleting
+names them by, and that carry no tombstone. Both filters are new: today every
+directory there with a safe name and no matching content is an orphan. Other
+names and retained directories are left alone. Deleting
 content removes only the handles recorded on it. Content whose class
 is gone keeps its finalizer and gets `StoreInactive`, as in SNEP-237.
 
@@ -380,14 +402,21 @@ is gone keeps its finalizer and gets `StoreInactive`, as in SNEP-237.
   any `PodSnapshot` may use that store.
 - **Credentials.** Secrets live in the Snapshot namespace, replacing today's S3
   file mounts, under a namespaced Role: `get`/`list`/`watch` for the operator,
-  `get` for the agent, and no caching of contents. The agent writes a Secret
-  only to the staging tmpfs, never to the node filesystem or logs.
+  `get` for the agent, and no caching of contents. The operator maintains the
+  agent's Role so its `resourceNames` list only the Secrets and ConfigMaps that
+  classes reference; every node can still read every store's credentials. The
+  agent's ClusterRole gains `get`/`list`/`watch` on `snapshotstorageclasses`.
+  The agent writes a Secret only to the staging tmpfs, never to the node
+  filesystem or logs.
 - **PageBroker.** No Kubernetes client, RBAC or long-lived credentials; it
   trusts the agent on the local socket as today.
 
 ### Configuration
 
-The chart keeps `storage.*` and always renders it as the `default` class. New value:
+The chart keeps `storage.*` but ships no class object: Helm applies a release
+before the operator's `crd-installer` has created the new CRD, so the operator
+creates the `default` class instead. The installer's RBAC gains the new CRD.
+New value:
 
 ```yaml
 storage:
@@ -406,27 +435,37 @@ selects PVC or S3; `s3.endpoint`, `region`, `bucket`, `prefix`, `addressing`,
 `pvc.name` becomes `claimName`, with the class `basePath` at the claim root.
 `pvc.basePath` stays the container mount path, and `pvc.create`, `size` and
 `storageClass` still only provision the claim. What changes is delivery: the
-chart no longer mounts the S3 Secret or CA ConfigMap into PageBroker and the
-operator, because both are read through the API and passed per transaction.
+chart no longer mounts the S3 Secret, which is read through the API and passed
+per transaction. The CA ConfigMap stays mounted in PageBroker, because the
+native restore engine reads its CA bundle and addressing mode once at start.
+
+The chart renders these values into the operator's storage configuration file,
+read through `--snapshot-storage-config`. The operator uses it for one thing:
+when the cluster has no `SnapshotStorageClass` at all, it creates `default` with
+`isDefault: true`. That covers a fresh install and the first upgrade. If any
+class exists it does nothing, so it never recreates a deleted `default`, re-sets
+`isDefault` or reverts an edit. Later changes to `storage.*` do not change an
+existing class; to switch stores, create a new class.
 
 Classes are the only way to define a store. The operator builds its backend
-registry from classes only, so this release removes its `--snapshot-storage-config`
-and S3 credential flags; an operator started with one fails at start with an
-unknown-flag error, so remove it from any hand-edited arguments. The chart no
-longer passes them. The agent's `--storage-config` remains only for content
-that has no class.
+registry from classes only, so this release removes its S3 credential flags; an
+operator started with one fails at start with an unknown-flag error, so remove
+it from any hand-edited arguments. `--snapshot-storage-config` stays, only as
+the seed for the `default` class. PageBroker's `--storage-config` no longer
+selects a store; it carries the process-wide restore settings.
 
 #### Upgrade from a single-store installation
 
-An installation upgraded from a release without classes keeps working with no
-action beyond `helm upgrade`:
+An installation upgraded from a release without classes keeps working after a
+`helm upgrade` run with the previous values:
 
-1. The same `storage.*` values now render the `default` class, so its `storeID`
-   is byte-identical to the one recorded on every bound `PodSnapshotContent`.
-2. On start, the operator sets `spec.storage.storageClassName` and
-   `reclaimPolicy` on content that has a `storeID` but no class name, by
-   matching the digest against Ready classes; content matching none keeps the
-   `StoreInactive` handling.
+1. The operator applies the new CRD, finds no class, and creates `default` from
+   the same `storage.*` values, so its `storeID` is byte-identical to the one
+   recorded on every bound `PodSnapshotContent`.
+2. Existing content is not rewritten. Content that has a `storeID` but no class
+   name is matched to a class by digest whenever it is used, and it protects
+   that class from deletion; content matching none keeps the `StoreInactive`
+   handling.
 3. Content with no `spec.storage`, bound before SNEP-237, keeps the legacy
    path-addressed flow and is never assigned a class.
 4. `PodSnapshot`s and `SnapshotJob`s without `storageClassName` resolve to
@@ -455,18 +494,20 @@ the old operator ignores both and reads `storage.yaml`.
 - **API:** CEL rejects two backend blocks, none, or a location change.
 - **Operator:** Ready/NotReady for each reason; digest, overlap, ancestor-marker
   and marker detection, including two classes created at once, a stale marker
-  and a denied ancestor read; default resolution with two marked classes and
-  with none; terminating class, finalizer, `Retain`, registry rebuild.
+  and a denied ancestor read; a marker from another cluster with the same class
+  name is refused; default resolution with two marked classes and with none;
+  the `default` class is created only when no class exists; terminating class, finalizer, `Retain`, registry rebuild.
 - **Admission policy:** rejects a second default and deleting the default,
-  accepts moving it, and is skipped when the API is not served; without it,
-  deleting the default emits the Warning.
+  and accepts moving it; without it, deleting the default emits the Warning.
 - **Agent:** Secret fetch, file permissions and removal on Commit, Abort and
   crash; mount mapping for default and extra claims; `StorageClassUnavailable`
   on a missing class, a `status.storeID` mismatch, or a claim with no mount.
 - **Maintenance:** a sweep stops when its own marker is missing or foreign, and
   looks only inside `artifacts/`, deleting only UUID-named orphans, on S3 and on
-  a PVC. A class inside another store's `artifacts/` is refused.
-- **PageBroker:** per-request `StorageBackend`, client cache, two stores live.
+  a PVC. A class inside another store's `artifacts/` is refused. A directory
+  retained under `Retain` survives sweeps.
+- **PageBroker:** per-request `StorageBackend`, client cache, two stores live;
+  restores from two stores queue and run in turn.
 - **End to end:** two S3 and one PVC class in one cluster, checkpoint and
   cross-node restore through each; a class terminates only after its content is
   gone; old content stays put when the default moves; rolling upgrade with an
@@ -475,7 +516,7 @@ the old operator ignores both and reads `storage.yaml`.
 ### Graduation Criteria
 
 - **Alpha:** CRD and fields as above; PVC and S3 classes; default class from
-  the chart; protection finalizer; `Retain`; PVC mount limitation documented.
+  the chart's values; protection finalizer; `Retain`; PVC mount limitation documented.
 
 ## Alternatives
 
@@ -484,3 +525,6 @@ the old operator ignores both and reads `storage.yaml`.
   over a local socket. Rejected.
 - **Mounting arbitrary PVCs at runtime.** Needs the agent to mount claims or a
   restart per claim; deferred and recorded as the limitation.
+- **Parallel restore from several stores.** Needs a restore worker per store
+  connection or a change in the native engine; deferred, with the per-store
+  queue as the interim.
