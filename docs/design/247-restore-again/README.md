@@ -38,10 +38,12 @@ each container start, at kubelet's back-off of up to 5 minutes.
 
 The change has four steps, in the order they run:
 
-1. **Detect the new container at creation.** The NRI plugin will treat a
-   destination container as starting again when the Pod's restore has ended
+1. **Detect the new container at creation.** kubelet creates a destination
+   container again only when the Pod's restart policy allows it. The NRI plugin
+   will treat that container as starting again when the Pod's restore has ended
    and an earlier container's proxy is still in the destination's control
-   directory.
+   directory. A container that is not created again gets no new restore and no
+   `RestoreRepeated` event.
 2. **Clear the earlier result.** The plugin will remove the earlier
    `restore-complete` or `restore-failed` before the new proxy starts, so the
    proxy waits for a new restore instead of exiting.
