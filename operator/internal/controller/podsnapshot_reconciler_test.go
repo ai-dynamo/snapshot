@@ -6,7 +6,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -1129,19 +1128,22 @@ func TestSnapshotReconciler_CascadeDeleteRequeuesUntilContentGone(t *testing.T) 
 }
 
 func TestSnapshotReconcilerBuildContentCopiesPodGroup(t *testing.T) {
-	for _, membership := range []*snapshotv1alpha1.PodGroupMembership{
-		nil,
-		{Name: "group", UID: "group-uid", MemberID: "worker-0"},
+	for _, tc := range []struct {
+		name       string
+		membership *snapshotv1alpha1.PodGroupMembership
+	}{
+		{name: "standalone"},
+		{name: "member", membership: &snapshotv1alpha1.PodGroupMembership{Name: "group", UID: "group-uid", MemberID: "worker-0"}},
 	} {
-		t.Run(fmt.Sprint(membership), func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			snap := makeSnapshotForReconcile()
-			snap.Spec.PodGroup = membership
+			snap.Spec.PodGroup = tc.membership
 			r := makeSnapshotReconciler(snapshotReconcilerScheme())
 			content := r.buildPodSnapshotContent(snap, "content", scheduledPod())
-			assert.Equal(t, membership, content.Spec.PodGroup)
-			if membership != nil {
+			assert.Equal(t, tc.membership, content.Spec.PodGroup)
+			if tc.membership != nil {
 				content.Spec.PodGroup.MemberID = "other"
-				assert.Equal(t, "worker-0", membership.MemberID)
+				assert.Equal(t, "worker-0", tc.membership.MemberID)
 			}
 		})
 	}
