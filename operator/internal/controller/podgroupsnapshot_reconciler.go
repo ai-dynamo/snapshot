@@ -362,14 +362,14 @@ func (r *PodGroupSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&snapshotv1alpha1.PodSnapshot{}).
 		Watches(
 			&snapshotv1alpha1.PodSnapshotContent{},
-			handler.EnqueueRequestsFromMapFunc(r.podSnapshotContentToPodGroupSnapshot),
+			handler.EnqueueRequestsFromMapFunc(podSnapshotContentToPodGroupSnapshot),
 		).
 		Complete(r)
 }
 
 // podSnapshotContentToPodGroupSnapshot maps a content to the group named by
 // its immutable membership.
-func (r *PodGroupSnapshotReconciler) podSnapshotContentToPodGroupSnapshot(_ context.Context, obj client.Object) []reconcile.Request {
+func podSnapshotContentToPodGroupSnapshot(_ context.Context, obj client.Object) []reconcile.Request {
 	content, ok := obj.(*snapshotv1alpha1.PodSnapshotContent)
 	if !ok || content.Spec.PodGroup == nil {
 		return nil
