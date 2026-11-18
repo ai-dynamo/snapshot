@@ -684,10 +684,10 @@ func TestCaptureMemberOf(t *testing.T) {
 				return c.Get(ctx, key, obj, opts...)
 			},
 		})
-		member, registered, err := w.captureMemberOf(within(t), g.contents[1])
+		member, err := w.captureMemberOf(within(t), g.contents[1])
 		require.NoError(t, err)
-		require.True(t, registered)
 		require.NotNil(t, member)
+		assert.True(t, member.pinned)
 		assert.Equal(t, captureGroupUID, member.attempt)
 		assert.Equal(t, "worker", member.id)
 		assert.Equal(t, client.ObjectKey{Namespace: "inference", Name: "pair"}, member.group)
@@ -707,9 +707,8 @@ func TestCaptureMemberOf(t *testing.T) {
 				return c.Get(ctx, key, obj, opts...)
 			},
 		})
-		member, registered, err := w.captureMemberOf(within(t), g.contents[0])
+		member, err := w.captureMemberOf(within(t), g.contents[0])
 		require.NoError(t, err)
-		assert.True(t, registered)
 		assert.Nil(t, member)
 		assert.Zero(t, reads)
 	})
@@ -729,10 +728,10 @@ func TestCaptureMemberOf(t *testing.T) {
 				}}
 			}
 			w, _ := groupCaptureController(t, nil, g, nil, nil)
-			member, registered, err := w.captureMemberOf(within(t), g.contents[0])
+			member, err := w.captureMemberOf(within(t), g.contents[0])
 			require.NoError(t, err)
-			require.True(t, registered)
 			require.NotNil(t, member)
+			assert.True(t, member.pinned)
 			assert.Equal(t, captureGroupUID, member.attempt)
 			assert.Equal(t, captureMemberIDs[0], member.id)
 		})
@@ -763,7 +762,7 @@ func TestCaptureMemberOf(t *testing.T) {
 			if tc.off {
 				w.podGroups = nil
 			}
-			_, _, err := w.captureMemberOf(within(t), g.contents[0])
+			_, err := w.captureMemberOf(within(t), g.contents[0])
 			require.ErrorContains(t, err, tc.want)
 			require.ErrorAs(t, err, new(*invalidMemberError))
 			require.NoError(t, w.reconcileCapture(within(t), "content-leader"))
