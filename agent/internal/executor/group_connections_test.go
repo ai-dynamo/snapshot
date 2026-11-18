@@ -61,13 +61,29 @@ func await(t *testing.T, done <-chan error) error {
 
 func TestKeptConnectionsLetTheRestoreContinueOnceEveryMemberRestored(t *testing.T) {
 	calls := 0
+	waiting, release := make(chan struct{}), make(chan struct{})
 	k := startKept(t, context.Background(), func(context.Context) error {
 		calls++
-		time.Sleep(10 * time.Millisecond)
+		close(waiting)
+		<-release
 		return nil
 	})
+	done := nsrestoreSide(k)
 
-	if err := await(t, nsrestoreSide(k)); err != nil {
+	// nsrestore has reported its restored sockets, and the other members have
+	// not restored theirs.
+	select {
+	case <-waiting:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the barrier never ran")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("nsrestore's post-restore hook = %v while the barrier waited, want it to wait too", err)
+	case <-time.After(peerDelay):
+	}
+	close(release)
+	if err := await(t, done); err != nil {
 		t.Fatalf("nsrestore's post-restore hook = %v, want the agent to let it continue", err)
 	}
 	if err := k.wait(nil); err != nil {
@@ -76,7 +92,7 @@ func TestKeptConnectionsLetTheRestoreContinueOnceEveryMemberRestored(t *testing.
 	if calls != 1 {
 		t.Fatalf("the barrier ran %d times, want once", calls)
 	}
-	if k.waited < 10*time.Millisecond {
+	if k.waited < peerDelay {
 		t.Fatalf("waited = %v, want the time the barrier took", k.waited)
 	}
 }
