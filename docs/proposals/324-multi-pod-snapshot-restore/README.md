@@ -1485,6 +1485,10 @@ review that settles the open questions in [Appendix A](#a-open-questions).
   safety.
 - 2026-11-17: Aligned with the implementation; fabric domains left to the
   owner in alpha.
+- 2026-11-17: The implementation stack captured a two-Pod DeepSeek V4.1 Flash
+  group served by vLLM on GB300 twice, with FABRIC memory shared across the
+  Pods, and restored it in place three times with identical outputs.
+- 2026-11-18: Aligned with the cuInterpose and agent PRs.
 
 ## Alternatives
 
