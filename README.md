@@ -211,6 +211,7 @@ To report a security vulnerability, follow the process in [SECURITY.md](SECURITY
 ## Community
 
 - **[Discussions](https://github.com/ai-dynamo/snapshot/discussions)** - Questions, ideas, and open-ended design conversations.
+- **[Slack](https://ai-dynamo.org/slack)** - Chat with the team and the community in the ai-dynamo workspace. Once you have joined, find us in [#snapshot-dev](https://ai-dynamo.slack.com/archives/C0CELRPP6D7).
 - **[Issues](https://github.com/ai-dynamo/snapshot/issues)** - Bugs and feature requests. Every change starts as an issue; see [CONTRIBUTING.md](CONTRIBUTING.md).
 - **[Changelog](CHANGELOG.md)** - What changed in each release.
 - **Security** - Never in a public issue; follow [SECURITY.md](SECURITY.md).
