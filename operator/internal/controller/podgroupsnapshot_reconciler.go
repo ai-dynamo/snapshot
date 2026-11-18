@@ -244,9 +244,24 @@ func (r *PodGroupSnapshotReconciler) createMemberPodSnapshots(
 	}
 	// One member's failure does not hold back the others; the error requeues.
 	var errs []error
+	groupConfirmed := false
 	for rank, m := range group.Status.Members {
 		if m.PodSnapshot != nil || observed.member(rank).podSnapshot != nil {
 			continue
+		}
+		if !groupConfirmed {
+			// The cache may not have seen the group's deletion yet.
+			live := &snapshotv1alpha1.PodGroupSnapshot{}
+			if err := r.NonCacheReadClient.Get(ctx, client.ObjectKeyFromObject(group), live); err != nil {
+				if apierrors.IsNotFound(err) {
+					return nil
+				}
+				return fmt.Errorf("confirm PodGroupSnapshot %q before creating member work: %w", group.Name, err)
+			}
+			if live.UID != group.UID || !live.DeletionTimestamp.IsZero() {
+				return nil
+			}
+			groupConfirmed = true
 		}
 		errs = append(errs, r.createMemberPodSnapshot(ctx, group, rank))
 	}
