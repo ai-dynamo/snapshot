@@ -789,6 +789,25 @@ The modes run these steps, with `<mode>` set to `inspect`, `prepare`, or `restor
 After the last step, the leader inserts `DONE` as the next command, and every coordinator exits.
 At prepare, each coordinator writes its own Pod's `cuinterpose.state` when the mode ends.
 
+In `inspect`, the leader inserts `inspect.fabric-peers` after validation and before `DONE`.
+Its value is a MessagePack map from each relay rank to a sorted array of the other ranks that share FABRIC memory or multicast objects with it.
+Two ranks share when a process in one imports what a process in the other created.
+A rank without peers maps to an empty array.
+Processes keep running between `inspect` and `prepare`.
+After `BEGIN_CHECKPOINT`, the leader therefore computes the relation again, and fails with `MemberFailed` if a rank gained a peer that `inspect` did not publish.
+
+At capture, each agent whose Pod runs a coordinator reads its own rank's entry after the inspection and records it in its artifact's manifest as `podGroup.fabricPeers`.
+A missing key refuses the capture, which happens only with a coordinator older than the agent.
+At restore admission, a member whose manifest lists peers reads where its restore container's GPUs are in their NVLink fabric.
+The agent runs `nvidia-smi --query-gpu` for `fabric.state`, `fabric.status`, `fabric.clusterUuid`, and `fabric.cliqueId`.
+The member publishes the result with its peers in its admission, as `fabric: {peers, gpus: [{uuid, clusterUUID, cliqueID, state, status}]}`.
+Before the `admitted` barrier, it checks every member that shared FABRIC memory with it, directly or through others, in rank order, so all of them reach the same verdict.
+Every GPU of those members must be registered with its fabric, with state `Completed` and status `Success`.
+All of those GPUs must report one cluster UUID and one clique ID.
+Otherwise the attempt ends with `Refused`, before CRIU runs.
+A member that shared no FABRIC memory publishes no fabric and is not checked.
+The check catches placement mistakes, but it does not promise that every later import succeeds.
+
 The attempt's deadline bounds every round.
 At restore each coordinator starts only after its own Pod's CRIU and CUDA restores, and the per-process timeouts of a step already bound each coordinator's own work, so the leader waits for replies until the deadline.
 A leader that reaches the deadline with replies missing, or a follower without a command by then, does not fail the session.
@@ -799,7 +818,7 @@ The reason follows the commit point: `Refused` in `--inspect`, which runs before
 Every other coordinator then exits with an error, without failing the session again, and each agent handles the failure as for a single Pod.
 
 A Pod alone runs the same steps as the leader of a group of one, without a session.
-The agent side, which creates the socket and serves the session for each coordinator, comes with the agent's group support.
+The agent side, which creates the socket and serves the session for each coordinator, is in `agent/internal/group`.
 
 ### API
 
