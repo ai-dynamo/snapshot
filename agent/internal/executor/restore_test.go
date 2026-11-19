@@ -553,11 +553,14 @@ func TestInspectRestoreRequiresTheRestoreProxy(t *testing.T) {
 		withoutProxy bool
 		wantErr      string
 	}{
-		"the proxy":            {cmdline: "/snapshot-control/snapshot-restore-proxy"},
-		"a node without it":    {cmdline: "sleep infinity", withoutProxy: true},
-		"the image's command":  {cmdline: "sleep infinity", wantErr: "NRI plugin did not set up this container"},
-		"the proxy with args":  {cmdline: "/snapshot-control/snapshot-restore-proxy --x", wantErr: "NRI plugin"},
-		"PID 1 cannot be read": {readErr: errors.New("no such process"), wantErr: "no such process"},
+		"the proxy":                      {cmdline: "/snapshot-control/snapshot-restore-proxy"},
+		"the proxy with a command":       {cmdline: "/snapshot-control/snapshot-restore-proxy -- python -m server --port 8000"},
+		"the proxy with no command":      {cmdline: "/snapshot-control/snapshot-restore-proxy --"},
+		"a node without it":              {cmdline: "sleep infinity", withoutProxy: true},
+		"the image's command":            {cmdline: "sleep infinity", wantErr: "NRI plugin did not set up this container"},
+		"the proxy with a flag":          {cmdline: "/snapshot-control/snapshot-restore-proxy --x"},
+		"another program in that folder": {cmdline: "/snapshot-control/snapshot-restore-proxy-other -- sleep", wantErr: "NRI plugin"},
+		"PID 1 cannot be read":           {readErr: errors.New("no such process"), wantErr: "no such process"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var readPID int
