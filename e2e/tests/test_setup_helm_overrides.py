@@ -79,15 +79,31 @@ def test_install_without_overrides_is_unchanged(monkeypatch):
     assert command[-2:] == ["--set-json", "daemonset.imagePullSecrets=[]"]
 
 
+RETRY_LIMIT = f"config.checkpoint.retryLimit={setup.E2E_CHECKPOINT_RETRY_LIMIT}"
+
+
 @pytest.mark.parametrize(
     ("mode", "expected"),
     [
-        ("vcluster", ["daemonset.nriHostNamespace=snapshot-e2e-vc", "a=user"]),
-        ("direct", ["a=user"]),
+        (
+            "vcluster",
+            ["daemonset.nriHostNamespace=snapshot-e2e-vc", RETRY_LIMIT, "a=user"],
+        ),
+        ("direct", [RETRY_LIMIT, "a=user"]),
     ],
 )
 def test_vcluster_restores_only_its_own_pods(mode, expected):
     assert setup.snapshot_helm_overrides(mode, "snapshot-e2e-vc", ["a=user"]) == expected
+
+
+def test_retry_is_on_for_every_install_and_the_user_still_wins():
+    # The chart ships retry off, so an install taking the default exercises none
+    # of it. A user's own assignment comes later and therefore wins.
+    assert setup.snapshot_helm_overrides("direct", "", None) == [RETRY_LIMIT]
+    overridden = setup.snapshot_helm_overrides(
+        "direct", "", ["config.checkpoint.retryLimit=4"]
+    )
+    assert overridden[-1] == "config.checkpoint.retryLimit=4", overridden
 
 
 @pytest.mark.parametrize(
