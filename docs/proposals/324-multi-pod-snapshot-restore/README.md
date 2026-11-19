@@ -114,7 +114,8 @@ models, by a single session that follows the attempt it serves.
 - Tolerate agent restarts without ever replaying CRIU into a restored container.
 - Configure each member as a standalone `PodSnapshot` is configured, so that
   members with different parts in the workload keep their own signals.
-- Keep single-Pod checkpoint and restore, and the existing resources, unchanged.
+- Keep single-Pod checkpoint and restore unchanged, and extend the existing
+  resources only with optional fields.
 
 ### Non-Goals
 
@@ -205,7 +206,7 @@ Redis-compatible server.
 | --- | --- |
 | Every restore keeps the original group size and GPU count per member, and a group whose members share GPU memory across nodes must restore within one fabric domain. | Admission checks the group size and each member's compatibility before CRIU. Alpha leaves the fabric domain to the owner, so a restore placed across domains fails after CRIU; beta verifies it at admission. |
 | Capture is not atomic: each source ends at its own dump, and a failure after the commit terminates every member that has started. Release is not atomic either, since a member can fail before its release while its peers are already released. | Admission catches every condition that can be checked without side effects, every member records when it started, and member results report partial outcomes truthfully, so the owner can retire the group and retry with a new attempt. |
-| Snapshot does not freeze restored processes until release, because CUDA, cuInterpose, and library threads do the reconstruction inside them, so an application thread that runs early could observe a half-rebuilt state. | Release relies on the existing workload contract, which this SNEP extends to every thread that could touch shared memory, communicators, or preserved connections; workloads launched through a wrapper that gates on the contract's signals satisfy it, and an enforced hold is left to future work. |
+| Snapshot does not freeze restored processes until release, because CUDA, cuInterpose, and library threads do the reconstruction inside them, so an application thread that runs early could observe a half-rebuilt state. | Release relies on the existing workload contract, which this SNEP extends to every thread that could touch shared memory, communicators, or preserved connections; an integration satisfies it only by holding every such thread until release, which a wrapper that gates only the main loop does not, and an enforced hold is left to future work. |
 | Between CRIU restore and CUDA unlock, a thread that calls CUDA blocks on the lock, which is not a recommended use of CUDA Checkpoint, and a failure in that window could leave such a thread stuck. | The locked window involves no coordination and lasts as long as for a single Pod, failing a restore terminates every restored process, and qualification measures both restore windows and injects failures into each. |
 | CRIU's network lock at capture and the agent's hold at restore pause the traffic of preserved connections while retransmission and user timeouts keep running, and keepalive too at capture, so a long dump or a slow peer can break them ([snapshot#577](https://github.com/ai-dynamo/snapshot/issues/577)). | Holds are taken as late and lifted as early as possible, a restore turns keepalive back on only once every member has restored its sockets, and qualification measures the whole interruption, including staggered dumps, to document the supported limits. |
 | At capture, CRIU's network lock covers a member's IP traffic only from the moment CRIU freezes it, and never covers RDMA, shared volumes, or external services, while dumps finish at different times. | Members must stop such traffic before reporting `ready-for-snapshot`, as the workload contract requires, and libraries tear down RDMA transports before the dump, which for NCCL means the application calling NCCL Checkpoint's prepare until CUDA's prepare phase does it. |
@@ -476,11 +477,12 @@ application calls it, so the application calls NCCL Checkpoint's restore after
 release and before it uses any communicator. A communicator whose memory and
 connections Snapshot preserves, such as NCCL over NVLink, needs no call.
 Snapshot cannot verify any of this from outside
-the process, so the SNEP makes it a requirement of group membership: integrations
-that launch the workload through a wrapper gating on both signals, as some
-serving platforms already do, satisfy it without application changes, an
-application can receive both signals directly through SNEP-411's contracts,
-and an enforced hold remains open in [Appendix A](#a-open-questions). Figures 5 and 6 show both signals and the
+the process, so the SNEP makes it a requirement of group membership. An
+integration meets it only by holding every such thread until release: a wrapper
+that gates the main loop on both signals does not by itself, since CRIU resumes
+every thread of the restored processes. An application can receive both
+signals directly through SNEP-411's contracts, and an enforced hold remains
+open in [Appendix A](#a-open-questions). Figures 5 and 6 show both signals and the
 waiting period on the workload's lifeline.
 
 ### Group checkpoint
@@ -545,7 +547,9 @@ Checkpointed, and otherwise records which member failed and why, together with e
 member's `startedAt`, copied from its `Started` condition. A member with that
 time has lost its source, since every source that started ends at its own dump
 or is terminated by the failure, whereas a member without it was never touched
-by Snapshot, and the group reports `Refused` only when no member started. Ready also describes
+by Snapshot, unless its `PodSnapshot` was deleted before the operator saw its
+start: that member fails with `PodSnapshotDeleted`, and whether it started is
+unknown. The group reports `Refused` only when no member started. Ready also describes
 availability rather than history: if a member's content later disappears, the
 operator withdraws Ready with `ArtifactUnavailable` and refuses new restores,
 without ever recapturing.
@@ -1054,7 +1058,8 @@ released members are unaffected.
 ### API
 
 This SNEP adds two namespaced kinds to `nvidia.com/v1alpha1`, generated from Go
-types as usual, and changes no existing resource schema.
+types as usual, and one optional, immutable field, `spec.podGroup`, to
+`PodSnapshot` and `PodSnapshotContent`.
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -1181,7 +1186,10 @@ and the group is `Ready` only when every member is Released. Each member's write
 `lastTransitionTime` of its agent's record, the `Started` condition at capture or
 the `nvidia.com/RestoreStarted` condition at restore, both of which are set once
 and never removed, so the operator cannot miss them however fast a member fails
-afterwards. It tells the owner which workloads Snapshot changed.
+afterwards. It tells the owner which workloads Snapshot changed, except for a
+member whose `PodSnapshot` or pinned restore Pod was deleted before the
+operator saw its start: that member fails with `PodSnapshotDeleted` or
+`TargetPodDeleted`, and whether Snapshot changed it is unknown.
 
 The operator derives the group's status from these records alone, by fixed
 rules. It refuses a group, or keeps it waiting, before it creates any member
