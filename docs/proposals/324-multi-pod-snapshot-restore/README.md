@@ -169,7 +169,9 @@ and [Workload contract](#workload-contract) defines which threads it covers.
 The owner must not delete or replace a source until the group's capture has
 ended, Ready or Failed, and group restore Pods must carry the group restore startup probe, which allows the longest deadline, and arrive held by Snapshot's scheduling gate. Placement stays
 with the owner, which keeps a group whose members share GPU memory across nodes
-within one fabric domain. A restore refused before it claims its Pods leaves them gated, so a new
+within one fabric domain, and restore admission refuses members that shared GPU
+memory unless their GPUs are ready in one NVLink clique.
+A restore refused before it claims its Pods leaves them gated, so a new
 attempt can name them, whereas a claimed Pod serves only its attempt, and the
 owner replaces it if that attempt fails. Finally, a plain `PodSnapshot` or a single restore Pod never contacts the
 coordinator, so existing users are unaffected, apart from the new version of
@@ -204,7 +206,7 @@ Redis-compatible server.
 
 | Risk or limitation | Mitigation or decision |
 | --- | --- |
-| Every restore keeps the original group size and GPU count per member, and a group whose members share GPU memory across nodes must restore within one fabric domain. | Admission checks the group size and each member's compatibility before CRIU. Alpha leaves the fabric domain to the owner, so a restore placed across domains fails after CRIU; beta verifies it at admission. |
+| Every restore keeps the original group size and GPU count per member, and a group whose members share GPU memory across nodes must restore within one fabric domain. | Admission checks the group size and each member's compatibility before CRIU. It also refuses members that shared GPU memory at capture unless all their GPUs are ready in one NVLink clique of one cluster. This catches placement mistakes, but it does not promise that every later import succeeds, for example in a restore Pod without the fabric access that [Dependencies](#dependencies) lists. |
 | Capture is not atomic: each source ends at its own dump, and a failure after the commit terminates every member that has started. Release is not atomic either, since a member can fail before its release while its peers are already released. | Admission catches every condition that can be checked without side effects, every member records when it started, and member results report partial outcomes truthfully, so the owner can retire the group and retry with a new attempt. |
 | Snapshot does not freeze restored processes until release, because CUDA, cuInterpose, and library threads do the reconstruction inside them, so an application thread that runs early could observe a half-rebuilt state. | Release relies on the existing workload contract, which this SNEP extends to every thread that could touch shared memory, communicators, or preserved connections; an integration satisfies it only by holding every such thread until release, which a wrapper that gates only the main loop does not, and an enforced hold is left to future work. |
 | Between CRIU restore and CUDA unlock, a thread that calls CUDA blocks on the lock, which is not a recommended use of CUDA Checkpoint, and a failure in that window could leave such a thread stuck. | The locked window involves no coordination and lasts as long as for a single Pod, failing a restore terminates every restored process, and qualification measures both restore windows and injects failures into each. |
@@ -390,7 +392,7 @@ session's patterns rather than added to them:
 | --- | --- | --- |
 | Broadcast | The cuInterpose leader sends each round's command to every relay | One `Insert`, read with a waiting `Get` by every relay |
 | Gather to one rank | Relays return records, results, and new fabric handles to the leader | One key per rank, read by the leader |
-| All-gather | Agents exchange their Pod IPs and identities, capture IDs, and whether each member runs a relay at admission | One key per rank, read by every agent with a waiting `Get` |
+| All-gather | At admission, agents exchange their Pod IPs and identities, capture IDs, whether each member runs a relay, and at restore the NVLink fabric of members that shared GPU memory | One key per rank, read by every agent with a waiting `Get` |
 | Phase synchronization | Agents synchronize `admitted`, `net-freeze`, `sockets-restored`, and `release`, and `resume` once CUDA Checkpoint's resume phase is released | One `Barrier` per phase |
 | Publish by key | The owner of a communicator or listening endpoint gives its peers a new identifier | `Insert` by the owner, waiting `Get` by each peer |
 | Failure | Any agent or relay, or the coordinator, ends the attempt | `Fail`, which ends every member's pending wait |
@@ -505,7 +507,8 @@ as for any `PodSnapshot`: `ready-for-snapshot` by default, or the member's own
 and container identity, and whether the Pod has opted into
 cuInterpose as SNEP-295 defines, to the admission exchange, while the
 relays run a first round that inspects every process and gathers the records to
-the leader for a global validation. Every agent then posts to the `admitted`
+the leader for a global validation. The leader also publishes which ranks
+share FABRIC memory. Every agent then posts to the `admitted`
 barrier once its own checks pass, and the agent of the leader's Pod posts only
 after the leader has accepted the topology, so the barrier completes, and the
 attempt commits, only when every member and the leader have accepted. Admission
@@ -525,8 +528,9 @@ peers do the same; invoking it one process at a time would deadlock libraries
 whose teardown is collective. Two more rounds then inspect again and move the
 shims into their checkpointing phase, the second giving each FABRIC import of
 unknown kind the kind of its creator. The leader revalidates a
-topology that now contains only application-owned shared memory, and three more
-rounds run the destructive cuInterpose phases. Finally,
+topology that now contains only application-owned shared memory, and fails the
+attempt if a rank gained a FABRIC peer since admission. Three more rounds then
+run the destructive cuInterpose phases. Finally,
 every agent locks and checkpoints CUDA, passes a `net-freeze` barrier, and only
 then runs CRIU, which drops all traffic in the Pod's network namespace as soon
 as it freezes the processes and keeps it dropped after the source ends. The
@@ -537,7 +541,8 @@ as [Cross-Pod TCP connections](#cross-pod-tcp-connections) explains. Every
 artifact records the capture ID, which is the `PodGroupSnapshot`'s UID, its own member ID, and the ordered table of all
 members with their Pod UIDs, containers, and Pod IPs, which is what a restore
 later uses to check that all members come from the same capture and to build
-the IP map.
+the IP map. It also records the ranks of the members that its Pod shared FABRIC
+memory with, as the leader published them, for restore admission.
 
 ![Group checkpoint](diagrams/checkpoint.svg)
 
@@ -632,10 +637,15 @@ attempt fails.
 The agents' admission waits for the operator's, which pins nothing until it
 passes. Each agent then resolves its member's artifact, runs the existing
 compatibility checks, and contributes its new Pod IP, the capture ID from its
-artifact, and whether it runs a relay. Every
+artifact, whether it runs a relay, and, if its Pod shared FABRIC memory at
+capture, where its GPUs are in their NVLink fabric. Every
 agent therefore ends admission holding the complete IP map, built from the
 member table in its own artifact and the new IPs, together with the assurance
-that all members restore the same capture.
+that all members restore the same capture. Members that shared FABRIC memory,
+directly or through others, must also land on GPUs that are all ready in one
+NVLink clique of one cluster. Otherwise the attempt ends as `Refused` before
+CRIU. This catches placement mistakes, but it does not promise that every later
+import succeeds.
 
 Each agent then posts to the `admitted` barrier once its own checks pass. When
 the barrier completes, the attempt commits, and each agent records the
@@ -757,6 +767,15 @@ importers need the new handles, and after `RESTORE_MULTICAST_DEVICES`, because
 the driver waits for the whole multicast team before a bind or a mapping
 completes. The other boundaries are kept for uniformity and easier debugging,
 since a round costs well under a millisecond.
+
+A capture's inspection also publishes which members share FABRIC memory. After
+it validates the topology and before it inserts `DONE`, the leader inserts
+`inspect.fabric-peers`. It maps each relay rank to the sorted ranks whose
+processes import what its own processes created, or the other way round. Each
+agent that runs a relay records its own rank's entry in its artifact as
+`fabricPeers`, which restore admission checks. Processes keep running until
+preparation, so after `BEGIN_CHECKPOINT` the leader fails the attempt if a rank
+gained a peer that the inspection did not publish.
 
 A round has no timeout of its own. SNEP-295's per-process timeouts bound each
 relay's work in a step, by default an hour to save or load allocations and 10
@@ -1250,7 +1269,7 @@ remain a compatible addition.
 | Resource or contract | Change | Purpose |
 | --- | --- | --- |
 | `PodSnapshot` and `PodSnapshotContent` | An optional, immutable `spec.podGroup` (`name`, `uid`, `memberID`) names the group a member belongs to, set by the group controller and copied unchanged into the content; group-owned children also carry an owner reference, take their settings from the member's template, and cannot be restored on their own, and the agent sets a new `Started` condition on a member's `PodSnapshotContent` before its first irreversible step | The agent reads group parameters from the parent group, each member keeps its own settings, and the operator learns which sources Snapshot changed |
-| Artifact manifest | Adds an optional `podGroup` section with the capture ID, the member's own ID, and the ordered member table of Pod UIDs, containers, and Pod IPs | Restore admission checks that all members come from one capture and builds the IP map from the artifacts |
+| Artifact manifest | Adds an optional `podGroup` section with the capture ID, the member's own ID, the ordered member table of Pod UIDs, containers, and Pod IPs, and the ranks of the members that the Pod shared FABRIC memory with | Restore admission checks that all members come from one capture, builds the IP map from the artifacts, and checks that members that shared FABRIC memory land in one NVLink clique |
 | Restore Pod contract | New scheduling gate `nvidia.com/restore-group`, set by the owner at creation, through `podcontract.BuildGroupTarget`, with the group restore startup probe and the control volume; new annotation `nvidia.com/restore-group-uid: <PodGroupRestore UID>`, written only by the operator, together with the target's single-pair `nvidia.com/restore-container-map`, in the same conditional patch that removes the gate; on a node without the NRI plugin, the destination's own command must be inert, as for a standalone restore | One template for every replica, no node held before the request is complete, an NRI plugin that decides without an API read, the `PodGroupRestore` as the only source of the mapping, and one attempt per Pod, never inherited through a reused name |
 | `restore-complete` file | Adds an `attempt` key holding the `PodGroupRestore` UID next to `pid`, keeping the existing format | Lets a restarted agent prove release for this attempt |
 | Restore Pod conditions | New condition `nvidia.com/RestoreStarted`, set to True before the agent first changes the Pod, under a field manager of its own, and never removed or relabelled; new condition `nvidia.com/GroupRestoreFailed`, set to True with the group's reason when a member fails for one, in the same update as `nvidia.com/Restored`; `nvidia.com/Restored` keeps its public reasons and gains only `GroupPending`, an agent-internal wait reason like today's `SnapshotPending` | Restart safety, an exact `startedAt`, and the group's reasons with `ClassifyRestoreOutcome` unchanged |
@@ -1501,8 +1520,7 @@ and an unchanged result for the existing single-Pod suite.
 including the `resume` barrier that orders the resume phase across members;
 scale measured beyond 16 Pods; decisions on IPv6, on the
 coordinator's availability model, on isolating sessions' memory and limits, and
-on an enforced execution hold, informed by operational evidence; admission
-that verifies a group's fabric domain before CRIU; and an API
+on an enforced execution hold, informed by operational evidence; and an API
 review that settles the open questions in [Appendix A](#a-open-questions).
 
 **GA** is not planned by this SNEP.
@@ -1527,7 +1545,8 @@ review that settles the open questions in [Appendix A](#a-open-questions).
 - 2026-11-18: Aligned with the cuInterpose and agent PRs.
 - 2026-11-18: Group membership in an immutable `spec.podGroup` instead of labels.
 - 2026-11-19: cuInterpose takes the kind of a FABRIC import from its creator
-  instead of the driver's private handle layout.
+  instead of the driver's private handle layout, and restore admission checks
+  that members that shared FABRIC memory land in one NVLink clique.
 
 ## Alternatives
 
@@ -2032,8 +2051,8 @@ type PodGroupRestoreList struct {
 ```
 
 Each artifact's manifest gains an optional section, identical across the
-members of one capture except for `MemberID`, and standalone artifacts omit
-it.
+members of one capture except for `MemberID` and `FabricPeers`, and standalone
+artifacts omit it.
 
 ```go
 package types
@@ -2052,6 +2071,10 @@ type PodGroupManifest struct {
 	MemberID string `yaml:"memberID"`
 	// Members is the ordered member table, so its index is the rank.
 	Members []PodGroupManifestMember `yaml:"members"`
+	// FabricPeers are the ranks of the members whose Pods shared GPU memory
+	// over NVLink with this member's, in either direction. A restore checks
+	// that their GPUs and this member's are all in one NVLink clique.
+	FabricPeers []int `yaml:"fabricPeers,omitempty"`
 }
 
 type PodGroupManifestMember struct {
