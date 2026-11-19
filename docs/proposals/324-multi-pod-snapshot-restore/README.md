@@ -169,9 +169,8 @@ and [Workload contract](#workload-contract) defines which threads it covers.
 The owner must not delete or replace a source until the group's capture has
 ended, Ready or Failed, and group restore Pods must carry the group restore startup probe, which allows the longest deadline, and arrive held by Snapshot's scheduling gate. Placement stays
 with the owner, which keeps a group whose members share GPU memory across nodes
-within one fabric domain. Restore admission refuses members that shared GPU
-memory unless each set of members linked by that memory is on GPUs ready in one
-NVLink clique.
+within one fabric domain, and restore admission refuses members that shared GPU
+memory unless their GPUs are ready in one NVLink clique.
 A restore refused before it claims its Pods leaves them gated, so a new
 attempt can name them, whereas a claimed Pod serves only its attempt, and the
 owner replaces it if that attempt fails. Finally, a plain `PodSnapshot` or a single restore Pod never contacts the
@@ -207,14 +206,14 @@ Redis-compatible server.
 
 | Risk or limitation | Mitigation or decision |
 | --- | --- |
-| Every restore keeps the original group size and GPU count per member, and a group whose members share GPU memory across nodes must restore within one fabric domain. | Admission checks the group size and each member's compatibility before CRIU. It also refuses members that shared GPU memory at capture unless each set of members linked by that memory is on GPUs ready in one NVLink clique of one cluster. This catches placement mistakes, but it does not promise that every later import succeeds, for example in a restore Pod without the fabric access that [Dependencies](#dependencies) lists. |
+| Every restore keeps the original group size and GPU count per member, and a group whose members share GPU memory across nodes must restore within one fabric domain. | Admission checks the group size and each member's compatibility before CRIU. It also refuses members that shared GPU memory at capture unless all their GPUs are ready in one NVLink clique of one cluster. This catches placement mistakes, but it does not promise that every later import succeeds, for example in a restore Pod without the fabric access that [Dependencies](#dependencies) lists. |
 | Capture is not atomic: each source ends at its own dump, and a failure after the commit terminates every member that has started. Release is not atomic either, since a member can fail before its release while its peers are already released. | Admission catches every condition that can be checked without side effects, every member records when it started, and member results report partial outcomes truthfully, so the owner can retire the group and retry with a new attempt. |
 | Snapshot does not freeze restored processes until release, because CUDA, cuInterpose, and library threads do the reconstruction inside them, so an application thread that runs early could observe a half-rebuilt state. | Release relies on the existing workload contract, which this SNEP extends to every thread that could touch shared memory, communicators, or preserved connections; an integration satisfies it only by holding every such thread until release, which a wrapper that gates only the main loop does not, and an enforced hold is left to future work. |
 | Between CRIU restore and CUDA unlock, a thread that calls CUDA blocks on the lock, which is not a recommended use of CUDA Checkpoint, and a failure in that window could leave such a thread stuck. | The locked window involves no coordination and lasts as long as for a single Pod, failing a restore terminates every restored process, and qualification measures both restore windows and injects failures into each. |
 | CRIU's network lock at capture and the agent's hold at restore pause the traffic of preserved connections while retransmission and user timeouts keep running, and keepalive too at capture, so a long dump or a slow peer can break them ([snapshot#577](https://github.com/ai-dynamo/snapshot/issues/577)). | Holds are taken as late and lifted as early as possible, a restore turns keepalive back on only once every member has restored its sockets, and qualification measures the whole interruption, including staggered dumps, to document the supported limits. |
 | At capture, CRIU's network lock covers a member's IP traffic only from the moment CRIU freezes it, and never covers RDMA, shared volumes, or external services, while dumps finish at different times. | Members must stop such traffic before reporting `ready-for-snapshot`, as the workload contract requires, and libraries tear down RDMA transports before the dump, which for NCCL means the application calling NCCL Checkpoint's prepare until CUDA's prepare phase does it. |
-| Sessions live only as long as the coordinator that holds them, so an attempt in flight ends if the agent that hosts its session restarts. | Each session lives in the agent on the node of the attempt's rank-0 member, which the attempt depends on anyway, since a restarted agent fails its own member; losing it is fail-stop and reported as `CoordinatorLost`, sessions on other nodes are unaffected, and a broken connection that reconnects does not fail an attempt. Every session pattern is safe to repeat, so replicating sessions later changes only the coordinator. |
-| Sessions hosted on the same node share the coordinator's memory, so a compromised workload can fill it with records forged through its relay and make concurrent attempts' data writes fail until its own attempt ends at its deadline. Every client the coordinator admits is an agent, and agents are one trust domain: in the coordinator's shared NATS account, a compromised agent can change another attempt's keys, for example through the reply subject of a request, which its permissions don't cover. | The sessions that the cap affects still end promptly, since their control keys live outside it, libraries are bounded per session, each bucket bounds how many watches its members open, and the cap protects the coordinator itself. A compromised agent gains nothing it lacks already, since the agent's ServiceAccount can patch any Pod, and the token review keeps everything that isn't an agent out. Beta revisits both limits together: one NATS account per attempt to isolate agents from each other, and memory isolated per session once cuInterpose's largest records are measured, while a ValidatingAdmissionPolicy that lets the agent change only Pods' metadata and status narrows what a compromised agent can do. |
+| Sessions live only as long as the coordinator that holds them, so an attempt in flight ends if the coordinator that hosts its session restarts. | Each session lives in the coordinator on the node of the attempt's rank-0 member, which the attempt depends on anyway, since a restarted agent fails its own member; losing it is fail-stop and reported as `CoordinatorLost`, sessions on other nodes are unaffected, and a broken connection that reconnects does not fail an attempt. Every session pattern is safe to repeat, so replicating sessions later changes only the coordinator. |
+| Sessions hosted on the same node share the coordinator's memory, so a session's reservation caps how many attempts a node hosts at once. Every client the coordinator admits is an agent, and agents are one trust domain: in the coordinator's shared NATS account, a compromised agent can reach another attempt's buckets, for example through the reply subject of a request, which its permissions don't cover. | Each attempt reserves its data when its session is created and can't write past it, so records forged through a workload's relay fail only that workload's attempt, and an attempt that doesn't fit waits in admission. Control keys live outside the data reservations, so every session can still end, and each bucket bounds how many watches its members open. A compromised agent gains nothing it lacks already, since the agent's ServiceAccount can patch any Pod, and the token review keeps everything that isn't an agent out. Beta revisits one NATS account per attempt to isolate agents from each other, while a ValidatingAdmissionPolicy that lets the agent change only Pods' metadata and status narrows what a compromised agent can do. |
 | The agent sits on every coordination path, and an agent can restart in the middle of a restore. | The agent records its intent before CRIU starts and treats `restore-complete` as proof of release, so a restarted agent never replays CRIU and never kills a released workload. |
 | Importing GPU memory through a FABRIC handle after a native CUDA restore, from another node or within one Pod, depends on a driver fix, and CUDA does not report whether an imported FABRIC handle names memory or a multicast object. | FABRIC sharing in alpha requires a user-mode driver with the fix in every process that imports a FABRIC handle ([Dependencies](#dependencies)). cuInterpose reads nothing from the handle's private layout. An import takes its kind from the first call that only one kind accepts, or else from its creator's record when the checkpoint begins. An import whose kind differs from its creator's is refused at inspection. A supported CUDA query would let the shim classify an import when it is made. |
 | CUDA Checkpoint's prepare and resume phases are not released yet. | Until they are, an application whose communicators use a transport that Snapshot cannot preserve, such as RDMA, calls NCCL Checkpoint's prepare and restore itself, and NCCL restores after release through the library endpoint. Over NVLink, an existing communicator continues without either call, since cuInterpose restores its memory and Snapshot preserves its connections. |
@@ -265,7 +264,7 @@ coordinator stays small, and new participants integrate without changing it.
 | Component | Runs as | Responsibility |
 | --- | --- | --- |
 | Group controllers | Snapshot operator | Validate groups, pin identities, create member `PodSnapshot`s, enforce the deadline, and aggregate member results into one outcome. |
-| Snapshot coordinator | Snapshot agent; the agent on the node of an attempt's rank-0 member serves its session | Embed a NATS server with JetStream, create three buckets per attempt, authenticate every connection and scope it to its attempt, enforce the deadline and the grace period, and fail every member when one fails. |
+| Snapshot coordinator | A Pod of its own on every node; the coordinator on the node of an attempt's rank-0 member serves its session | Embed a NATS server with JetStream, create three buckets per attempt, authenticate every connection and scope it to its attempt, enforce the deadline and the grace period, and fail every member when one fails. |
 | Group executor | Snapshot agent | Run each member's capture or restore as session phases around the existing CUDA and CRIU steps, and record its intent before destructive work. |
 | Session proxy | Snapshot agent | Hold one NATS connection per hosted member, serve the relay's socket and the Pod's endpoint, and confine each to its namespace. |
 | cuInterpose relay | Short-lived process in each Pod that uses cuInterpose | Fan commands out to the Pod's processes as in SNEP-295 and, in the lowest rank that runs one, also lead the group. |
@@ -275,10 +274,10 @@ coordinator stays small, and new participants integrate without changing it.
 
 A session corresponds to exactly one attempt, that is, one capture of a
 `PodGroupSnapshot` or one `PodGroupRestore`, and it is identified by that resource's
-UID, because each resource is exactly one attempt. The coordinator is a logical
-component that Snapshot runs in every agent: an attempt's session lives in the
-agent on the node of its rank-0 member, which the group's status records, so
-every member finds it there and no election is needed. That agent follows the
+UID, because each resource is exactly one attempt. Snapshot runs a coordinator
+on every node, in a Pod of its own: an attempt's session lives in the
+coordinator on the node of its rank-0 member, which the group's status records,
+so every member finds it there and no election is needed. That coordinator follows the
 group resources through a read-only watch and creates the session of every
 unfinished attempt whose rank-0 member runs on its node, so sessions need no
 creation API and the resource remains the single source of truth. The coordinator removes a session and all of its
@@ -308,8 +307,12 @@ Snapshot's own components, the agents and relays, and the other holds library
 keys, such as NCCL Checkpoint's communicator identifiers. Each bucket limits the
 size of a value, and the library bucket also limits its number of keys, so
 libraries cannot exhaust what Snapshot's own keys need. The data buckets live
-in memory and reserve none of it: one cap bounds the memory of all sessions,
-which they share. The control bucket lives instead in a small file store,
+in memory, and each one has a byte limit that the session reserves when the
+coordinator creates it: the Snapshot bucket a budget per member, never less
+than its largest value, and the library bucket the bound its key and value
+limits already set. One cap, `maxMemoryBytes`, bounds the reservations of all
+sessions, so an attempt that writes past its own limit fails only itself, and
+every attempt that starts has its space. The control bucket lives instead in a small file store,
 bounded per session by its number of members, because NATS limits memory and
 file storage separately, so a session whose peers fill the memory cap can still
 end, fail, and release every wait. That store sits in a directory the
@@ -317,7 +320,11 @@ coordinator owns, which it empties when it starts, so like the rest of a session
 it never outlives the coordinator. Every control bucket reserves its worst case
 for its number of members from that one store, which `maxMemoryBytes` sizes. A
 session that does not fit is not created: the coordinator retries it, its
-members wait to join, and the attempt ends at its deadline unless room frees. Members coordinate through six patterns, each built from standard NATS key-value
+members wait to join, and the attempt ends at its deadline unless room frees.
+A session that could never fit, even on an idle coordinator, fails at once with
+`Refused`. If every group's rank-0 member runs on one node, that node's
+coordinator holds every session, so the cluster runs at most as many attempts
+at once as its reservations fit in `maxMemoryBytes`, and the others wait. Members coordinate through six patterns, each built from standard NATS key-value
 operations, which [Session semantics](#session-semantics) defines precisely.
 
 | Pattern | Purpose | Used by |
@@ -380,7 +387,7 @@ and no participant ever needs to send a message to one specific rank.
 | Path | Transport | Identity |
 | --- | --- | --- |
 | Operator, agents, and coordinator to the API server | Kubernetes API, read-only for the coordinator | RBAC |
-| Agent to coordinator | One NATS connection per session and hosted member, over TLS, to the server that the coordinator embeds, in the agent hosting the session | Pod-bound ServiceAccount token checked with TokenReview when the connection opens; the member's Pod must run on the agent's node, and the connection may reach only its attempt's buckets |
+| Agent to coordinator | One NATS connection per session and hosted member, over TLS, to the server that the coordinator on the session's node embeds, at its Pod's IP | Pod-bound ServiceAccount token checked with TokenReview when the connection opens; the member's Pod must run on the agent's node, and the connection may reach only its attempt's buckets |
 | Agent to cuInterpose relay | Socket pair inherited through `nsenter` or `nsrestore` | Implicit, because the agent created it |
 | Workload processes to agent | Per-Pod endpoint: a Unix socket in the control volume, or a loopback listener inside the Pod's network namespace | Implicit, because the endpoint belongs to one Pod |
 | Relay to shims | Per-process Unix sockets from SNEP-295 | File permissions |
@@ -644,9 +651,9 @@ agent therefore ends admission holding the complete IP map, built from the
 member table in its own artifact and the new IPs, together with the assurance
 that all members restore the same capture. Members that shared FABRIC memory,
 directly or through others, must also land on GPUs that are all ready in one
-NVLink clique of one cluster, while members that share nothing may use other
-cliques. Otherwise the attempt ends as `Refused` before CRIU. This catches
-placement mistakes, but it does not promise that every later import succeeds.
+NVLink clique of one cluster. Otherwise the attempt ends as `Refused` before
+CRIU. This catches placement mistakes, but it does not promise that every later
+import succeeds.
 
 Each agent then posts to the `admitted` barrier once its own checks pass. When
 the barrier completes, the attempt commits, and each agent records the
@@ -812,7 +819,9 @@ ranks poll until it appears; the application calls NCCL's prepare before
 reporting `ready-for-snapshot` and NCCL's restore after `restore-complete`.
 An application needs it only for communicators over a transport that Snapshot
 cannot preserve, such as RDMA; over NVLink, an existing communicator continues
-without it.
+without it. NCCL Checkpoint must be loaded before the application creates its
+first communicator, for example preloaded when the application starts, so that
+it records every communicator it later prepares and restores.
 Because the variable is captured in the CRIU image, Snapshot requires it to point
 into the Pod's control volume, rejects other paths during admission, and records
 the path in the artifact. At restore, the agent writes that file with the
@@ -943,6 +952,15 @@ that would revive or suspend the workload again, or start another attempt, would
 resume it after its peers' network cut, so the member fails with `MemberFailed`
 instead, which fails the group.
 
+A failed restore can leave some members running, and its status cannot always
+say which: Snapshot doesn't stop a released member when its peers fail, and a
+member that has resumed still shows `Restoring` while its `postRestore`
+notification is pending. The owner therefore treats a failed attempt as
+possibly partly running, and retires it whole, without waiting for proof of
+each member's release: it stops every target Pod of the attempt, waits for them
+to terminate, and retries with fresh Pods and a new `PodGroupRestore`. The
+failed `PodGroupRestore` can be kept for diagnosis or deleted afterwards.
+
 Restore is not idempotent, so an agent that restarts during a restore relies on
 two durable facts rather than on its memory. It first looks for
 `restore-complete` with the attempt's ID: if the file exists, the member was
@@ -969,7 +987,7 @@ attempt.
 The coordinator, by contrast, keeps sessions only for its own lifetime. In
 alpha its embedded server holds the data buckets in memory and the control
 bucket in a store that it empties when it starts, without replicas, so
-restarting the agent that hosts a session loses it. When the coordinator creates
+restarting the coordinator that hosts a session loses it. When the coordinator creates
 a session, it writes an epoch, drawn at random, into the session's `meta` key,
 and every agent presents the epoch it read whenever it reconnects. If the
 coordinator has recreated the session since, it fails the session with
@@ -1065,11 +1083,11 @@ node that hosts the session.
 Alpha assumes one serving coordinator per attempt, which its rank-0 member's
 node determines without an election. Epoch checks detect a recreated session;
 they do not fence an earlier instance. The contract extends by version and by
-namespace: bucket names and the key layout carry a version, agents advertise
-the group protocol versions they support, which the group controllers check before
-creating any member work and which, since every agent also runs the coordinator,
-cover the session protocol as well, and a new kind of participant receives a
-namespace of its own.
+namespace: bucket names and the key layout carry a version, so an agent and a
+coordinator that disagree on it fail admission; agents advertise the group
+protocol versions they support, which the group controllers check before
+creating any member work; and a new kind of participant receives a namespace of
+its own.
 
 ### Deadlines
 
@@ -1135,7 +1153,7 @@ status:
   members:                              # keyed by id; bindings are pinned at admission
   - {id: worker-0, pod: {name: llm-worker-0-r1, uid: <uid>}, nodeName: node-c, targetPodIP: 10.1.9.2, startedAt: "2026-10-16T18:20:40Z", phase: Released}
   - {id: worker-1, pod: {name: llm-worker-1-r1, uid: <uid>}, nodeName: node-d, targetPodIP: 10.1.2.8, startedAt: "2026-10-16T18:20:40Z", phase: Released}
-  conditions: []                        # Admitted, Released, Ready, Failed
+  conditions: []                        # Admitted, Ready, Failed
 ---
 apiVersion: v1
 kind: Pod                               # a target, created by the owner
@@ -1206,13 +1224,12 @@ during capture, and through `Pending`, `Admitted`, `Restoring`, and `Released` d
 restore, with `Failed` and a reason otherwise. `Admitted` names three different
 things: a member phase, which means that the operator created the member's work;
 the group's condition, which turns True on the first `startedAt`; and the agents'
-`admitted` barrier, whose completion is the commit. `Released` has one meaning
-for a member and one for the group. A member's release point is its
-`restore-complete`, and the member is `Released` once any `postRestore`
-notification has also succeeded; from its release point on, the attempt's
-outcome no longer affects it. The group's `Released` condition turns True on
-the first Released member, which proves that the `release` barrier completed,
-and the group is `Ready` only when every member is Released. Each member's write-once `startedAt` is the
+`admitted` barrier, whose completion is the commit. `Released` is a member
+phase only. A member's release point is its `restore-complete`, and the member
+is `Released` once any `postRestore` notification has also succeeded, so a
+member can have resumed while it still shows `Restoring`; from its release
+point on, the attempt's outcome no longer affects it. The group is `Ready` only
+when every member is Released. Each member's write-once `startedAt` is the
 `lastTransitionTime` of its agent's record, the `Started` condition at capture or
 the `nvidia.com/RestoreStarted` condition at restore, both of which are set once
 and never removed, so the operator cannot miss them however fast a member fails
@@ -1289,8 +1306,8 @@ The operator needs full
 access to the new kinds, read access to the agent Pods, and `patch` on Pods,
 which it uses only to claim a target, conditionally on its `resourceVersion`:
 to write its binding and its map and remove its gate. The agents need
-read access to the new kinds and, for the coordinator they run, read access to
-Pods and permission to create TokenReviews.
+read access to the new kinds. The coordinator has a ServiceAccount of its own,
+which can only read the new kinds and Pods and create TokenReviews.
 
 ### Security
 
@@ -1318,8 +1335,8 @@ keys are issued or stored.
 Within a member's connection, the agent confines each local client to its
 namespace: the cuInterpose relay reaches only the `cuinterpose` namespace, and workload
 processes only the library bucket, because the agent is the component that
-knows which local client sent each request. The design relies on trusted agents
-for this, as it already does for running CRIU and entering workload namespaces;
+knows which local client sent each request. Alpha trusts every agent for this,
+as Snapshot already does for running CRIU and entering workload namespaces;
 every agent holds the same ServiceAccount, which can already patch any Pod, so
 the agents form one trust domain, and a compromised agent could act for any
 member of any attempt, which gives it nothing it lacks already. Inside a node, the per-Pod endpoint is
@@ -1340,25 +1357,23 @@ workload.
 The agent's privileges do not grow in kind, because it already enters workload
 namespaces, although it now also creates a loopback listener and narrow packet
 rules there, both of which it removes on every exit path. The coordinator
-writes nothing to the API, but in alpha it runs as a container of the agent's
-Pod, non-root and with no capabilities, so it shares the agent's ServiceAccount
-and the host's network, PID, and IPC namespaces: code running in it could take
-over the privileged agent on every node, and reach the node's local services
-and any cloud metadata endpoint. Its pre-authentication path is therefore kept
-small, with the TLS handshake first and a token header checked before it is
-parsed, and a coordinator of its own, with its own ServiceAccount, remains an
-option for beta. The operator gains one write on workload Pods, the
+writes nothing to the API, and it runs apart from the agent, in a Pod of its own
+on every node: on the Pod network, with no host namespace, non-root, with no
+capabilities and a read-only root filesystem, under a ServiceAccount that can
+only read the new kinds and Pods and create TokenReviews. So the network
+listener stays out of the privileged agent's Pod, and code running in the
+coordinator gains neither the agent's rights nor access to the node. Its
+pre-authentication path is still kept small, with the TLS handshake first and a
+token header checked before it is parsed. The operator gains one write on workload Pods, the
 claim of a restore target, which writes its binding and its map and removes
 Snapshot's gate in one patch conditional on the Pod's `resourceVersion`, and
 only for Pods that a `PodGroupRestore` names and that carry the gate; the chart
 grants it as `patch` on Pods. As for abuse, a compromised workload cannot read or
 corrupt another session. Its libraries' keys are confined to the library bucket,
-whose number of keys and value size are small, and the server caps the memory of
-all sessions together and disconnects a client that stops reading, so a flood
-cannot exhaust the coordinator. Sessions do share that memory, however, so
-records forged through the workload's relay can make concurrent attempts fail
-until its own attempt ends, although those attempts still end promptly, since
-their control keys live outside that cap ([Limitations, Risks, and
+whose number of keys and value size are small, each session's data is bounded
+by the space it reserved, and the server disconnects a client that stops
+reading, so a flood cannot exhaust the coordinator, and records forged through
+the workload's relay fail only its own attempt ([Limitations, Risks, and
 Mitigations](#limitations-risks-and-mitigations)). Pods that use the host
 network are refused unless their libraries use the Unix-socket endpoint, because
 their loopback interface is shared with the node.
@@ -1367,11 +1382,11 @@ their loopback interface is shared with the node.
 
 Multi-Pod support is enabled the way Snapshot enables its other features: by
 installing the `PodGroupSnapshot` and `PodGroupRestore` CRDs and setting one chart
-value, off by default in alpha, that turns on the group controllers and the
-coordinator in every agent. The chart gains the coordinator's TLS and resource
+value, off by default in alpha, that turns on the group controllers and deploys
+the coordinator on every node. The chart gains the coordinator's TLS and resource
 settings, together with the limits of its embedded NATS server, namely total
-memory, maximum message size, the value limits of each session's buckets, and
-the key limit of its library bucket; the coordinator refuses a total memory too
+memory, maximum message size, the value limits of each session's buckets, the
+key limit of its library bucket, and the data budget each member reserves; the coordinator refuses a total memory too
 small for the control keys of the largest group, and the chart keeps the
 coordinator's temporary directory, which holds the control store, in memory,
 sized from that same total. The agent gains a switch for the
@@ -1414,8 +1429,8 @@ groups of 2 to 16 Pods, and larger groups are measured before beta.
 
 ### Monitoring
 
-`PodGroupSnapshot` and `PodGroupRestore` report `Admitted`, `Released`, `Ready`,
-and `Failed` conditions, with reasons that distinguish `Refused`,
+`PodGroupSnapshot` and `PodGroupRestore` report `Admitted`, `Ready`, and
+`Failed` conditions, with reasons that distinguish `Refused`,
 `DeadlineExceeded`, `PodIPChanged`,
 `TargetInUse`, `ArtifactUnavailable`, `MemberFailed`, `CoordinatorLost`, and
 `Cancelled`. Until the attempt commits, the reason of `Admitted` says what it
@@ -1423,7 +1438,9 @@ waits for, such as `TargetPodUnscheduled` while a claimed target finds no node,
 and each member's phase and `startedAt` show how far it progressed and whether
 Snapshot changed its workload. The operator emits events at
 every transition, agents log each phase with its attempt, member, and duration
-and export the duration of both restore windows. Metrics from the coordinator,
+and export the duration of both restore windows. While a barrier waits, its
+agent logs the attempt, the barrier and the members that have not arrived yet,
+at most once every few seconds, so a stalled attempt names who it waits for. Metrics from the coordinator,
 for active sessions, barrier wait time and failures by reason, together with
 its embedded server's connection, memory and slow-consumer statistics, come
 after alpha.
@@ -1444,8 +1461,9 @@ after alpha.
 - For TCP connections kept between members, nf_tables in each node's kernel,
   which restore admission checks, and `pidfd_getfd`, which Linux 5.6 and newer
   provide.
-- For communicators over RDMA, NCCL 2.31 or newer for NCCL Checkpoint, and
-  later a release that restores in CUDA Checkpoint's resume phase.
+- For communicators over RDMA, NCCL 2.31 or newer for NCCL Checkpoint, loaded
+  before the application creates its first communicator, and later a release
+  that restores in CUDA Checkpoint's resume phase.
 - The NATS server, with JetStream, embedded in the coordinator as a Go library,
   so no separate deployment is needed.
 - [SNEP-411](https://github.com/ai-dynamo/snapshot/issues/411)'s container
@@ -1480,7 +1498,12 @@ keeps; a group target on a node without the NRI plugin; and cuInterpose's valida
 of multi-rank topologies with teams that span Pods, importers resolved by
 handle, missing ranks, duplicated creators, and a leader other than rank 0.
 
-Integration tests extend the existing end-to-end suite on CPU-only nodes. A
+Integration tests extend the existing end-to-end suite on CPU-only nodes, and
+CI runs them on every change, on two nodes, from the installed chart. They cover
+the projected agent tokens, a token rotation followed by a reconnect, and
+refused authentication: a token for another audience, an expired token, and a
+member whose Pod runs on another node. A workload's library endpoint must fail
+to read or write another group's keys. A
 two-Pod group with TCP and ZeroMQ connections is captured and restored onto
 swapped nodes, the same group without the group IP map serves as a negative
 control, a member whose node runs an older or unready agent must keep the group
@@ -1505,7 +1528,8 @@ kill a member during a destructive phase to confirm that every member fails.
 The same runs measure, for every member, the time from CRIU restore to CUDA
 unlock and from CUDA unlock to release, with a background thread that calls
 CUDA throughout, and inject a failure into each window to confirm that no
-process is left blocked.
+process is left blocked. Each of these runs as a named CI job, which names the
+GPU systems it needs.
 
 ### Graduation Criteria
 
@@ -1515,12 +1539,13 @@ including multicast, with admission refusals and fail-stop behavior tested;
 evidence that a restarted agent never replays CRIU and never kills a released
 member; measured limits for how long preserved connections survive a hold;
 measured durations of both restore windows, with fail-stop verified in each;
-and an unchanged result for the existing single-Pod suite.
+the two-node CI suite below passing on every change; and an unchanged result
+for the existing single-Pod suite.
 
 **Beta** requires integration with CUDA Checkpoint's prepare and resume phases,
 including the `resume` barrier that orders the resume phase across members;
 scale measured beyond 16 Pods; decisions on IPv6, on the
-coordinator's availability model, on isolating sessions' memory and limits, and
+coordinator's availability model, on one NATS account per attempt, and
 on an enforced execution hold, informed by operational evidence; and an API
 review that settles the open questions in [Appendix A](#a-open-questions).
 
@@ -1548,6 +1573,9 @@ review that settles the open questions in [Appendix A](#a-open-questions).
 - 2026-11-19: cuInterpose takes the kind of a FABRIC import from its creator
   instead of the driver's private handle layout, and restore admission checks
   that members that shared FABRIC memory land in one NVLink clique.
+- 2026-11-19: The coordinator runs in a Pod of its own, each attempt reserves
+  its data, the group-level `Released` condition is gone, and a failed restore
+  is retired whole.
 
 ## Alternatives
 
@@ -1556,9 +1584,10 @@ review that settles the open questions in [Appendix A](#a-open-questions).
 | Coordination inside rank 0's cuInterpose coordinator, as prototyped | It exits before libraries restore, listens on the Pod network behind a shared secret, collides with the TCP hold, and serves only cuInterpose. |
 | Coordination inside the operator | It saves a component, but operator upgrades and leader changes would fail restores in flight and data-plane traffic would cross the control plane; building the coordinator as a library keeps this option open. |
 | The CRIU project's [criu-coordinator](https://github.com/checkpoint-restore/criu-coordinator) | It synchronizes CRIU's dump and restore hooks across processes, containers, or Pods through a server that every participant reaches over TCP, which matches the `net-freeze` and dump barriers, but it sees only CRIU's steps, not CUDA's phases, cuInterpose's rounds, or library rendezvous, and it would add a second coordination server; the session's barriers provide the same synchronization at points the agents already control, while its hook points remain a useful reference. |
-| A coordinator Deployment, with one replica elected through a Lease and a standby | It adds a component and an election that every attempt depends on, and a takeover still loses the sessions in flight; running the coordinator in every agent, with each session on its rank-0 member's node, ties an attempt only to a node it already depends on and spreads sessions across nodes. |
+| A coordinator Deployment, with one replica elected through a Lease and a standby | It adds a component and an election that every attempt depends on, and a takeover still loses the sessions in flight; running a coordinator on every node, with each session on its rank-0 member's node, ties an attempt only to a node it already depends on and spreads sessions across nodes. |
+| The coordinator as a container of the agent's Pod | It saves a DaemonSet and a ServiceAccount, but the coordinator then shares the agent's ServiceAccount, which can patch any Pod, and the host's network, PID and IPC namespaces, and changing one of its settings restarts every agent. |
 | A separately deployed Redis, etcd, or NATS | It adds a stateful service to secure and operate, still leaves membership and failure handling to Snapshot, and stores fabric handles where any client of the store can read them; embedding NATS in the coordinator keeps the store off the shelf without another deployment. |
-| A purpose-built protocol and in-memory store | It would let Snapshot shape every message, but it reimplements what JetStream already provides, namely transport, waits, flow control, and memory limits, at several times the code to maintain. |
+| A purpose-built protocol and in-memory store, as PyTorch's TCPStore is | It would let Snapshot shape every message, and a session could fail without a separate control store. But Snapshot would own and version a wire protocol across the agent and coordinator versions that coexist during a rollout, and reimplement what JetStream already provides, namely transport, waits, flow control, and memory limits. The gRPC coordinator it replaced (#700, #702) had about 70% more server-side code, plus generated code, and no client yet. |
 | Pods connect to the coordinator directly | It requires credentials inside Pods and possibly inside CRIU images, NetworkPolicy changes in every workload namespace, and exemptions from the TCP hold. |
 | A Session custom resource, or Secrets that persist each session from alpha | It would let an attempt survive a coordinator restart, but every operation would become an API write, fabric handles and bootstrap identifiers would sit in etcd, and a takeover helps only if it beats the hold and library timeouts; because every session pattern is safe to repeat, replicating sessions stays open as a change to the coordinator alone. |
 | cuInterpose as a CUDA Checkpoint client | CUDA does not order callbacks across clients, whereas cuInterpose must rebuild memory before libraries run, and it needs lockstep rounds at checkpoint as well as at restore. |
@@ -1578,8 +1607,9 @@ review that settles the open questions in [Appendix A](#a-open-questions).
 1. **CUDA Checkpoint.** The integration needs a resume that is allowed without a
    restore, which would let the commit move after the prepare phase, and
    per-library results from the prepare and resume phases.
-2. **NCCL Checkpoint.** Would it accept a Unix-socket endpoint, and does every
-   key receive exactly one `SET` per restore?
+2. **NCCL Checkpoint.** Would it accept a Unix-socket endpoint? NCCL Checkpoint
+   sets each key once per restore, which the library endpoint's write-once
+   `Insert` relies on, and the alpha test with its client checks it.
 3. **Execution hold.** Members can already signal both transitions of the
    [workload contract](#workload-contract) through SNEP-411's application
    contracts, but nothing enforces the wait between them. Should a later
@@ -1588,8 +1618,14 @@ review that settles the open questions in [Appendix A](#a-open-questions).
 4. **Source lifetime.** Beyond the owner keeping every source until the group's
    capture has ended, must anything else of a source that has finished its dump
    survive while its peers are still capturing?
-5. **Cross-namespace restore.** Would restoring a group into another namespace
-   justify a cluster-scoped, group-level content resource?
+5. **Reuse in other namespaces and clusters.** A group capture becomes
+   reusable through a cluster-scoped group-level content: the record of which
+   member contents, with which IDs and ranks, form one capture. It follows the
+   single-Pod work on reusable artifacts
+   ([#604](https://github.com/ai-dynamo/snapshot/issues/604)): it needs member
+   contents that outlive their `PodSnapshot`s and a reclaim policy first, and
+   its import and its binding from other namespaces then reuse the single-Pod
+   contracts.
 6. **Availability.** Which evidence, such as the observed rate of
    `CoordinatorLost` and the measured takeover time against the hold and library
    timeouts, would justify keeping attempts alive across a coordinator restart,
@@ -1642,14 +1678,10 @@ import (
 const PodGroupMaxDeadlineSeconds = 86400
 
 // Condition types. Admitted is True, with Committed, once the attempt commits,
-// which the operator sees as the first member's startedAt. Released applies to
-// PodGroupRestore only: it is True on the first Released member, which proves
-// that the release barrier completed; from its release point on, the
-// attempt's outcome no longer affects a member. Ready is True once every
-// member is Checkpointed, or every member is Released.
+// which the operator sees as the first member's startedAt. Ready is True once
+// every member is Checkpointed, or every member is Released.
 const (
 	PodGroupConditionAdmitted = "Admitted"
-	PodGroupConditionReleased = "Released"
 	PodGroupConditionReady    = "Ready"
 	PodGroupConditionFailed   = "Failed"
 )
