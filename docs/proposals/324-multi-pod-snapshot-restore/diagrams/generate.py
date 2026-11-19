@@ -341,16 +341,16 @@ CHECKPOINT = (
         ("m", "A", "W", "beta: CUDA prepare on every process at once, libraries tear down"),
         ("m", "A", "L", "run the relay in prepare mode"),
         ("m", "A", "R", "run the relays in prepare mode"),
-        ("r", "round 2 · BEGIN_CHECKPOINT"),
-        ("m", "L", "C", "Insert the round 2 command"),
-        ("m", "C", "R", "command", 1),
-        ("m", "L", "W", "BEGIN_CHECKPOINT (leader's rank)"),
-        ("m", "R", "W", "BEGIN_CHECKPOINT (other ranks)"),
+        ("r", "rounds 2 and 3 · INSPECT, BEGIN_CHECKPOINT"),
+        ("m", "L", "C", "Insert INSPECT, then BEGIN_CHECKPOINT with the creator's kind of each import of unknown kind"),
+        ("m", "C", "R", "commands", 1),
+        ("m", "L", "W", "INSPECT, then BEGIN_CHECKPOINT (leader's rank)"),
+        ("m", "R", "W", "INSPECT, then BEGIN_CHECKPOINT (other ranks)"),
         ("m", "R", "C", "Insert replies with records"),
         ("m", "C", "L", "records of every rank", 1),
         ("x",),
         ("s", "L", "revalidate the topology"),
-        ("r", "rounds 3 to 5 · PREPARE_MULTICAST, SAVE_ALLOCATIONS, PREPARE_UNICAST"),
+        ("r", "rounds 4 to 6 · PREPARE_MULTICAST, SAVE_ALLOCATIONS, PREPARE_UNICAST"),
         ("m", "L", "C", "Insert the step and its arguments (in SAVE_ALLOCATIONS, which process saves each allocation)"),
         ("m", "C", "R", "command", 1),
         ("m", "L", "W", "execute (leader's rank)"),
@@ -600,7 +600,7 @@ def phases():
         ("COMMIT",),
         ("g", "Record: Started condition"),
         ("a", "Beta: CUDA prepare, libraries tear down"),
-        ("t", "Round: begin, revalidate"),
+        ("t", "Rounds: inspect, begin, revalidate"),
         ("t", "Rounds: destructive phases"),
         ("g", "CUDA lock and checkpoint"),
         ("p", "Barrier: net-freeze"),
@@ -645,7 +645,7 @@ def phases():
         b.append(T(lx2 + 18, ly + 6, label, "tm", 12, anchor="start"))
     svg("phases.svg", W, ly + 34, "Phases of a group checkpoint and a group restore",
         "Checkpoint: the workload quiesces and reports ready-for-snapshot, admission all-gather, an INSPECT round, "
-        "admitted barrier, commit, the Started record, CUDA prepare (beta), a revalidation round, destructive cuInterpose "
+        "admitted barrier, commit, the Started record, CUDA prepare (beta), an inspection and a revalidation round, destructive cuInterpose "
         "rounds, CUDA lock and checkpoint, net-freeze barrier, CRIU dump with its network lock. Restore: admission, admitted "
         "barrier, commit, the RestoreStarted record, CRIU restore under a narrow "
         "hold, the sockets-restored barrier, after which the hold lifts and the tasks resume, CUDA restore, the "
@@ -662,8 +662,8 @@ def main():
              "The leader inserts one command that every relay reads, every rank executes it at once, and each relay "
              "inserts a reply that the leader collects.", *ROUND, width=860)
     sequence("checkpoint.svg", "Group checkpoint",
-             "Admission with an INSPECT round, the admitted barrier and commit, the Started record, CUDA prepare (beta), a "
-             "BEGIN_CHECKPOINT round, three destructive rounds, CUDA lock and checkpoint, net-freeze barrier, CRIU "
+             "Admission with an INSPECT round, the admitted barrier and commit, the Started record, CUDA prepare (beta), an "
+             "INSPECT and a BEGIN_CHECKPOINT round, three destructive rounds, CUDA lock and checkpoint, net-freeze barrier, CRIU "
              "dump.", *CHECKPOINT, width=960)
     sequence("restore.svg", "Group restore up to release",
              "Admission, commit, CRIU restore under a narrow hold, the sockets-restored barrier before the restored "
