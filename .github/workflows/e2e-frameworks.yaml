@@ -94,7 +94,7 @@ jobs:
     name: ${{ matrix.case }}
     needs: check
     runs-on: prod-deploy-tester-v1
-    # Above the sum of this job's own step timeout-minutes (341, dominated by
+    # Above the sum of this job's own step timeout-minutes (336, dominated by
     # the 180-min suite slot wait and the 56-min test step) plus margin: a
     # job-level timeout kills the whole job, including the failure()
     # diagnostics upload and always() vCluster cleanup, which is exactly the
@@ -284,7 +284,7 @@ jobs:
         timeout-minutes: 180
         env:
           KUBECONFIG: ${{ steps.host.outputs.kubeconfig }}
-        run: uv run --locked --project e2e python -m snapshot_e2e.infra.suite_slot take
+        run: uv run --locked --project e2e python -m snapshot_e2e.infra.suite_slot
 
       - name: Validate host GPU cluster
         if: ${{ steps.selected.outputs.run == 'true' }}
@@ -510,13 +510,6 @@ jobs:
             vcluster delete "${VCLUSTER_NAME}" --namespace "${HOST_NAMESPACE}"
           fi
           kubectl delete namespace "${HOST_NAMESPACE}" --ignore-not-found --wait=false
-
-      - name: Release the GPU suite slot
-        if: ${{ always() && steps.selected.outputs.run == 'true' }}
-        timeout-minutes: 5
-        env:
-          KUBECONFIG: ${{ steps.host.outputs.kubeconfig }}
-        run: uv run --locked --project e2e python -m snapshot_e2e.infra.suite_slot release
 
   # PR mirrors and ordinary dispatches compare against history with a
   # read-only token. Scheduled main runs are published instead, by

@@ -174,7 +174,7 @@ jobs:
     needs: upgrade-gate
     if: ${{ needs.upgrade-gate.outputs.pairs != '' && needs.upgrade-gate.outputs.pairs != '[]' }}
     runs-on: prod-deploy-tester-v1
-    # The suite's own 155 or 105 minutes plus waiting for and releasing a suite slot.
+    # The suite's own 155 or 105 minutes plus waiting for a suite slot.
     timeout-minutes: ${{ matrix.profile == 'all' && 340 || 290 }}
     strategy:
       fail-fast: false
@@ -243,7 +243,7 @@ jobs:
         timeout-minutes: 180
         env:
           KUBECONFIG: ${{ steps.host.outputs.kubeconfig }}
-        run: uv run --locked --project e2e python -m snapshot_e2e.infra.suite_slot take
+        run: uv run --locked --project e2e python -m snapshot_e2e.infra.suite_slot
 
       - name: Create vCluster target
         timeout-minutes: 30
@@ -282,10 +282,3 @@ jobs:
         uses: ./.github/actions/e2e-vcluster-down
         with:
           host_kubeconfig: ${{ steps.host.outputs.kubeconfig }}
-
-      - name: Release the GPU suite slot
-        if: ${{ always() }}
-        timeout-minutes: 5
-        env:
-          KUBECONFIG: ${{ steps.host.outputs.kubeconfig }}
-        run: uv run --locked --project e2e python -m snapshot_e2e.infra.suite_slot release
