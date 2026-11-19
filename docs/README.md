@@ -14,6 +14,7 @@ This page lists every page in the Snapshot documentation, grouped by section.
 - [Architecture](overview/architecture-overview.md) - The components, the Kubernetes resources that drive them, and how a checkpoint and a restore proceed.
 - [Performance](overview/performance.md) - Cold start and restore times for vLLM, SGLang, and TensorRT-LLM on one to eight B200 GPUs.
 - [Limitations and Known Issues](overview/limitations.md) - Current limitations and what is on the roadmap.
+- [Roadmap](roadmap.md) - Where Snapshot is heading, one quarter at a time.
 
 ## Get Started
 
