@@ -103,13 +103,43 @@ func TestCreateContainerScope(t *testing.T) {
 				return
 			}
 			require.NotNil(t, adjust)
-			assert.Equal(t, []string{"/snapshot-control/snapshot-restore-proxy"}, adjust.GetArgs())
+			assert.Equal(t, []string{"/snapshot-control/snapshot-restore-proxy", "--"}, adjust.GetArgs())
 			data, err := os.ReadFile(installed)
 			require.NoError(t, err)
 			assert.Equal(t, "proxy binary", string(data))
 			info, err := os.Stat(installed)
 			require.NoError(t, err)
 			assert.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+		})
+	}
+}
+
+// The container's own command follows the proxy and a "--", so a cold start can
+// run it and none of it is read as a proxy flag.
+func TestCreateContainerKeepsContainerCommandAsProxyArguments(t *testing.T) {
+	const proxy = "/snapshot-control/snapshot-restore-proxy"
+	for name, tc := range map[string]struct {
+		args []string
+		want []string
+	}{
+		"no command":            {args: nil, want: []string{proxy, "--"}},
+		"command only":          {args: []string{"/usr/bin/server"}, want: []string{proxy, "--", "/usr/bin/server"}},
+		"command and arguments": {args: []string{"python", "-m", "server", "--port", "8000"}, want: []string{proxy, "--", "python", "-m", "server", "--port", "8000"}},
+		"empty argument":        {args: []string{"sh", "-c", ""}, want: []string{proxy, "--", "sh", "-c", ""}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			restorer := &fakeRestorer{destinations: []string{"main"}}
+			p, _ := testPlugin(t, restorer)
+			annotations := map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"}
+			ctr := &api.Container{Name: "main", Args: tc.args}
+
+			adjust, _, err := p.CreateContainer(context.Background(), restoreSandbox(annotations), ctr)
+
+			require.NoError(t, err)
+			require.NotNil(t, adjust)
+			assert.Equal(t, tc.want, adjust.GetArgs())
+			// The adjustment is a copy: the runtime's own args are not reused.
+			assert.Equal(t, tc.args, ctr.GetArgs())
 		})
 	}
 }
