@@ -1117,8 +1117,16 @@ fn relay_alone_in_its_group_runs_every_mode_through_the_session() {
     assert!(agent.fails().is_empty());
     assert_eq!(
         agent.keys(),
-        ["inspect.2.cmd", "prepare.6.cmd", "restore.9.cmd"]
+        [
+            "inspect.2.cmd",
+            "inspect.fabric-peers",
+            "prepare.6.cmd",
+            "restore.9.cmd"
+        ]
     );
+    // A relay alone in its group has no FABRIC peers: {0: []}.
+    let peers = agent.value("inspect.fabric-peers").unwrap();
+    assert_eq!(peers, b"\x81\x00\x90");
 }
 
 #[test]

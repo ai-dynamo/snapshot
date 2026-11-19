@@ -44,6 +44,8 @@ struct Response {
 #[derive(Default)]
 struct Session {
     values: BTreeMap<String, Vec<u8>>,
+    /// Every inserted key, in the order of its insertion.
+    inserted: Vec<String>,
     /// The reason the session failed, once it has.
     failed: Option<String>,
     /// Every `fail` request, with the rank that sent it.
@@ -92,6 +94,16 @@ impl FakeAgent {
     /// The `fail` requests so far, by rank.
     pub fn fails(&self) -> Vec<(Rank, String)> {
         self.session.0.lock().unwrap().fails.clone()
+    }
+
+    /// Every inserted key, in the order of its insertion, including deleted keys.
+    pub fn inserted(&self) -> Vec<String> {
+        self.session.0.lock().unwrap().inserted.clone()
+    }
+
+    /// The value of `key`, if it is in the session.
+    pub fn value(&self, key: &str) -> Option<Vec<u8>> {
+        self.session.0.lock().unwrap().values.get(key).cloned()
     }
 
     pub fn keys(&self) -> Vec<String> {
@@ -154,6 +166,7 @@ fn serve(session: &(Mutex<Session>, Condvar), rank: Rank, request: Request) -> R
                     return answer(Err("EXISTS"), None);
                 }
                 session.values.insert(request.key.clone(), value);
+                session.inserted.push(request.key.clone());
                 changed.notify_all();
                 return answer(Ok(None), None);
             }

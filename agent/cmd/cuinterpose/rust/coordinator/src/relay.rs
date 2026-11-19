@@ -19,6 +19,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
+/// The key under which the leader of an inspection publishes, for each relay rank, the
+/// other ranks that share FABRIC memory or multicast objects with it. The agent keeps
+/// those ranks in one NVLink fabric at restore. The value is a MessagePack map from each
+/// relay rank to a sorted array of ranks, empty for a rank without peers.
+const FABRIC_PEERS: &str = "inspect.fabric-peers";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Inspect,
@@ -252,6 +258,40 @@ fn per_process<T>(
         .collect()
 }
 
+/// The FABRIC peers of every relay rank, as `FABRIC_PEERS` holds them.
+fn fabric_peers(group: &Group, topology: &Topology) -> BTreeMap<Rank, Vec<Rank>> {
+    group
+        .relays
+        .iter()
+        .map(|rank| (*rank, topology.fabric_peers(*rank)))
+        .collect()
+}
+
+/// Refuse any peer of a rank in `current` that inspection did not publish.
+fn check_fabric_peers(
+    published: &BTreeMap<Rank, Vec<Rank>>,
+    current: &BTreeMap<Rank, Vec<Rank>>,
+) -> Result<()> {
+    let gained: Vec<String> = current
+        .iter()
+        .filter_map(|(rank, peers)| {
+            let known = published.get(rank).map_or(&[][..], Vec::as_slice);
+            let gained: Vec<Rank> = peers
+                .iter()
+                .filter(|peer| !known.contains(peer))
+                .copied()
+                .collect();
+            (!gained.is_empty()).then(|| format!("rank {rank} with ranks {gained:?}"))
+        })
+        .collect();
+    ensure!(
+        gained.is_empty(),
+        "ranks share FABRIC memory that inspection did not publish: {}",
+        gained.join(", ")
+    );
+    Ok(())
+}
+
 struct Relay<'a> {
     /// None for a Pod alone, which is its own leader.
     session: Option<Session>,
@@ -419,7 +459,12 @@ impl Relay<'_> {
         match self.mode {
             Mode::Inspect => {
                 let (pods, _) = self.records(Command::Inspect)?;
-                Topology::validate(&pods)?;
+                let topology = Topology::validate(&pods)?;
+                // Before Done, so that every relay that sees Done finds the key.
+                if let Some(session) = &mut self.session {
+                    let peers = fabric_peers(&self.group, &topology);
+                    session.insert(FABRIC_PEERS, &rmp_serde::to_vec_named(&peers)?)?;
+                }
             }
             Mode::Prepare => {
                 // Inspect does not freeze registries, but the application stops changing
@@ -433,6 +478,16 @@ impl Relay<'_> {
                 // the checkpoint and every source process.
                 let (pods, _) = self.records(Command::BeginCheckpoint { imports })?;
                 let topology = Topology::validate(&pods)?;
+                // Processes ran on after inspection, so they may share FABRIC memory with
+                // ranks that the agent did not learn of.
+                if let Some(session) = &mut self.session {
+                    let published = match session.get(FABRIC_PEERS, Duration::ZERO)? {
+                        Some(value) => rmp_serde::from_slice(&value)
+                            .with_context(|| format!("decode {FABRIC_PEERS}"))?,
+                        None => BTreeMap::new(),
+                    };
+                    check_fabric_peers(&published, &fabric_peers(&self.group, &topology))?;
+                }
                 self.execute(&topology, Command::PrepareMulticast)?;
                 let owners = per_process(&pods, |rank, pid| topology.owners(rank, pid));
                 self.execute(&topology, Command::SaveAllocations { owners })?;
@@ -796,6 +851,38 @@ mod tests {
         (0..3).map(Scripted::new).collect()
     }
 
+    /// Pods that share no FABRIC memory: each holds an allocation of its own.
+    fn separate() -> Vec<Scripted> {
+        (0..3)
+            .map(|rank| {
+                let own = AllocationReference {
+                    id: [40 + rank as u8; 16],
+                    creator_pid: PID,
+                };
+                let mut pod = Scripted::new(rank);
+                pod.records = Manifest::from([(
+                    PID,
+                    vec![
+                        with!(allocation(), Allocation.allocation = own),
+                        with!(mapping(), Mapping.allocation = own),
+                    ],
+                )]);
+                pod
+            })
+            .collect()
+    }
+
+    /// Inspect `pods`, which publishes their FABRIC peers for a later Prepare.
+    fn inspect_pods(agent: &FakeAgent, pods: Vec<Scripted>) {
+        for (result, _) in group(agent, Mode::Inspect, pods, LONG) {
+            result.unwrap();
+        }
+    }
+
+    fn inspect(agent: &FakeAgent) {
+        inspect_pods(agent, pods());
+    }
+
     const LONG: Duration = Duration::from_secs(60);
 
     #[test]
@@ -817,10 +904,16 @@ mod tests {
             assert!(pod.finished && pod.restored);
         }
         assert!(agent.fails().is_empty());
-        // The leader removes each round's keys and leaves only the end of each mode.
+        // The leader removes each round's keys and leaves only the end of each mode and
+        // the FABRIC peers.
         assert_eq!(
             agent.keys(),
-            ["inspect.2.cmd", "prepare.6.cmd", "restore.9.cmd"]
+            [
+                "inspect.2.cmd",
+                FABRIC_PEERS,
+                "prepare.6.cmd",
+                "restore.9.cmd"
+            ]
         );
         let steps: Vec<String> = calls[1]
             .lock()
@@ -869,6 +962,7 @@ mod tests {
     #[test]
     fn begin_checkpoint_names_each_rank_the_creators_kind_of_its_imports() {
         let agent = FakeAgent::default();
+        inspect(&agent);
         let mut pods = pods();
         // Ranks 1 and 2 have only mapped `X`, which either kind accepts.
         for pod in &mut pods[1..] {
@@ -906,8 +1000,63 @@ mod tests {
     }
 
     #[test]
+    fn inspect_publishes_the_ranks_that_share_fabric_memory_before_done() {
+        let agent = FakeAgent::default();
+        inspect(&agent);
+        // Ranks 1 and 2 import from rank 0, so the map is {0: [1, 2], 1: [0], 2: [0]}.
+        let value = agent.value(FABRIC_PEERS).unwrap();
+        assert_eq!(value, b"\x83\x00\x92\x01\x02\x01\x91\x00\x02\x91\x00");
+        let peers: BTreeMap<Rank, Vec<Rank>> = rmp_serde::from_slice(&value).unwrap();
+        let expected = BTreeMap::from([(0, vec![1, 2]), (1, vec![0]), (2, vec![0])]);
+        assert_eq!(peers, expected);
+        let inserted = agent.inserted();
+        let position = |key: &str| {
+            inserted
+                .iter()
+                .position(|inserted| inserted == key)
+                .unwrap()
+        };
+        assert!(
+            position(FABRIC_PEERS) < position("inspect.2.cmd"),
+            "{inserted:?}"
+        );
+    }
+
+    #[test]
+    fn inspect_publishes_no_peers_for_ranks_that_share_no_fabric_memory() {
+        let agent = FakeAgent::default();
+        inspect_pods(&agent, separate());
+        let value = agent.value(FABRIC_PEERS).unwrap();
+        assert_eq!(value, b"\x83\x00\x90\x01\x90\x02\x90");
+    }
+
+    #[test]
+    fn prepare_refuses_fabric_peers_that_inspection_did_not_publish() {
+        let agent = FakeAgent::default();
+        inspect_pods(&agent, separate());
+        // Ranks 1 and 2 imported from rank 0 after inspection.
+        let pods = pods();
+        let calls: Vec<_> = pods.iter().map(|pod| Arc::clone(&pod.calls)).collect();
+        let results = group(&agent, Mode::Prepare, pods, LONG);
+        assert!(results.iter().all(|(result, _)| result.is_err()));
+        let leader = format!("{:#}", results[0].0.as_ref().unwrap_err());
+        assert!(
+            leader.ends_with(
+                "ranks share FABRIC memory that inspection did not publish: \
+                 rank 0 with ranks [1, 2], rank 1 with ranks [0], rank 2 with ranks [0]"
+            ),
+            "{leader}"
+        );
+        assert_eq!(agent.fails(), [(0, "MemberFailed".to_owned())]);
+        // The leader refuses after BeginCheckpoint, before any step that changes processes.
+        let prepared = |calls: &Calls| calls.lock().unwrap().contains(&Command::PrepareMulticast);
+        assert!(!calls.iter().any(prepared));
+    }
+
+    #[test]
     fn save_owners_name_each_allocation_by_its_holders_own_reference() {
         let agent = FakeAgent::default();
+        inspect(&agent);
         let pods = pods();
         let calls: Vec<_> = pods.iter().map(|pod| Arc::clone(&pod.calls)).collect();
         for (result, _) in group(&agent, Mode::Prepare, pods, LONG) {
@@ -939,6 +1088,7 @@ mod tests {
     #[test]
     fn wrong_carrier_bytes_fail_the_session_as_member_failed() {
         let agent = FakeAgent::default();
+        inspect(&agent);
         let mut pods = pods();
         pods[1].carrier = Some(0);
         let results = group(&agent, Mode::Prepare, pods, LONG);
@@ -978,6 +1128,7 @@ mod tests {
     #[test]
     fn follower_step_error_fails_the_session_as_member_failed() {
         let agent = FakeAgent::default();
+        inspect(&agent);
         let mut pods = pods();
         pods[1].failing = Some("SaveAllocations");
         let results = group(&agent, Mode::Prepare, pods, LONG);
@@ -994,6 +1145,7 @@ mod tests {
     #[test]
     fn follower_step_error_outlasts_a_session_that_ended_first() {
         let agent = FakeAgent::default();
+        inspect(&agent);
         let mut pods = pods();
         // Rank 2 fails the session while rank 1's step still runs, and then rank 1's step
         // fails too.
@@ -1016,6 +1168,7 @@ mod tests {
     #[test]
     fn silent_rank_leaves_the_failure_to_the_coordinator_at_the_deadline() {
         let agent = FakeAgent::default();
+        inspect(&agent);
         let mut pods = pods();
         pods[2].slow = Some(("PrepareMulticast", Duration::from_secs(2)));
         // The coordinator's clock runs behind the relays', so the session ends after the
