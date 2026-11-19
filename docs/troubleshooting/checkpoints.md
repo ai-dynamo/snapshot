@@ -151,7 +151,7 @@ member failed.
 - The Pod has no IP yet
 - The Pod's IP is not IPv4 (`is not an IPv4 address`), which a pod group needs
 - The cuInterpose relay refused the group's topology, for example memory one Pod imports that no member exported. Its error follows `inspect cuinterpose:`
-- The agent and its cuInterpose come from different builds, and the relays recorded no members that share GPU memory (`recorded no inspect.fabric-peers`). Use the agent image's own cuInterpose
+- The agent and its cuInterpose come from different builds, so the relays' leader wrote no `inspect.fabric-peers` record at all (`recorded no inspect.fabric-peers`). A record that lists no peers is valid and does not cause this. Use the agent image's own cuInterpose
 - Another member refused first (`Refused`), and its agent's log carries the step
 - A member never arrived, for example one whose `checkpointReadinessProbe` never passed, so the attempt's deadline passed (`DeadlineExceeded`)
 
