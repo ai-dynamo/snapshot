@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: seccomp profile installation
+templates:
+  - templates/daemonset.yaml
+tests:
+  - it: exits on mkdir or cp failure before logging installation success
+    set:
+      seccomp.deploy: true
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: deploy-seccomp
+      - equal:
+          path: spec.template.spec.initContainers[0].command
+          value:
+            - sh
+            - -ec
+            - |
+              mkdir -p /host-seccomp/profiles
+              cp /seccomp-profiles/block-iouring.json /host-seccomp/profiles/block-iouring.json
+              echo "Deployed seccomp profile to /var/lib/kubelet/seccomp/profiles/block-iouring.json"
+
+  - it: omits the installation container when seccomp deployment is disabled
+    set:
+      seccomp.deploy: false
+    asserts:
+      - notExists:
+          path: spec.template.spec.initContainers
