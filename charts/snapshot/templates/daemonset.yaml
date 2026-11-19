@@ -142,6 +142,13 @@ spec:
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath }}
             {{- end }}
+            {{- if .Values.storage.nodeCache.enabled }}
+            # Checkpoint copies an administrator placed on this node. Read only:
+            # Snapshot never writes to or removes from the node cache.
+            - name: node-cache
+              mountPath: /node-cache
+              readOnly: true
+            {{- end }}
             # Mount the runtime socket directory. Derived from runtime.socketPath
             # so overrides stay reachable inside the container.
             - name: runtime-run
@@ -235,6 +242,10 @@ spec:
             - --model-streamer-config
             - {{ include "snapshot.modelStreamerConfigPath" . }}
             {{- end }}
+            {{- if .Values.storage.nodeCache.enabled }}
+            - --node-cache-root
+            - /node-cache
+            {{- end }}
           resources:
             {{- toYaml .Values.pageBroker.resources | nindent 12 }}
           volumeMounts:
@@ -246,6 +257,11 @@ spec:
             {{- if eq .Values.storage.type "pvc" }}
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath }}
+            {{- end }}
+            {{- if .Values.storage.nodeCache.enabled }}
+            - name: node-cache
+              mountPath: /node-cache
+              readOnly: true
             {{- end }}
             {{- if eq .Values.storage.type "s3" }}
             - name: pagebroker-s3-config
@@ -300,6 +316,15 @@ spec:
         - name: checkpoints
           persistentVolumeClaim:
             claimName: {{ .Values.storage.pvc.name }}
+        {{- end }}
+        {{- if .Values.storage.nodeCache.enabled }}
+        # By default a node without the directory gets an empty one, so its
+        # agent still starts and its restores read the snapshot store. Snapshot
+        # never writes here, so an empty directory costs nothing.
+        - name: node-cache
+          hostPath:
+            path: {{ include "snapshot.nodeCachePath" . | quote }}
+            type: {{ ternary "DirectoryOrCreate" "Directory" .Values.storage.nodeCache.createIfMissing }}
         {{- end }}
         {{- if eq .Values.storage.type "s3" }}
         # Written by the operator (ensurePageBrokerS3Config), not this chart:

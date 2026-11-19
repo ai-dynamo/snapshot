@@ -130,6 +130,10 @@ type RestoreRequest struct {
 	PageBrokerControlSocketPath string
 	PageBrokerRestoreMode       string
 
+	// NodeCache marks BasePath as the node cache. The copy there is already on
+	// the node's local disk, so it is always read in place, never staged.
+	NodeCache bool
+
 	// PublishedArtifact, when set, switches restore to the artifact-addressed
 	// RPCs; read from the content's recorded status, never reconstructed here.
 	PublishedArtifact *pagebroker.PublishedArtifact
@@ -320,7 +324,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	transactionID = uuid.NewString()
 	stageStart := time.Now()
 	// Bound restore has no direct mode at the protocol level.
-	direct := !bound && req.PageBrokerRestoreMode != "staged"
+	direct := !bound && (req.NodeCache || req.PageBrokerRestoreMode != "staged")
 	var staged string
 	preparationAttempted = true
 	staged, gpu, err = prepareRestoreSource(ctx, broker, transactionID, bound, usePageBrokerGPU, direct, req.PublishedArtifact, artifactPath, gpuContext)

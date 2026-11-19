@@ -808,11 +808,15 @@ func TestRestoreSourceAndAbortCleanup(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		mode         string
+		nodeCache    bool
 		mountFailure bool
 		cancel       bool
 	}{
 		{name: "default direct"},
 		{name: "explicit staged", mode: "staged"},
+		// A copy in the node cache is already local: it is read in place even
+		// where the snapshot store is configured to be staged.
+		{name: "node cache ignores staged", mode: "staged", nodeCache: true},
 		{name: "direct", mode: "direct"},
 		{name: "direct mount failure", mode: "direct", mountFailure: true},
 		{name: "direct cancellation", mode: "direct", mountFailure: true, cancel: true},
@@ -864,7 +868,7 @@ func TestRestoreSourceAndAbortCleanup(t *testing.T) {
 							if transaction == "" {
 								return errors.New("missing transaction")
 							}
-							if tc.mode != "staged" {
+							if tc.mode != "staged" || tc.nodeCache {
 								if request.GetDirectRestore().GetSource().GetFilesystem().GetDirectory() != artifact {
 									return errors.New("wrong direct restore source")
 								}
@@ -898,6 +902,7 @@ func TestRestoreSourceAndAbortCleanup(t *testing.T) {
 			_, err = Restore(ctx, &restoreFakeRuntime{}, testr.New(t), RestoreRequest{
 				BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
 				SkipCompatCheck:       true,
+				NodeCache:             tc.nodeCache,
 				PageBrokerRestoreMode: tc.mode, PageBrokerControlSocketPath: listener.Addr().String(),
 			}, mounts)
 			// The fixture has no namespace FD, so nsrestore cannot launch.
@@ -913,7 +918,7 @@ func TestRestoreSourceAndAbortCleanup(t *testing.T) {
 				t.Fatal("restore did not abort its transaction")
 			}
 			name := "staged"
-			if tc.mode != "staged" {
+			if tc.mode != "staged" || tc.nodeCache {
 				name = "artifact"
 				if mounts.artifact != artifact || mounts.staged != "" {
 					t.Fatalf("wrong source mount: %+v", mounts)

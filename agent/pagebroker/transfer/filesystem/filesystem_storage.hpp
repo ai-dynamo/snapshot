@@ -17,6 +17,10 @@ using Path = std::filesystem::path;
 // Returns an existing source directory beneath storage_root, rejecting symlink components.
 Path SourcePath(const StorageBackend& source, const Path& storage_root);
 
+// Reports whether a filesystem location is lexically beneath root. An empty root
+// contains nothing. Does not touch the filesystem; SourcePath still validates the path.
+bool IsWithinRoot(const StorageBackend& storage, const Path& root);
+
 // Returns a destination beneath storage_root, rejecting symlink components.
 Path DestinationPath(const StorageBackend& destination, const Path& storage_root);
 
