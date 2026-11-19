@@ -151,10 +151,11 @@ keeps its binding. See [Default class](#default-class).
 
 #### SnapshotStorageClass
 
-A new cluster-scoped kind in `snapshot.nvidia.com/v1alpha1`, a discriminated
-union: `type` names the backend and exactly that block is set. Its location
-fields are the `storeID` inputs defined in `../../../api/storage`; they and
-`type` are immutable through CEL transition rules. `reclaimPolicy`,
+A new cluster-scoped kind in `snapshot.nvidia.com/v1alpha1`. Exactly one
+store block is set, `pvc` or `s3`, and the block that is set names the kind of
+store. Its location fields are the `storeID` inputs defined in
+`../../../api/storage`; they are immutable through CEL transition rules, and a
+class cannot move from one block to the other. `reclaimPolicy`,
 credentials and TLS settings stay editable; an edit to `reclaimPolicy` applies
 to content bound afterwards.
 A class name is at most 63 characters, because it is used as a label value.
@@ -169,13 +170,9 @@ type SnapshotStorageClass struct {
     Status SnapshotStorageClassStatus `json:"status,omitempty"`
 }
 
-// +kubebuilder:validation:XValidation:rule="(self.type == 'PVC') == has(self.pvc)",message="pvc must be set exactly when type is PVC"
-// +kubebuilder:validation:XValidation:rule="(self.type == 'S3') == has(self.s3)",message="s3 must be set exactly when type is S3"
+// +kubebuilder:validation:XValidation:rule="has(self.pvc) != has(self.s3)",message="exactly one of pvc or s3 must be set"
+// +kubebuilder:validation:XValidation:rule="has(self.pvc) == has(oldSelf.pvc)",message="the store block cannot change between pvc and s3"
 type SnapshotStorageClassSpec struct {
-    // +kubebuilder:validation:Enum=PVC;S3
-    // +unionDiscriminator
-    // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="type is immutable"
-    Type StoreType `json:"type"`
     // +kubebuilder:validation:Enum=Delete;Retain
     // +kubebuilder:default=Delete
     ReclaimPolicy ReclaimPolicy `json:"reclaimPolicy,omitempty"`
@@ -505,7 +502,6 @@ kind: SnapshotStorageClass
 metadata:
   name: team-b
 spec:
-  type: PVC
   pvc:
     claimName: team-b-snapshots   # Which mounted claim.
     basePath: /prod               # A directory inside it, not the mount path.
@@ -514,8 +510,8 @@ spec:
 Classes require `operator.bindNewContents` and `pageBroker.artifactAddressing`;
 the chart fails the render otherwise.
 
-Every other `storage.*` value keeps its meaning and feeds the default class: `type`
-selects PVC or S3; `s3.endpoint`, `region`, `bucket`, `prefix`, `addressing`,
+Every other `storage.*` value keeps its meaning and feeds the default class: `storage.type`
+selects the `pvc` or `s3` block; `s3.endpoint`, `region`, `bucket`, `prefix`, `addressing`,
 `allowHttp`, `credentialsSecretRef`, `credentialsSecretKey`,
 `caBundleConfigMapRef` and `caBundleConfigMapKey` become the class's `s3` fields;
 `pvc.name` becomes `claimName`, with the class `basePath` at the claim root.
@@ -584,7 +580,7 @@ the old operator ignores both and reads `storage.yaml`.
 
 ### Test Plan
 
-- **API:** CEL rejects two backend blocks, none, a location change, a name over
+- **API:** CEL rejects two store blocks, none, a move between blocks, a location change, a name over
   63 characters, or an `artifacts` path segment.
 - **Operator:** Ready/NotReady for each reason; digest detection, including
   two classes created at once; the access check; nested stores are accepted;
