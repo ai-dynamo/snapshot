@@ -9,7 +9,7 @@ use crate::driver::Context;
 use crate::error::{Error, Result};
 use crate::runtime;
 use cudarc::driver::sys::CUresult::*;
-use cuinterpose_protocol::{FabricReplacement, ImportKind, Operation, Reply};
+use cuinterpose_protocol::{FabricReplacement, ImportKind, Operation, Reply, Response};
 use runtime::export_cache;
 use std::collections::BTreeMap;
 use std::ffi::c_void;
@@ -126,11 +126,11 @@ impl ProcessState {
     ///
     /// Each FABRIC import that `imports` names takes the kind that its creator recorded.
     /// Restore needs the kind of every import, so the process refuses to enter checkpoint
-    /// mode while it holds an import of unknown kind.
-    pub fn begin_checkpoint(
-        &mut self,
-        imports: &[ImportKind],
-    ) -> Result<Vec<cuinterpose_protocol::Record>> {
+    /// mode while it holds an import of unknown kind. It also refuses if the response
+    /// that carries its records exceeds the protocol's size limit, which the records of
+    /// the imports that it classifies here can cause. A process that refuses stays
+    /// active, and its imports keep their kinds, which their creators fixed.
+    pub fn begin_checkpoint(&mut self, imports: &[ImportKind]) -> Result<Response> {
         if self.phase != Phase::Active || self.unlocked_driver_calls != 0 {
             return Err(CUDA_ERROR_NOT_READY.into());
         }
@@ -143,9 +143,16 @@ impl ProcessState {
         }) {
             return Err(Error::UnknownFabricKind(handle));
         }
-        let records = self.inspect()?;
+        let response = Response {
+            namespace_pid: self.namespace_pid,
+            result: Ok(Reply::Inspection {
+                records: self.inspect()?,
+            }),
+        };
+        // The control worker sends this same response, so it must fit.
+        cuinterpose_protocol::encode(&response).map_err(Error::Reply)?;
         self.phase = Phase::Checkpointing;
-        Ok(records)
+        Ok(response)
     }
 
     /// Check the complete local plan before changing any state. The coordinator
@@ -457,10 +464,10 @@ pub(crate) fn inspect() -> std::result::Result<Reply, String> {
 
 pub(crate) fn begin(imports: &[ImportKind]) -> std::result::Result<Reply, String> {
     let mut state = runtime::get().map_err(|_| "cuinterpose state is unavailable")?;
-    let records = state
+    state
         .begin_checkpoint(imports)
-        .map_err(|error| format!("application is not ready for checkpoint: {error}"))?;
-    Ok(Reply::Inspection { records })
+        .map_err(|error| format!("application is not ready for checkpoint: {error}"))?
+        .result
 }
 
 pub(crate) fn execute(operation: &Operation) -> std::result::Result<Reply, String> {
@@ -628,7 +635,10 @@ mod tests {
         ));
         assert_eq!(state.phase, Phase::Active);
         state.unlocked_driver_calls = 0;
-        assert!(state.begin_checkpoint(&[]).unwrap().is_empty());
+        assert!(matches!(
+            state.begin_checkpoint(&[]).unwrap().result,
+            Ok(Reply::Inspection { records }) if records.is_empty()
+        ));
         assert_eq!(state.phase, Phase::Checkpointing);
         assert!(matches!(
             state.begin_checkpoint(&[]),

@@ -319,8 +319,8 @@ mod tests {
     use cudarc::driver::sys::CUresult::{CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_SUPPORTED};
     use cudarc::driver::sys::{CUmemAccess_flags, CUmemAccessDesc, CUmemLocationType};
     use cuinterpose_protocol::{
-        BindingSource, BindingVersion, ImportKind, MemberRange, MemoryAccess, MemoryLocation,
-        MulticastProperties,
+        BindingSource, BindingVersion, ImportKind, MAX_MESSAGE_BYTES, MemberRange, MemoryAccess,
+        MemoryLocation, MulticastProperties, Reply,
     };
     use std::sync::LazyLock;
 
@@ -665,9 +665,13 @@ mod tests {
         assert_eq!(state.phase, Phase::Active);
         // The import that the coordinator named keeps its kind.
         assert!(state.memblocks[&memory.id].unicast().is_some());
-        let records = state
+        let Ok(Reply::Inspection { records }) = state
             .begin_checkpoint(&named(object, FabricKind::Multicast))
-            .unwrap();
+            .unwrap()
+            .result
+        else {
+            panic!("no records");
+        };
         assert_eq!(state.phase, Phase::Checkpointing);
         for (allocation, byte, kind) in [
             (memory, 2, FabricKind::Memory),
@@ -680,6 +684,50 @@ mod tests {
             };
             assert!(records.contains(&record), "{records:?}");
         }
+    }
+
+    #[test]
+    fn begin_checkpoint_stays_active_while_its_reply_exceeds_the_size_limit() {
+        let mut state = ProcessState::new(41);
+        let memory = unclassified(&mut state, 2);
+        // An import of unknown kind reports only its handle, so its mappings first count
+        // when BeginCheckpoint classifies it.
+        let virtual_handle =
+            VirtualAllocationHandle::from_raw(VirtualAllocationHandle::TAG | 1).unwrap();
+        for index in 0..(MAX_MESSAGE_BYTES / 64) as u64 {
+            let address = 0x10000 + index * 4096;
+            state.mappings.insert(
+                address,
+                Mapping {
+                    id: memory.id,
+                    handle: virtual_handle,
+                    address,
+                    size: 4096,
+                    offset: 0,
+                    access: Vec::new(),
+                    flags: 0,
+                },
+            );
+        }
+        assert_eq!(state.inspect().unwrap().len(), 1);
+        let imports = [ImportKind {
+            allocation: memory,
+            kind: FabricKind::Memory,
+        }];
+        // A failure names only the error, since the response holds every mapping.
+        let refused = state.begin_checkpoint(&imports);
+        assert!(
+            matches!(refused, Err(Error::Reply(_))),
+            "{:?}",
+            refused.err()
+        );
+        assert_eq!(state.phase, Phase::Active);
+        // The import keeps its kind, and the process enters checkpoint mode once the
+        // application unmaps enough that the reply fits.
+        assert!(state.memblocks[&memory.id].unicast().is_some());
+        state.mappings.retain(|address, _| *address == 0x10000);
+        state.begin_checkpoint(&[]).unwrap();
+        assert_eq!(state.phase, Phase::Checkpointing);
     }
 
     /// A driver that knows what each fabric handle names: an import of a handle whose

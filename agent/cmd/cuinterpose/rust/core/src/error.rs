@@ -19,6 +19,8 @@ pub enum Error {
     },
     #[error("peer export: {0}")]
     PeerExport(#[source] cuinterpose_protocol::Error),
+    #[error("reply: {0}")]
+    Reply(#[source] cuinterpose_protocol::Error),
     #[error("lifecycle out of order: expected {expected:?}, actual {actual:?}")]
     OutOfOrder { expected: Phase, actual: Phase },
     #[error("{handles} foreign allocation handles and {mappings} foreign mappings are still held")]
