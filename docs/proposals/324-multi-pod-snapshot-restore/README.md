@@ -169,8 +169,9 @@ and [Workload contract](#workload-contract) defines which threads it covers.
 The owner must not delete or replace a source until the group's capture has
 ended, Ready or Failed, and group restore Pods must carry the group restore startup probe, which allows the longest deadline, and arrive held by Snapshot's scheduling gate. Placement stays
 with the owner, which keeps a group whose members share GPU memory across nodes
-within one fabric domain, and restore admission refuses members that shared GPU
-memory unless their GPUs are ready in one NVLink clique.
+within one fabric domain. Restore admission refuses members that shared GPU
+memory unless each set of members linked by that memory is on GPUs ready in one
+NVLink clique.
 A restore refused before it claims its Pods leaves them gated, so a new
 attempt can name them, whereas a claimed Pod serves only its attempt, and the
 owner replaces it if that attempt fails. Finally, a plain `PodSnapshot` or a single restore Pod never contacts the
@@ -206,7 +207,7 @@ Redis-compatible server.
 
 | Risk or limitation | Mitigation or decision |
 | --- | --- |
-| Every restore keeps the original group size and GPU count per member, and a group whose members share GPU memory across nodes must restore within one fabric domain. | Admission checks the group size and each member's compatibility before CRIU. It also refuses members that shared GPU memory at capture unless all their GPUs are ready in one NVLink clique of one cluster. This catches placement mistakes, but it does not promise that every later import succeeds, for example in a restore Pod without the fabric access that [Dependencies](#dependencies) lists. |
+| Every restore keeps the original group size and GPU count per member, and a group whose members share GPU memory across nodes must restore within one fabric domain. | Admission checks the group size and each member's compatibility before CRIU. It also refuses members that shared GPU memory at capture unless each set of members linked by that memory is on GPUs ready in one NVLink clique of one cluster. This catches placement mistakes, but it does not promise that every later import succeeds, for example in a restore Pod without the fabric access that [Dependencies](#dependencies) lists. |
 | Capture is not atomic: each source ends at its own dump, and a failure after the commit terminates every member that has started. Release is not atomic either, since a member can fail before its release while its peers are already released. | Admission catches every condition that can be checked without side effects, every member records when it started, and member results report partial outcomes truthfully, so the owner can retire the group and retry with a new attempt. |
 | Snapshot does not freeze restored processes until release, because CUDA, cuInterpose, and library threads do the reconstruction inside them, so an application thread that runs early could observe a half-rebuilt state. | Release relies on the existing workload contract, which this SNEP extends to every thread that could touch shared memory, communicators, or preserved connections; an integration satisfies it only by holding every such thread until release, which a wrapper that gates only the main loop does not, and an enforced hold is left to future work. |
 | Between CRIU restore and CUDA unlock, a thread that calls CUDA blocks on the lock, which is not a recommended use of CUDA Checkpoint, and a failure in that window could leave such a thread stuck. | The locked window involves no coordination and lasts as long as for a single Pod, failing a restore terminates every restored process, and qualification measures both restore windows and injects failures into each. |
@@ -643,9 +644,9 @@ agent therefore ends admission holding the complete IP map, built from the
 member table in its own artifact and the new IPs, together with the assurance
 that all members restore the same capture. Members that shared FABRIC memory,
 directly or through others, must also land on GPUs that are all ready in one
-NVLink clique of one cluster. Otherwise the attempt ends as `Refused` before
-CRIU. This catches placement mistakes, but it does not promise that every later
-import succeeds.
+NVLink clique of one cluster, while members that share nothing may use other
+cliques. Otherwise the attempt ends as `Refused` before CRIU. This catches
+placement mistakes, but it does not promise that every later import succeeds.
 
 Each agent then posts to the `admitted` barrier once its own checks pass. When
 the barrier completes, the attempt commits, and each agent records the
