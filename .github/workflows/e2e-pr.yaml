@@ -174,6 +174,11 @@ jobs:
           cache_mode: read
           # A mirror branch has no cache of its own; main's is the warmest.
           cache_branch: main
+          # The setup check compares each running container's digest with the one
+          # built here. A node that already pulled an earlier build with the same
+          # content reports that build's digest instead, so give every build its
+          # own content. The label changes only the image config, not the layers.
+          build_args: --label io.snapshot.ci.build=${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Record digest
         env:
