@@ -171,6 +171,7 @@ The caller sets these annotations on the new pod to trigger a restore:
 | `nvidia.com/restore-from`               | Names the `PodSnapshot`, in the pod's namespace, to restore into the pod.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `nvidia.com/restore-container-map`      | Optional. Comma-separated `source=destination` pairs mapping the single checkpointed container to one or more restore containers. When absent, the checkpointed container name is the destination.                                                                                                                                                                                                                                                                                                                                                                       |
 | `nvidia.com/snapshot-skip-compat-check` | Optional. Set to `"true"` to attempt the restore without the compatibility checks, which otherwise refuse a snapshot this node cannot run. The value must parse as a boolean, so any other spelling, including `"yes"`, leaves the checks in place. Treat it as a debugging escape hatch: a restore that should have been refused instead fails somewhere inside CRIU. Adding it to a pod whose restore was already refused reopens that restore in place, so this is the one case that needs no new pod. A restore that was attempted and failed still does. |
+| `nvidia.com/restore-retry-limit`        | Optional. How many more restore attempts each destination container gets after its first attempt fails, as a non-negative integer. Overrides `config.restore.retryLimit`, which defaults to `0`. Any other value fails the restore before its first attempt.                                                                                                                                                                                                                                                                                                  |
 
 Snapshot then reports restore progress with a pod status condition, written by
 the node agent and not set by the caller:
@@ -178,6 +179,22 @@ the node agent and not set by the caller:
 | Pod condition         | Description                                                                                                                                                         |
 |-----------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `nvidia.com/Restored` | Added to the pod by the node agent once a restore is under way; becomes `True` when the restore completes. Observe it alongside pod readiness to confirm a restore. |
+
+With a retry limit above 0, the node agent also writes this annotation when a
+restore attempt starts and when one fails:
+
+| Annotation                        | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+|-----------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `nvidia.com/restore-retry-status` | JSON with one entry per destination container that started an attempt. Each entry holds `attempt`, the current or last attempt from 1; `retryLimit`; `deadline`, when the restore times out; `retryAt`, when a waiting retry falls due; `containerID`, the container of the last attempt; `podUID`, the Pod the entry belongs to; and `lastFailure`, the `step` and `cause` of the last failed attempt. `lastFailure.snapshotUnusable` is `true` when the snapshot is missing, corrupt, or unsupported. |
+
+The agent writes the annotation in the background, so it can change after
+the `nvidia.com/Restored` condition. An agent that restarts continues the
+restore from it.
+
+All attempts of a restore share one deadline, `config.restore.timeoutSeconds`,
+from the start of the first. Only a failure that left the container untouched
+is retried; see
+[Restore Retry](../design/restore-retry/README.md#recovery-after-a-failed-attempt).
 
 ## Labels
 

@@ -186,6 +186,11 @@ The proxy reserves two exit codes:
 Every other exit code is the restored workload's own, or 128 plus the number of
 the signal that ended it.
 
+## Restore Retries
+
+Which failed attempts the agent retries, and how many times, is in
+[Restore Retry](../design/restore-retry/README.md).
+
 ## Nodes Without the Restore Proxy
 
 On a node whose container runtime has no NRI, or NRI older than v0.10
