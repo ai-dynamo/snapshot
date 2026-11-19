@@ -344,8 +344,16 @@ Instead, the shim records every FABRIC handle that a process exports or imports,
 A handle does not name the process that created its memory.
 The importer therefore records the import under creator PID 0, which is never a process, and an allocation ID derived from the handle.
 It cannot observe the allocation's size or a multicast object's properties, so it records size 0 and empty multicast properties.
-The driver does not report whether a handle names memory or a multicast object.
-The shim reads the object kind from the driver's private handle layout and refuses imports of any kind it does not recognize.
+
+A FABRIC handle does not say whether it names memory or a multicast object, so an import starts with its kind unknown.
+Calls that accept either kind go to the driver with the real handle: `cuMemMap`, `cuMemUnmap`, `cuMemSetAccess`, `cuMemRelease`, `cuMemRetainAllocationHandle`, and `cuMemGetAllocationPropertiesFromHandle`.
+The mappings that they record do not depend on the kind.
+The first call that only one kind accepts classifies the import, once the driver accepts that call.
+The object of `cuMulticastAddDevice`, `cuMulticastBindMem`, `cuMulticastBindAddr`, or `cuMulticastUnbind` becomes a multicast object, and the member of a binding, by handle or by address, becomes memory.
+A refused call leaves the import unknown.
+The creator always knows the kind, so its export record names it.
+An import of unknown kind appears in its process's records only as an import record without a kind.
+`BEGIN_CHECKPOINT` gives each import of unknown kind the kind of [its creator](#creator-and-checkpoint-holder), and the process refuses to enter checkpoint mode while any import is still unknown.
 
 During restore, each creator exports a new handle for its recreated backing or multicast object and returns the old and new handles to the coordinator.
 Each importer then imports the new handle that replaces the one it recorded, wherever the creator runs.
@@ -373,7 +381,8 @@ It resolves each [FABRIC import](#fabric-handles) to the process that exported t
 A multicast team can therefore have devices in several Pods.
 POSIX sharing cannot cross Pods, because a POSIX import names its creator by PID in the importer's own namespace.
 The creator always saves a FABRIC allocation, because its importers do not know its size.
-The coordinator refuses a FABRIC import whose creator is not in the group or no longer holds the allocation.
+The coordinator refuses a FABRIC import whose creator is not in the group, no longer holds the allocation, or exported another kind.
+An import of unknown kind takes its creator's kind, so preparation inspects before `BEGIN_CHECKPOINT`, which carries those kinds to each process.
 A coordinator started without a session runs its Pod alone, as a group of one, so FABRIC sharing between the processes of its one container checkpoints and restores, and a Pod that imports FABRIC memory from another Pod is refused at inspection, before anything changes.
 
 #### Multicast tracking
@@ -645,7 +654,9 @@ sequenceDiagram
     C-->>A: Group passes preflight
     Note over A,S: Application finishes outstanding work and prevents new work
     A->>C: Prepare participant group
-    C->>S: BEGIN_CHECKPOINT, one process at a time
+    C->>S: INSPECT
+    S-->>C: Records, with FABRIC imports of unknown kind
+    C->>S: BEGIN_CHECKPOINT with their creators' kinds, one process at a time
     S-->>C: Frozen resource records
     C->>C: Validate group and select holders
     C->>S: PREPARE_MULTICAST
@@ -761,7 +772,9 @@ The coordinator of the lowest rank leads the group. It validates the group's rec
 Every operation of a mode is one round:
 
 1. The leader inserts the round's command, `<mode>.<k>.cmd`, which names the step and its arguments.
-   A command carries only its step's arguments: `SAVE_ALLOCATIONS` the owners of each process, keyed by rank and PID, and `RESTORE_UNICAST` and `RESTORE_MULTICAST_IMPORTERS` the old and new FABRIC handles so far.
+   A command carries only its step's arguments.
+   `BEGIN_CHECKPOINT` carries the creator's kind of each FABRIC import of unknown kind, and `SAVE_ALLOCATIONS` the owners of each process, both keyed by rank and PID.
+   `RESTORE_UNICAST` and `RESTORE_MULTICAST_IMPORTERS` carry the old and new FABRIC handles so far.
 2. Every coordinator runs the step on its own processes, and each one except the leader inserts its reply under `<mode>.<k>.reply.<rank>`: its Pod's records, or each process's reply.
 3. The leader reads every reply, checks each process's reply and carrier bytes against the topology, folds the results into the group state, and removes the round's keys.
 
@@ -770,7 +783,7 @@ The modes run these steps, with `<mode>` set to `inspect`, `prepare`, or `restor
 | Mode | Steps |
 | --- | --- |
 | `inspect` | `INSPECT`, then validation |
-| `prepare` | `BEGIN_CHECKPOINT` with validation, `PREPARE_MULTICAST`, `SAVE_ALLOCATIONS`, `PREPARE_UNICAST` |
+| `prepare` | `INSPECT` with validation, `BEGIN_CHECKPOINT` with validation, `PREPARE_MULTICAST`, `SAVE_ALLOCATIONS`, `PREPARE_UNICAST` |
 | `restore` | `INSPECT` with the saved records, `LOAD_ALLOCATIONS`, `RESTORE_UNICAST`, the four multicast phases, and a final `INSPECT` |
 
 After the last step, the leader inserts `DONE` as the next command, and every coordinator exits.
@@ -1211,7 +1224,8 @@ The outer `offset` field identifies the location where that memory is bound with
 Separate `multicast`, `multicast_device`, and `multicast_mapping` records describe the object, attached devices, and virtual mappings.
 
 [FABRIC sharing](#fabric-handles) adds a `fabric_export` record to the creator and a `fabric_import` record to each importer.
-Both hold an allocation reference and the 64-byte handle as MessagePack binary data.
+Both hold an allocation reference, the 64-byte handle as MessagePack binary data, and a `kind`, `memory` or `multicast`, which is nil in a `fabric_import` of unknown kind.
+A `begin_checkpoint` request carries `imports`, a list of `{allocation, kind}` that names the creator's kind of each import of unknown kind.
 An operation carries only the arguments of its step, and a process replies with only that step's result: `saved` with its carrier bytes, `loaded` with its carrier bytes and the FABRIC handles that it replaced, `multicast_recreated` with the multicast handles that it replaced, and `completed` for every other step.
 
 ### Further reading
