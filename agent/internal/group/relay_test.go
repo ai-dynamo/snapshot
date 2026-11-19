@@ -1,0 +1,568 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package group
+
+import (
+	"bytes"
+	"context"
+	"encoding/binary"
+	"io"
+	"net"
+	"net/netip"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/vmihailenco/msgpack/v5"
+
+	"github.com/ai-dynamo/snapshot/coordinator"
+	"github.com/ai-dynamo/snapshot/coordinator/session"
+)
+
+// These tests stand in for a cuInterpose relay: they write the frames it
+// writes, as raw MessagePack maps, on its end of a socket the agent serves.
+
+func TestRelaysRunARoundThroughTheSession(t *testing.T) {
+	members := joinAll(t, 3)
+	// Rank 1 has no CUDA processes, so it runs no relay.
+	each(t, members, func(ctx context.Context, m *Member) error {
+		return m.Admit(ctx, Admission{PodIP: netip.MustParseAddr("10.1.0.1"), RunsRelay: m.Rank() != 1})
+	})
+	relay, err := members[1].OpenRelay(within(t))
+	require.NoError(t, err)
+	require.Nil(t, relay)
+	leader, follower := openRelay(t, members[0]), openRelay(t, members[2])
+	assert.Equal(t, []string{"--rank", "2", "--relay-ranks", "0,2"}, follower.args[:4])
+
+	write(t, follower.conn, map[string]any{"op": "get", "id": 1, "key": "inspect.1.cmd", "wait_ms": 60_000})
+	assert.Equal(t, answer{"id": uint64(1), "ok": true}, call(t, leader.conn,
+		map[string]any{"op": "insert", "id": 1, "key": "inspect.1.cmd", "value": []byte("INSPECT")}))
+	assert.Equal(t, answer{"id": uint64(1), "ok": true, "value": []byte("INSPECT")}, read(t, follower.conn))
+	assert.Equal(t, answer{"id": uint64(2), "ok": true}, call(t, follower.conn,
+		map[string]any{"op": "insert", "id": 2, "key": "inspect.1.reply.2", "value": []byte("records")}))
+	assert.Equal(t, answer{"id": uint64(7), "ok": true, "value": []byte("records")}, call(t, leader.conn,
+		map[string]any{"op": "get", "id": 7, "key": "inspect.1.reply.2", "wait_ms": 60_000}))
+
+	// The relays' keys stay in the cuinterpose namespace.
+	_, err = members[1].agent.Get(within(t), "inspect.1.cmd", 0)
+	require.ErrorIs(t, err, session.ErrNotFound)
+	got, err := members[1].session.CuInterpose().Get(within(t), "inspect.1.cmd", 0)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("INSPECT"), got)
+}
+
+func TestRelayDeadlineIsTheSessionsRoundedUpToTheSecond(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		deadline time.Time
+		want     string
+	}{
+		{"a deadline on a second", time.Unix(1_000_000, 0), "1000000"},
+		{"a deadline just past a second", time.Unix(1_000_000, 1), "1000001"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := session.Meta{
+				Deadline: tc.deadline,
+				Members:  []session.Member{{ID: "member-0"}, {ID: "member-1", Rank: 1}},
+			}
+			m := &Member{session: metaSession{meta: meta}, admissions: []Admission{{RunsRelay: true}, {RunsRelay: true}}}
+			assert.Equal(t, []string{"--rank", "0", "--relay-ranks", "0,1", "--deadline", tc.want}, m.relayArgs())
+		})
+	}
+}
+
+func TestRelayAnswersInAnyOrderAndRefusesAnIDAlreadyPending(t *testing.T) {
+	members := joinAll(t, 2)
+	r := openRelay(t, members[0])
+	peer := members[1].session.CuInterpose()
+
+	write(t, r.conn, map[string]any{"op": "get", "id": 1, "key": "inspect.1.cmd", "wait_ms": 60_000})
+	assert.Equal(t, answer{"id": uint64(2), "ok": true},
+		call(t, r.conn, map[string]any{"op": "insert", "id": 2, "key": "x", "value": []byte("x")}),
+		"a waiting get does not hold up a later request")
+	assert.Equal(t, answer{"id": uint64(1), "ok": false, "code": "INVALID"},
+		call(t, r.conn, map[string]any{"op": "get", "id": 1, "key": "x"}))
+	assert.Equal(t, answer{"id": uint64(3), "ok": false, "code": "INVALID"},
+		call(t, r.conn, map[string]any{"op": "rename", "id": 3}))
+	assert.Equal(t, answer{"id": uint64(4), "ok": false, "code": "EXISTS"},
+		call(t, r.conn, map[string]any{"op": "insert", "id": 4, "key": "x", "value": []byte("y")}))
+	assert.Equal(t, answer{"id": uint64(5), "ok": false, "code": "NOT_FOUND"},
+		call(t, r.conn, map[string]any{"op": "get", "id": 5, "key": "y"}), "a zero wait does not wait")
+
+	require.NoError(t, peer.Insert(within(t), "inspect.1.cmd", []byte{}))
+	assert.Equal(t, answer{"id": uint64(1), "ok": true, "value": []byte{}}, read(t, r.conn),
+		"the first get with id 1 is still the one answered, with its empty value")
+}
+
+func TestRelayFailEndsTheAttemptAsTheMemberWould(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		committed   bool
+		relayReason string
+		want        string
+	}{
+		{"before the admitted barrier", false, session.ReasonMemberFailed, session.ReasonRefused},
+		{"after the admitted barrier", true, session.ReasonRefused, session.ReasonMemberFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			members := joinAll(t, 2)
+			if tc.committed {
+				each(t, members, func(ctx context.Context, m *Member) error { return m.Barrier(ctx, Admitted) })
+			}
+			r := openRelay(t, members[0])
+			write(t, r.conn, map[string]any{"op": "get", "id": 7, "key": "inspect.1.cmd", "wait_ms": 60_000})
+
+			write(t, r.conn, map[string]any{"op": "fail", "id": 8, "reason": tc.relayReason})
+
+			got := []answer{read(t, r.conn), read(t, r.conn)}
+			assert.ElementsMatch(t, []answer{
+				{"id": uint64(7), "ok": false, "code": "ABORTED", "reason": tc.want},
+				{"id": uint64(8), "ok": true},
+			}, got)
+			var header [4]byte
+			_, err := io.ReadFull(r.conn, header[:])
+			assert.ErrorIs(t, err, io.EOF, "the agent closes its end after the last answer")
+			require.NoError(t, r.close())
+			<-members[1].session.Done()
+			assert.ErrorIs(t, members[1].session.Err(), &session.AbortError{Reason: tc.want})
+		})
+	}
+}
+
+// Two relays wait for each other until the deadline, then exit with an error,
+// after which their agents fail the attempt. The attempt still ends as the
+// coordinator ends it at the deadline, by a clock that may run behind theirs.
+func TestRelaysPastTheDeadlineLeaveTheAttemptDeadlineExceeded(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode string
+		// lag is how far the coordinator's clock runs behind the members',
+		// and ahead how far the relays' clocks run ahead of them.
+		lag, ahead time.Duration
+		// endedBy is the id of the relay's get that the session's end
+		// answers: 1 for its wait for the other relay, and 2 for its wait for
+		// the session's end, once the first has reached its deadline.
+		endedBy uint64
+	}{
+		{name: "the clocks agree", mode: "inspect", endedBy: 1},
+		{name: "the coordinator's clock runs behind", mode: "inspect", lag: time.Second, endedBy: 2},
+		{name: "the relays' clocks run ahead", mode: "prepare", ahead: time.Second, endedBy: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Half a second into a second, so the relay's deadline, rounded
+			// up, comes half a second after the session's.
+			deadline := time.Now().Truncate(time.Second).Add(2*time.Second + 500*time.Millisecond)
+			members := joinUntil(t, 2, deadline, tc.lag)
+			each(t, members, func(ctx context.Context, m *Member) error {
+				return m.Admit(ctx, Admission{PodIP: netip.MustParseAddr("10.1.0.1"), RunsRelay: true})
+			})
+			// Inspect runs before the commit, and prepare after it.
+			reason := session.ReasonRefused
+			if tc.mode != "inspect" {
+				reason = session.ReasonMemberFailed
+				each(t, members, func(ctx context.Context, m *Member) error { return m.Barrier(ctx, Admitted) })
+			}
+			// The leader waits for the follower's reply, and the follower for
+			// the leader's command, and neither comes.
+			keys := []string{tc.mode + ".1.reply.1", tc.mode + ".1.cmd"}
+			ended := make([]chan answer, len(members))
+			for rank, m := range members {
+				r := openRelay(t, m)
+				ended[rank] = make(chan answer, 1)
+				go func() {
+					got, err := relayPastDeadline(r.conn, r.args, tc.ahead, keys[rank], tc.mode, reason)
+					assert.NoError(t, err)
+					// The relay exits with an error, and its agent fails the
+					// attempt, as a capture or restore does.
+					_ = r.conn.Close()
+					assert.NoError(t, r.close())
+					assert.NoError(t, m.Fail(within(t)))
+					ended[rank] <- got
+				}()
+			}
+
+			for rank, m := range members {
+				assert.Equal(t, answer{
+					"id": tc.endedBy, "ok": false, "code": "ABORTED", "reason": session.ReasonDeadlineExceeded,
+				}, <-ended[rank])
+				assert.ErrorIs(t, m.session.Err(), &session.AbortError{Reason: session.ReasonDeadlineExceeded})
+			}
+		})
+	}
+}
+
+func TestRelayThatGoesAwayLeavesTheSession(t *testing.T) {
+	members := joinAll(t, 2)
+	r := openRelay(t, members[0])
+	write(t, r.conn, map[string]any{"op": "get", "id": 1, "key": "inspect.1.cmd", "wait_ms": 60_000})
+
+	require.NoError(t, r.conn.Close())
+
+	require.NoError(t, r.close())
+	assert.NoError(t, members[0].session.Err(), "the session outlives its relay")
+}
+
+func TestRelayWaitsForRoomInFlight(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		inserts int
+		value   []byte
+		want    int32
+	}{
+		// A get for the other member, and the requests besides.
+		{"by requests", 10, []byte("x"), 1 + relayRequestsBesideGets},
+		{"by bytes", 3, make([]byte, maxRelayBody-1024), 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := session.Meta{
+				Deadline: time.Now().Add(time.Hour),
+				Members:  []session.Member{{ID: "member-0"}, {ID: "member-1", Rank: 1}},
+			}
+			store := &holdingStore{release: make(chan struct{})}
+			r := openRelay(t, &Member{session: holdingSession{metaSession{meta: meta}, store}, id: "member-0"})
+			var frames []byte
+			for id := range tc.inserts {
+				frames = append(frames, frame(t, map[string]any{"op": "insert", "id": id, "key": strconv.Itoa(id), "value": tc.value})...)
+			}
+			written := make(chan error, 1)
+			go func() {
+				_, err := r.conn.Write(frames)
+				written <- err
+			}()
+
+			require.Eventually(t, func() bool { return store.started.Load() == tc.want }, 10*time.Second, time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
+			assert.Equal(t, tc.want, store.started.Load(), "the agent reads no request past the relay's room")
+
+			close(store.release)
+			for range tc.inserts {
+				assert.Equal(t, true, read(t, r.conn)["ok"])
+			}
+			require.NoError(t, <-written)
+		})
+	}
+}
+
+func TestRelayLeaderWaitingForEveryOtherRelayStillWrites(t *testing.T) {
+	members := joinAll(t, 4)
+	leader := openRelay(t, members[0])
+	// A request that waits for room fails the test rather than hang it.
+	require.NoError(t, leader.conn.SetDeadline(time.Now().Add(10*time.Second)))
+
+	// The leader waits for every other relay's reply at once.
+	for rank := 1; rank < 4; rank++ {
+		write(t, leader.conn, map[string]any{
+			"op": "get", "id": rank, "key": "round.reply." + strconv.Itoa(rank), "wait_ms": 60_000,
+		})
+	}
+	// Its writes still have room, the largest value among them, and so has an
+	// insert that ends one of its waits.
+	largest := make([]byte, members[0].session.Meta().MaxValue)
+	assert.Equal(t, answer{"id": uint64(4), "ok": true}, call(t, leader.conn,
+		map[string]any{"op": "insert", "id": 4, "key": "round.cmd", "value": largest}))
+	write(t, leader.conn, map[string]any{"op": "insert", "id": 5, "key": "round.reply.1", "value": []byte("1")})
+	assert.ElementsMatch(t, []answer{
+		{"id": uint64(1), "ok": true, "value": []byte("1")},
+		{"id": uint64(5), "ok": true},
+	}, []answer{read(t, leader.conn), read(t, leader.conn)})
+
+	// The other relays' replies end the other waits.
+	for rank := 2; rank < 4; rank++ {
+		require.NoError(t, members[rank].session.CuInterpose().Insert(within(t), "round.reply."+strconv.Itoa(rank), []byte("r")))
+	}
+	assert.ElementsMatch(t, []answer{
+		{"id": uint64(2), "ok": true, "value": []byte("r")},
+		{"id": uint64(3), "ok": true, "value": []byte("r")},
+	}, []answer{read(t, leader.conn), read(t, leader.conn)})
+}
+
+func TestRelayThatStopsReadingDoesNotHoldTheAgent(t *testing.T) {
+	original := relayAnswerTimeout
+	t.Cleanup(func() { relayAnswerTimeout = original })
+	relayAnswerTimeout = 100 * time.Millisecond
+
+	for _, tc := range []struct {
+		name string
+		end  func(t *testing.T, peer *Member, conn net.Conn)
+	}{
+		{"the session ends", func(t *testing.T, peer *Member, _ net.Conn) {
+			require.NoError(t, peer.Fail(within(t)))
+		}},
+		{"the relay breaks the protocol", func(t *testing.T, _ *Member, conn net.Conn) {
+			_, err := conn.Write(binary.LittleEndian.AppendUint32(nil, maxRelayBody+1))
+			require.NoError(t, err)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			members := joinAll(t, 2)
+			r := openRelay(t, members[0])
+			// The relay starts to read an answer far larger than its socket's
+			// buffer, and then reads no more.
+			require.NoError(t, members[1].session.CuInterpose().Insert(within(t), "records", make([]byte, 8<<20)))
+			write(t, r.conn, map[string]any{"op": "get", "id": 1, "key": "records"})
+			var header [4]byte
+			_, err := io.ReadFull(r.conn, header[:])
+			require.NoError(t, err)
+
+			tc.end(t, members[1], r.conn)
+
+			served := make(chan struct{})
+			go func() {
+				_ = r.close()
+				close(served)
+			}()
+			select {
+			case <-served:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the agent still writes to a relay that stopped reading")
+			}
+		})
+	}
+}
+
+func TestRelayFrameWithAnUnknownFieldEndsTheService(t *testing.T) {
+	members := joinAll(t, 2)
+	r := openRelay(t, members[0])
+	// A map whose one field is unknown, and nests arrays as deep as a frame
+	// allows: skipping it would recurse once for each level, past the stack's
+	// limit, which would end the agent.
+	body := append([]byte{0x81, 0xa1, 'x'}, bytes.Repeat([]byte{0x91}, maxRelayBody-4)...)
+	body = append(body, 0xc0)
+	_, err := r.conn.Write(append(binary.LittleEndian.AppendUint32(nil, uint32(len(body))), body...))
+	require.NoError(t, err)
+
+	var header [4]byte
+	_, err = io.ReadFull(r.conn, header[:])
+	assert.ErrorIs(t, err, io.EOF, "the agent closes its end")
+	require.ErrorContains(t, r.close(), `unknown field "x"`)
+	assert.NoError(t, members[0].session.Err(), "the session outlives its relay")
+}
+
+func TestFabricPeersAreTheLeadersRecordForTheMember(t *testing.T) {
+	members := joinAll(t, 3)
+	// Rank 1 has no CUDA processes, so it runs no relay.
+	each(t, members, func(ctx context.Context, m *Member) error {
+		return m.Admit(ctx, Admission{PodIP: netip.MustParseAddr("10.1.0.1"), RunsRelay: m.Rank() != 1})
+	})
+
+	// The read does not wait for a record that is not there, as a leader
+	// older than the agent leaves it out.
+	_, err := members[0].FabricPeers(within(t))
+	require.EqualError(t, err, "the leader of the cuInterpose relays recorded no inspect.fabric-peers, "+
+		"which a cuInterpose older than this agent leaves out")
+
+	// rmp_serde's encoding of the leader's map {0: [2], 2: [0]}.
+	record := []byte{0x82, 0x00, 0x91, 0x02, 0x02, 0x91, 0x00}
+	require.NoError(t, members[0].session.CuInterpose().Insert(within(t), "inspect.fabric-peers", record))
+	for _, rank := range []int{0, 2} {
+		peers, err := members[rank].FabricPeers(within(t))
+		require.NoError(t, err)
+		assert.Equal(t, []int{2 - rank}, peers)
+	}
+}
+
+func TestFabricPeersRefusesARecordItCannotUse(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		record  []byte
+		wantErr string
+	}{
+		{name: "a relay that shares memory with none", record: []byte{0x83, 0x00, 0x90, 0x01, 0x90, 0x02, 0x90}},
+		{
+			name:    "no entry for the member",
+			record:  []byte{0x81, 0x01, 0x90},
+			wantErr: "inspect.fabric-peers has no entry for rank 0",
+		},
+		{
+			name:    "the member's own rank",
+			record:  []byte{0x81, 0x00, 0x91, 0x00},
+			wantErr: "inspect.fabric-peers lists rank 0 for rank 0, which is not another relay's rank",
+		},
+		{
+			name:    "a member that runs no relay",
+			record:  []byte{0x81, 0x00, 0x91, 0x02},
+			wantErr: "inspect.fabric-peers lists rank 2 for rank 0, which is not another relay's rank",
+		},
+		{
+			name:    "a rank past the group",
+			record:  []byte{0x81, 0x00, 0x91, 0x03},
+			wantErr: "inspect.fabric-peers lists rank 3 for rank 0, which is not another relay's rank",
+		},
+		{name: "not a map", record: []byte{0x91, 0x00}, wantErr: "decode inspect.fabric-peers"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &Member{
+				session:    recordedSession{record: tc.record},
+				admissions: []Admission{{RunsRelay: true}, {RunsRelay: true}, {}},
+			}
+			peers, err := m.FabricPeers(within(t))
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Empty(t, peers)
+		})
+	}
+}
+
+// relayPastDeadline does on conn what a cuInterpose relay does when its wait
+// for key reaches the deadline args give it, by a clock ahead of its member's
+// by ahead. It waits for the session's end with a get of mode.end, which
+// nobody inserts, until 60 seconds past the deadline, and fails the session
+// with reason only if that wait runs out. It returns the last answer it read.
+func relayPastDeadline(conn net.Conn, args []string, ahead time.Duration, key, mode, reason string) (answer, error) {
+	seconds, err := strconv.ParseInt(args[5], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	deadline := time.Unix(seconds, 0)
+	until := func(at time.Time) int64 { return max(time.Until(at)-ahead, 0).Milliseconds() }
+	ask := func(request map[string]any) (answer, error) {
+		body, err := msgpack.Marshal(request)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := conn.Write(append(binary.LittleEndian.AppendUint32(nil, uint32(len(body))), body...)); err != nil {
+			return nil, err
+		}
+		var header [4]byte
+		if _, err := io.ReadFull(conn, header[:]); err != nil {
+			return nil, err
+		}
+		body = make([]byte, binary.LittleEndian.Uint32(header[:]))
+		if _, err := io.ReadFull(conn, body); err != nil {
+			return nil, err
+		}
+		var a answer
+		return a, msgpack.Unmarshal(body, &a)
+	}
+
+	got, err := ask(map[string]any{"op": "get", "id": 1, "key": key, "wait_ms": until(deadline)})
+	if err != nil || (got["code"] != "NOT_YET" && got["code"] != "NOT_FOUND") {
+		return got, err
+	}
+	got, err = ask(map[string]any{"op": "get", "id": 2, "key": mode + ".end", "wait_ms": until(deadline.Add(time.Minute))})
+	if err != nil || got["code"] != "NOT_YET" {
+		return got, err
+	}
+	return ask(map[string]any{"op": "fail", "id": 3, "reason": reason})
+}
+
+// testRelay is the relay's end of a relay socket, as a connection.
+type testRelay struct {
+	conn  net.Conn
+	args  []string
+	close func() error
+}
+
+// openRelay admits m alone as a relay, unless it was admitted already, and
+// opens its relay socket.
+func openRelay(t *testing.T, m *Member) testRelay {
+	t.Helper()
+	if m.Admissions() == nil {
+		m.admissions = make([]Admission, len(m.session.Meta().Members))
+		m.admissions[m.Rank()].RunsRelay = true
+	}
+	r, err := m.OpenRelay(within(t))
+	require.NoError(t, err)
+	conn, err := net.FileConn(r.File)
+	require.NoError(t, err)
+	// Only the test's connection keeps the relay's end open.
+	require.NoError(t, r.File.Close())
+	closeRelay := sync.OnceValue(r.Close)
+	t.Cleanup(func() {
+		_ = conn.Close()
+		_ = closeRelay()
+	})
+	return testRelay{conn: conn, args: r.Args, close: closeRelay}
+}
+
+// answer is an answer as the relay decodes it: only the fields the agent sent.
+type answer map[string]any
+
+func write(t *testing.T, conn net.Conn, request map[string]any) {
+	t.Helper()
+	_, err := conn.Write(frame(t, request))
+	require.NoError(t, err)
+}
+
+// frame encodes request as one frame.
+func frame(t *testing.T, request map[string]any) []byte {
+	t.Helper()
+	body, err := msgpack.Marshal(request)
+	require.NoError(t, err)
+	return append(binary.LittleEndian.AppendUint32(nil, uint32(len(body))), body...)
+}
+
+func read(t *testing.T, conn net.Conn) answer {
+	t.Helper()
+	var header [4]byte
+	_, err := io.ReadFull(conn, header[:])
+	require.NoError(t, err)
+	body := make([]byte, binary.LittleEndian.Uint32(header[:]))
+	_, err = io.ReadFull(conn, body)
+	require.NoError(t, err)
+	var a answer
+	require.NoError(t, msgpack.Unmarshal(body, &a))
+	return a
+}
+
+// call writes request and reads the next answer, for a request answered
+// before any other pending one.
+func call(t *testing.T, conn net.Conn, request map[string]any) answer {
+	t.Helper()
+	write(t, conn, request)
+	return read(t, conn)
+}
+
+// recordedSession is a member's session of rank 0 whose relays' leader
+// recorded record, and nothing else.
+type recordedSession struct {
+	metaSession
+	record []byte
+}
+
+func (s recordedSession) CuInterpose() coordinator.Store { return recordedStore{record: s.record} }
+
+type recordedStore struct {
+	coordinator.Store
+	record []byte
+}
+
+func (s recordedStore) Get(context.Context, string, time.Duration) ([]byte, error) {
+	return s.record, nil
+}
+
+// holdingSession is a member's session of rank 0, which never ends, whose
+// relay store is store.
+type holdingSession struct {
+	metaSession
+	store *holdingStore
+}
+
+func (s holdingSession) CuInterpose() coordinator.Store { return s.store }
+
+func (holdingSession) Done() <-chan struct{} { return nil }
+
+// holdingStore holds every insert until release is closed, and counts the
+// inserts it has started.
+type holdingStore struct {
+	coordinator.Store
+	release chan struct{}
+	started atomic.Int32
+}
+
+func (s *holdingStore) Insert(ctx context.Context, _ string, _ []byte) error {
+	s.started.Add(1)
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+	}
+	return nil
+}

@@ -34,6 +34,28 @@ type CuInterposeTarget struct {
 	// coordinator endpoints.
 	NamespacePIDs []int
 	Binary        string
+	// Relay, for a member of a pod group, runs the coordinator as its Pod's
+	// relay in the group. Nil for a Pod alone.
+	Relay *CuInterposeRelay
+}
+
+// CuInterposeRelay runs a coordinator as its Pod's relay in a pod group. The
+// coordinator inherits Session, its end of the member's session socket, and Args
+// place it in the group.
+type CuInterposeRelay struct {
+	Session *os.File
+	Args    []string
+}
+
+// inherit passes the session socket to cmd and returns the arguments that make
+// the coordinator a relay, none for a Pod alone.
+func (r *CuInterposeRelay) inherit(cmd *exec.Cmd) []string {
+	if r == nil {
+		return nil
+	}
+	fd := 3 + len(cmd.ExtraFiles)
+	cmd.ExtraFiles = append(cmd.ExtraFiles, r.Session)
+	return append([]string{"--session-fd", strconv.Itoa(fd)}, r.Args...)
 }
 
 type cuInterposeOperation string
@@ -79,16 +101,19 @@ func runCuInterposeInContainer(ctx context.Context, operation cuInterposeOperati
 	}
 	command := coordinatorCommand{operation: operation, checkpointDir: checkpointDir, namespacePIDs: target.NamespacePIDs}
 	cmd.Args = append(cmd.Args, command.args()...)
+	cmd.Args = append(cmd.Args, target.Relay.inherit(cmd)...)
 	return executeCoordinator(cmd)
 }
 
 // RestoreCuInterpose runs inside the restored namespaces through a binary descriptor
 // opened before CRIU.
-func RestoreCuInterpose(ctx context.Context, checkpointDir string, namespacePIDs []int, binary string) error {
+func RestoreCuInterpose(ctx context.Context, checkpointDir string, namespacePIDs []int, binary string, relay *CuInterposeRelay) error {
 	// Sharing nsrestore's process group lets cancellation by its host parent reach this
 	// coordinator even if nsrestore has already been killed.
 	command := coordinatorCommand{operation: cuInterposeRestore, checkpointDir: checkpointDir, namespacePIDs: namespacePIDs}
-	return executeCoordinator(exec.CommandContext(ctx, binary, command.args()...))
+	cmd := exec.CommandContext(ctx, binary, command.args()...)
+	cmd.Args = append(cmd.Args, relay.inherit(cmd)...)
+	return executeCoordinator(cmd)
 }
 
 func executeCoordinator(cmd *exec.Cmd) error {

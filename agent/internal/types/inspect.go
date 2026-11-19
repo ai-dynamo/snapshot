@@ -56,3 +56,20 @@ type RestoreContainerSnapshot struct {
 	CUDADeviceMap   string
 	GPUMountAliases map[string]string
 }
+
+// GPUFabric is where a GPU is in its NVLink fabric, as nvidia-smi reports it.
+// GPUs share memory over NVLink only within one clique of one cluster.
+type GPUFabric struct {
+	UUID        string `json:"uuid"`
+	ClusterUUID string `json:"clusterUUID"`
+	CliqueID    string `json:"cliqueID"`
+	// State and Status are the GPU's registration with the fabric, which
+	// assigns its cluster and clique.
+	State  string `json:"state"`
+	Status string `json:"status"`
+}
+
+// Ready reports that the GPU has registered with its fabric.
+func (f GPUFabric) Ready() bool {
+	return f.State == "Completed" && f.Status == "Success"
+}

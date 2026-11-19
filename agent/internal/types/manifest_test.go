@@ -138,6 +138,7 @@ func TestPodGroupManifestRoundTrip(t *testing.T) {
 			{ID: "leader", PodUID: "pod-uid-0", Containers: []string{"main"}, PodIP: netip.MustParseAddr("10.0.0.1")},
 			{ID: "worker", PodUID: "pod-uid-1", Containers: []string{"engine"}, PodIP: netip.MustParseAddr("10.0.0.2")},
 		},
+		FabricPeers: []int{0},
 	}
 	if err := WriteManifest(dir, original); err != nil {
 		t.Fatalf("WriteManifest: %v", err)
@@ -163,6 +164,8 @@ func TestPodGroupManifestRoundTrip(t *testing.T) {
           containers:
             - engine
           podIP: 10.0.0.2
+    fabricPeers:
+        - 0
 `
 	if !strings.HasSuffix(string(content), want) {
 		t.Errorf("manifest = %s, want it to end with %s", content, want)

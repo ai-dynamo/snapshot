@@ -5,8 +5,10 @@ package executor
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -18,8 +20,10 @@ import (
 	"github.com/go-logr/logr/testr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/vmihailenco/msgpack/v5"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/group"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
@@ -33,6 +37,8 @@ import (
 func TestGroupRestoreRefusesAnotherMembersArtifact(t *testing.T) {
 	otherVersion := capturedAs("worker", "leader", "worker")
 	otherVersion.Version = types.PodGroupManifestVersion + 1
+	sharedWithItself := capturedAs("worker", "leader", "worker")
+	sharedWithItself.FabricPeers = []int{1}
 	for _, tc := range []struct {
 		name     string
 		captured *types.PodGroupManifest
@@ -59,6 +65,11 @@ func TestGroupRestoreRefusesAnotherMembersArtifact(t *testing.T) {
 			name:     "an artifact of a capture with more members",
 			captured: capturedAs("worker", "leader", "worker", "spare"),
 			want:     "the capture had 3 members, the restore has 2",
+		},
+		{
+			name:     "an artifact that shared GPU memory with its own member",
+			captured: sharedWithItself,
+			want:     "the artifact lists rank 1 as a member it shared GPU memory with, which is not another member's rank",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -169,6 +180,110 @@ func TestGroupCheckpointFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
 	}
 }
 
+func TestGroupCheckpointThatCuInterposeRefusesNeverCommits(t *testing.T) {
+	member, peer := joinMembers(t)
+	peerEnded := runPeer(t, peer, group.Admission{PodIP: netip.MustParseAddr("10.0.0.2")}, group.NetFreeze)
+	socket := serveCheckpointStaging(t, t.TempDir())
+	// The relays' leader finds the group's topology invalid, and the member's
+	// coordinator exits with an error.
+	var inspected cuda.CuInterposeTarget
+	stubCuInterpose(t, func(target cuda.CuInterposeTarget) error {
+		inspected = target
+		return errors.New("cuinterpose coordinator: exit status 1: the group's topology is invalid")
+	})
+	captured := false
+	stubCapture(t, func(*types.CheckpointManifest) (*checkpointPhaseTimings, error) {
+		captured = true
+		return nil, errors.New("the capture started")
+	})
+	cfg := &types.AgentConfig{
+		Storage:    types.StorageSpec{BasePath: t.TempDir()},
+		PageBroker: types.PageBrokerSpec{ControlSocketPath: socket},
+	}
+	recorded := false
+	req := CheckpointRequest{
+		ContentUID: "content-uid", ContainerName: "main", PodIP: "10.0.0.1", Group: member,
+		Committed: func(context.Context) error {
+			recorded = true
+			return nil
+		},
+	}
+	_, err := checkpoint(groupTestContext(t), nil, testr.New(t), req, cfg, inspectCUDA(t))
+
+	assert.Equal(t, StepAdmitGroup, StepOf(err), "%v", err)
+	assert.ErrorContains(t, err, "the group's topology is invalid")
+	require.NotNil(t, inspected.Relay, "the coordinator inspects as the member's relay")
+	assert.Equal(t, []string{"--rank", "0", "--relay-ranks", "0"}, inspected.Relay.Args[:4])
+	assert.False(t, recorded, "the commit was recorded")
+	assert.False(t, captured, "the capture started")
+	outcome := <-peerEnded
+	assert.False(t, outcome.committed, "the peer passed the admitted barrier")
+	require.ErrorIs(t, outcome.err, &session.AbortError{Reason: session.ReasonRefused})
+}
+
+func TestGroupCheckpointRecordsTheMembersItSharesGPUMemoryWith(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// record is what the relays' leader records at inspect, or nothing
+		// if it is nil.
+		record     []byte
+		wantStep   Step
+		wantErr    string
+		wantPeers  []int
+		wantReason string
+	}{
+		{
+			name: "the leader records them",
+			// rmp_serde's encoding of the leader's map {0: [1], 1: [0]}.
+			record:     []byte{0x82, 0x00, 0x91, 0x01, 0x01, 0x91, 0x00},
+			wantStep:   StepDumpCRIU,
+			wantPeers:  []int{1},
+			wantReason: session.ReasonMemberFailed,
+		},
+		{
+			name:       "the leader records nothing",
+			wantStep:   StepAdmitGroup,
+			wantErr:    "the leader of the cuInterpose relays recorded no inspect.fabric-peers",
+			wantReason: session.ReasonRefused,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			member, peer := joinMembers(t)
+			peerEnded := runPeer(t, peer, group.Admission{PodIP: netip.MustParseAddr("10.0.0.2"), RunsRelay: true},
+				group.NetFreeze)
+			socket := serveCheckpointStaging(t, t.TempDir())
+			// The member's coordinator inspects as the relays' leader.
+			stubCuInterpose(t, func(target cuda.CuInterposeTarget) error {
+				if tc.record == nil {
+					return nil
+				}
+				return insertThroughRelay(target.Relay, "inspect.fabric-peers", tc.record)
+			})
+			var recorded *types.PodGroupManifest
+			stubCapture(t, func(data *types.CheckpointManifest) (*checkpointPhaseTimings, error) {
+				recorded = data.PodGroup
+				return nil, failStep(StepDumpCRIU, errors.New("stop after the manifest is recorded"))
+			})
+			cfg := &types.AgentConfig{
+				Storage:    types.StorageSpec{BasePath: t.TempDir()},
+				PageBroker: types.PageBrokerSpec{ControlSocketPath: socket},
+			}
+			req := CheckpointRequest{ContentUID: "content-uid", ContainerName: "main", PodIP: "10.0.0.1", Group: member}
+			_, err := checkpoint(groupTestContext(t), nil, testr.New(t), req, cfg, inspectCUDA(t))
+
+			assert.Equal(t, tc.wantStep, StepOf(err), "%v", err)
+			if tc.wantErr != "" {
+				assert.ErrorContains(t, err, tc.wantErr)
+				assert.Nil(t, recorded, "the capture started")
+			} else {
+				require.NotNil(t, recorded, "the capture started")
+				assert.Equal(t, tc.wantPeers, recorded.FabricPeers)
+			}
+			require.ErrorIs(t, (<-peerEnded).err, &session.AbortError{Reason: tc.wantReason})
+		})
+	}
+}
+
 func TestGroupRestoreFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -232,6 +347,90 @@ func TestGroupRestoreFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
 			outcome := <-peerEnded
 			assert.Equal(t, tc.wantCommitted, outcome.committed, "whether the peer passed the admitted barrier")
 			require.ErrorIs(t, outcome.err, &session.AbortError{Reason: tc.wantReason})
+		})
+	}
+}
+
+func TestGroupRestoreRefusesMembersThatSharedGPUMemoryOutsideOneNVLinkClique(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// fabricPeers is what the member's artifact records, and peerFabric
+		// what the peer publishes.
+		fabricPeers   []int
+		peerFabric    *group.FabricAdmission
+		wantStep      Step
+		wantErr       string
+		wantCommitted bool
+		wantReason    string
+	}{
+		{
+			name:          "the members shared no GPU memory",
+			wantStep:      StepMountBundle,
+			wantCommitted: true,
+			wantReason:    session.ReasonMemberFailed,
+		},
+		{
+			name:        "the peer's GPU is in the member's clique",
+			fabricPeers: []int{1},
+			peerFabric: &group.FabricAdmission{
+				Peers: []int{0}, GPUs: []types.GPUFabric{inClique("GPU-b", "cluster-a", "1")},
+			},
+			wantStep:      StepMountBundle,
+			wantCommitted: true,
+			wantReason:    session.ReasonMemberFailed,
+		},
+		{
+			name:        "the peer's GPU is in another clique",
+			fabricPeers: []int{1},
+			peerFabric: &group.FabricAdmission{
+				Peers: []int{0}, GPUs: []types.GPUFabric{inClique("GPU-b", "cluster-a", "2")},
+			},
+			wantStep:   StepAdmitGroup,
+			wantErr:    "rank 1's GPU GPU-b is in NVLink clique 2, but rank 0's GPU GPU-a is in clique 1",
+			wantReason: session.ReasonRefused,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			member, peer := joinMembers(t)
+			peerEnded := runPeer(t, peer, group.Admission{
+				PodIP: netip.MustParseAddr("10.0.0.2"), CaptureID: "capture-1", Fabric: tc.peerFabric,
+			}, group.Release)
+			captured := capturedAs("member-0", "member-0", "member-1")
+			captured.FabricPeers = tc.fabricPeers
+			base := writeGroupArtifact(t, captured)
+			original := readGPUFabricFunc
+			t.Cleanup(func() { readGPUFabricFunc = original })
+			readGPUFabricFunc = func(context.Context, []string) ([]types.GPUFabric, error) {
+				if tc.fabricPeers == nil {
+					t.Error("a member that shared no GPU memory read its GPUs' NVLink fabric")
+				}
+				return []types.GPUFabric{inClique("GPU-a", "cluster-a", "1")}, nil
+			}
+
+			mounted := false
+			mounter := stoppingMounter{stop: func() error {
+				mounted = true
+				return errors.New("the bundle mount failed")
+			}}
+			req := RestoreRequest{
+				BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+				TargetPodIP: "10.0.0.1", WithoutProxy: true, SkipCompatCheck: true, Group: member,
+			}
+			_, err := Restore(groupTestContext(t), &restoreFakeRuntime{}, testr.New(t), req, mounter)
+
+			assert.Equal(t, tc.wantStep, StepOf(err), "%v", err)
+			assert.Equal(t, tc.wantCommitted, mounted, "whether the restore went past its admission")
+			outcome := <-peerEnded
+			assert.Equal(t, tc.wantCommitted, outcome.committed, "whether the peer passed the admitted barrier")
+			require.ErrorIs(t, outcome.err, &session.AbortError{Reason: tc.wantReason})
+			// The peer reaches the same verdict from the same admissions.
+			verdict := checkFabric(peer.Rank(), peer.Admissions())
+			if tc.wantErr == "" {
+				require.NoError(t, verdict)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
+			require.ErrorContains(t, verdict, tc.wantErr, "the peer's verdict")
 		})
 	}
 }
@@ -702,6 +901,60 @@ func inspectNothing(t *testing.T) func(context.Context, snapshotruntime.Runtime,
 	return func(context.Context, snapshotruntime.Runtime, logr.Logger, CheckpointRequest) (*types.CheckpointContainerSnapshot, time.Duration, error) {
 		return &types.CheckpointContainerSnapshot{PID: -1, RootFS: t.TempDir()}, 0, nil
 	}
+}
+
+// inspectCUDA inspects a source with one CUDA process, and without anything
+// else a capture's later steps would read.
+func inspectCUDA(t *testing.T) func(context.Context, snapshotruntime.Runtime, logr.Logger, CheckpointRequest) (*types.CheckpointContainerSnapshot, time.Duration, error) {
+	return func(context.Context, snapshotruntime.Runtime, logr.Logger, CheckpointRequest) (*types.CheckpointContainerSnapshot, time.Duration, error) {
+		return &types.CheckpointContainerSnapshot{PID: -1, RootFS: t.TempDir(), CUDAHostPIDs: []int{1001}, CUDANSPIDs: []int{1}}, 0, nil
+	}
+}
+
+// stubCuInterpose has every CUDA process of the source load cuInterpose's
+// core, so its coordinator runs, and replaces that coordinator's inspection,
+// in the group's admission, with inspect.
+func stubCuInterpose(t *testing.T, inspect func(cuda.CuInterposeTarget) error) {
+	t.Helper()
+	originalLibraries, originalCoordinator := inspectCuInterposeFunc, inspectWithRelayFunc
+	t.Cleanup(func() { inspectCuInterposeFunc, inspectWithRelayFunc = originalLibraries, originalCoordinator })
+	inspectCuInterposeFunc = func(_ context.Context, state *types.CheckpointContainerSnapshot, _, _ bool) (*types.CuInterposeManifest, error) {
+		manifest := testCuInterposeIdentity()
+		manifest.PIDs = state.CUDANSPIDs
+		return manifest, nil
+	}
+	inspectWithRelayFunc = func(_ context.Context, target cuda.CuInterposeTarget) error { return inspect(target) }
+}
+
+// insertThroughRelay inserts value under key in the session's cuinterpose
+// namespace, through relay's session socket, as the relay's coordinator would.
+func insertThroughRelay(relay *cuda.CuInterposeRelay, key string, value []byte) error {
+	body, err := msgpack.Marshal(map[string]any{"op": "insert", "id": 1, "key": key, "value": value})
+	if err != nil {
+		return err
+	}
+	if _, err := relay.Session.Write(append(binary.LittleEndian.AppendUint32(nil, uint32(len(body))), body...)); err != nil {
+		return err
+	}
+	var header [4]byte
+	if _, err := io.ReadFull(relay.Session, header[:]); err != nil {
+		return err
+	}
+	body = make([]byte, binary.LittleEndian.Uint32(header[:]))
+	if _, err := io.ReadFull(relay.Session, body); err != nil {
+		return err
+	}
+	var answer struct {
+		OK   bool   `msgpack:"ok"`
+		Code string `msgpack:"code"`
+	}
+	if err := msgpack.Unmarshal(body, &answer); err != nil {
+		return err
+	}
+	if !answer.OK {
+		return fmt.Errorf("insert %s: %s", key, answer.Code)
+	}
+	return nil
 }
 
 // stubCapture replaces the GPU checkpoint and the dump, the first steps after
