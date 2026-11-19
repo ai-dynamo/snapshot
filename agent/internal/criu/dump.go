@@ -33,8 +33,31 @@ const (
 // versionTimeout bounds asking CRIU what it is. Overridden in tests.
 var versionTimeout = 5 * time.Second
 
+// versionWaitDelay bounds the wait for the version command's output after its
+// deadline. Killing the process does not close pipes a grandchild inherited,
+// and a configured wrapper can leave one holding them.
+const versionWaitDelay = time.Second
+
 // DefaultBinary is the CRIU the agent runs when its configuration names none.
 const DefaultBinary = "criu"
+
+// ResolveBinary names the CRIU the agent will run.
+//
+// One rule for every caller: LookPath takes a bare name from PATH and a path as
+// given, and reports either being unusable the same way. Resolving differently
+// per caller is how the version reported at startup comes to name a binary no
+// dump can run.
+func ResolveBinary(settings *types.CRIUSettings) (string, error) {
+	name := DefaultBinary
+	if settings != nil && strings.TrimSpace(settings.BinaryPath) != "" {
+		name = strings.TrimSpace(settings.BinaryPath)
+	}
+	path, err := exec.LookPath(name)
+	if err != nil {
+		return "", fmt.Errorf("criu binary %q is not usable: %w", name, err)
+	}
+	return path, nil
+}
 
 // Version reports the CRIU that will run: the version it states, and for a
 // build from git the commit it was built at.
@@ -48,22 +71,28 @@ const DefaultBinary = "criu"
 // the number it returns is not the one CRIU states, and it discards the commit
 // the same response carries.
 func Version(ctx context.Context, settings *types.CRIUSettings) (string, error) {
-	binary := DefaultBinary
-	if settings != nil && strings.TrimSpace(settings.BinaryPath) != "" {
-		binary = settings.BinaryPath
+	binary, err := ResolveBinary(settings)
+	if err != nil {
+		return "", err
 	}
 	ctx, cancel := context.WithTimeout(ctx, versionTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, binary, "--version").CombinedOutput()
+	cmd := exec.CommandContext(ctx, binary, "--version")
+	// The deadline kills the process; without this it would not end a wait on
+	// output pipes something else still holds open.
+	cmd.WaitDelay = versionWaitDelay
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("ask %s its version: %w", binary, err)
 	}
 	return parseVersion(string(out))
 }
 
+// Each field is on its own line, so the value cannot be read from the next one:
+// \s* would cross the newline and take an empty Version: as whatever follows.
 var (
-	versionLine = regexp.MustCompile(`(?m)^Version:\s*(\S+)`)
-	gitIDLine   = regexp.MustCompile(`(?m)^GitID:\s*(\S+)`)
+	versionLine = regexp.MustCompile(`(?m)^Version:[ \t]*(\S+)`)
+	gitIDLine   = regexp.MustCompile(`(?m)^GitID:[ \t]*(\S+)`)
 )
 
 // parseVersion reads what `criu --version` states. GitID is printed only for a
@@ -185,12 +214,11 @@ func ExecuteDump(
 
 	criuDumpStart := time.Now()
 	criuClient := criulib.MakeCriu()
-	if settings != nil && strings.TrimSpace(settings.BinaryPath) != "" {
-		if _, err := os.Stat(settings.BinaryPath); err != nil {
-			return 0, fmt.Errorf("criu binary not found at %s: %w", settings.BinaryPath, err)
-		}
-		criuClient.SetCriuPath(settings.BinaryPath)
+	binary, err := ResolveBinary(settings)
+	if err != nil {
+		return 0, err
 	}
+	criuClient.SetCriuPath(binary)
 	if err := criuClient.Dump(criuOpts, nil); err != nil {
 		dumpDuration := time.Since(criuDumpStart)
 		dumpLogPath := filepath.Join(checkpointDir, dumpLogFilename)
