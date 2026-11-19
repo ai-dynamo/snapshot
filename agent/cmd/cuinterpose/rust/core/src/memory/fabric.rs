@@ -741,18 +741,56 @@ mod tests {
         };
         use cudarc::driver::sys::*;
         use std::ffi::{CStr, c_void};
-        use std::sync::Barrier;
         use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Condvar, Mutex};
+        use std::time::Duration;
 
-        /// Set to make the next call that checks it wait at `CALL` once it is in the
-        /// driver, and again before it returns.
+        /// Set to make the next call that checks it hold in the driver until the test
+        /// releases it through `CALL`.
         pub(super) static BLOCK: AtomicBool = AtomicBool::new(false);
-        pub(super) static CALL: Barrier = Barrier::new(2);
+        pub(super) static CALL: Handshake = Handshake {
+            entered: Mutex::new(false),
+            changed: Condvar::new(),
+        };
+
+        /// A call held in the driver, and the test that releases it. The test bounds
+        /// its wait, so a call that never reaches the driver fails the test.
+        pub(super) struct Handshake {
+            entered: Mutex<bool>,
+            changed: Condvar,
+        }
+
+        impl Handshake {
+            fn hold(&self) {
+                let mut entered = self.entered.lock().unwrap();
+                *entered = true;
+                self.changed.notify_all();
+                drop(
+                    self.changed
+                        .wait_while(entered, |entered| *entered)
+                        .unwrap(),
+                );
+            }
+
+            /// Whether a call entered the driver within `timeout`.
+            pub(super) fn entered(&self, timeout: Duration) -> bool {
+                let entered = self.entered.lock().unwrap();
+                let (_entered, wait) = self
+                    .changed
+                    .wait_timeout_while(entered, timeout, |entered| !*entered)
+                    .unwrap();
+                !wait.timed_out()
+            }
+
+            pub(super) fn release(&self) {
+                *self.entered.lock().unwrap() = false;
+                self.changed.notify_all();
+            }
+        }
 
         fn wait() {
             if BLOCK.swap(false, Ordering::SeqCst) {
-                CALL.wait();
-                CALL.wait();
+                CALL.hold();
             }
         }
 
@@ -983,11 +1021,15 @@ mod tests {
         call: impl FnOnce() -> Result<()> + Send + 'static,
         meanwhile: impl FnOnce(),
     ) -> Result<()> {
+        let timeout = std::time::Duration::from_secs(10);
         fake::BLOCK.store(true, std::sync::atomic::Ordering::SeqCst);
         let call = std::thread::spawn(call);
-        fake::CALL.wait();
+        if !fake::CALL.entered(timeout) {
+            let early = call.is_finished().then(|| call.join().unwrap());
+            panic!("the call did not reach the driver within {timeout:?}, and returned {early:?}");
+        }
         meanwhile();
-        fake::CALL.wait();
+        fake::CALL.release();
         call.join().unwrap()
     }
 
