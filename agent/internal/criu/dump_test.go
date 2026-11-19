@@ -6,6 +6,7 @@ package criu
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -78,6 +79,44 @@ func TestParseVersion(t *testing.T) {
 
 	_, err := parseVersion("criu: command not found")
 	assert.Error(t, err, "output with no version is an error, not an empty version")
+
+	_, err = parseVersion("Version:\nGitID: v4.3-128-g1a2b3c4d\n")
+	assert.Error(t, err, "a field is read from its own line, never the next one")
+}
+
+// Both callers resolve the configured binary the same way, so the version the
+// agent reports at startup names the binary its dumps run.
+func TestResolveBinary(t *testing.T) {
+	dir := t.TempDir()
+	onPath := filepath.Join(dir, DefaultBinary)
+	require.NoError(t, os.WriteFile(onPath, []byte("#!/bin/sh\n"), 0o755))
+	t.Setenv("PATH", dir)
+
+	for _, tc := range []struct {
+		name     string
+		settings *types.CRIUSettings
+		want     string
+	}{
+		{name: "no configuration takes the default off PATH", want: onPath},
+		{name: "a bare name is taken off PATH", want: onPath,
+			settings: &types.CRIUSettings{BinaryPath: DefaultBinary}},
+		{name: "a path is taken as given", want: onPath,
+			settings: &types.CRIUSettings{BinaryPath: onPath}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ResolveBinary(tc.settings)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+
+	_, err := ResolveBinary(&types.CRIUSettings{BinaryPath: filepath.Join(dir, "no-such-criu")})
+	assert.Error(t, err, "a binary that is not there is not usable")
+
+	notExecutable := filepath.Join(dir, "unrunnable")
+	require.NoError(t, os.WriteFile(notExecutable, nil, 0o644))
+	_, err = ResolveBinary(&types.CRIUSettings{BinaryPath: notExecutable})
+	assert.Error(t, err, "a file that cannot be executed is not usable either")
 }
 
 // A binary that cannot be asked leaves the version unknown rather than failing
