@@ -54,6 +54,20 @@ type Admission struct {
 	// RunsRelay reports that the member's Pod runs a cuInterpose coordinator,
 	// which takes part in the group as its relay.
 	RunsRelay bool `json:"runsRelay,omitempty"`
+	// Fabric is set at restore by a member whose Pod shared GPU memory over
+	// NVLink with other members' at capture.
+	Fabric *FabricAdmission `json:"fabric,omitempty"`
+}
+
+// FabricAdmission is what a member contributes to the restore's check that
+// the members that shared GPU memory over NVLink at capture can share it
+// again.
+type FabricAdmission struct {
+	// Peers are the ranks of the members whose Pods shared GPU memory with
+	// this member's, from its artifact.
+	Peers []int `json:"peers"`
+	// GPUs are where the restore container's GPUs are in their NVLink fabric.
+	GPUs []types.GPUFabric `json:"gpus"`
 }
 
 // Member is one member's part in one attempt. The caller joins, hands the

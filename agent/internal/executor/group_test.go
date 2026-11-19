@@ -37,6 +37,8 @@ import (
 func TestGroupRestoreRefusesAnotherMembersArtifact(t *testing.T) {
 	otherVersion := capturedAs("worker", "leader", "worker")
 	otherVersion.Version = types.PodGroupManifestVersion + 1
+	sharedWithItself := capturedAs("worker", "leader", "worker")
+	sharedWithItself.FabricPeers = []int{1}
 	for _, tc := range []struct {
 		name     string
 		captured *types.PodGroupManifest
@@ -63,6 +65,11 @@ func TestGroupRestoreRefusesAnotherMembersArtifact(t *testing.T) {
 			name:     "an artifact of a capture with more members",
 			captured: capturedAs("worker", "leader", "worker", "spare"),
 			want:     "the capture had 3 members, the restore has 2",
+		},
+		{
+			name:     "an artifact that shared GPU memory with its own member",
+			captured: sharedWithItself,
+			want:     "the artifact lists rank 1 as a member it shared GPU memory with, which is not another member's rank",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -340,6 +347,90 @@ func TestGroupRestoreFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
 			outcome := <-peerEnded
 			assert.Equal(t, tc.wantCommitted, outcome.committed, "whether the peer passed the admitted barrier")
 			require.ErrorIs(t, outcome.err, &session.AbortError{Reason: tc.wantReason})
+		})
+	}
+}
+
+func TestGroupRestoreRefusesMembersThatSharedGPUMemoryOutsideOneNVLinkClique(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// fabricPeers is what the member's artifact records, and peerFabric
+		// what the peer publishes.
+		fabricPeers   []int
+		peerFabric    *group.FabricAdmission
+		wantStep      Step
+		wantErr       string
+		wantCommitted bool
+		wantReason    string
+	}{
+		{
+			name:          "the members shared no GPU memory",
+			wantStep:      StepMountBundle,
+			wantCommitted: true,
+			wantReason:    session.ReasonMemberFailed,
+		},
+		{
+			name:        "the peer's GPU is in the member's clique",
+			fabricPeers: []int{1},
+			peerFabric: &group.FabricAdmission{
+				Peers: []int{0}, GPUs: []types.GPUFabric{inClique("GPU-b", "cluster-a", "1")},
+			},
+			wantStep:      StepMountBundle,
+			wantCommitted: true,
+			wantReason:    session.ReasonMemberFailed,
+		},
+		{
+			name:        "the peer's GPU is in another clique",
+			fabricPeers: []int{1},
+			peerFabric: &group.FabricAdmission{
+				Peers: []int{0}, GPUs: []types.GPUFabric{inClique("GPU-b", "cluster-a", "2")},
+			},
+			wantStep:   StepAdmitGroup,
+			wantErr:    "rank 1's GPU GPU-b is in NVLink clique 2, but rank 0's GPU GPU-a is in clique 1",
+			wantReason: session.ReasonRefused,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			member, peer := joinMembers(t)
+			peerEnded := runPeer(t, peer, group.Admission{
+				PodIP: netip.MustParseAddr("10.0.0.2"), CaptureID: "capture-1", Fabric: tc.peerFabric,
+			}, group.Release)
+			captured := capturedAs("member-0", "member-0", "member-1")
+			captured.FabricPeers = tc.fabricPeers
+			base := writeGroupArtifact(t, captured)
+			original := readGPUFabricFunc
+			t.Cleanup(func() { readGPUFabricFunc = original })
+			readGPUFabricFunc = func(context.Context, []string) ([]types.GPUFabric, error) {
+				if tc.fabricPeers == nil {
+					t.Error("a member that shared no GPU memory read its GPUs' NVLink fabric")
+				}
+				return []types.GPUFabric{inClique("GPU-a", "cluster-a", "1")}, nil
+			}
+
+			mounted := false
+			mounter := stoppingMounter{stop: func() error {
+				mounted = true
+				return errors.New("the bundle mount failed")
+			}}
+			req := RestoreRequest{
+				BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+				TargetPodIP: "10.0.0.1", WithoutProxy: true, SkipCompatCheck: true, Group: member,
+			}
+			_, err := Restore(groupTestContext(t), &restoreFakeRuntime{}, testr.New(t), req, mounter)
+
+			assert.Equal(t, tc.wantStep, StepOf(err), "%v", err)
+			assert.Equal(t, tc.wantCommitted, mounted, "whether the restore went past its admission")
+			outcome := <-peerEnded
+			assert.Equal(t, tc.wantCommitted, outcome.committed, "whether the peer passed the admitted barrier")
+			require.ErrorIs(t, outcome.err, &session.AbortError{Reason: tc.wantReason})
+			// The peer reaches the same verdict from the same admissions.
+			verdict := checkFabric(peer.Rank(), peer.Admissions())
+			if tc.wantErr == "" {
+				require.NoError(t, verdict)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
+			require.ErrorContains(t, verdict, tc.wantErr, "the peer's verdict")
 		})
 	}
 }

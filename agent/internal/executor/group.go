@@ -98,9 +98,12 @@ func groupManifest(g *group.Member, fabricPeers []int) *types.PodGroupManifest {
 
 // admitRestore runs a restore's admission: the member checks that its artifact
 // is its own part of a group capture, publishes its new Pod IP, the capture it
-// restores and whether it runs a cuInterpose relay, reads every other member's,
-// and passes the admitted barrier, after which the attempt commits.
-func admitRestore(ctx context.Context, g *group.Member, targetPodIP string, manifest *types.CheckpointManifest) error {
+// restores, whether it runs a cuInterpose relay and, if its Pod shared GPU
+// memory over NVLink at capture, where gpus, its restore container's GPUs, are
+// in their NVLink fabric. It reads every other member's, checks that the
+// members that shared GPU memory can share it again, and passes the admitted
+// barrier, after which the attempt commits.
+func admitRestore(ctx context.Context, g *group.Member, targetPodIP string, manifest *types.CheckpointManifest, gpus []string) error {
 	captured := manifest.PodGroup
 	if err := checkGroupArtifact(captured, g.ID(), g.Rank(), len(g.MemberIDs())); err != nil {
 		return err
@@ -110,7 +113,18 @@ func admitRestore(ctx context.Context, g *group.Member, targetPodIP string, mani
 		return fmt.Errorf("the restore Pod's IP: %w", err)
 	}
 	admission := group.Admission{PodIP: ip, CaptureID: captured.CaptureUID, RunsRelay: manifest.CuInterpose.UsesCoordinator()}
+	// A member whose Pod shared no GPU memory over NVLink needs no fabric.
+	if len(captured.FabricPeers) > 0 {
+		fabric, err := readGPUFabricFunc(ctx, gpus)
+		if err != nil {
+			return fmt.Errorf("read the NVLink fabric of the restore Pod's GPUs: %w", err)
+		}
+		admission.Fabric = &group.FabricAdmission{Peers: captured.FabricPeers, GPUs: fabric}
+	}
 	if err := g.Admit(ctx, admission); err != nil {
+		return err
+	}
+	if err := checkFabric(g.Rank(), g.Admissions()); err != nil {
 		return err
 	}
 	return g.Barrier(ctx, group.Admitted)
@@ -118,7 +132,8 @@ func admitRestore(ctx context.Context, g *group.Member, targetPodIP string, mani
 
 // checkGroupArtifact refuses an artifact that is not member's part, at rank,
 // of a group capture whose number of members is members, in the version of
-// its manifest this agent restores.
+// its manifest this agent restores, or whose fabric peers are not other
+// members' ranks.
 func checkGroupArtifact(captured *types.PodGroupManifest, member string, rank, members int) error {
 	switch {
 	case captured == nil:
@@ -131,6 +146,12 @@ func checkGroupArtifact(captured *types.PodGroupManifest, member string, rank, m
 	case captured.MemberID != member || captured.Rank() != rank:
 		return fmt.Errorf("the artifact is member %s at rank %d of its capture, not member %s at rank %d",
 			captured.MemberID, captured.Rank(), member, rank)
+	}
+	for _, peer := range captured.FabricPeers {
+		if peer < 0 || peer >= members || peer == rank {
+			return fmt.Errorf("the artifact lists rank %d as a member it shared GPU memory with, "+
+				"which is not another member's rank", peer)
+		}
 	}
 	return nil
 }
