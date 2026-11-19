@@ -932,10 +932,15 @@ func TestSnapshotJobCuInterposeInvalidSource(t *testing.T) {
 		name          string
 		annotation    string
 		command       []string
+		mounts        []corev1.VolumeMount
 		initContainer bool
 		want          string
 	}{
 		{name: "missing command", annotation: "enabled", initContainer: true, want: "requires container.command"},
+		{
+			name: "agent mode, delivery path mounted without the launcher", annotation: "enabled", command: []string{"worker"},
+			mounts: []corev1.VolumeMount{{Name: "libs", MountPath: podcontract.CuInterposeMountPath}}, want: "must start with",
+		},
 		{name: "empty command", annotation: "enabled", command: []string{""}, initContainer: true, want: "requires container.command"},
 		{name: "invalid annotation", annotation: "invalid", command: []string{"worker"}, want: "expected enabled or disabled"},
 		{name: "empty annotation", annotation: "", command: []string{"worker"}, want: "expected enabled or disabled"},
@@ -944,6 +949,7 @@ func TestSnapshotJobCuInterposeInvalidSource(t *testing.T) {
 			sj := minimalSnapshotJob()
 			sj.Spec.PodTemplate.Annotations = map[string]string{podcontract.CuInterposeAnnotation: tc.annotation}
 			sj.Spec.PodTemplate.Spec.Containers[0].Command = tc.command
+			sj.Spec.PodTemplate.Spec.Containers[0].VolumeMounts = tc.mounts
 			r := makeSnapshotJobReconciler(snapshotJobReconcilerScheme(), sj)
 			if tc.initContainer {
 				r.CuInterposeContainer = testCuInterposeInstaller()

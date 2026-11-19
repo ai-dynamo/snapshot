@@ -169,13 +169,20 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 		if buildErr != nil {
 			return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, buildErr), ctrl.Result{}, nil
 		}
-		// In agent mode the agent's NRI plugin prepares the target when it starts.
+		// In agent mode the agent's NRI plugin prepares the target when it starts,
+		// so check it here: the agent's own check runs only after the model loads.
 		// The init container is the fallback for nodes without NRI.
-		if cuInterposeEnabled && r.CuInterposeContainer.Preparation == operatortypes.MultiGPUPreparationInitContainer {
+		if cuInterposeEnabled {
 			// buildSourceJob has already validated the single target.
 			target := sj.Spec.PodSnapshotTemplate.TargetContainers[0]
-			if err := protocol.ShapeCuInterposeCapture(&desiredJob.Spec.Template, target, r.CuInterposeContainer); err != nil {
-				return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, err), ctrl.Result{}, nil
+			var cuErr error
+			if r.CuInterposeContainer.Preparation == operatortypes.MultiGPUPreparationInitContainer {
+				cuErr = protocol.ShapeCuInterposeCapture(&desiredJob.Spec.Template, target, r.CuInterposeContainer)
+			} else {
+				cuErr = protocol.ValidateCuInterposeAgentTarget(&desiredJob.Spec.Template.Spec, target)
+			}
+			if cuErr != nil {
+				return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, cuErr), ctrl.Result{}, nil
 			}
 		}
 		return r.createSourceJob(ctx, sj, desiredJob)

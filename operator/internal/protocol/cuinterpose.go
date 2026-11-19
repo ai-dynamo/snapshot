@@ -53,6 +53,17 @@ func ShapeCuInterposeCapture(template *corev1.PodTemplateSpec, targetName string
 	return nil
 }
 
+// ValidateCuInterposeAgentTarget checks a target that the agent's NRI plugin
+// prepares, with the same rule the agent applies before checkpointing it.
+func ValidateCuInterposeAgentTarget(spec *corev1.PodSpec, targetName string) error {
+	for i := range spec.Containers {
+		if spec.Containers[i].Name == targetName {
+			return podcontract.ValidateCuInterposeTarget(&spec.Containers[i])
+		}
+	}
+	return fmt.Errorf("cuinterpose target container %q not found", targetName)
+}
+
 func checkCuInterposeReservedNames(spec *corev1.PodSpec) error {
 	for _, volume := range spec.Volumes {
 		if volume.Name == cuInterposeVolumeName {
