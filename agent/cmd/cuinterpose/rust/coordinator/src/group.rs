@@ -15,7 +15,7 @@ use cuinterpose_protocol::{
     FabricReplacement, ImportKind, Manifest, MemberRange, MemoryLocation, MulticastProperties,
     NamespacePid, Operation, Record, Reply,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub type Rank = u32;
 
@@ -64,6 +64,9 @@ pub struct Topology {
     /// The bytes that each process, by group PID, copies to and from its host carrier:
     /// the size of every host-carrier allocation that it owns.
     carrier_bytes: BTreeMap<NamespacePid, u64>,
+    /// For each rank, the other ranks whose processes share FABRIC memory or multicast
+    /// objects with its processes, in either direction.
+    fabric_peers: BTreeMap<Rank, BTreeSet<Rank>>,
     /// Whether the topology spans Pods, so messages name each process's rank.
     grouped: bool,
 }
@@ -79,6 +82,7 @@ impl Topology {
         let mut group = Manifest::new();
         let mut references = BTreeMap::new();
         let mut imports = BTreeMap::new();
+        let mut fabric_peers: BTreeMap<Rank, BTreeSet<Rank>> = BTreeMap::new();
         for (&rank, pod) in pods {
             ensure!(
                 rank <= MAX_RANK,
@@ -94,6 +98,17 @@ impl Topology {
                 group.insert(process, resolved);
                 references.insert(process, held);
                 imports.insert(process, unknown);
+                for record in records {
+                    // Resolution found the creator of every import.
+                    if let Record::FabricImport { handle, .. } = record
+                        && let Some((creator, _)) = creators.exporters.get(handle)
+                        && rank_of(creator.creator_pid) != rank
+                    {
+                        let creator = rank_of(creator.creator_pid);
+                        fabric_peers.entry(rank).or_default().insert(creator);
+                        fabric_peers.entry(creator).or_default().insert(rank);
+                    }
+                }
             }
         }
         let grouped = pods.len() > 1;
@@ -119,8 +134,18 @@ impl Topology {
             references,
             imports,
             carrier_bytes,
+            fabric_peers,
             grouped,
         })
+    }
+
+    /// The other ranks whose processes share FABRIC memory or multicast objects with the
+    /// processes of `rank`, in either direction, in order.
+    pub fn fabric_peers(&self, rank: Rank) -> Vec<Rank> {
+        self.fabric_peers
+            .get(&rank)
+            .map(|peers| peers.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     /// The creator's kind of each FABRIC import of unknown kind that `pid` in `rank`
@@ -645,6 +670,9 @@ mod tests {
             (1, vec![(1, importer(handle(1)))]),
         ]))
         .unwrap();
+        // The two ranks share FABRIC memory, in both directions.
+        assert_eq!(topology.fabric_peers(0), [1]);
+        assert_eq!(topology.fabric_peers(1), [0]);
         // Only the creator saves, and the importer names the owner as remote.
         assert_eq!(
             carrier(&topology, 0, 1),
@@ -698,6 +726,8 @@ mod tests {
             (2, importer(handle(1))),
         ])))
         .unwrap();
+        // Sharing within a Pod makes no FABRIC peers.
+        assert!(topology.fabric_peers(0).is_empty());
         assert_eq!(
             topology.owners(0, 2),
             [AllocationOwner {
