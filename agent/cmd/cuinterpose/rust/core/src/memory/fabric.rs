@@ -136,6 +136,7 @@ pub(crate) fn import(
         refcounts: Refcounts {
             handle_entries: 1,
             mappings: 0,
+            calls: 0,
         },
         driver: imported,
         context,
@@ -337,6 +338,7 @@ mod tests {
             refcounts: Refcounts {
                 handle_entries: 1,
                 mappings: 0,
+                calls: 0,
             },
             driver: 0x1000 | u64::from(byte),
             context: 0x77,
@@ -742,10 +744,17 @@ mod tests {
         use std::sync::Barrier;
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        /// Set to make the next map wait at `MAP` once it is in the driver, and again
-        /// before it returns.
-        pub(super) static BLOCK_MAP: AtomicBool = AtomicBool::new(false);
-        pub(super) static MAP: Barrier = Barrier::new(2);
+        /// Set to make the next call that checks it wait at `CALL` once it is in the
+        /// driver, and again before it returns.
+        pub(super) static BLOCK: AtomicBool = AtomicBool::new(false);
+        pub(super) static CALL: Barrier = Barrier::new(2);
+
+        fn wait() {
+            if BLOCK.swap(false, Ordering::SeqCst) {
+                CALL.wait();
+                CALL.wait();
+            }
+        }
 
         fn multicast(handle: u64) -> bool {
             handle & 1 == 1
@@ -800,10 +809,7 @@ mod tests {
             _: u64,
             flags: u64,
         ) -> CUresult {
-            if BLOCK_MAP.swap(false, Ordering::SeqCst) {
-                MAP.wait();
-                MAP.wait();
-            }
+            wait();
             if flags == 0 {
                 CUDA_SUCCESS
             } else {
@@ -829,6 +835,7 @@ mod tests {
         }
 
         unsafe extern "C" fn cuMulticastAddDevice(group: u64, _: CUdevice) -> CUresult {
+            wait();
             accepted(multicast(group))
         }
 
@@ -840,6 +847,7 @@ mod tests {
             _: usize,
             _: u64,
         ) -> CUresult {
+            wait();
             accepted(multicast(group) && !multicast(member))
         }
 
@@ -862,6 +870,7 @@ mod tests {
             _: usize,
             _: u64,
         ) -> CUresult {
+            wait();
             accepted(multicast(group))
         }
 
@@ -882,6 +891,7 @@ mod tests {
             _: usize,
             _: usize,
         ) -> CUresult {
+            wait();
             accepted(multicast(group))
         }
 
@@ -965,6 +975,32 @@ mod tests {
                 _ => None,
             })
             .expect("an import record")
+    }
+
+    /// Make `call` on another thread, and do what the application does `meanwhile` while
+    /// the call waits in the driver without the registry. Returns what the call returned.
+    fn waiting(
+        call: impl FnOnce() -> Result<()> + Send + 'static,
+        meanwhile: impl FnOnce(),
+    ) -> Result<()> {
+        fake::BLOCK.store(true, std::sync::atomic::Ordering::SeqCst);
+        let call = std::thread::spawn(call);
+        fake::CALL.wait();
+        meanwhile();
+        fake::CALL.wait();
+        call.join().unwrap()
+    }
+
+    fn release(imported: u64) {
+        handlers::cuMemRelease(imported).unwrap();
+    }
+
+    /// Whether the registry holds the memblock of the import of `handle(byte)`.
+    fn held(byte: u8) -> bool {
+        runtime::get()
+            .unwrap()
+            .memblocks
+            .contains_key(&importer_reference(&handle(byte)).id)
     }
 
     #[test]
@@ -1121,42 +1157,118 @@ mod tests {
         with_driver(
             "a_map_that_waits_in_the_driver_keeps_its_memblock_until_its_own_release",
             || {
-                // The application releases the last handle while the map waits in the
-                // driver without the registry.
-                let map_while_released = |address, imported, flags| {
-                    fake::BLOCK_MAP.store(true, std::sync::atomic::Ordering::SeqCst);
-                    let map = std::thread::spawn(move || {
-                        handlers::cuMemMap(address, SIZE, 0, imported, flags)
-                    });
-                    fake::MAP.wait();
-                    handlers::cuMemRelease(imported).unwrap();
-                    fake::MAP.wait();
-                    map.join().unwrap()
-                };
-                let held = |byte| {
-                    runtime::get()
-                        .unwrap()
-                        .memblocks
-                        .contains_key(&importer_reference(&handle(byte)).id)
-                };
-                // An import of unknown kind, and one that a call classified as a
-                // multicast object.
+                // The application releases the last handle while the map waits. An import
+                // of unknown kind, and one that a call classified as a multicast object.
                 let object = import_handle(1);
                 handlers::cuMulticastAddDevice(object, 0).unwrap();
                 for (byte, imported) in [(2, import_handle(2)), (1, object)] {
                     let address = 0x10_0000 * u64::from(byte);
-                    map_while_released(address, imported, 0).unwrap();
+                    waiting(
+                        move || handlers::cuMemMap(address, SIZE, 0, imported, 0),
+                        || release(imported),
+                    )
+                    .unwrap();
                     assert!(held(byte), "{byte}");
                     handlers::cuMemUnmap(address, SIZE).unwrap();
                     assert!(!held(byte), "{byte}");
                 }
                 // A map that the driver refuses holds nothing once it returns.
-                let refused = map_while_released(0x40_0000, import_handle(4), 1);
+                let refused = import_handle(4);
+                let mapped = waiting(
+                    move || handlers::cuMemMap(0x40_0000, SIZE, 0, refused, 1),
+                    || release(refused),
+                );
                 assert!(
-                    matches!(refused, Err(Error::Cuda(CUDA_ERROR_INVALID_VALUE))),
-                    "{refused:?}"
+                    matches!(mapped, Err(Error::Cuda(CUDA_ERROR_INVALID_VALUE))),
+                    "{mapped:?}"
                 );
                 assert!(!held(4));
+            },
+        );
+    }
+
+    #[test]
+    fn multicast_calls_that_wait_in_the_driver_hold_their_memblocks_until_recorded() {
+        with_driver(
+            "multicast_calls_that_wait_in_the_driver_hold_their_memblocks_until_recorded",
+            || {
+                // The application releases the last handles while each call waits, first
+                // on objects of unknown kind, then on objects that a call classified.
+                for base in [0, 20] {
+                    let object = |byte| {
+                        let imported = import_handle(base + byte);
+                        if base != 0 {
+                            handlers::cuMulticastAddDevice(imported, 0).unwrap();
+                        }
+                        imported
+                    };
+                    let added = object(1);
+                    waiting(
+                        move || handlers::cuMulticastAddDevice(added, 1),
+                        || release(added),
+                    )
+                    .unwrap();
+                    // A member named by its handle.
+                    let (bound, member) = (object(3), import_handle(base + 2));
+                    waiting(
+                        move || handlers::cuMulticastBindMem(bound, 0, member, 0, SIZE, 0),
+                        || {
+                            release(bound);
+                            release(member);
+                        },
+                    )
+                    .unwrap();
+                    // A member named by its mapping, which the application unmaps.
+                    let (by_address, mapped) = (object(5), import_handle(base + 4));
+                    let address = 0x10_0000 * u64::from(base + 4);
+                    handlers::cuMemMap(address, SIZE, 0, mapped, 0).unwrap();
+                    waiting(
+                        move || handlers::cuMulticastBindAddr(by_address, 0, address, SIZE, 0),
+                        || {
+                            release(by_address);
+                            handlers::cuMemUnmap(address, SIZE).unwrap();
+                            release(mapped);
+                        },
+                    )
+                    .unwrap();
+                    let unbound = object(7);
+                    waiting(
+                        move || handlers::cuMulticastUnbind(unbound, 0, 0, SIZE),
+                        || release(unbound),
+                    )
+                    .unwrap();
+                    // Nothing else held them, so each call released them once recorded.
+                    for byte in [1, 2, 3, 4, 5, 7] {
+                        assert!(!held(base + byte), "{}", base + byte);
+                    }
+                }
+                // Calls that the driver refuses on memory release them once they return.
+                let [added, bound, member, unbound] = [40, 42, 44, 46].map(import_handle);
+                for refused in [
+                    waiting(
+                        move || handlers::cuMulticastAddDevice(added, 0),
+                        || release(added),
+                    ),
+                    waiting(
+                        move || handlers::cuMulticastBindMem(bound, 0, member, 0, SIZE, 0),
+                        || {
+                            release(bound);
+                            release(member);
+                        },
+                    ),
+                    waiting(
+                        move || handlers::cuMulticastUnbind(unbound, 0, 0, SIZE),
+                        || release(unbound),
+                    ),
+                ] {
+                    assert!(
+                        matches!(refused, Err(Error::Cuda(CUDA_ERROR_NOT_SUPPORTED))),
+                        "{refused:?}"
+                    );
+                }
+                for byte in [40, 42, 44, 46] {
+                    assert!(!held(byte), "{byte}");
+                }
             },
         );
     }

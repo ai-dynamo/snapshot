@@ -71,6 +71,8 @@ pub struct Refcounts {
     /// Distinct live virtual handles, excluding repeated retains of the same handle.
     pub handle_entries: usize,
     pub mappings: usize,
+    /// Driver calls that use the memblock while the registry is released.
+    pub calls: usize,
 }
 
 /// Physical allocation identified by a generic CUDA handle. Unicast and multicast share
@@ -288,13 +290,15 @@ impl ProcessState {
     }
 
     /// Release a unicast driver handle after the last virtual handle is removed. Remove
-    /// the memblock when no virtual handles or mappings refer to it.
+    /// the memblock when no virtual handles or mappings refer to it. A driver call in
+    /// flight holds the memblock and its driver handle, as a virtual handle does.
     pub(crate) fn release_unused_memblock(&mut self, id: AllocationId) -> Result<()> {
         let memblock = self
             .memblocks
             .get_mut(&id)
             .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-        let handle_live = memblock.refcounts().handle_entries != 0;
+        let handle_live =
+            memblock.refcounts().handle_entries != 0 || memblock.refcounts().calls != 0;
         let mapped = memblock.refcounts().mappings != 0;
         match memblock {
             Memblock::Unicast(allocation) => {

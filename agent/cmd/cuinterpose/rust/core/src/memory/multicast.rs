@@ -72,12 +72,39 @@ pub struct Binding {
     version: BindingVersion,
 }
 
-/// Map a multicast object, or a FABRIC import of unknown kind, which may be one. CUDA can
-/// wait for other processes while it maps a multicast object, so the registry is released
-/// around the call. The mapping counts from before the call, so the memblock stays if
-/// another thread releases its last handle meanwhile, and a refused call gives it back.
-pub fn map(
+/// Make a driver call on multicast objects or FABRIC imports of unknown kind without the
+/// registry, since CUDA can wait for other processes in such a call, then `record` what
+/// the call did. The call holds each memblock in `ids` until then, so one whose last
+/// handle another thread releases meanwhile stays, with its driver handle. Afterwards,
+/// also when the driver refuses the call, a memblock that nothing else holds is released.
+fn call_holding<T>(
     mut state: MutexGuard<'static, ProcessState>,
+    ids: &[AllocationId],
+    call: impl FnOnce() -> Result<T>,
+    record: impl FnOnce(&mut ProcessState, T),
+) -> Result<()> {
+    for id in ids {
+        state.memblocks.get_mut(id).unwrap().refcounts_mut().calls += 1;
+    }
+    let (mut state, result) = runtime::call_unlocked(state, || Ok(call()))?;
+    let result = result.map(|value| record(&mut state, value));
+    for id in ids {
+        runtime::must_complete(
+            state
+                .memblocks
+                .get_mut(id)
+                .ok_or(CUDA_ERROR_INVALID_HANDLE.into()),
+        )
+        .refcounts_mut()
+        .calls -= 1;
+        runtime::must_complete(state.release_unused_memblock(*id));
+    }
+    result
+}
+
+/// Map a multicast object, or a FABRIC import of unknown kind, which may be one.
+pub fn map(
+    state: MutexGuard<'static, ProcessState>,
     id: AllocationId,
     handle: VirtualAllocationHandle,
     address: u64,
@@ -91,45 +118,38 @@ pub fn map(
     } else {
         context
     };
-    state
-        .memblocks
-        .get_mut(&id)
-        .unwrap()
-        .refcounts_mut()
-        .mappings += 1;
-    let (mut state, mapped) = runtime::call_unlocked(state, || {
-        Ok(unsafe { crate::driver::cuMemMap(address, size, offset, driver, flags) })
-    })?;
-    // Another call may have classified an import meanwhile. The mapping is the same for
-    // either kind.
-    let memblock = runtime::must_complete(
-        state
-            .memblocks
-            .get_mut(&id)
-            .ok_or(CUDA_ERROR_INVALID_HANDLE.into()),
-    );
-    if let Err(error) = mapped {
-        memblock.refcounts_mut().mappings -= 1;
-        runtime::must_complete(state.release_unused_memblock(id));
-        return Err(error);
-    }
-    let recorded = memblock.context_mut();
-    if *recorded == 0 {
-        *recorded = context;
-    }
-    state.mappings.insert(
-        address,
-        Mapping {
-            id,
-            handle,
-            address,
-            size,
-            offset,
-            flags,
-            access: Vec::new(),
+    call_holding(
+        state,
+        &[id],
+        || unsafe { crate::driver::cuMemMap(address, size, offset, driver, flags) },
+        |state, ()| {
+            // Another call may have classified an import meanwhile. The mapping is the
+            // same for either kind.
+            let memblock = runtime::must_complete(
+                state
+                    .memblocks
+                    .get_mut(&id)
+                    .ok_or(CUDA_ERROR_INVALID_HANDLE.into()),
+            );
+            let recorded = memblock.context_mut();
+            if *recorded == 0 {
+                *recorded = context;
+            }
+            memblock.refcounts_mut().mappings += 1;
+            state.mappings.insert(
+                address,
+                Mapping {
+                    id,
+                    handle,
+                    address,
+                    size,
+                    offset,
+                    flags,
+                    access: Vec::new(),
+                },
+            );
         },
-    );
-    Ok(())
+    )
 }
 
 /// The driver handle and context of `id` for a call that only a multicast object
@@ -463,27 +483,34 @@ pub(crate) fn bind(
     } else {
         context
     };
-    let (mut state, ()) = runtime::call_unlocked(state, || binding.apply(driver, member_driver))?;
-    // The driver accepted the binding, so an import of unknown kind is the multicast
-    // object, or memory as its member.
-    if let Some(id) = member {
-        state.classify(id, FabricKind::Memory);
-        runtime::must_complete(
-            state
-                .memblocks
-                .get_mut(&id)
-                .and_then(Memblock::unicast_mut)
-                .ok_or(CUDA_ERROR_INVALID_HANDLE.into()),
-        )
-        .shared = true;
-    }
-    state.classify(target, FabricKind::Multicast);
-    let object = runtime::must_complete(binding_object(&mut state, target, &binding_lock));
-    object.bindings.push(binding);
-    if object.context == 0 {
-        object.context = context;
-    }
-    Ok(())
+    // The call holds the member, named by its handle or its mapping, as well as the object.
+    let held: Vec<_> = std::iter::once(target).chain(member).collect();
+    call_holding(
+        state,
+        &held,
+        || binding.apply(driver, member_driver).map(|()| binding),
+        |state, binding| {
+            // The driver accepted the binding, so an import of unknown kind is the
+            // multicast object, or memory as its member.
+            if let Some(id) = member {
+                state.classify(id, FabricKind::Memory);
+                runtime::must_complete(
+                    state
+                        .memblocks
+                        .get_mut(&id)
+                        .and_then(Memblock::unicast_mut)
+                        .ok_or(CUDA_ERROR_INVALID_HANDLE.into()),
+                )
+                .shared = true;
+            }
+            state.classify(target, FabricKind::Multicast);
+            let object = runtime::must_complete(binding_object(state, target, &binding_lock));
+            object.bindings.push(binding);
+            if object.context == 0 {
+                object.context = context;
+            }
+        },
+    )
 }
 
 pub fn describe(state: &ProcessState, records: &mut Vec<Record>) -> Result<()> {
@@ -747,6 +774,7 @@ impl ProcessState {
                 refcounts: super::Refcounts {
                     handle_entries: 1,
                     mappings: 0,
+                    calls: 0,
                 },
                 properties,
                 driver: Some(driver),
@@ -773,24 +801,27 @@ pub(crate) fn add_device(
     } else {
         context
     };
-    let (mut state, ()) = runtime::call_unlocked(state, || unsafe {
-        crate::driver::cuMulticastAddDevice(driver, device)
-    })?;
-    state.classify(id, FabricKind::Multicast);
-    let object = runtime::must_complete(
-        state
-            .memblocks
-            .get_mut(&id)
-            .and_then(Memblock::multicast_mut)
-            .ok_or(CUDA_ERROR_INVALID_HANDLE.into()),
-    );
-    if !object.devices.contains(&device) {
-        object.devices.push(device);
-    }
-    if object.context == 0 {
-        object.context = context;
-    }
-    Ok(())
+    call_holding(
+        state,
+        &[id],
+        || unsafe { crate::driver::cuMulticastAddDevice(driver, device) },
+        |state, ()| {
+            state.classify(id, FabricKind::Multicast);
+            let object = runtime::must_complete(
+                state
+                    .memblocks
+                    .get_mut(&id)
+                    .and_then(Memblock::multicast_mut)
+                    .ok_or(CUDA_ERROR_INVALID_HANDLE.into()),
+            );
+            if !object.devices.contains(&device) {
+                object.devices.push(device);
+            }
+            if object.context == 0 {
+                object.context = context;
+            }
+        },
+    )
 }
 
 // Keep native bind/unbind order and record updates in the same order. Waiting for
@@ -846,13 +877,18 @@ pub(crate) fn unbind(
             return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
         }
     }
-    let (mut state, ()) = runtime::call_unlocked(state, || unsafe {
-        crate::driver::cuMulticastUnbind(driver, device, offset, size)
-    })?;
-    state.classify(id, FabricKind::Multicast);
-    let object = runtime::must_complete(binding_object(&mut state, id, &binding_lock));
-    object.bindings.retain(|binding| {
-        binding.device != device || binding.offset >= end || binding.offset + binding.size <= offset
-    });
-    Ok(())
+    call_holding(
+        state,
+        &[id],
+        || unsafe { crate::driver::cuMulticastUnbind(driver, device, offset, size) },
+        |state, ()| {
+            state.classify(id, FabricKind::Multicast);
+            let object = runtime::must_complete(binding_object(state, id, &binding_lock));
+            object.bindings.retain(|binding| {
+                binding.device != device
+                    || binding.offset >= end
+                    || binding.offset + binding.size <= offset
+            });
+        },
+    )
 }
