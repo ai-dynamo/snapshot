@@ -1,85 +1,47 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Hold one of a limited number of GPU E2E suite slots on the host cluster.
+"""Wait for one of a limited number of GPU E2E suite slots on the host cluster.
 
 Every GPU, framework and upgrade suite creates its own vCluster on the same GPU
 nodes and installs Snapshot in it, which places an agent Pod on every GPU node.
 Once a node has no room for another agent, the next suite's agents stay Pending
-and its setup times out. So a suite first takes a slot: one of the Leases
-suite-slot-0 to suite-slot-<N-1> in the snapshot-e2e-slots namespace.
+and its setup times out. So a suite first waits for a slot.
 
-N is computed from the GPU nodes while a suite waits: how many suite budgets
-fit into what the tightest node has left after every Pod outside the
-slot-holding namespaces, capped by free GPUs, keeping one suite of headroom.
-If the nodes or Pods cannot be read, N is FALLBACK_LIMIT.
+A suite's host namespace is its place in line. This creates it, labelled
+snapshot-e2e=true like every suite's host namespace, and the suite starts once
+fewer than SUITE_LIMIT of those namespaces are older than its own. The suite's
+vCluster cleanup deletes the namespace, which frees the slot, so there is
+nothing to release. A namespace that is being deleted holds no slot.
 
-take waits for a free slot, claims it and starts a detached renewer. release
-stops the renewer and frees the slot. A Lease nobody renews expires, so a run
-that lost its runner frees its slot too.
+Namespaces created in the same second are ordered by name, so the first check
+waits SETTLE_SECONDS for every namespace that could sort ahead to exist.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import random
-import shutil
-import signal
-import subprocess
-import sys
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from decimal import Decimal
-from pathlib import Path
 
 from kubernetes import client
 from kubernetes.client import ApiException
-from kubernetes.utils import parse_quantity
 from urllib3.exceptions import HTTPError
 
 from snapshot_e2e.infra import preflight
-from snapshot_e2e.infra.setup import ensure_namespace, log, node_sync_selector
+from snapshot_e2e.infra.setup import create_host_namespace, log
 
 
-NAMESPACE = "snapshot-e2e-slots"
-SLOT_PREFIX = "suite-slot-"
 E2E_NAMESPACE_SELECTOR = "snapshot-e2e=true"
-GPU_NODE_LABEL = "nvidia.com/gpu.present"
-GPU_RESOURCE = "nvidia.com/gpu"
-AGENT_ARCHITECTURES = ("amd64", "arm64")
-LEASE_SECONDS = 300
-GRACE_SECONDS = 60
-RENEW_SECONDS = 60
-RENEW_MAX_SECONDS = 6 * 3600
+SUITE_LIMIT = 6
+SETTLE_SECONDS = 5
 POLL_SECONDS = 20
-LIMIT_REFRESH_SECONDS = 60
 REPORT_SECONDS = 60
-REAP_AFTER_SECONDS = 600
-LEASE_ERROR_POLLS = 3
-FALLBACK_LIMIT = 8
+API_ERROR_POLLS = 3
 REQUEST_TIMEOUT_SECONDS = 60
-# The chart's default agent and PageBroker requests (10 CPUs, 33 GiB) plus the
-# hostpath mapper and vCluster's own Pods.
-SUITE_CPU = Decimal("10.5")
-SUITE_MEMORY = Decimal(34 * 2**30)
-SUITE_GPUS = Decimal(2)
-DEFAULT_STATE_FILE = ".snapshot-e2e-slot.json"
 DEFAULT_TIMEOUT_MINUTES = 175
 API_ERRORS = (ApiException, HTTPError)
-
-
-class CapacityError(RuntimeError):
-    pass
-
-
-@dataclass(frozen=True)
-class Limit:
-    value: int
-    detail: str
 
 
 def describe(exc: Exception) -> str:
@@ -88,528 +50,102 @@ def describe(exc: Exception) -> str:
     return str(exc)
 
 
-def connect() -> None:
-    preflight.load_config(None, None)
-
-
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def format_time(moment: datetime) -> str:
-    return moment.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
-
 def annotate(level: str, title: str, message: str) -> None:
     escaped = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
     print(f"::{level} title={title}::{escaped}", flush=True)
 
 
-def quantities(values: dict[str, str] | None) -> dict[str, Decimal]:
-    return {name: parse_quantity(value) for name, value in (values or {}).items()}
-
-
-def amount(resources: dict[str, Decimal], name: str) -> Decimal:
-    return resources.get(name, Decimal(0))
-
-
-def add_requests(total: dict[str, Decimal], extra: dict[str, Decimal]) -> None:
-    for name, value in extra.items():
-        total[name] = total.get(name, Decimal(0)) + value
-
-
-def container_requests(container: client.V1Container) -> dict[str, Decimal]:
-    return quantities(container.resources.requests if container.resources else None)
-
-
-def pod_requests(pod: client.V1Pod) -> dict[str, Decimal]:
-    requests: dict[str, Decimal] = {}
-    for container in pod.spec.containers or []:
-        add_requests(requests, container_requests(container))
-    for container in pod.spec.init_containers or []:
-        for name, value in container_requests(container).items():
-            requests[name] = max(requests.get(name, Decimal(0)), value)
-    add_requests(requests, quantities(pod.spec.overhead))
-    return requests
-
-
-def node_labels(node: client.V1Node) -> dict[str, str]:
-    return node.metadata.labels or {}
-
-
-def agent_nodes(nodes: Sequence[client.V1Node]) -> list[client.V1Node]:
-    synced = node_sync_selector(nodes)
-    return [
-        node
-        for node in nodes
-        if all(node_labels(node).get(key) == value for key, value in synced.items())
-        and node_labels(node).get(GPU_NODE_LABEL) == "true"
-        and node_labels(node).get("kubernetes.io/arch") in AGENT_ARCHITECTURES
-    ]
-
-
-def cpus(value: Decimal) -> str:
-    return f"{value:.1f}"
-
-
-def gib(value: Decimal) -> str:
-    return f"{value / 2**30:.0f}"
-
-
-def compute_limit(
-    nodes: Sequence[client.V1Node],
-    pods: Sequence[client.V1Pod],
-    holders: set[str],
-    e2e_namespaces: set[str],
-) -> Limit:
-    eligible = agent_nodes(nodes)
-    if not eligible:
-        raise CapacityError(f"no node the vCluster syncs is labelled {GPU_NODE_LABEL}=true")
-
-    other: dict[str, dict[str, Decimal]] = {}
-    held: dict[tuple[str, str], dict[str, Decimal]] = {}
-    for pod in pods:
-        node = pod.spec.node_name if pod.spec else None
-        if not node or (pod.status and pod.status.phase in ("Succeeded", "Failed")):
-            continue
-        namespace = pod.metadata.namespace or ""
-        if namespace in holders:
-            add_requests(held.setdefault((namespace, node), {}), pod_requests(pod))
-        else:
-            add_requests(other.setdefault(node, {}), pod_requests(pod))
-
-    tightest = None
-    free_gpus = Decimal(0)
-    for node in eligible:
-        name = node.metadata.name
-        allocatable = quantities(node.status.allocatable if node.status else None)
-        used = other.get(name, {})
-        cpu, memory = amount(allocatable, "cpu"), amount(allocatable, "memory")
-        used_cpu, used_memory = amount(used, "cpu"), amount(used, "memory")
-        fit = max(int(min((cpu - used_cpu) / SUITE_CPU, (memory - used_memory) / SUITE_MEMORY)), 0)
-        free_gpus += max(amount(allocatable, GPU_RESOURCE) - amount(used, GPU_RESOURCE), Decimal(0))
-        if tightest is None or fit < tightest[0]:
-            tightest = (fit, name, cpu, memory, used_cpu, used_memory)
-
-    node_fit, name, cpu, memory, used_cpu, used_memory = tightest
-    gpu_fit = int(free_gpus / SUITE_GPUS)
-    fit = min(node_fit, gpu_fit)
-    limit = max(fit - 1, min(fit, 1))
-
-    detail = (
-        f"suite limit {limit}: the tightest GPU node {name} has {cpus(cpu)} CPUs and "
-        f"{gib(memory)} GiB allocatable, {cpus(used_cpu)} CPUs and {gib(used_memory)} GiB "
-        f"used outside slot holders, room for {node_fit} suites of {cpus(SUITE_CPU)} CPUs "
-        f"and {gib(SUITE_MEMORY)} GiB; {free_gpus:.0f} free GPUs fit {gpu_fit} suites "
-        f"of {SUITE_GPUS:.0f}; {len(eligible)} GPU nodes; "
-        f"{len(e2e_namespaces - holders)} E2E namespaces hold no slot"
+def run_without_slot(exc: Exception) -> int:
+    annotate(
+        "warning",
+        "Running without a suite slot",
+        f"the suite slots could not be checked: {describe(exc)}",
     )
-    if held:
-        (namespace, node), largest = max(
-            held.items(), key=lambda item: (amount(item[1], "cpu"), amount(item[1], "memory"))
-        )
-        detail += (
-            f"; the largest slot holder footprint on one node is {cpus(amount(largest, 'cpu'))} "
-            f"CPUs and {gib(amount(largest, 'memory'))} GiB ({namespace} on {node})"
-        )
-    return Limit(limit, detail)
+    return 0
 
 
-def list_e2e_namespaces() -> set[str] | None:
-    try:
-        items = client.CoreV1Api().list_namespace(
-            label_selector=E2E_NAMESPACE_SELECTOR, _request_timeout=REQUEST_TIMEOUT_SECONDS
-        ).items
-    except API_ERRORS as exc:
-        log(f"Could not list E2E namespaces: {describe(exc)}")
-        return None
-    return {item.metadata.name for item in items}
-
-
-def current_limit(holders: set[str], e2e_namespaces: set[str] | None, max_running: int | None) -> Limit:
-    core = client.CoreV1Api()
-    try:
-        nodes = core.list_node(_request_timeout=REQUEST_TIMEOUT_SECONDS).items
-        pods = core.list_pod_for_all_namespaces(
-            field_selector="status.phase!=Succeeded,status.phase!=Failed",
-            _request_timeout=REQUEST_TIMEOUT_SECONDS,
-        ).items
-        limit = compute_limit(nodes, pods, holders, e2e_namespaces or set())
-    except (*API_ERRORS, CapacityError, ValueError, ArithmeticError) as exc:
-        limit = Limit(
-            FALLBACK_LIMIT,
-            f"suite limit {FALLBACK_LIMIT}, the fallback: the GPU nodes could not be read: {describe(exc)}",
-        )
-    if max_running is not None and max_running < limit.value:
-        limit = Limit(max_running, f"{limit.detail}; capped at {max_running} by --max-running")
-    return limit
-
-
-def slot_name(index: int) -> str:
-    return f"{SLOT_PREFIX}{index}"
-
-
-def is_slot(name: str) -> bool:
-    return name.startswith(SLOT_PREFIX) and name[len(SLOT_PREFIX) :].isdigit()
-
-
-def holder(lease: client.V1Lease) -> str:
-    return (lease.spec and lease.spec.holder_identity) or ""
-
-
-def acquired_at(lease: client.V1Lease) -> datetime | None:
-    return lease.spec.acquire_time if lease.spec else None
-
-
-def seconds_expired(lease: client.V1Lease, now: datetime) -> float:
-    spec = lease.spec or client.V1LeaseSpec()
-    renewed = spec.renew_time or spec.acquire_time
-    if renewed is None:
-        return float("inf")
-    duration = spec.lease_duration_seconds or LEASE_SECONDS
-    return (now - renewed).total_seconds() - duration - GRACE_SECONDS
-
-
-def is_free(lease: client.V1Lease | None, now: datetime) -> bool:
-    return lease is None or not holder(lease) or seconds_expired(lease, now) >= 0
-
-
-def run_metadata() -> tuple[dict[str, str], dict[str, str]]:
-    run_id = os.environ.get("GITHUB_RUN_ID", "")
-    attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "")
-    labels = {}
-    annotations = {}
-    if run_id.isdigit():
-        labels["snapshot.github/run-id"] = run_id
-    if attempt.isdigit():
-        labels["snapshot.github/run-attempt"] = attempt
-    server = os.environ.get("GITHUB_SERVER_URL", "")
-    repository = os.environ.get("GITHUB_REPOSITORY", "")
-    if server and repository and run_id:
-        annotations["snapshot.github/run-url"] = f"{server}/{repository}/actions/runs/{run_id}"
-    return labels, annotations
-
-
-def lease_body(name: str, resource_version: str | None, spec: dict, held: bool) -> dict:
-    labels, annotations = run_metadata() if held else ({}, {})
-    metadata: dict = {"name": name, "namespace": NAMESPACE, "labels": labels, "annotations": annotations}
-    if resource_version:
-        metadata["resourceVersion"] = resource_version
-    return {"apiVersion": "coordination.k8s.io/v1", "kind": "Lease", "metadata": metadata, "spec": spec}
-
-
-def held_spec(identity: str, acquired: datetime, renewed: datetime) -> dict:
-    return {
-        "holderIdentity": identity,
-        "leaseDurationSeconds": LEASE_SECONDS,
-        "acquireTime": format_time(acquired),
-        "renewTime": format_time(renewed),
-    }
-
-
-def list_slots() -> dict[str, client.V1Lease]:
-    items = client.CoordinationV1Api().list_namespaced_lease(
-        NAMESPACE, _request_timeout=REQUEST_TIMEOUT_SECONDS
+def queue() -> list[str]:
+    items = client.CoreV1Api().list_namespace(
+        label_selector=E2E_NAMESPACE_SELECTOR, _request_timeout=REQUEST_TIMEOUT_SECONDS
     ).items
-    return {item.metadata.name: item for item in items if is_slot(item.metadata.name)}
+    live = [item for item in items if item.metadata.deletion_timestamp is None]
+    live.sort(key=lambda item: (item.metadata.creation_timestamp, item.metadata.name))
+    return [item.metadata.name for item in live]
 
 
-def read_slot(name: str) -> client.V1Lease | None:
+def ahead_of(names: list[str], identity: str) -> list[str]:
+    return names[: names.index(identity)] if identity in names else names
+
+
+def wait(identity: str, timeout_minutes: int) -> int:
     try:
-        return client.CoordinationV1Api().read_namespaced_lease(
-            name, NAMESPACE, _request_timeout=REQUEST_TIMEOUT_SECONDS
-        )
-    except ApiException as exc:
-        if exc.status == 404:
-            return None
-        raise
-
-
-def replace_slot(name: str, body: dict) -> None:
-    client.CoordinationV1Api().replace_namespaced_lease(
-        name, NAMESPACE, body, _request_timeout=REQUEST_TIMEOUT_SECONDS
-    )
-
-
-def claim(name: str, lease: client.V1Lease | None, identity: str, now: datetime) -> bool:
-    spec = held_spec(identity, now, now)
-    try:
-        if lease is None:
-            client.CoordinationV1Api().create_namespaced_lease(
-                NAMESPACE, lease_body(name, None, spec, True), _request_timeout=REQUEST_TIMEOUT_SECONDS
-            )
-        else:
-            replace_slot(name, lease_body(name, lease.metadata.resource_version, spec, True))
-    except ApiException as exc:
-        if exc.status in (404, 409):
-            return False
-        raise
-    return True
-
-
-def run_best_effort(command: list[str]) -> None:
-    if shutil.which(command[0]) is None:
-        return
-    try:
-        subprocess.run(command, capture_output=True, text=True, timeout=180)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        log(f"{' '.join(command)} failed: {exc}")
-
-
-def reap(name: str, lease: client.V1Lease, e2e_namespaces: set[str] | None, now: datetime) -> None:
-    namespace = holder(lease)
-    expired = seconds_expired(lease, now)
-    if not e2e_namespaces or namespace not in e2e_namespaces or expired < REAP_AFTER_SECONDS:
-        return
-    log(f"Deleting {namespace}: its slot {name} expired {expired:.0f} s ago, so the run that held it is gone")
-    run_best_effort(["helm", "uninstall", "vcluster-hpm", "-n", namespace])
-    run_best_effort(["vcluster", "delete", namespace, "--namespace", namespace])
-    try:
-        client.CoreV1Api().delete_namespace(namespace, _request_timeout=REQUEST_TIMEOUT_SECONDS)
-    except API_ERRORS as exc:
-        log(f"Could not delete {namespace}: {describe(exc)}")
-
-
-def describe_holders(slots: dict[str, client.V1Lease], now: datetime) -> str:
-    held = []
-    for name in sorted(slots, key=lambda item: int(item[len(SLOT_PREFIX) :])):
-        lease = slots[name]
-        if is_free(lease, now):
-            continue
-        acquired = acquired_at(lease)
-        minutes = f", {(now - acquired).total_seconds() / 60:.0f} min" if acquired else ""
-        held.append(f"{name} {holder(lease)}{minutes}")
-    return "; ".join(held) or "none"
-
-
-def start_renewer(slot: str, identity: str, log_path: Path) -> int:
-    with log_path.open("a", encoding="utf-8") as output:
-        process = subprocess.Popen(
-            [sys.executable, "-m", __spec__.name, "renew", "--slot", slot, "--identity", identity],
-            stdin=subprocess.DEVNULL,
-            stdout=output,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-    return process.pid
-
-
-def hold(slot: str, identity: str, state_path: Path) -> int:
-    state = {"slot": slot, "identity": identity}
-    state_path.write_text(json.dumps(state), encoding="utf-8")
-    log_path = state_path.with_name(state_path.name + ".renew.log")
-    state["renewer_pid"] = start_renewer(slot, identity, log_path)
-    state["renewer_log"] = str(log_path)
-    state_path.write_text(json.dumps(state), encoding="utf-8")
-    log(f"Holding suite slot {slot} as {identity}")
-    return 0
-
-
-def fail_open(exc: Exception) -> int:
-    message = f"the suite slots could not be read or written: {describe(exc)}"
-    annotate("warning", "Running without a suite slot", message)
-    return 0
-
-
-def take(args: argparse.Namespace) -> int:
-    identity = args.identity
-    state_path = Path(args.state_file)
-    deadline = time.monotonic() + args.timeout_minutes * 60
-    try:
-        connect()
-        ensure_namespace(NAMESPACE)
+        preflight.load_config(None, None)
+        create_host_namespace(identity)
     except (RuntimeError, *API_ERRORS) as exc:
-        return fail_open(exc)
+        return run_without_slot(exc)
+    time.sleep(SETTLE_SECONDS)
 
-    limit: Limit | None = None
-    slots: dict[str, client.V1Lease] = {}
-    refreshed_at = reported_at = float("-inf")
-    lease_errors = 0
-    e2e_namespaces: set[str] | None = None
+    deadline = time.monotonic() + timeout_minutes * 60
+    reported_at = float("-inf")
+    errors = 0
+    ahead: list[str] = []
     while True:
-        now = utc_now()
         try:
-            slots = list_slots()
-            held = {name: lease for name, lease in slots.items() if not is_free(lease, now)}
-            mine = [name for name, lease in held.items() if holder(lease) == identity]
-            if mine:
-                return hold(mine[0], identity, state_path)
-
-            if time.monotonic() - refreshed_at >= LIMIT_REFRESH_SECONDS:
-                e2e_namespaces = list_e2e_namespaces()
-                holders = {holder(lease) for lease in held.values()}
-                fresh = current_limit(holders, e2e_namespaces, args.max_running)
-                if limit is None or fresh.value != limit.value:
-                    log(fresh.detail)
-                limit = fresh
-                refreshed_at = time.monotonic()
-
-            candidates = [slot_name(index) for index in range(limit.value)]
-            random.shuffle(candidates)
-            for name in candidates:
-                lease = slots.get(name)
-                if not is_free(lease, now):
-                    continue
-                if lease is not None and holder(lease):
-                    reap(name, lease, e2e_namespaces, now)
-                if claim(name, lease, identity, now):
-                    log(f"Took suite slot {name} of {limit.value}")
-                    return hold(name, identity, state_path)
-            lease_errors = 0
+            names = queue()
         except API_ERRORS as exc:
-            lease_errors += 1
+            errors += 1
             forbidden = isinstance(exc, ApiException) and exc.status == 403
-            if forbidden or lease_errors >= LEASE_ERROR_POLLS:
-                return fail_open(exc)
-            log(f"Suite slot API error, retrying: {describe(exc)}")
+            if forbidden or errors >= API_ERROR_POLLS:
+                return run_without_slot(exc)
+            log(f"Could not list the suite slots, retrying: {describe(exc)}")
+        else:
+            errors = 0
+            ahead = ahead_of(names, identity)
+            if len(ahead) < SUITE_LIMIT:
+                log(f"Took suite slot {len(ahead) + 1} of {SUITE_LIMIT} as {identity}")
+                return 0
+            if time.monotonic() - reported_at >= REPORT_SECONDS:
+                log(
+                    f"Waiting for a suite slot, {SUITE_LIMIT} run at once; "
+                    f"{len(ahead)} ahead: {', '.join(ahead)}"
+                )
+                reported_at = time.monotonic()
 
-        allowed = limit.value if limit else 0
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             annotate(
                 "error",
                 "No suite slot",
-                f"waited {args.timeout_minutes} minutes for one of {allowed} suite slots; "
-                f"held: {describe_holders(slots, now)}",
+                f"waited {timeout_minutes} minutes for one of {SUITE_LIMIT} suite slots; "
+                f"ahead: {', '.join(ahead) or 'unknown'}",
             )
             return 1
-        if time.monotonic() - reported_at >= REPORT_SECONDS:
-            log(f"Waiting for a suite slot, {allowed} allowed; held: {describe_holders(slots, now)}")
-            reported_at = time.monotonic()
-        time.sleep(min(POLL_SECONDS + random.uniform(0, 5), remaining))
+        time.sleep(min(POLL_SECONDS, remaining))
 
 
-def renew(args: argparse.Namespace) -> int:
-    try:
-        connect()
-    except RuntimeError as exc:
-        log(f"warning: could not renew suite slot {args.slot}: {exc}")
-        return 0
-    started = time.monotonic()
-    while time.monotonic() - started < RENEW_MAX_SECONDS:
-        time.sleep(RENEW_SECONDS)
-        try:
-            lease = read_slot(args.slot)
-            if lease is None:
-                log(f"warning: suite slot {args.slot} no longer exists; stopped renewing")
-                return 0
-            if holder(lease) != args.identity:
-                log(f"warning: suite slot {args.slot} is held by {holder(lease) or 'nobody'}; stopped renewing")
-                return 0
-            spec = held_spec(args.identity, acquired_at(lease) or utc_now(), utc_now())
-            replace_slot(args.slot, lease_body(args.slot, lease.metadata.resource_version, spec, True))
-        except API_ERRORS as exc:
-            log(f"Could not renew suite slot {args.slot}: {describe(exc)}")
-    log(f"warning: stopped renewing suite slot {args.slot} after {RENEW_MAX_SECONDS // 3600} hours")
-    return 0
-
-
-def stop_renewer(pid: object) -> None:
-    if not isinstance(pid, int) or pid <= 0:
-        return
-    cmdline = Path(f"/proc/{pid}/cmdline")
-    if cmdline.exists() and __spec__.name.encode() not in cmdline.read_bytes():
-        return
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-
-
-def free(slot: str, identity: str) -> None:
-    for _ in range(3):
-        lease = read_slot(slot)
-        if lease is None:
-            log(f"Suite slot {slot} no longer exists")
-            return
-        if holder(lease) != identity:
-            log(f"Suite slot {slot} is held by {holder(lease) or 'nobody'}, not {identity}; left alone")
-            return
-        spec = {"leaseDurationSeconds": LEASE_SECONDS}
-        try:
-            replace_slot(slot, lease_body(slot, lease.metadata.resource_version, spec, False))
-        except ApiException as exc:
-            if exc.status == 409:
-                continue
-            raise
-        log(f"Released suite slot {slot}")
-        return
-    raise RuntimeError(f"suite slot {slot} kept changing while it was being released")
-
-
-def release(args: argparse.Namespace) -> int:
-    state_path = Path(args.state_file)
-    if not state_path.exists():
-        log("No suite slot held")
-        return 0
-    try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-        stop_renewer(state.get("renewer_pid"))
-        renewer_log = state.get("renewer_log")
-        if renewer_log and Path(renewer_log).exists():
-            text = Path(renewer_log).read_text(encoding="utf-8", errors="replace").rstrip()
-            log(f"Renewer log for {state['slot']}:\n{text}")
-        connect()
-        free(state["slot"], state["identity"])
-        state_path.unlink()
-    except Exception as exc:  # noqa: BLE001 - releasing must never fail the job
-        annotate(
-            "warning",
-            "Suite slot not released",
-            f"{describe(exc)}; it expires within {(LEASE_SECONDS + GRACE_SECONDS) // 60} minutes",
-        )
-    return 0
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    commands = parser.add_subparsers(dest="command", required=True)
-
-    take_parser = commands.add_parser("take", help="wait for a free suite slot and hold it")
-    take_parser.add_argument(
+def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Wait for a GPU E2E suite slot on the host cluster.")
+    parser.add_argument(
         "--identity",
-        default=os.environ.get("HOST_NAMESPACE", ""),
-        help="holder identity, unique per run, attempt and suite; defaults to HOST_NAMESPACE",
+        default=os.environ.get("HOST_NAMESPACE"),
+        help="the suite's host namespace; defaults to HOST_NAMESPACE",
     )
-    take_parser.add_argument("--state-file", default=DEFAULT_STATE_FILE, help="where the held slot is recorded")
-    take_parser.add_argument(
+    parser.add_argument(
         "--timeout-minutes",
         type=int,
         default=DEFAULT_TIMEOUT_MINUTES,
         help="fail when no slot frees up within this many minutes",
     )
-    take_parser.add_argument(
-        "--max-running",
-        type=int,
-        help="cap the computed limit; meant for validating the slots, not for normal runs",
-    )
-
-    renew_parser = commands.add_parser("renew", help="keep a held slot from expiring; started by take")
-    renew_parser.add_argument("--slot", required=True)
-    renew_parser.add_argument("--identity", required=True)
-
-    release_parser = commands.add_parser("release", help="stop renewing and free the held slot")
-    release_parser.add_argument("--state-file", default=DEFAULT_STATE_FILE, help="where take recorded the slot")
-
     args = parser.parse_args(argv)
-    if args.command == "take":
-        if not args.identity:
-            parser.error("take needs --identity or HOST_NAMESPACE")
-        if args.timeout_minutes < 1:
-            parser.error("--timeout-minutes must be at least 1")
-        if args.max_running is not None and args.max_running < 1:
-            parser.error("--max-running must be at least 1")
+    if not args.identity:
+        parser.error("--identity or HOST_NAMESPACE is required")
     return args
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    if args.command == "take":
-        return take(args)
-    if args.command == "renew":
-        return renew(args)
-    return release(args)
+    return wait(args.identity, args.timeout_minutes)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

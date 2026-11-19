@@ -711,23 +711,18 @@ def vcluster_node_sync_selector_labels() -> dict[str, str]:
     except ApiException as exc:
         raise SetupError(f"failed to list nodes for vCluster node sync: {exc}") from exc
 
-    selector = node_sync_selector(nodes)
-    if selector:
-        log(
-            "Using AKS user-node selector for vCluster node sync: "
-            f"{AKS_USER_NODE_LABEL}={AKS_USER_NODE_VALUE}"
-        )
-    else:
-        log("No AKS user-node label found; vCluster will sync all host nodes")
-    return selector
-
-
-def node_sync_selector(nodes: Sequence[client.V1Node]) -> dict[str, str]:
     for node in nodes:
-        if (node.metadata.labels or {}).get(AKS_USER_NODE_LABEL) == AKS_USER_NODE_VALUE:
+        labels = node.metadata.labels or {}
+        if labels.get(AKS_USER_NODE_LABEL) == AKS_USER_NODE_VALUE:
             # Matches the current AKS CI runner layout. If that cluster layout
             # changes, revisit which host nodes the vCluster should sync.
+            log(
+                "Using AKS user-node selector for vCluster node sync: "
+                f"{AKS_USER_NODE_LABEL}={AKS_USER_NODE_VALUE}"
+            )
             return {AKS_USER_NODE_LABEL: AKS_USER_NODE_VALUE}
+
+    log("No AKS user-node label found; vCluster will sync all host nodes")
     return {}
 
 
