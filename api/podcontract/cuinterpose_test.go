@@ -95,6 +95,8 @@ func TestValidateCuInterposeTarget(t *testing.T) {
 			mounts: []corev1.VolumeMount{control, delivery}, wantError: "must start with",
 		},
 		{name: "no control mount", command: []string{"worker"}, wantError: "does not mount"},
+		{name: "agent mounts the libraries for a launched command", command: launched, mounts: []corev1.VolumeMount{control}},
+		{name: "launched command with nothing to mount the libraries", command: launched, wantError: "does not mount"},
 		{
 			name: "delivery mount without launcher", command: []string{"worker"},
 			mounts: []corev1.VolumeMount{control, delivery}, wantError: "must start with",

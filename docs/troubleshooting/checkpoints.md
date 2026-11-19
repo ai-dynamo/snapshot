@@ -110,6 +110,8 @@ answer before the checkpoint becomes destructive.
 **Likely causes:**
 
 - A CUDA process started without the shim
+- The source node's container runtime has no NRI v0.10 or newer, so the agent could not prepare the container; see [Without NRI](../reference/workload-contract.md#without-nri)
+- The container was created while the agent was not running on its node, for example during an agent upgrade
 - The delivery mount is writable
 - The coordinator is not running
 

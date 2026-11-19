@@ -67,19 +67,20 @@ func (p *Plugin) shapeCuInterposeCapture(pod *api.PodSandbox, ctr *api.Container
 		Source:      source,
 		Options:     []string{"rbind", "rprivate", "ro"},
 	})
-	adjust.SetArgs(append(podcontract.CuInterposeLauncherPrefix(), args...))
+	// A command that already starts the launcher, kept from a manifest that
+	// once installed the libraries itself, needs only the mount.
+	if !podcontract.HasCuInterposeLauncher(args) {
+		adjust.SetArgs(append(podcontract.CuInterposeLauncherPrefix(), args...))
+	}
 	log.Info("Container starts with multi-GPU support", "source", source)
 	return adjust, nil
 }
 
 // needsCuInterposeDelivery reports whether the plugin delivers cuinterpose to a
 // container of an opted-in Pod. The snapshot-control mount marks a checkpoint
-// target. A container that mounts the delivery path or already starts the
-// launcher delivers cuinterpose itself, and wrapping it again would break it.
+// target. A container that mounts the delivery path delivers cuinterpose
+// itself, and mounting over it would break it.
 func needsCuInterposeDelivery(ctr *api.Container) bool {
-	if podcontract.HasCuInterposeLauncher(ctr.GetArgs()) {
-		return false
-	}
 	control := false
 	for _, mount := range ctr.GetMounts() {
 		if podcontract.IsCuInterposeDeliveryPath(mount.GetDestination()) {

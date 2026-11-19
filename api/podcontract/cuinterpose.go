@@ -66,16 +66,20 @@ func IsCuInterposeDeliveryPath(mountPath string) bool {
 
 // ValidateCuInterposeTarget checks that an opted-in target container will start under
 // the launcher. Either the agent delivers it, which needs the snapshot-control mount
-// and no mount on the delivery path, or the container starts the launcher itself.
-// Self-delivery needs command: with only args, the image's entrypoint runs first
-// and may never start the launcher.
+// and no mount on the delivery path, or the container mounts the libraries at the
+// delivery path and starts the launcher itself. Self-delivery needs command: with
+// only args, the image's entrypoint runs first and may never start the launcher.
+// The agent also delivers to a container whose command already starts the
+// launcher but that mounts nothing at the delivery path.
 func ValidateCuInterposeTarget(container *corev1.Container) error {
-	if len(container.Command) > 0 && HasCuInterposeLauncher(append(slices.Clone(container.Command), container.Args...)) {
-		return nil
-	}
+	argv := append(slices.Clone(container.Command), container.Args...)
+	launched := len(container.Command) > 0 && HasCuInterposeLauncher(argv)
 	controlMount := false
 	for _, mount := range container.VolumeMounts {
 		if IsCuInterposeDeliveryPath(mount.MountPath) {
+			if launched {
+				return nil
+			}
 			return fmt.Errorf("container %q requests multi-GPU support and mounts %q at %q, "+
 				"so its command must start with %q followed by the workload",
 				container.Name, mount.Name, mount.MountPath, strings.Join(CuInterposeLauncherPrefix(), " "))

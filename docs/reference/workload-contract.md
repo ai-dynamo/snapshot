@@ -213,8 +213,9 @@ included:
 
 Containers without the `/snapshot-control` mount, such as helpers, start
 unchanged. The agent also leaves alone a container that mounts a volume at
-`/tmp/snapshot-cuda` or whose `command` already starts with
-`/tmp/snapshot-cuda/cuinterpose-launch`. A Pod that delivers the libraries
+`/tmp/snapshot-cuda`. A container whose process already starts with
+`/tmp/snapshot-cuda/cuinterpose-launch` but mounts nothing there gets the
+libraries and keeps its process. A Pod that delivers the libraries
 itself keeps working if its `command` starts with the full launcher prefix,
 as shown in [Without NRI](#without-nri). If the agent cannot prepare a
 container, the container does not start, and kubelet retries it. A container

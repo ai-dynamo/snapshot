@@ -77,7 +77,6 @@ func TestCreateContainerDeliversCuInterpose(t *testing.T) {
 }
 
 func TestCreateContainerCuInterposeScope(t *testing.T) {
-	launched := append(podcontract.CuInterposeLauncherPrefix(), "worker")
 	for name, tc := range map[string]struct {
 		annotations map[string]string
 		ctr         *api.Container
@@ -98,10 +97,6 @@ func TestCreateContainerCuInterposeScope(t *testing.T) {
 			annotations: optedIn(),
 			ctr:         &api.Container{Name: "saver", Args: []string{"saver"}},
 		},
-		"already launched": {
-			annotations: optedIn(),
-			ctr:         &api.Container{Name: "main", Args: launched, Mounts: []*api.Mount{controlMount}},
-		},
 		"delivers its own libraries": {
 			annotations: optedIn(),
 			ctr:         &api.Container{Name: "main", Args: []string{"worker"}, Mounts: []*api.Mount{controlMount, deliveryMount}},
@@ -117,6 +112,25 @@ func TestCreateContainerCuInterposeScope(t *testing.T) {
 			assert.NoDirExists(t, filepath.Join(root, "pod-uid", tc.ctr.GetName(), "snapshot-cuda"))
 		})
 	}
+}
+
+// A manifest that once installed the libraries itself can keep the launcher in
+// its command after dropping its own library volume. The plugin then mounts the
+// libraries and leaves the process alone, rather than skipping the container
+// and letting the launcher fail to start.
+func TestCreateContainerMountsCuInterposeForAnAlreadyLaunchedProcess(t *testing.T) {
+	p, root := testPlugin(t, &fakeRestorer{})
+	launched := append(podcontract.CuInterposeLauncherPrefix(), "worker")
+	ctr := &api.Container{Name: "main", Args: launched, Mounts: []*api.Mount{controlMount}}
+
+	adjust, _, err := p.CreateContainer(context.Background(), captureSandbox(optedIn()), ctr)
+
+	require.NoError(t, err)
+	require.NotNil(t, adjust)
+	assert.Empty(t, adjust.GetArgs(), "the process already starts the launcher")
+	require.Len(t, adjust.GetMounts(), 1)
+	assert.Equal(t, podcontract.CuInterposeMountPath, adjust.GetMounts()[0].GetDestination())
+	assert.FileExists(t, filepath.Join(root, "pod-uid", "main", "snapshot-cuda", "cuinterpose-launch"))
 }
 
 func TestCreateContainerRestorePodIsNotShapedForCapture(t *testing.T) {
