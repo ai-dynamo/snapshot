@@ -53,7 +53,11 @@ branched from `main`. If it does, the CPU suite runs while the operator, agent,
 and pagebroker images are built from the mirrored commit and pushed to GHCR as
 `v0.0.0-pull-request-<number>-g<sha8>`. The GPU suite in `e2e.yaml` and the
 framework suites in `e2e-frameworks.yaml` run only once both succeed, and
-install those images rather than main's. Each suite receives the digests the
+install those images rather than main's. They install them under a tag that
+the `Verify candidate images` job adds for each run attempt,
+`v0.0.0-pull-request-<number>-g<sha8>-<run_id>-<run_attempt>`. A re-run pushes
+new images under the per-commit tag, and a node that resolved that tag in an
+earlier attempt can keep returning the earlier images. Each suite receives the
 build recorded in `SNAPSHOT_E2E_IMAGE_DIGESTS`, a JSON object keyed `operator`,
 `agent`, and `pagebroker`. With it set, `setup.py` pulls every image instead of
 reusing a node's cached copy, and fails the install unless each running
