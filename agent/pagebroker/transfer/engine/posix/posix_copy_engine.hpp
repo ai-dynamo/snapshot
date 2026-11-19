@@ -8,8 +8,9 @@
 namespace snapshot::pagebroker {
 class PosixCopyEngine final : public TransferEngine {
  public:
-  // Retains the storage root used to validate filesystem locations.
-  explicit PosixCopyEngine(Path storage_root);
+  // Retains the roots that locations are validated against. An empty
+  // storage_root refuses every checkpoint; node_cache_root is only read.
+  explicit PosixCopyEngine(Path storage_root, Path node_cache_root = {});
 
   // Identifies the POSIX transfer implementation.
   IoEngine type() const override;
@@ -42,6 +43,10 @@ class PosixCopyEngine final : public TransferEngine {
       TransferMode mode = TransferMode::Staged) const override;
 
  private:
+  // Selects the root a restore source must lie beneath.
+  const Path& RestoreRoot(const StorageBackend& source) const;
+
   Path storage_root_;
+  Path node_cache_artifacts_;
 };
 }  // namespace snapshot::pagebroker

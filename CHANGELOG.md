@@ -34,6 +34,12 @@ commit-level history for each release is on its
 
 ### Added
 
+- Node cache: with `storage.nodeCache.enabled`, a restore reads a checkpoint
+  copy from a directory on its node's local disk, and reads the snapshot store
+  when the node holds none. An administrator places and removes the copies.
+  Off by default. Deploy the matching agent and PageBroker images together. See
+  [Node Cache](docs/operate/configure-storage.md#node-cache).
+
 - Lifecycle hooks: `PodSnapshot.spec.containers` and
   `SnapshotJob.spec.podSnapshotTemplate.containers` can set a
   `checkpointReadinessProbe`, which decides when to checkpoint instead of the

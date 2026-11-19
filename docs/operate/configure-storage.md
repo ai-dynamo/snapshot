@@ -141,6 +141,234 @@ After changing the endpoint, bucket, region or prefix, restart the agent
 DaemonSet once the operator pod is Ready, so PageBroker reads the operator's
 current configuration. PageBroker does not re-read it while running.
 
+## Node Cache
+
+The node cache is a directory on a node's local disk that holds copies of
+checkpoints. With `storage.nodeCache.enabled: true`, a restore reads a copy
+found on its node, and reads the snapshot store when the node holds none. With
+the setting off, which is the default, nothing changes.
+
+Snapshot never writes to the node cache. An administrator places and removes
+the copies with their own tools.
+
+The sections below describe how to place a copy of a checkpoint on a node
+before a restore needs it.
+
+Place the copy before the workloads that restore from that checkpoint are
+scheduled to the node. A copy can also be added while such workloads are
+running. In that case it must appear in the node cache in a single step, by a
+rename of a complete directory, as [Place a Copy](#place-a-copy) describes. A
+restore that starts while the copy is still being written then reads the
+snapshot store, and never a partial copy.
+
+The examples use `/mnt/nvme/snapshot-cache` as the directory.
+
+### Prepare the Nodes
+
+Set these Helm values when you install or [upgrade](upgrade.md) Snapshot.
+They apply to both `pvc` and `s3` stores:
+
+```yaml
+storage:
+  nodeCache:
+    enabled: true
+    path: /mnt/nvme/snapshot-cache
+    createIfMissing: true
+```
+
+The default path is `/var/lib/snapshot/cache`. The same path is used on every
+node that runs the agent. Any local filesystem that supports direct I/O works,
+as for the snapshot store.
+
+With `createIfMissing: true`, the default, a node that does not have the
+directory gets an empty one, and restores on that node read the snapshot
+store.
+
+With `createIfMissing: false`, Snapshot does not create the directory. Create
+it yourself on every node that runs the agent, before you install or upgrade.
+On a node without the directory, the agent Pod does not start. It stays in
+`ContainerCreating` with a `FailedMount` event, and that node runs no
+checkpoints or restores until you create the directory.
+
+A directory that Snapshot created is on the node's root disk, unless a disk
+is mounted at that path. Check on each node that the directory is on the
+intended disk before you place copies:
+
+```bash
+df -h /mnt/nvme/snapshot-cache
+```
+
+If you mount a disk at the path after the agent Pod started, restart the
+agent Pod on that node. The Pod otherwise keeps the directory it started with:
+
+```bash
+kubectl delete pod --namespace <snapshot-namespace> \
+  --selector app.kubernetes.io/component=snapshot-agent \
+  --field-selector spec.nodeName=<node>
+```
+
+### Place a Copy
+
+A copy lives at `<path>/artifacts/<uid>/containers/<container>/`. `<uid>`
+is the UID of the snapshot's `PodSnapshotContent`, and `<container>` is the
+name of the checkpointed container. The directory holds the same files as the
+checkpoint in the store, including `manifest.yaml`.
+
+Find the UID of a snapshot with these commands:
+
+```bash
+content=$(kubectl get podsnapshot <snapshot> --namespace <namespace> \
+  --output jsonpath='{.status.boundSnapshotContentName}')
+kubectl get podsnapshotcontent "$content" --output jsonpath='{.metadata.uid}'
+```
+
+The agent treats an existing directory as complete. Build the copy beside
+`artifacts/` on the same filesystem, then rename it into place. `<source>` is
+the directory of the snapshot store, such as the mounted snapshot volume:
+
+```bash
+cd /mnt/nvme/snapshot-cache &&
+  cp -a <source>/artifacts/<uid>/containers/<container> \
+    .incoming-<uid>-<container> &&
+  mkdir -p artifacts/<uid>/containers &&
+  mv -T .incoming-<uid>-<container> artifacts/<uid>/containers/<container>
+```
+
+`mv -T` fails when a copy is already there. Remove the existing copy first, as
+in [Remove a Copy](#remove-a-copy).
+
+After a failed `cp`, remove the `.incoming-` directory before you copy again.
+
+Keep the file modes and owners of the checkpoint, as `cp -a` does. A copy must
+be a directory, not a symbolic link, and its manifest must name the same
+snapshot and container. Otherwise the restore reads the snapshot store.
+
+Snapshot checks only the manifest of a copy, not its files. A restore from a
+damaged or partial copy fails; it does not fall back to the snapshot store.
+
+### Fill Nodes from the Snapshot Volume
+
+With `storage.type: pvc`, the checkpoint in the snapshot volume is already a
+directory with this layout. Run the commands in [Place a Copy](#place-a-copy)
+on each node to fill, with the snapshot volume as `<source>`. For example, run
+them in a Pod on the node that mounts the snapshot volume's claim and the node
+cache directory. The claim is in the Helm release namespace.
+
+### Fill Nodes from an S3 Store
+
+With `storage.type: s3`, a checkpoint is stored under
+`<prefix>/artifacts/<uid>/containers/<container>/` in the bucket. Its files
+are the objects below `data/`. Objects carry no file modes and no empty
+directories, so `index.json` beside `data/` records both, and it lists empty
+files that have no object.
+
+Build the copy from the objects and the index with a script. Save the
+following script on the node, set the five values at its top, and run it as
+root. It needs `jq` and the AWS CLI, with credentials that can read the
+bucket. The script stops at the first failed command, and it places the copy
+only after every file has the size that the index records. A failed download
+therefore never leaves a copy in place.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# The bucket with the key prefix of the store, or only the bucket if the
+# store has no prefix.
+store=s3://<bucket>/<prefix>
+snapshot_uid=<uid>
+container=<container>
+cache=/mnt/nvme/snapshot-cache
+aws=(aws)  # For a store that is not Amazon S3: (aws --endpoint-url <endpoint>)
+
+src="$store/artifacts/$snapshot_uid/containers/$container"
+copy="$cache/artifacts/$snapshot_uid/containers/$container"
+tmp="$cache/.incoming-$snapshot_uid-$container"
+index="$tmp.index.json"
+
+mkdir "$tmp"
+"${aws[@]}" s3 cp "$src/index.json" "$index"
+"${aws[@]}" s3 sync "$src/data/" "$tmp/"
+
+# Directories, including empty ones, with their modes.
+jq -r '.directories[] | "\(.mode) \(.path)"' "$index" |
+  while read -r mode path; do
+    mkdir -p "$tmp/$path"
+    chmod "$(printf '%o' "$mode")" "$tmp/$path"
+  done
+
+# Files. An empty file has no object, so create it. Every other file must
+# have been downloaded in full.
+jq -r '.files[] | "\(.mode) \(.size) \(.path)"' "$index" |
+  while read -r mode size path; do
+    file="$tmp/$path"
+    if [ "$size" -eq 0 ] && [ ! -e "$file" ]; then
+      : > "$file"
+    fi
+    if [ ! -f "$file" ] || [ "$(stat -c %s "$file")" -ne "$size" ]; then
+      echo "incomplete download: $path" >&2
+      exit 1
+    fi
+    chmod "$(printf '%o' "$mode")" "$file"
+  done
+
+chmod "$(printf '%o' "$(jq -r .rootMode "$index")")" "$tmp"
+rm "$index"
+mkdir -p "$(dirname "$copy")"
+mv -T "$tmp" "$copy"
+```
+
+The modes in the index are decimal numbers, which `printf` converts to the
+octal form that `chmod` takes. After a failed run, remove the `.incoming-`
+directory and its `.index.json` file before you run the script again.
+
+### Check Which Source a Restore Used
+
+With the node cache enabled, each restore Pod gets a `RestoreSourceSelected`
+event. It says which source the restore reads. Read it with this command:
+
+```bash
+kubectl get events --namespace <namespace> \
+  --field-selector \
+  involvedObject.name=<restore-pod>,reason=RestoreSourceSelected
+```
+
+The message is `Restoring from the node cache`, or
+`Restoring from the snapshot store:` followed by one of these reasons:
+
+- `this node holds no copy`
+- `the copy on this node could not be read`
+- `the copy on this node has no readable manifest`
+- `the copy on this node belongs to another checkpoint`
+
+### Remove a Copy
+
+Snapshot does not remove a copy, including when its snapshot is deleted.
+Remove a copy in two steps. First rename it out of `artifacts/`, so that new
+restores read the snapshot store. The rename covers every container of that
+snapshot:
+
+```bash
+cd /mnt/nvme/snapshot-cache && mv artifacts/<uid> .removing-<uid>
+```
+
+Then wait for restores on the node to finish, and remove it:
+
+```bash
+rm -rf /mnt/nvme/snapshot-cache/.removing-<uid>
+```
+
+A restore that selected the copy just before the rename can still fail.
+
+Snapshot does not limit the size of the directory, so remove copies that are
+no longer needed.
+
+### Restrict Access
+
+A copy determines the state of the restored process, and it contains process
+memory that can hold secrets. Restrict read and write access to the directory
+as you restrict the snapshot store.
+
 ## PageBroker Staging
 
 ### How Staging Works
@@ -172,7 +400,8 @@ the sidecar:
   staging. Setting `pageBroker.restoreMode: staged` has PageBroker copy the
   artifact into staging first, and CRIU restores from memory instead.
 
-`pageBroker.restoreMode` selects the restore source for every restore:
+A copy in the [node cache](#node-cache) is always read in place. For every
+other restore, `pageBroker.restoreMode` selects the restore source:
 
 - `direct` (default) prepares a PageBroker transaction and mounts the original
   snapshot directory read-only for CRIU. It does not copy CPU images into staging.

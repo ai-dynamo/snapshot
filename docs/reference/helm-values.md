@@ -33,13 +33,16 @@ values, see [values.yaml](../../charts/snapshot/values.yaml).
 
 | Value                                     | Default        | Description                                                                                                                                                                                               |
 |-------------------------------------------|----------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `pageBroker.restoreMode`                  | `direct`       | PageBroker restore source: `staged` copies CPU images into staging, `direct` reads the original artifact.                                                                                                 |
+| `pageBroker.restoreMode`                  | `direct`       | PageBroker restore source: `staged` copies CPU images into staging, `direct` reads the original artifact. A copy in the node cache is always read in place.                                               |
 | `storage.type`                            | `pvc`          | Snapshot store backend: `pvc` or `s3`.                                                                                                                                                                  |
 | `storage.pvc.create`                      | `true`         | Create the PVC; set `false` to use an existing one.                                                                                                                                                       |
 | `storage.pvc.name`                        | `snapshot-pvc` | Shared PVC name.                                                                                                                                                                                          |
 | `storage.pvc.size`                        | `1Ti`          | Requested size.                                                                                                                                                                                           |
 | `storage.pvc.storageClass`                | `""`           | Storage class; empty uses the cluster default. Must support `ReadWriteMany`.                                                                                                                              |
 | `storage.pvc.basePath`                    | `/checkpoints` | Fixed agent mount path; cannot be changed.                                                                                                                                                                |
+| `storage.nodeCache.enabled`               | `false`        | Restore from a checkpoint copy on the node's local disk when one is there. See [Node Cache](../operate/configure-storage.md#node-cache).                                                                  |
+| `storage.nodeCache.path`                  | `/var/lib/snapshot/cache` | Absolute path of the directory on the node, without a trailing slash and not `/`. The same path is used on every node that runs the agent.                                                     |
+| `storage.nodeCache.createIfMissing`       | `true`         | Create the directory, empty, on a node that does not have it. With `false`, the agent Pod does not start on such a node.                                                                                  |
 | `storage.s3.endpoint`                     | `""`           | Required with `storage.type: s3`. S3-compatible endpoint, an absolute http(s) URL.                                                                                                                        |
 | `storage.s3.region`                       | `""`           | Required with `storage.type: s3`. Bucket region.                                                                                                                                                          |
 | `storage.s3.bucket`                       | `""`           | Required with `storage.type: s3`. Bucket holding the snapshots.                                                                                                                                         |
@@ -83,7 +86,8 @@ uses CustomStorage for checkpoints when the driver supports it; otherwise a
 checkpoint uses the driver-managed format. The agent runs CRIU. GPU payloads
 are read directly from the original snapshot.
 `pageBroker.restoreMode` selects whether CRIU reads CPU images directly (the
-default) or from tmpfs staging. Restore uses the format recorded in the snapshot.
+default) or from tmpfs staging. A copy in the node cache is always read
+directly. Restore uses the format recorded in the snapshot.
 
 | Value                              | Default                                    | Description                                       |
 |------------------------------------|--------------------------------------------|---------------------------------------------------|

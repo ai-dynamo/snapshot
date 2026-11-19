@@ -66,6 +66,8 @@ struct mount_attr {
  * podcontract.CuInterposeMountPath. */
 #define SNAPSHOT_CUDA_DESTINATION "/tmp/snapshot-cuda"
 #define CHECKPOINT_ROOT "/checkpoints"
+/* Published checkpoint copies in the node cache; must equal nsmount.NodeCacheArtifactsSrc. */
+#define NODE_CACHE_ARTIFACTS_ROOT "/node-cache/artifacts"
 #define CHECKPOINT_DESTINATION "/tmp/checkpoint"
 #define PAGEBROKER_RESTORE_ROOT "/pagebroker/staging/restore"
 #define PAGEBROKER_DESTINATION "/tmp/pagebroker"
@@ -89,13 +91,20 @@ is_portable_path_char(char value)
          (value >= '0' && value <= '9') || value == '_' || value == '-' || value == '.';
 }
 
+static int
+is_below(const char* value, const char* root)
+{
+  size_t root_len = strlen(root);
+  return strncmp(value, root, root_len) == 0 && value[root_len] == '/';
+}
+
 /* The Go caller constructs this path from validated single path elements. This
  * second check keeps the privileged helper safe if that caller regresses. */
 static int
 check_storage_path(const char* value, const char* root)
 {
   size_t root_len = strlen(root);
-  if (strncmp(value, root, root_len) != 0 || value[root_len] != '/') {
+  if (!is_below(value, root)) {
     fprintf(stderr, "storage path must be below %s: %s\n", root, value);
     return -1;
   }
@@ -122,9 +131,12 @@ check_storage_path(const char* value, const char* root)
   }
 }
 
+/* A checkpoint is read from the snapshot store or from a copy in the node cache. */
 static int
 check_checkpoint_path(const char* value)
 {
+  if (is_below(value, NODE_CACHE_ARTIFACTS_ROOT))
+    return check_storage_path(value, NODE_CACHE_ARTIFACTS_ROOT);
   return check_storage_path(value, CHECKPOINT_ROOT);
 }
 

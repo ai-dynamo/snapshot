@@ -16,6 +16,10 @@ import (
 // helper independently enforces the same path.
 const CheckpointBasePath = "/checkpoints"
 
+// NodeCacheBasePath is the fixed agent-side mount of the node cache. The
+// privileged mount helper enforces the same path.
+const NodeCacheBasePath = "/node-cache"
+
 // AgentConfig holds static checkpoint settings plus runtime fields populated at startup.
 type AgentConfig struct {
 	NodeName               string          `yaml:"-"`
@@ -49,6 +53,11 @@ func (c *AgentConfig) Validate() error {
 		return &ConfigError{Field: "storage.basePath", Message: fmt.Sprintf("storage.basePath must be %q", CheckpointBasePath)}
 	}
 	c.Storage.BasePath = basePath
+	// Empty leaves the node cache off. Any other value must be the fixed mount
+	// path, the only one the privileged mount helper accepts.
+	if c.Storage.NodeCachePath != "" && c.Storage.NodeCachePath != NodeCacheBasePath {
+		return &ConfigError{Field: "storage.nodeCachePath", Message: fmt.Sprintf("storage.nodeCachePath must be %q or empty", NodeCacheBasePath)}
+	}
 	if strings.TrimSpace(c.PageBroker.ControlSocketPath) == "" {
 		return &ConfigError{Field: "pageBroker.controlSocketPath", Message: "pageBroker.controlSocketPath is required"}
 	}
@@ -84,6 +93,10 @@ func (c *AgentConfig) Validate() error {
 type StorageSpec struct {
 	Type     string `yaml:"type"`
 	BasePath string `yaml:"basePath"`
+
+	// NodeCachePath is where the node cache is mounted. Empty turns the node
+	// cache off.
+	NodeCachePath string `yaml:"nodeCachePath"`
 }
 
 type PageBrokerSpec struct {
