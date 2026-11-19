@@ -652,9 +652,10 @@ agent therefore ends admission holding the complete IP map, built from the
 member table in its own artifact and the new IPs, together with the assurance
 that all members restore the same capture. Members that shared FABRIC memory,
 directly or through others, must also land on GPUs that are all ready in one
-NVLink clique of one cluster, while members that share nothing may use other
-cliques. Otherwise the attempt ends as `Refused` before CRIU. This catches
-placement mistakes, but it does not promise that every later import succeeds.
+NVLink clique of one cluster, while separate sets of members, which share no
+memory directly or through others, may use other cliques. Otherwise the attempt
+ends as `Refused` before CRIU. This catches placement mistakes, but it does not
+promise that every later import succeeds.
 
 Each agent then posts to the `admitted` barrier once its own checks pass. When
 the barrier completes, the attempt commits, and each agent records the
