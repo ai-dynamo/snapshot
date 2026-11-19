@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="402" viewBox="0 0 1040 402" role="img" aria-labelledby="title desc">
+<title id="title">Restore replacement containers after application failure: Dynamo example</title>
+<desc id="desc">In the same Pod, Snapshot initially restores C0 and C1 successfully. The application in C0 then crashes. Kubelet creates replacement container C2 and C1 takes over serving. Today C2 receives no restore. The proposed feature restores C2 from the same snapshot as a standby, preserving C1 and the Pod's placement.</desc>
+<defs>
+  <marker id="failureArrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#dc2626"/></marker>
+  <marker id="restoreArrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#2563eb"/></marker>
+</defs>
+<rect width="1040" height="402" fill="#ffffff"/>
+<rect x="12" y="12" width="1016" height="332" rx="16" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+<g font-family="DejaVu Sans, sans-serif">
+<text x="36" y="43" fill="#0f172a" font-size="18" font-weight="700">Same Pod</text>
+<rect x="636" y="24" width="368" height="30" rx="8" fill="#e2e8f0"/>
+<text x="820" y="44" text-anchor="middle" fill="#334155" font-size="15" font-family="DejaVu Sans Mono, monospace">restartPolicy: Always / OnFailure</text>
+
+<text x="36" y="83" fill="#0f172a" font-size="20" font-weight="700">1. Initial restore</text>
+<text x="380" y="83" fill="#0f172a" font-size="20" font-weight="700">2. Application failure</text>
+<text x="724" y="83" fill="#0f172a" font-size="20" font-weight="700">3. Restore replacement</text>
+<rect x="36" y="96" width="280" height="28" rx="7" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="176" y="115" fill="#334155" font-size="14" font-weight="600" text-anchor="middle">Snapshot restores C0 and C1</text>
+<rect x="380" y="96" width="280" height="28" rx="7" fill="#fef2f2" stroke="#fecaca"/>
+<text x="520" y="115" fill="#b91c1c" font-size="14" font-weight="600" text-anchor="middle">C0 crashes; kubelet starts C2</text>
+<rect x="724" y="96" width="280" height="28" rx="7" fill="#eff6ff" stroke="#bfdbfe"/>
+<text x="864" y="115" fill="#1e40af" font-size="14" font-weight="600" text-anchor="middle">Same snapshot restores C2</text>
+<rect x="36" y="140" width="280" height="64" rx="10" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1.5"/>
+<text x="52" y="165" fill="#334155" font-size="17" font-weight="400">engine-0 / C0</text>
+<text x="52" y="189" fill="#065f46" font-size="20" font-weight="700">Active</text>
+<rect x="36" y="224" width="280" height="64" rx="10" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.5"/>
+<text x="52" y="249" fill="#334155" font-size="17" font-weight="400">engine-1 / C1</text>
+<text x="52" y="273" fill="#1e40af" font-size="20" font-weight="700">Standby</text>
+<rect x="380" y="140" width="280" height="64" rx="10" fill="#fffbeb" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="396" y="165" fill="#334155" font-size="17" font-weight="400">engine-0 / C2</text>
+<text x="396" y="189" fill="#92400e" font-size="20" font-weight="700">Needs restore</text>
+<rect x="380" y="224" width="280" height="64" rx="10" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1.5"/>
+<text x="396" y="249" fill="#334155" font-size="17" font-weight="400">engine-1 / C1</text>
+<text x="396" y="273" fill="#065f46" font-size="20" font-weight="700">Active</text>
+<rect x="724" y="140" width="280" height="64" rx="10" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.5"/>
+<text x="740" y="165" fill="#334155" font-size="17" font-weight="400">engine-0 / C2</text>
+<text x="740" y="189" fill="#1e40af" font-size="20" font-weight="700">Standby</text>
+<rect x="724" y="224" width="280" height="64" rx="10" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1.5"/>
+<text x="740" y="249" fill="#334155" font-size="17" font-weight="400">engine-1 / C1</text>
+<text x="740" y="273" fill="#065f46" font-size="20" font-weight="700">Active</text>
+<path d="M328 214 H368" fill="none" stroke="#dc2626" stroke-width="2" marker-end="url(#failureArrow)"/>
+<path d="M672 214 H712" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#restoreArrow)"/>
+<text x="176" y="318" fill="#475569" font-size="15" font-weight="400" text-anchor="middle">Initial restore succeeded</text>
+<text x="520" y="318" fill="#b45309" font-size="15" font-weight="600" text-anchor="middle">Today: no restore after restart</text>
+<text x="864" y="318" fill="#1e40af" font-size="15" font-weight="600" text-anchor="middle">Proposed: standby recovered</text>
+<path d="M380 352 V364 H1004 V352" fill="none" stroke="#059669" stroke-width="2"/>
+<text x="692" y="391" fill="#065f46" font-size="17" font-weight="600" text-anchor="middle">C1 keeps serving; no Pod replacement</text>
+</g></svg>
