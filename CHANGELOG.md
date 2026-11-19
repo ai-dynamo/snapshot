@@ -70,13 +70,14 @@ commit-level history for each release is on its
   cluster-wide, and a single capture overrides it with
   `PodSnapshot.spec.checkpointRetryLimit` (or
   `SnapshotJob.spec.podSnapshotTemplate.checkpointRetryLimit`); unset defers to
-  the cluster value, and an explicit `0` asks for no retry. The resolved value is
-  saved on `PodSnapshotContent.spec.checkpointRetryLimit`. CRD change: deploy
-  the matching CRDs, operator and node agent together. Each attempt a retry
-  follows emits a `CheckpointAttemptFailed` event on the source Pod, and the
-  attempt that ends the checkpoint emits one under the reason the checkpoint
-  failed with — `RetriesExhausted` once the retries are used up, rather than
-  reading like a first-attempt failure. See
+  the cluster value, and an explicit `0` asks for no retry. The request's value
+  is carried unchanged to `PodSnapshotContent.spec.checkpointRetryLimit`, where
+  the node agent resolves it against the cluster value as it captures. CRD
+  change: deploy the matching CRDs, operator and node agent together. Each
+  attempt a retry follows emits a `CheckpointAttemptFailed` event on the source
+  Pod, and the attempt that ends the checkpoint emits one under the reason the
+  checkpoint failed with — `RetriesExhausted` once the retries are used up,
+  rather than reading like a first-attempt failure. See
   [Checkpoint retries](docs/troubleshooting/checkpoints.md#a-checkpoint-fails-with-retriesexhausted).
 - Storage shortages on a checkpoint now read distinctly: `StagingUnavailable`
   for a node's staging volume being occupied, `ImageTooLarge` for an image that
