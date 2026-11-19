@@ -35,9 +35,8 @@ one B200 with VAST NFS.
 
 For a slow CUDA phase, PageBroker's NVTX ranges separate CUDA setup, payload
 transfer, storage waits, and completion. Use NVTX-only tracing; CUDA API tracing
-can interfere with checkpoint operations. Tune `pageBroker.transferBufferCount`
-and `pageBroker.transferChunkBytes` together, accounting for their product on
-every visible GPU.
+can interfere with checkpoint operations. Tune `pageBroker.stagingBytesPerGPU`,
+accounting for it on every visible GPU.
 
 ## Check the Storage Configuration
 
