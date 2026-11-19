@@ -346,7 +346,7 @@ The importer therefore records the import under creator PID 0, which is never a 
 It cannot observe the allocation's size or a multicast object's properties, so it records size 0 and empty multicast properties.
 
 A FABRIC handle does not say whether it names memory or a multicast object, so an import starts with its kind unknown.
-Calls that accept either kind go to the driver with the real handle: `cuMemMap`, `cuMemUnmap`, `cuMemSetAccess`, `cuMemRelease`, `cuMemRetainAllocationHandle`, and `cuMemGetAllocationPropertiesFromHandle`.
+Calls that accept either kind go to the driver with the real handle or address: `cuMemMap`, `cuMemUnmap`, `cuMemSetAccess`, `cuMemRelease`, `cuMemRetainAllocationHandle`, and `cuMemGetAllocationPropertiesFromHandle`.
 The mappings that they record do not depend on the kind.
 The first call that only one kind accepts classifies the import, once the driver accepts that call.
 The object of `cuMulticastAddDevice`, `cuMulticastBindMem`, `cuMulticastBindAddr`, or `cuMulticastUnbind` becomes a multicast object, and the member of a binding, by handle or by address, becomes memory.
@@ -804,6 +804,7 @@ The member publishes the result with its peers in its admission, as `fabric: {pe
 Before the `admitted` barrier, it checks every member that shared FABRIC memory with it, directly or through others, in rank order, so all of them reach the same verdict.
 Every GPU of those members must be registered with its fabric, with state `Completed` and status `Success`.
 All of those GPUs must report one cluster UUID and one clique ID.
+Members that share no memory with each other, directly or through others, may be in different cliques.
 Otherwise the attempt ends with `Refused`, before CRIU runs.
 A member that shared no FABRIC memory publishes no fabric and is not checked.
 The check catches placement mistakes, but it does not promise that every later import succeeds.
