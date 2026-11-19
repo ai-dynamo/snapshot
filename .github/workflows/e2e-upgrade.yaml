@@ -174,7 +174,8 @@ jobs:
     needs: upgrade-gate
     if: ${{ needs.upgrade-gate.outputs.pairs != '' && needs.upgrade-gate.outputs.pairs != '[]' }}
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: ${{ matrix.profile == 'all' && 155 || 105 }}
+    # The suite's own 155 or 105 minutes plus waiting for and releasing a suite slot.
+    timeout-minutes: ${{ matrix.profile == 'all' && 340 || 290 }}
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -218,6 +219,12 @@ jobs:
         run: |
           echo "kubeconfig=${KUBECONFIG:-}" >> "${GITHUB_OUTPUT}"
 
+      - name: Wait for a GPU suite slot
+        timeout-minutes: 180
+        env:
+          KUBECONFIG: ${{ steps.host.outputs.kubeconfig }}
+        run: python3 hack/e2e-suite-slot.py take
+
       - name: Create vCluster target
         timeout-minutes: 30
         uses: ./.github/actions/e2e-vcluster-up
@@ -255,3 +262,10 @@ jobs:
         uses: ./.github/actions/e2e-vcluster-down
         with:
           host_kubeconfig: ${{ steps.host.outputs.kubeconfig }}
+
+      - name: Release the GPU suite slot
+        if: ${{ always() }}
+        timeout-minutes: 5
+        env:
+          KUBECONFIG: ${{ steps.host.outputs.kubeconfig }}
+        run: python3 hack/e2e-suite-slot.py release
