@@ -256,7 +256,7 @@ EOF
 # cluster, not of the caller, so they live here rather than in CI.
 #
 # The chart sizes the agent and PageBroker for a GPU node. CPU-only tests
-# allocate no CUDA staging ring and must leave room for workloads on the runner.
+# allocate no CUDA staging buffers and must leave room for workloads on the runner.
 # If a component is OOMKilled mid-dump, its memory limit is the first thing to raise.
 print_helm_set() {
   cat <<EOF

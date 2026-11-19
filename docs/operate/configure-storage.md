@@ -192,7 +192,7 @@ The staging volume is RAM, so size the agent pod for it:
 | `pageBroker.staging.sizeLimit`       | Cap on the RAM-backed staging volume shared by checkpoint and staged restore; unbounded without it | `56Gi`       |
 | `daemonset.resources.limits.memory`  | Bounds the largest CRIU image, since CRIU writes staging from the agent container         | `64Gi`       |
 | `pageBroker.resources.limits.memory` | Bounds staged-restore prefetch, since PageBroker fills staging only in staged restore mode       | `256Gi`      |
-| `pageBroker.resources.requests`      | GPU transfer rings and process memory; added to the agent's requests when scheduling            | 8 CPU / 32Gi |
+| `pageBroker.resources.requests`      | GPU transfer buffers and process memory; added to the agent's requests when scheduling          | 8 CPU / 32Gi |
 
 To checkpoint workloads whose CPU memory exceeds the defaults, raise the
 staging cap and the agent memory limit together, leaving headroom above the
@@ -209,10 +209,10 @@ Leave `pageBroker.resources.limits.memory` at its chart default (`256Gi`)
 here: PageBroker needs headroom above the staging cap too, on top of the
 default GPU transfer buffers (4 GiB per visible GPU, `32Gi` on an eight-GPU
 node by default). The chart default already covers both; raise it further
-only if your node has more GPUs or a larger `pageBroker.transferBufferCount`.
+only if your node has more GPUs or a larger `pageBroker.stagingBytesPerGPU`.
 
 Each agent pod requests 10 CPU and 33Gi of memory in total by default, including
-the GPU engine transfer rings. Nodes must have that allocatable capacity.
+the GPU engine transfer buffers. Nodes must have that allocatable capacity.
 Limits are not checked at scheduling time.
 
 ### Why the Staging Volume Needs a Cap
