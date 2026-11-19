@@ -176,7 +176,6 @@ def test_a_dump_that_runs_out_of_staging_spends_its_retries(
             snap.drain_staging(config, node)
 
 
-@pytest.mark.environment
 @pytest.mark.cpu
 def test_the_agent_reports_the_criu_build_it_runs(
     config: k8s.E2EConfig,
@@ -189,12 +188,11 @@ def test_the_agent_reports_the_criu_build_it_runs(
     source, node = create_ready_source(config, run, gpu=False)
     assert source is not None
 
-    startup = [
-        line
-        for line in snap.agent_startup_log(config, node).splitlines()
-        if "Starting snapshot agent" in line
-    ]
-    assert startup, "the agent logs what it starts with"
+    # Quoted on failure because an unreadable log comes back as a sentinel
+    # string rather than an error, and an empty match alone names neither.
+    log = snap.agent_startup_log(config, node)
+    startup = [line for line in log.splitlines() if "Starting snapshot agent" in line]
+    assert startup, f"the agent logs what it starts with; read instead: {log[-2000:]!r}"
 
     reported = re.search(r'"criu_version":\s*"([^"]+)"', startup[-1])
     assert reported, f"the startup line names the CRIU it runs: {startup[-1]}"
