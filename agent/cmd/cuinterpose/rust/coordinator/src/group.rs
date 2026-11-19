@@ -218,13 +218,13 @@ fn participant(grouped: bool, process: NamespacePid) -> String {
     }
 }
 
-/// What creators record and their importers cannot observe.
+/// What creators record and their importers cannot observe, in group identities.
 #[derive(Default)]
 struct Creators {
-    /// The creator of each exported FABRIC handle, in group identities, and its kind.
+    /// The creator of each exported FABRIC handle and its kind.
     exporters: BTreeMap<FabricHandle, (AllocationReference, FabricKind)>,
-    allocations: BTreeMap<AllocationId, (u64, MemoryLocation)>,
-    multicasts: BTreeMap<AllocationId, MulticastProperties>,
+    allocations: BTreeMap<AllocationReference, (u64, MemoryLocation)>,
+    multicasts: BTreeMap<AllocationReference, MulticastProperties>,
 }
 
 impl Creators {
@@ -233,6 +233,10 @@ impl Creators {
         for (&rank, pod) in pods {
             for (&pid, records) in pod {
                 let process = group_pid(rank, pid);
+                let created = |allocation: &AllocationReference| AllocationReference {
+                    creator_pid: process,
+                    ..*allocation
+                };
                 for record in records {
                     match record {
                         Record::FabricExport {
@@ -244,10 +248,7 @@ impl Creators {
                                 allocation.creator_pid == pid,
                                 "participant {process}: fabric export of {allocation:?} by a process that did not create it"
                             );
-                            let creator = AllocationReference {
-                                creator_pid: process,
-                                ..*allocation
-                            };
+                            let creator = created(allocation);
                             if let Some(known) =
                                 creators.exporters.insert(*handle, (creator, *kind))
                                 && known != (creator, *kind)
@@ -263,19 +264,32 @@ impl Creators {
                         } if allocation.creator_pid == pid => {
                             creators
                                 .allocations
-                                .insert(allocation.id, (*size, *location));
+                                .insert(created(allocation), (*size, *location));
                         }
                         Record::Multicast {
                             allocation,
                             properties,
                             ..
                         } if allocation.creator_pid == pid => {
-                            creators.multicasts.insert(allocation.id, *properties);
+                            creators.multicasts.insert(created(allocation), *properties);
                         }
                         _ => {}
                     }
                 }
             }
+        }
+        // Importers of unknown kind take the kind of an export, so it must be the kind of
+        // what its creator recorded.
+        for (handle, (creator, kind)) in &creators.exporters {
+            let (recorded, record) = match kind {
+                FabricKind::Memory => (creators.allocations.contains_key(creator), "Allocation"),
+                FabricKind::Multicast => (creators.multicasts.contains_key(creator), "Multicast"),
+            };
+            ensure!(
+                recorded,
+                "participant {}: fabric export {handle:?} is {kind:?}, but the participant has no {record} record of {creator:?}",
+                creator.creator_pid
+            );
         }
         Ok(creators)
     }
@@ -353,7 +367,7 @@ impl Creators {
                 } => {
                     if imported
                         && let Some((creator_size, creator_location)) =
-                            self.allocations.get(&allocation.id)
+                            self.allocations.get(allocation)
                     {
                         *size = *creator_size;
                         *location = *creator_location;
@@ -365,7 +379,7 @@ impl Creators {
                     properties,
                     ..
                 } if imported => {
-                    if let Some(creator) = self.multicasts.get(&allocation.id) {
+                    if let Some(creator) = self.multicasts.get(allocation) {
                         *properties = *creator;
                     }
                 }
@@ -801,6 +815,52 @@ mod tests {
             error.contains("is Multicast, but its creator exported Memory"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn fabric_export_of_another_kind_than_its_creator_recorded_is_refused() {
+        // The creator records `X` as memory and `T` as a one-device team, and exports
+        // one of them as the other kind, which an importer of unknown kind would take.
+        let mut creator = creator();
+        creator.extend([
+            with!(
+                multicast(),
+                Multicast.allocation = T,
+                Multicast.properties.handle_types = u64::from(FABRIC)
+            ),
+            with!(device(), MulticastDevice.allocation = T),
+            with!(
+                binding(),
+                MulticastBinding.allocation = T,
+                MulticastBinding.source = member(X, 0)
+            ),
+        ]);
+        let importer = vec![Record::FabricImport {
+            allocation: import(9),
+            handle: handle(1),
+            kind: None,
+        }];
+        for (allocation, kind, record) in [
+            (X, FabricKind::Multicast, "Multicast"),
+            (T, FabricKind::Memory, "Allocation"),
+        ] {
+            let mut exporter = creator.clone();
+            exporter[2] = Record::FabricExport {
+                allocation,
+                handle: handle(1),
+                kind,
+            };
+            let error = refusal(&pods([
+                (0, vec![(1, exporter)]),
+                (1, vec![(1, importer.clone())]),
+            ]));
+            assert!(
+                error.contains(&format!(
+                    "is {kind:?}, but the participant has no {record} record"
+                )),
+                "{error}"
+            );
+        }
     }
 
     #[test]
