@@ -153,6 +153,14 @@ commit-level history for each release is on its
   namespace rather than the restore container's (#593), so lookups by PID,
   such as UCX shared-memory endpoints (#802), work after a restore. Only
   checkpoints taken after the upgrade get it; take older ones again.
+- Restore semantics: on nodes with the restore proxy, a destination container
+  that starts again after its Pod's restore has ended is restored again from the
+  same `PodSnapshot`. This happens whatever the earlier outcome, where the proxy
+  used to exit with code 112 and the container ended in `CrashLoopBackOff`. The
+  `nvidia.com/Restored` condition returns to `RestoreInProgress`, with a
+  `RestoreRepeated` event. Use `restartPolicy: Never` to keep one restore per
+  Pod. See
+  [When a Container Starts Again](docs/reference/restore-pod-contract.md#when-a-container-starts-again).
 
 ### Deprecated
 

@@ -333,6 +333,70 @@ func TestWriteFileInDirReplacesSymlinkWithoutFollowing(t *testing.T) {
 	}
 }
 
+func TestFileExistsInDir(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "snapshot-restore-proxy"), nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "missing"), filepath.Join(root, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+
+	for name, want := range map[string]bool{"snapshot-restore-proxy": true, "dangling": true, "missing": false} {
+		exists, err := FileExistsInDir(dir, name)
+		if err != nil || exists != want {
+			t.Errorf("FileExistsInDir(%q) = %v, %v; want %v", name, exists, err, want)
+		}
+	}
+	for _, name := range []string{"", "..", "a/b", "../x"} {
+		if _, err := FileExistsInDir(dir, name); err == nil {
+			t.Errorf("FileExistsInDir(%q) succeeded, want error", name)
+		}
+	}
+}
+
+func TestRemoveFileInDir(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(target, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "restore-complete"), []byte("pid=7\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, "restore-failed")); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+
+	for _, name := range []string{"restore-complete", "restore-failed", "missing"} {
+		if err := RemoveFileInDir(dir, name); err != nil {
+			t.Fatalf("RemoveFileInDir(%q): %v", name, err)
+		}
+	}
+
+	if entries, _ := os.ReadDir(root); len(entries) != 0 {
+		t.Fatalf("entries = %v; want none", entries)
+	}
+	if data, _ := os.ReadFile(target); string(data) != "keep" {
+		t.Fatalf("symlink target changed to %q", data)
+	}
+	for _, name := range []string{"", "..", "a/b", "../x"} {
+		if err := RemoveFileInDir(dir, name); err == nil {
+			t.Errorf("RemoveFileInDir(%q) succeeded, want error", name)
+		}
+	}
+}
+
 func TestWriteFileInDirRejectsPaths(t *testing.T) {
 	dir, err := os.Open(t.TempDir())
 	if err != nil {

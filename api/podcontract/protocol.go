@@ -91,8 +91,9 @@ const (
 
 	// RestoreFailedFile is written by the Snapshot agent before it kills a
 	// destination container whose restore failed. The failing container never
-	// acts on it; a later container in the same Pod reads it as proof that the
-	// Pod's one restore was already used.
+	// acts on it. A container that starts again before the Pod's restore has
+	// ended reads it and exits; the agent removes it for a container created
+	// after that, which is restored again.
 	RestoreFailedFile = "restore-failed"
 
 	// RestoreCompletePIDKey names the restored process's PID, relative to the
@@ -123,9 +124,11 @@ func IsReservedControlFile(name string) bool {
 // Exit codes reserved by the restore proxy. Every other code is the restored
 // workload's own, or 128 plus the signal number that killed it.
 const (
-	// RestoreNotRepeatableExitCode means this Pod's one restore is spent: the
-	// proxy found RestoreCompleteFile or RestoreFailedFile at start, left by an
-	// earlier container, or RestoreFailedFile appeared while it waited.
+	// RestoreNotRepeatableExitCode means no restore is coming for this
+	// container: the proxy found RestoreCompleteFile or RestoreFailedFile at
+	// start, left by an earlier container while the Pod's restore had not yet
+	// ended, or RestoreFailedFile appeared while it waited. A container created
+	// after the Pod's restore has ended is restored again.
 	RestoreNotRepeatableExitCode = 112
 
 	// RestoreProxyErrorExitCode means the proxy could not follow the restored

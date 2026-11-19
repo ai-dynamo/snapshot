@@ -76,12 +76,13 @@ the `nvidia.com/snapshot-multi-gpu: enabled` annotation on the source pod.
 Multi-node workloads are not supported. See
 [Workload Contract](../reference/workload-contract.md#multi-gpu-workloads).
 
-## One Restore per Pod
+## Restoring Again
 
-A pod gets one restore. If the restored process exits, the pod does not restore
-again; create a new pod to restore again. This is why restore pods use
-`restartPolicy: Never`. See
-[Restore Pod Contract](../reference/restore-pod-contract.md).
+A restore pod with `restartPolicy: Never` gets one restore; create a new pod to
+restore again. Under `restartPolicy: Always`, as in a Deployment, a container
+that starts again after the restore has ended is restored again from the same
+snapshot. See
+[When a Container Starts Again](../reference/restore-pod-contract.md#when-a-container-starts-again).
 
 ## Primitives, Not Orchestration
 

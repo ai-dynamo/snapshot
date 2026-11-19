@@ -57,15 +57,17 @@ func ControlDirFromEnv() string {
 
 // Run waits for the restore and follows the restored process. It returns the
 // container's exit code. It never deletes the control files: an emptyDir
-// survives a container restart, and a file left by an earlier container is
-// how a restarted proxy knows the Pod's one restore is spent.
+// survives a container restart, and the NRI plugin removes the result an
+// earlier container left once the Pod's restore has ended. One still here at
+// start means that restore has not ended, so no restore is coming for this
+// container.
 func Run(cfg Config) int {
 	log := cfg.Log
 	if prior, done, err := checkRestore(cfg.ControlDir); err != nil {
 		log.Error(err, "Cannot inspect control directory")
 		return podcontract.RestoreProxyErrorExitCode
 	} else if done {
-		log.Info("Restore already used by an earlier container; restores are not repeatable", "restore_failed", prior.failed)
+		log.Info("An earlier container's restore result is still here; the Pod's restore has not ended", "restore_failed", prior.failed)
 		return podcontract.RestoreNotRepeatableExitCode
 	}
 
@@ -79,7 +81,7 @@ func Run(cfg Config) int {
 		if outcome.failed {
 			// Normally the agent kills this container first. If it could not,
 			// the marker is the only way out.
-			log.Info("Restore failed; this Pod's restore is spent")
+			log.Info("Restore failed")
 			return podcontract.RestoreNotRepeatableExitCode
 		}
 		// Nothing to forward to yet. The runtime kills anything CRIU left.

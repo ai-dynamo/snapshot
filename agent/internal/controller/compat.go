@@ -58,8 +58,10 @@ func restoreRefused(pod *corev1.Pod) bool {
 }
 
 // skipRequestedAfterRefusal reports a pod that the gates turned down and that
-// has since asked for them to be skipped. Nothing else reopens a terminal
-// restore, which is what makes the skip request an escape hatch and not a retry.
+// has since asked for them to be skipped. Apart from a destination container
+// that starts again, which RestoreAgain restores, nothing else reopens a
+// terminal restore, which is what makes the skip request an escape hatch and
+// not a retry.
 func (w *NodeController) skipRequestedAfterRefusal(pod *corev1.Pod) bool {
 	return restoreRefused(pod) && w.skipCompatCheckRequested(pod)
 }

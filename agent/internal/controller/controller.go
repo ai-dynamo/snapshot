@@ -109,6 +109,14 @@ type NodeController struct {
 	// restore destination container the NRI plugin saw start, so a restore
 	// begins before kubelet publishes the container in the Pod status.
 	startedRestoreContainers sync.Map
+	// restoresStartedAgain holds, per Pod UID, the restoreStartedAgain that
+	// RestoreAgain left, until the cache shows the restore back in progress
+	// or the API server shows it ended.
+	restoresStartedAgain sync.Map
+	// restartedRestoreContainers holds the restoreContainerKey of each
+	// destination that RestoreAgain restores again, until a pass finds its
+	// new container.
+	restartedRestoreContainers sync.Map
 
 	// contentIndexer is the PodSnapshotContent informer's indexer, indexed by source pod
 	// (podRefIndex). The source-pod informer uses it to map a pod event back to its work order.
@@ -446,13 +454,16 @@ func (w *NodeController) forgetRestorePod(obj interface{}) {
 		return
 	}
 	w.handledRestores.Delete(string(pod.UID))
+	w.restoresStartedAgain.Delete(string(pod.UID))
 	prefix := string(pod.UID) + "/"
-	w.startedRestoreContainers.Range(func(key, _ any) bool {
-		if strings.HasPrefix(key.(string), prefix) {
-			w.startedRestoreContainers.Delete(key)
-		}
-		return true
-	})
+	for _, containers := range []*sync.Map{&w.startedRestoreContainers, &w.restartedRestoreContainers} {
+		containers.Range(func(key, _ any) bool {
+			if strings.HasPrefix(key.(string), prefix) {
+				containers.Delete(key)
+			}
+			return true
+		})
+	}
 }
 
 // RestoreContainerStarted records a restore destination's container that the
@@ -525,6 +536,15 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
 	}
 	if err != nil {
 		w.log.Error(err, "Failed to read restore pod from informer cache", "pod", key.String())
+		requeue = true
+		return
+	}
+	pod, err = w.latestRestorePod(ctx, pod)
+	if apierrors.IsNotFound(err) {
+		return
+	}
+	if err != nil {
+		w.log.Error(err, "Failed to read restore pod from the API server", "pod", key.String())
 		requeue = true
 		return
 	}
@@ -1016,6 +1036,7 @@ func (w *NodeController) restoreDestination(
 	if containerID == "" {
 		return result
 	}
+	w.restartedRestoreContainers.Delete(restoreContainerKey(pod.UID, destination))
 
 	startedAt := time.Now()
 	log := w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "destination", destination)
@@ -1050,10 +1071,14 @@ func (w *NodeController) restoreDestination(
 
 // resolveRestoreContainerID uses the kubelet-published status fast path, then
 // polls inline while this Pod's queue key remains in progress: first for the
-// container the NRI plugin saw start, then the node runtime.
+// container the NRI plugin saw start, then the node runtime. A destination
+// restored again skips the status, which can still name the container that
+// stopped.
 func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *corev1.Pod, destination, podKey string) (string, bool) {
-	if containerID := restoreContainerIDFromStatus(pod, destination); containerID != "" {
-		return containerID, false
+	if _, restarted := w.restartedRestoreContainers.Load(restoreContainerKey(pod.UID, destination)); !restarted {
+		if containerID := restoreContainerIDFromStatus(pod, destination); containerID != "" {
+			return containerID, false
+		}
 	}
 
 	w.log.V(1).Info("Restore pod has no running container in Kubernetes status yet; polling node runtime",
@@ -1300,9 +1325,11 @@ func (op *restoreOperation) completeRestore(ctx context.Context, restored execut
 }
 
 // markRestoreFailed writes the restore-failed sentinel before the caller kills
-// the placeholder, so a restarted container sees that this Pod's one restore
-// was already used instead of waiting for a restore that will not come. It is
-// best effort: the kill must happen whether or not the marker was written.
+// the placeholder, so a container that starts again before the Pod's restore
+// ends exits instead of waiting for a restore that will not come. Once the
+// restore has ended, the NRI plugin removes it for the next container, which
+// is restored again. It is best effort: the kill must happen whether or not
+// the marker was written.
 func (op *restoreOperation) markRestoreFailed(placeholderHostPID int) {
 	if err := op.controller.writeControlSentinelFn(placeholderHostPID, podcontract.RestoreFailedFile, restoreFailedSentinelContents); err != nil {
 		op.log.Error(err, "Failed to write restore-failed sentinel")

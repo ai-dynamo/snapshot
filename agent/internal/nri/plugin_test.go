@@ -35,6 +35,11 @@ type fakeRestorer struct {
 	pod          *corev1.Pod
 	started      []started
 	stopped      []started
+	ended        bool
+	againErr     error
+	again        []string
+	againPod     *corev1.Pod
+	againBounded bool
 }
 
 func (r *fakeRestorer) RestoreDestinations(_ context.Context, pod *corev1.Pod) ([]string, error) {
@@ -49,6 +54,17 @@ func (r *fakeRestorer) RestoreContainerStarted(pod ktypes.NamespacedName, uid kt
 
 func (r *fakeRestorer) RestoreContainerStopped(uid ktypes.UID, container, containerID string) {
 	r.stopped = append(r.stopped, started{uid: uid, container: container, containerID: containerID})
+}
+
+func (r *fakeRestorer) RestoreEnded(*corev1.Pod) bool {
+	return r.ended
+}
+
+func (r *fakeRestorer) RestoreAgain(ctx context.Context, pod *corev1.Pod, container string) error {
+	r.again = append(r.again, container)
+	r.againPod = pod
+	_, r.againBounded = ctx.Deadline()
+	return r.againErr
 }
 
 // testPlugin installs into a temporary directory instead of kubelet's.
@@ -213,6 +229,84 @@ func TestCreateContainerFailsClosed(t *testing.T) {
 		require.Error(t, err)
 		assert.Nil(t, adjust)
 	})
+
+	t.Run("earlier result cannot be removed", func(t *testing.T) {
+		restorer := &fakeRestorer{destinations: []string{"main"}, ended: true}
+		p, root := testPlugin(t, restorer)
+		dir := filepath.Join(root, "pod-uid", "main")
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, podcontract.RestoreCompleteFile, "entry"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, podcontract.RestoreProxyBinaryName), []byte("earlier"), 0o755))
+
+		adjust, _, err := p.CreateContainer(context.Background(), restoreSandbox(restoreFrom), &api.Container{Name: "main"})
+
+		require.Error(t, err)
+		assert.Nil(t, adjust)
+		assert.Empty(t, restorer.again, "the restore does not start again while the earlier result stays")
+	})
+
+	t.Run("restoring again fails", func(t *testing.T) {
+		p, root := testPlugin(t, &fakeRestorer{destinations: []string{"main"}, ended: true, againErr: errors.New("status write timed out")})
+		dir := filepath.Join(root, "pod-uid", "main")
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, podcontract.RestoreProxyBinaryName), []byte("earlier"), 0o755))
+
+		adjust, _, err := p.CreateContainer(context.Background(), restoreSandbox(restoreFrom), &api.Container{Name: "main"})
+
+		require.Error(t, err)
+		assert.Nil(t, adjust)
+	})
+}
+
+// The control directory outlives the container. A container that starts again
+// after its Pod's restore ended must not find the result an earlier container
+// left, or its proxy would exit instead of waiting for the new restore.
+func TestCreateContainerRestoresAgainAfterTheRestoreEnded(t *testing.T) {
+	restoreFrom := map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"}
+	for name, tc := range map[string]struct {
+		ended         bool
+		earlier       bool
+		wantRestarted bool
+	}{
+		"container starts again during the restore": {ended: false, earlier: true},
+		"container starts again after the restore":  {ended: true, earlier: true, wantRestarted: true},
+		"first container after the restore ended":   {ended: true},
+		"first container before the restore":        {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			restorer := &fakeRestorer{destinations: []string{"main"}, ended: tc.ended}
+			p, root := testPlugin(t, restorer)
+			dir := filepath.Join(root, "pod-uid", "main")
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			results := []string{podcontract.RestoreCompleteFile, podcontract.RestoreFailedFile}
+			if tc.earlier {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, podcontract.RestoreProxyBinaryName), []byte("earlier"), 0o755))
+				for _, result := range results {
+					require.NoError(t, os.WriteFile(filepath.Join(dir, result), []byte("earlier\n"), 0o644))
+				}
+			}
+
+			adjust, _, err := p.CreateContainer(context.Background(), restoreSandbox(restoreFrom), &api.Container{Id: "ctr-new", Name: "main"})
+
+			require.NoError(t, err)
+			require.NotNil(t, adjust)
+			assert.FileExists(t, filepath.Join(dir, podcontract.RestoreProxyBinaryName))
+			for _, result := range results {
+				switch {
+				case tc.wantRestarted:
+					assert.NoFileExists(t, filepath.Join(dir, result))
+				case tc.earlier:
+					assert.FileExists(t, filepath.Join(dir, result), "the running restore may be done with this destination")
+				}
+			}
+			if !tc.wantRestarted {
+				assert.Empty(t, restorer.again)
+				return
+			}
+			assert.Equal(t, []string{"main"}, restorer.again)
+			assert.Equal(t, "pod-uid", string(restorer.againPod.UID))
+			assert.True(t, restorer.againBounded, "the status write runs inside the runtime's call")
+		})
+	}
 }
 
 // The controller restores as soon as the destination runs, by the identity it
