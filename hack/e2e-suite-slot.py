@@ -42,7 +42,9 @@ SLOT_PREFIX = "suite-slot-"
 E2E_NAMESPACE_SELECTOR = "snapshot-e2e=true"
 GPU_NODE_LABEL = "nvidia.com/gpu.present"
 GPU_RESOURCE = "nvidia.com/gpu"
-AGENT_TOLERATED_TAINTS = ("nvidia.com/gpu", "dedicated")
+AGENT_ARCHITECTURES = ("amd64", "arm64")
+AKS_USER_NODE_LABEL = "kubernetes.azure.com/mode"
+AKS_USER_NODE_VALUE = "user"
 LEASE_SECONDS = 300
 GRACE_SECONDS = 60
 RENEW_SECONDS = 60
@@ -182,19 +184,19 @@ def pod_requests(pod: dict) -> dict[str, Decimal]:
     return requests
 
 
-def blocks_agent(taint: dict) -> bool:
-    if taint.get("effect") not in ("NoSchedule", "NoExecute"):
-        return False
-    key = taint.get("key", "")
-    return key not in AGENT_TOLERATED_TAINTS and not key.startswith("node.kubernetes.io/")
+def node_labels(node: dict) -> dict[str, str]:
+    return node["metadata"].get("labels") or {}
 
 
 def agent_nodes(nodes: list[dict]) -> list[dict]:
+    # Must match the nodes vcluster_node_sync_selector_labels in e2e/snapshot_e2e/infra/setup.py syncs.
+    if any(node_labels(node).get(AKS_USER_NODE_LABEL) == AKS_USER_NODE_VALUE for node in nodes):
+        nodes = [node for node in nodes if node_labels(node).get(AKS_USER_NODE_LABEL) == AKS_USER_NODE_VALUE]
     return [
         node
         for node in nodes
-        if (node["metadata"].get("labels") or {}).get(GPU_NODE_LABEL) == "true"
-        and not any(blocks_agent(taint) for taint in (node.get("spec") or {}).get("taints") or [])
+        if node_labels(node).get(GPU_NODE_LABEL) == "true"
+        and node_labels(node).get("kubernetes.io/arch") in AGENT_ARCHITECTURES
     ]
 
 
@@ -214,7 +216,7 @@ def compute_limit(
 ) -> Limit:
     eligible = agent_nodes(nodes)
     if not eligible:
-        raise CapacityError(f"no node is labelled {GPU_NODE_LABEL}=true and open to the agent")
+        raise CapacityError(f"no node the vCluster syncs is labelled {GPU_NODE_LABEL}=true")
 
     other: dict[str, dict[str, Decimal]] = {}
     held: dict[tuple[str, str], dict[str, Decimal]] = {}

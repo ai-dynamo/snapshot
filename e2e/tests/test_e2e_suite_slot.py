@@ -18,6 +18,8 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import yaml
 
+from snapshot_e2e.infra import setup
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "hack" / "e2e-suite-slot.py"
@@ -68,7 +70,7 @@ def clock(slot: ModuleType, monkeypatch: pytest.MonkeyPatch) -> Clock:
 
 
 def gpu_node(name: str, cpu: str = "96", memory: str = "880Gi", gpus: str = "16", taints=None, labels=None) -> dict:
-    node_labels = {"nvidia.com/gpu.present": "true"} if labels is None else labels
+    node_labels = {"nvidia.com/gpu.present": "true", "kubernetes.io/arch": "amd64"} if labels is None else labels
     return {
         "metadata": {"name": name, "labels": node_labels},
         "spec": {"taints": taints or []},
@@ -288,32 +290,45 @@ def test_init_containers_and_overhead_count_like_the_scheduler_counts_them(slot)
     assert slot.pod_requests(workload) == {"cpu": Decimal("6.25"), "memory": Decimal(GIB)}
 
 
-def test_finished_pods_and_nodes_closed_to_the_agent_are_skipped(slot, cluster):
-    cluster.nodes = [
-        gpu_node("node-a"),
-        gpu_node("tainted", cpu="1", taints=[{"key": "maintenance", "effect": "NoSchedule"}]),
-        gpu_node("cpu-only", cpu="1", labels={}),
-        gpu_node(
-            "gpu-tainted",
-            taints=[
-                {"key": "nvidia.com/gpu", "effect": "NoSchedule"},
-                {"key": "node.kubernetes.io/unschedulable", "effect": "NoSchedule"},
-                {"key": "prefer", "effect": "PreferNoSchedule"},
-            ],
-        ),
-    ]
+def test_finished_and_unscheduled_pods_take_no_room(slot, cluster):
     cluster.pods = [
         pod("done", "node-a", cpu="90", phase="Succeeded"),
         pod("unscheduled", "", cpu="90"),
     ]
+    assert limit(slot, cluster).value == 8
+
+
+def test_every_gpu_node_counts_whatever_its_taints(slot, cluster):
+    cluster.nodes = [
+        gpu_node("node-a"),
+        gpu_node("tainted", cpu="21", taints=[{"key": "maintenance", "effect": "NoExecute"}]),
+        gpu_node("cpu-only", cpu="1", labels={"kubernetes.io/arch": "amd64"}),
+        gpu_node("s390x", cpu="1", labels={"nvidia.com/gpu.present": "true", "kubernetes.io/arch": "s390x"}),
+    ]
     result = limit(slot, cluster)
-    assert result.value == 8
+    assert result.value == 1
+    assert "the tightest GPU node tainted" in result.detail
     assert "2 GPU nodes" in result.detail
 
 
+def test_only_aks_user_nodes_count_when_the_host_has_them(slot, cluster):
+    user = {"nvidia.com/gpu.present": "true", "kubernetes.io/arch": "amd64", "kubernetes.azure.com/mode": "user"}
+    cluster.nodes = [gpu_node("user-node", labels=user), gpu_node("system-node", cpu="1")]
+    result = limit(slot, cluster)
+    assert result.value == 7
+    assert "1 GPU nodes" in result.detail
+
+
+def test_the_aks_user_node_filter_is_the_one_the_vcluster_syncs_by(slot):
+    assert (slot.AKS_USER_NODE_LABEL, slot.AKS_USER_NODE_VALUE) == (
+        setup.AKS_USER_NODE_LABEL,
+        setup.AKS_USER_NODE_VALUE,
+    )
+
+
 def test_no_gpu_node_is_a_capacity_error(slot, cluster):
-    cluster.nodes = [gpu_node("cpu-only", labels={})]
-    with pytest.raises(slot.CapacityError, match="no node is labelled"):
+    cluster.nodes = [gpu_node("cpu-only", labels={"kubernetes.io/arch": "amd64"})]
+    with pytest.raises(slot.CapacityError, match="no node the vCluster syncs"):
         limit(slot, cluster)
 
 
