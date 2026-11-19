@@ -213,7 +213,7 @@ Redis-compatible server.
 | Sessions live only as long as the coordinator that holds them, so an attempt in flight ends if the agent that hosts its session restarts. | Each session lives in the agent on the node of the attempt's rank-0 member, which the attempt depends on anyway, since a restarted agent fails its own member; losing it is fail-stop and reported as `CoordinatorLost`, sessions on other nodes are unaffected, and a broken connection that reconnects does not fail an attempt. Every session pattern is safe to repeat, so replicating sessions later changes only the coordinator. |
 | Sessions hosted on the same node share the coordinator's memory, so a compromised workload can fill it with records forged through its relay and make concurrent attempts' data writes fail until its own attempt ends at its deadline. Every client the coordinator admits is an agent, and agents are one trust domain: in the coordinator's shared NATS account, a compromised agent can change another attempt's keys, for example through the reply subject of a request, which its permissions don't cover. | The sessions that the cap affects still end promptly, since their control keys live outside it, libraries are bounded per session, each bucket bounds how many watches its members open, and the cap protects the coordinator itself. A compromised agent gains nothing it lacks already, since the agent's ServiceAccount can patch any Pod, and the token review keeps everything that isn't an agent out. Beta revisits both limits together: one NATS account per attempt to isolate agents from each other, and memory isolated per session once cuInterpose's largest records are measured, while a ValidatingAdmissionPolicy that lets the agent change only Pods' metadata and status narrows what a compromised agent can do. |
 | The agent sits on every coordination path, and an agent can restart in the middle of a restore. | The agent records its intent before CRIU starts and treats `restore-complete` as proof of release, so a restarted agent never replays CRIU and never kills a released workload. |
-| Importing GPU memory through a FABRIC handle after a native CUDA restore, from another node or within one Pod, depends on a driver fix, and cuInterpose reads the kind of an imported FABRIC handle from byte 44 of the driver's private handle layout, 1 for memory and 3 for multicast. | FABRIC sharing in alpha requires a user-mode driver with the fix in every process that imports a FABRIC handle ([Dependencies](#dependencies)). cuInterpose refuses an import whose kind byte holds any other value, so a layout change fails the import rather than misreading the handle, and a public query for the handle kind is a beta prerequisite. |
+| Importing GPU memory through a FABRIC handle after a native CUDA restore, from another node or within one Pod, depends on a driver fix, and CUDA does not report whether an imported FABRIC handle names memory or a multicast object. | FABRIC sharing in alpha requires a user-mode driver with the fix in every process that imports a FABRIC handle ([Dependencies](#dependencies)). cuInterpose reads nothing from the handle's private layout. An import takes its kind from the first call that only one kind accepts, or else from its creator's record when the checkpoint begins. An import whose kind differs from its creator's is refused at inspection. A supported CUDA query would let the shim classify an import when it is made. |
 | CUDA Checkpoint's prepare and resume phases are not released yet. | Until they are, an application whose communicators use a transport that Snapshot cannot preserve, such as RDMA, calls NCCL Checkpoint's prepare and restore itself, and NCCL restores after release through the library endpoint. Over NVLink, an existing communicator continues without either call, since cuInterpose restores its memory and Snapshot preserves its connections. |
 | A group restore Pod's container starts only after its claim, so its startup probe runs while the restore waits for its peers. | A group target's probe allows the longest deadline, a day, so it never expires before the restore's own deadline; the agent fails a member at that deadline and stops its workload, so the probe never decides an outcome. |
 | A restored process keeps its captured hostname namespace, so `gethostname()` returns its source's hostname, while the target Pod's hostname and `/etc/hosts` name the target. A workload that resolves its own hostname after release reaches loopback or nothing, and one that reports `gethostname()` as its identity names its source. | Preserved connections don't depend on names, and eager vLLM restored under new target hostnames. Workloads take their current identity from the Pod's metadata, refreshed at restore, select their network interfaces explicitly rather than through their hostname, and don't resolve their own hostname after release. |
@@ -522,10 +522,11 @@ the operator copies it to the group as it already copies Ready and Failed to the
 prepare phase on every CUDA process of every Pod at once, so that communication
 libraries tear down their connections while CUDA is still usable and while their
 peers do the same; invoking it one process at a time would deadlock libraries
-whose teardown is collective. A second round then moves the shims into their
-checkpointing phase, the leader revalidates a topology that now contains only
-application-owned shared memory, and three more rounds run the destructive
-cuInterpose phases. Finally,
+whose teardown is collective. Two more rounds then inspect again and move the
+shims into their checkpointing phase, the second giving each FABRIC import of
+unknown kind the kind of its creator. The leader revalidates a
+topology that now contains only application-owned shared memory, and three more
+rounds run the destructive cuInterpose phases. Finally,
 every agent locks and checkpoints CUDA, passes a `net-freeze` barrier, and only
 then runs CRIU, which drops all traffic in the Pod's network namespace as soon
 as it freezes the processes and keeps it dropped after the source ends. The
@@ -692,7 +693,10 @@ now admits FABRIC allocations and multicast objects, and their handles stay real
 at runtime: an export returns the driver's own handle and an import passes the
 handle to the driver, so an import never contacts its creator, while the shim
 records every handle so that the handle itself becomes the key that joins an
-importer to its creator on another node. Each shim also keeps every handle that
+importer to its creator on another node. A handle does not say whether it names
+memory or a multicast object, so an import starts without a kind. The first
+call that only one kind accepts, such as a multicast bind, classifies it once
+the driver accepts that call. Each shim also keeps every handle that
 a restore replaced, mapped to its newest replacement, and translates a handle
 through that map before it imports it, so a handle that the application kept
 from before the checkpoint imports the restored memory. Each shared allocation
@@ -705,11 +709,14 @@ lowest rank that runs one also acts as the leader, which is rank 0 unless that
 member uses no cuInterpose. The leader gathers every Pod's records, makes process
 identities unique by prefixing them with the rank, resolves importers to
 creators through the recorded handles, and validates multicast teams whose
-devices span Pods. It keeps the result as the group state, together with the
-expected carrier bytes of each process, which is the amount of shared memory
-that process must copy to or from its host carrier, and, during restore, the
-handle table, which maps every old fabric handle to the one its creator exported
-after re-creating the memory. Members without cuInterpose run no relay, and
+devices span Pods. A creator always records the kind of what it exported, so
+the leader gives each import of unknown kind its creator's kind and refuses an
+import whose kind differs. It keeps the result as the group state, together
+with the expected carrier bytes of each process, which is the amount of shared
+memory that process must copy to or from its host carrier, and, during restore,
+the handle table, which maps every old fabric handle to the one its creator
+exported after re-creating the memory. Members without cuInterpose run no
+relay, and
 since every agent learns from the admission exchange which ranks run one, they
 all agree on the leader without an election: an agent that starts a relay
 passes it its own rank, the ranks that run a relay, and the attempt's deadline,
@@ -734,15 +741,18 @@ table below and one handler in the shim.
 
 | Step | Arguments | Result |
 | --- | --- | --- |
-| `INSPECT`, `BEGIN_CHECKPOINT` | None | Records describing allocations, fabric handles, and multicast teams |
+| `INSPECT` | None | Records describing allocations, fabric handles, and multicast teams |
+| `BEGIN_CHECKPOINT` | The creator's kind of each FABRIC import of unknown kind, keyed by rank and PID, which the process takes before it freezes its records, refusing if an import is still of unknown kind | The same records, in which every import has a kind |
 | `SAVE_ALLOCATIONS` | The process that saves each shared allocation, keyed by rank and PID, so a process whose allocation another Pod saves restores it by import | Bytes copied |
 | `LOAD_ALLOCATIONS` | None | Bytes copied, and the new handles of re-created FABRIC allocations |
 | `RESTORE_MULTICAST_CREATORS` | None | The new handles of re-created multicast objects |
 | `RESTORE_UNICAST`, `RESTORE_MULTICAST_IMPORTERS` | The handle table, so each importer finds the new handle from the old one it recorded | Status only |
 | `PREPARE_MULTICAST`, `PREPARE_UNICAST`, `RESTORE_MULTICAST_DEVICES`, `RESTORE_MULTICAST_BINDINGS` | None | Status only |
 
-Only three step boundaries need the whole group to finish before the next step
-starts: after `LOAD_ALLOCATIONS` and after `RESTORE_MULTICAST_CREATORS`, because
+Only four step boundaries need the whole group to finish before the next step
+starts: after the `INSPECT` that starts a preparation, because
+`BEGIN_CHECKPOINT` carries kinds from creators in other Pods, after
+`LOAD_ALLOCATIONS` and after `RESTORE_MULTICAST_CREATORS`, because
 importers need the new handles, and after `RESTORE_MULTICAST_DEVICES`, because
 the driver waits for the whole multicast team before a bind or a mapping
 completes. The other boundaries are kept for uniformity and easier debugging,
@@ -1489,8 +1499,7 @@ and an unchanged result for the existing single-Pod suite.
 
 **Beta** requires integration with CUDA Checkpoint's prepare and resume phases,
 including the `resume` barrier that orders the resume phase across members;
-a public way to identify FABRIC handle kinds; scale measured beyond 16 Pods;
-decisions on IPv6, on the
+scale measured beyond 16 Pods; decisions on IPv6, on the
 coordinator's availability model, on isolating sessions' memory and limits, and
 on an enforced execution hold, informed by operational evidence; admission
 that verifies a group's fabric domain before CRIU; and an API
@@ -1517,6 +1526,8 @@ review that settles the open questions in [Appendix A](#a-open-questions).
   Pods, and restored it in place three times with identical outputs.
 - 2026-11-18: Aligned with the cuInterpose and agent PRs.
 - 2026-11-18: Group membership in an immutable `spec.podGroup` instead of labels.
+- 2026-11-19: cuInterpose takes the kind of a FABRIC import from its creator
+  instead of the driver's private handle layout.
 
 ## Alternatives
 
