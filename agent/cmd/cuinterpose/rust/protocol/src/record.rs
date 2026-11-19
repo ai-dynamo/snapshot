@@ -54,6 +54,17 @@ pub enum BindingVersion {
     V2,
 }
 
+/// What a fabric handle names. `CUmemFabricHandle` is opaque, so only the creator knows,
+/// and an importer learns it from the first call that only one kind accepts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FabricKind {
+    /// Memory created by `cuMemCreate`.
+    Memory,
+    /// A multicast object created by `cuMulticastCreate`.
+    Multicast,
+}
+
 /// One entry in a participant's persisted CUDA state.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -112,17 +123,22 @@ pub enum Record {
         /// `CUmemAccessDesc` values.
         access: Vec<MemoryAccess>,
     },
-    /// The creator of `allocation` exported it as `handle`.
+    /// The creator of `allocation`, which is of `kind`, exported it as `handle`.
     FabricExport {
         allocation: AllocationReference,
         handle: FabricHandle,
+        kind: FabricKind,
     },
     /// This process imported `handle` as `allocation`, whose creator namespace PID is 0
     /// because a fabric handle does not name its creator. The importer's other records
     /// hold only what it can observe: allocation size 0, the importing device, and no
     /// multicast properties. The coordinator finds the creator by the handle.
+    ///
+    /// `kind` is None until the process makes a call that only one kind accepts, and an
+    /// import of unknown kind has no other records. The creator's kind decides it.
     FabricImport {
         allocation: AllocationReference,
         handle: FabricHandle,
+        kind: Option<FabricKind>,
     },
 }

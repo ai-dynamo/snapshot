@@ -29,6 +29,8 @@ pub enum Error {
     RuntimeFailed,
     #[error("no replacement for imported fabric handle {0:?}")]
     MissingFabricReplacement(cuinterpose_protocol::FabricHandle),
+    #[error("the kind of imported fabric handle {0:?} is unknown")]
+    UnknownFabricKind(cuinterpose_protocol::FabricHandle),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

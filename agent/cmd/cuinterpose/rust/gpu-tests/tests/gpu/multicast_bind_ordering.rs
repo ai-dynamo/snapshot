@@ -75,6 +75,7 @@ fn bind_waits_until_concurrent_unbind_records_its_result() {
         assert_not_ready(
             Request::BeginCheckpoint {
                 namespace_pid: pid(),
+                imports: Vec::new(),
             },
             BEGIN,
         );
@@ -89,6 +90,7 @@ fn bind_waits_until_concurrent_unbind_records_its_result() {
         assert_not_ready(
             Request::BeginCheckpoint {
                 namespace_pid: pid(),
+                imports: Vec::new(),
             },
             BEGIN,
         );

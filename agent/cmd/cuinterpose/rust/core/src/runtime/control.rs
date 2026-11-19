@@ -8,7 +8,9 @@
 use crate::error::{Error, Result};
 use crate::memory::checkpoint;
 use crate::runtime as state;
-use cuinterpose_protocol::{self as protocol, NamespacePid, Operation, Request, Response};
+use cuinterpose_protocol::{
+    self as protocol, ImportKind, NamespacePid, Operation, Request, Response,
+};
 use rustix::event::{PollFd, PollFlags, poll};
 use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType, socket_with};
 use std::os::fd::OwnedFd;
@@ -22,7 +24,7 @@ use std::sync::mpsc::{self, TrySendError};
 const CONTROL_QUEUE_CAPACITY: usize = 8;
 
 enum ControlRequest {
-    BeginCheckpoint,
+    BeginCheckpoint(Vec<ImportKind>),
     Inspect,
     Execute(Operation),
 }
@@ -240,6 +242,7 @@ fn dispatch(
     let addressed = match &request {
         Request::BeginCheckpoint {
             namespace_pid: target,
+            ..
         }
         | Request::Inspect {
             namespace_pid: target,
@@ -261,7 +264,7 @@ fn dispatch(
         );
     }
     let request = match request {
-        Request::BeginCheckpoint { .. } => ControlRequest::BeginCheckpoint,
+        Request::BeginCheckpoint { imports, .. } => ControlRequest::BeginCheckpoint(imports),
         Request::Inspect { .. } => ControlRequest::Inspect,
         Request::Execute { operation, .. } => ControlRequest::Execute(operation),
         Request::Export { allocation, .. } => {
@@ -312,7 +315,7 @@ fn serve(
 ) -> protocol::Result<()> {
     let load = matches!(request, ControlRequest::Execute(Operation::LoadAllocations));
     let result = match request {
-        ControlRequest::BeginCheckpoint => checkpoint::begin(),
+        ControlRequest::BeginCheckpoint(imports) => checkpoint::begin(&imports),
         ControlRequest::Inspect => checkpoint::inspect(),
         ControlRequest::Execute(operation) => checkpoint::execute(&operation),
     };

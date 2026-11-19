@@ -14,8 +14,8 @@ pub use identity::{
 };
 #[doc(inline)]
 pub use record::{
-    BindingSource, BindingVersion, MemberRange, MemoryAccess, MemoryLocation, MulticastProperties,
-    Record,
+    BindingSource, BindingVersion, FabricKind, MemberRange, MemoryAccess, MemoryLocation,
+    MulticastProperties, Record,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
@@ -147,6 +147,14 @@ pub struct AllocationOwner {
     pub owner_pid: NamespacePid,
 }
 
+/// The kind of a FABRIC import that its process has not learned, as its creator recorded
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportKind {
+    pub allocation: AllocationReference,
+    pub kind: FabricKind,
+}
+
 /// A fabric handle that a restored creator exported in place of the one it exported
 /// before the checkpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -159,9 +167,12 @@ pub struct FabricReplacement {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Request {
     /// Enter checkpoint mode and return stable records. The application must already be
-    /// paused because this request does not synchronize GPU work.
+    /// paused because this request does not synchronize GPU work. The process first takes
+    /// the kind of each FABRIC import that `imports` names, and refuses if it still holds
+    /// an import of unknown kind.
     BeginCheckpoint {
         namespace_pid: NamespacePid,
+        imports: Vec<ImportKind>,
     },
     Inspect {
         namespace_pid: NamespacePid,

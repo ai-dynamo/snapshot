@@ -68,6 +68,15 @@ impl Allocation {
     pub(crate) fn uses_host_carrier(&self) -> bool {
         self.shared || self.peer_access_granted
     }
+
+    /// Whether `access` lets a GPU other than the home device use this backing.
+    pub(crate) fn grants_peer_access(&self, access: &[CUmemAccessDesc]) -> bool {
+        access.iter().any(|entry| {
+            entry.location.type_ == CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
+                && Some(entry.location.id) != self.home_device
+                && entry.flags != CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_NONE
+        })
+    }
 }
 
 /// A host NUMA node ID describes memory placement and cannot serve as a CUDA device
@@ -138,11 +147,7 @@ impl ProcessState {
             .memblocks
             .get_mut(&mapping.id)
             .and_then(Memblock::unicast_mut)
-            && access.iter().any(|entry| {
-                entry.location.type_ == CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
-                    && Some(entry.location.id) != allocation.home_device
-                    && entry.flags != CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_NONE
-            })
+            && allocation.grants_peer_access(&access)
         {
             allocation.peer_access_granted = true;
         }

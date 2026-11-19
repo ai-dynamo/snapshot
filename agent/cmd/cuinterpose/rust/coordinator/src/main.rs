@@ -12,8 +12,8 @@ mod topology;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use cuinterpose_protocol::{
-    self as protocol, FabricReplacement, Manifest, NamespacePid, Operation, Record, Reply, Request,
-    Response,
+    self as protocol, FabricReplacement, ImportKind, Manifest, NamespacePid, Operation, Record,
+    Reply, Request, Response,
 };
 use group::{HandleTable, Topology};
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,10 +43,21 @@ struct Peer {
     namespace_pid: NamespacePid,
 }
 
-#[derive(Clone, Copy, Debug)]
-enum RecordRequest {
+#[derive(Clone, Copy)]
+enum RecordRequest<'a> {
     Inspect,
-    BeginCheckpoint,
+    /// With the creator's kind of each FABRIC import of unknown kind, by the PID of the
+    /// process that holds it.
+    BeginCheckpoint(&'a BTreeMap<NamespacePid, Vec<ImportKind>>),
+}
+
+impl std::fmt::Display for RecordRequest<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Inspect => "Inspect",
+            Self::BeginCheckpoint(_) => "BeginCheckpoint",
+        })
+    }
 }
 
 /// Bound the wait for a participant's reply. Saving and loading allocation contents
@@ -98,7 +109,10 @@ impl Peer {
         let namespace_pid = self.namespace_pid;
         let request = match request {
             RecordRequest::Inspect => Request::Inspect { namespace_pid },
-            RecordRequest::BeginCheckpoint => Request::BeginCheckpoint { namespace_pid },
+            RecordRequest::BeginCheckpoint(imports) => Request::BeginCheckpoint {
+                namespace_pid,
+                imports: imports.get(&namespace_pid).cloned().unwrap_or_default(),
+            },
         };
         match self.request(&request)? {
             Reply::Inspection { records } => Ok(records),
@@ -196,7 +210,7 @@ fn collect_records(peers: &[Peer], request: RecordRequest) -> Result<Manifest> {
             peer.records(request)
                 .with_context(|| {
                     format!(
-                        "{request:?}: participant {} ({})",
+                        "{request}: participant {} ({})",
                         peer.namespace_pid,
                         peer.endpoint.display()
                     )
@@ -263,19 +277,25 @@ fn run() -> Result<()> {
             "restored processes do not match the checkpointed participants"
         );
     }
-    // BeginCheckpoint freezes registries, not GPU work. From this point preparation
-    // is fail-stop: callers must abandon the checkpoint and all source processes.
-    let mut participants = group::alone(collect_records(
+    // Inspect does not freeze registries, but the application stops changing them before
+    // preparation. The inspected topology names the creator's kind of each FABRIC import
+    // of unknown kind, which BeginCheckpoint classifies.
+    let inspected = Topology::validate(&group::alone(collect_records(
         &peers,
-        if args.prepare {
-            RecordRequest::BeginCheckpoint
-        } else {
-            RecordRequest::Inspect
-        },
-    )?);
-    let inspected = Topology::validate(&participants)?;
+        RecordRequest::Inspect,
+    )?))?;
     if args.prepare {
-        let topology = inspected;
+        let imports = peers
+            .iter()
+            .map(|peer| (peer.namespace_pid, inspected.imports(0, peer.namespace_pid)))
+            .collect();
+        // BeginCheckpoint freezes registries, not GPU work. From this point preparation
+        // is fail-stop: callers must abandon the checkpoint and all source processes.
+        let mut participants = group::alone(collect_records(
+            &peers,
+            RecordRequest::BeginCheckpoint(&imports),
+        )?);
+        let topology = Topology::validate(&participants)?;
         execute(&peers, &topology, |_| Operation::PrepareMulticast)?;
         execute(&peers, &topology, |pid| Operation::SaveAllocations {
             owners: topology.owners(0, pid),
@@ -289,7 +309,6 @@ fn run() -> Result<()> {
         let saved = group::alone(expected);
         let topology = Topology::validate(&saved)?;
         drop(inspected);
-        drop(participants);
         // Importers need the FABRIC handles that creators export in the step before.
         let mut handles = HandleTable::default();
         handles.record(execute(&peers, &topology, |_| Operation::LoadAllocations)?)?;
@@ -363,7 +382,13 @@ mod tests {
             operation,
         };
         let cases = [
-            (Request::BeginCheckpoint { namespace_pid }, control),
+            (
+                Request::BeginCheckpoint {
+                    namespace_pid,
+                    imports: Vec::new(),
+                },
+                control,
+            ),
             (Request::Inspect { namespace_pid }, control),
             (
                 Request::Export {

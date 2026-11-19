@@ -14,9 +14,9 @@ use crate::runtime;
 use cudarc::driver::sys::CUresult::{
     CUDA_ERROR_INVALID_HANDLE, CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_SUPPORTED,
 };
-use cudarc::driver::sys::{CUmemAllocationHandleType, CUmulticastObjectProp};
+use cudarc::driver::sys::{CUmemAllocationHandleType, CUmemLocation, CUmulticastObjectProp};
 use cuinterpose_protocol::{
-    AllocationId, AllocationReference, BindingSource, BindingVersion, FabricHandle,
+    AllocationId, AllocationReference, BindingSource, BindingVersion, FabricHandle, FabricKind,
     FabricReplacement, MemberRange, Operation, Record,
 };
 use std::ffi::c_void;
@@ -34,7 +34,7 @@ pub struct MulticastObject {
     pub devices: Vec<i32>,
     pub bindings: Vec<Binding>,
     // Clones share this lock so bind/unbind calls retain their order.
-    binding_lock: Arc<Mutex<()>>,
+    pub(super) binding_lock: Arc<Mutex<()>>,
     /// The fabric handle that the creator exported, or that an importer imported.
     pub fabric: Option<FabricHandle>,
 }
@@ -72,6 +72,9 @@ pub struct Binding {
     version: BindingVersion,
 }
 
+/// Map a multicast object, or a FABRIC import of unknown kind, which may be one. CUDA can
+/// wait for other processes while it maps a multicast object, so the registry is released
+/// around the call.
 pub fn map(
     state: MutexGuard<'static, ProcessState>,
     id: AllocationId,
@@ -81,31 +84,28 @@ pub fn map(
     offset: usize,
     flags: u64,
 ) -> Result<()> {
-    let object = state
-        .memblocks
-        .get(&id)
-        .and_then(Memblock::multicast)
-        .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-    let driver = object.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-    let context = if object.context == 0 {
+    let (driver, context) = multicast_driver(&state, id, None)?;
+    let context = if context == 0 {
         crate::driver::context()?
     } else {
-        object.context
+        context
     };
     let (mut state, ()) = runtime::call_unlocked(state, || unsafe {
         crate::driver::cuMemMap(address, size, offset, driver, flags)
     })?;
-    let object = runtime::must_complete(
+    // Another call may have classified an import meanwhile. The mapping is the same for
+    // either kind.
+    let memblock = runtime::must_complete(
         state
             .memblocks
             .get_mut(&id)
-            .and_then(Memblock::multicast_mut)
             .ok_or(CUDA_ERROR_INVALID_HANDLE.into()),
     );
-    if object.context == 0 {
-        object.context = context;
+    let recorded = memblock.context_mut();
+    if *recorded == 0 {
+        *recorded = context;
     }
-    object.refcounts.mappings += 1;
+    memblock.refcounts_mut().mappings += 1;
     state.mappings.insert(
         address,
         Mapping {
@@ -119,6 +119,70 @@ pub fn map(
         },
     );
     Ok(())
+}
+
+/// The driver handle and context of `id` for a call that only a multicast object
+/// accepts. A FABRIC import of unknown kind may be one, and the caller classifies it once
+/// the driver accepts the call. A caller that holds a binding lock passes it, so that an
+/// object removed and imported again under the same ID does not match.
+fn multicast_driver(
+    state: &ProcessState,
+    id: AllocationId,
+    binding_lock: Option<&Arc<Mutex<()>>>,
+) -> Result<(u64, usize)> {
+    let (driver, context, lock) = match state.memblocks.get(&id) {
+        Some(Memblock::Multicast(object)) => (
+            object.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?,
+            object.context,
+            &object.binding_lock,
+        ),
+        Some(Memblock::Unclassified(import)) => {
+            (import.driver, import.context, &import.binding_lock)
+        }
+        _ => return Err(CUDA_ERROR_INVALID_HANDLE.into()),
+    };
+    if binding_lock.is_some_and(|held| !Arc::ptr_eq(held, lock)) {
+        return Err(CUDA_ERROR_INVALID_HANDLE.into());
+    }
+    Ok((driver, context))
+}
+
+/// The lock that orders bind and unbind calls on `id`, which `multicast_driver` accepts.
+fn binding_lock(state: &ProcessState, id: AllocationId) -> Result<Arc<Mutex<()>>> {
+    match state.memblocks.get(&id) {
+        Some(Memblock::Multicast(object)) => Ok(Arc::clone(&object.binding_lock)),
+        Some(Memblock::Unclassified(import)) => Ok(Arc::clone(&import.binding_lock)),
+        _ => Err(CUDA_ERROR_INVALID_HANDLE.into()),
+    }
+}
+
+/// What a binding needs of its member: memory, or a FABRIC import of unknown kind, which
+/// is memory if the driver binds it. An import does not know its size, so it reports 0.
+struct Member {
+    reference: AllocationReference,
+    size: usize,
+    location: CUmemLocation,
+    driver: Option<u64>,
+}
+
+impl Member {
+    fn of(memblock: &Memblock) -> Option<Self> {
+        match memblock {
+            Memblock::Unicast(allocation) => Some(Self {
+                reference: allocation.reference,
+                size: allocation.size,
+                location: allocation.properties.location,
+                driver: allocation.driver,
+            }),
+            Memblock::Unclassified(import) => Some(Self {
+                reference: import.reference,
+                size: 0,
+                location: import.location,
+                driver: Some(import.driver),
+            }),
+            Memblock::Multicast(_) => None,
+        }
+    }
 }
 
 pub fn import(
@@ -258,36 +322,25 @@ pub(crate) fn bind(
     let target = state
         .resolve_virtual_handle(handle)?
         .ok_or(CUDA_ERROR_NOT_SUPPORTED)?;
-    let binding_lock = state
-        .memblocks
-        .get(&target)
-        .and_then(Memblock::multicast)
-        .ok_or(CUDA_ERROR_INVALID_HANDLE)?
-        .binding_lock
-        .clone();
-    let (mut state, _binding_guard) = lock_bindings(state, &binding_lock)?;
-    binding_object(&mut state, target, &binding_lock)?;
+    let binding_lock = binding_lock(&state, target)?;
+    let (state, _binding_guard) = lock_bindings(state, &binding_lock)?;
+    let (driver, context) = multicast_driver(&state, target, Some(&binding_lock))?;
     let (source, member, member_driver) = match input {
         BindInput::Memory {
             handle: member_handle,
             offset: member_offset,
         } => {
             let member = match state.resolve_virtual_handle(member_handle)? {
-                Some(id)
-                    if state
-                        .memblocks
-                        .get(&id)
-                        .and_then(Memblock::unicast)
-                        .is_some() =>
-                {
-                    Some(id)
-                }
+                // One handle cannot name both the object and its member.
+                Some(id) if id != target => Some(id),
                 Some(_) => return Err(CUDA_ERROR_INVALID_HANDLE.into()),
                 None => None,
             };
             if let Some(id) = member {
-                let allocation = &state.memblocks[&id]
-                    .unicast()
+                let allocation = state
+                    .memblocks
+                    .get(&id)
+                    .and_then(Member::of)
                     .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
                 if member_offset
                     .checked_add(size)
@@ -296,7 +349,7 @@ pub(crate) fn bind(
                     return Err(CUDA_ERROR_INVALID_VALUE.into());
                 }
                 if version == BindingVersion::V1 {
-                    let location = allocation.properties.location;
+                    let location = allocation.location;
                     if location.type_
                         != cudarc::driver::sys::CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
                     {
@@ -329,7 +382,7 @@ pub(crate) fn bind(
                             || state
                                 .memblocks
                                 .get(&mapping.id)
-                                .and_then(Memblock::unicast)
+                                .and_then(Member::of)
                                 .is_none())
                     {
                         return Err(CUDA_ERROR_INVALID_VALUE.into());
@@ -342,10 +395,12 @@ pub(crate) fn bind(
                     && state
                         .memblocks
                         .get(&mapping.id)
-                        .and_then(Memblock::unicast)
+                        .and_then(Member::of)
                         .is_some()
             });
             let range = if let Some(mapping) = mapping {
+                let allocation =
+                    Member::of(&state.memblocks[&mapping.id]).ok_or(CUDA_ERROR_INVALID_HANDLE)?;
                 let displacement = address - mapping.address;
                 if displacement
                     .checked_add(size as u64)
@@ -354,11 +409,7 @@ pub(crate) fn bind(
                     return Err(CUDA_ERROR_INVALID_VALUE.into());
                 }
                 if version == BindingVersion::V1 {
-                    let location = state.memblocks[&mapping.id]
-                        .unicast()
-                        .ok_or(CUDA_ERROR_INVALID_HANDLE)?
-                        .properties
-                        .location;
+                    let location = allocation.location;
                     if location.type_
                         != cudarc::driver::sys::CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
                     {
@@ -367,10 +418,7 @@ pub(crate) fn bind(
                     device = location.id;
                 }
                 Some(MemberRange {
-                    allocation: state.memblocks[&mapping.id]
-                        .unicast()
-                        .ok_or(CUDA_ERROR_INVALID_HANDLE)?
-                        .reference,
+                    allocation: allocation.reference,
                     offset: (mapping.offset as u64)
                         .checked_add(displacement)
                         .ok_or(CUDA_ERROR_INVALID_VALUE)?,
@@ -399,16 +447,16 @@ pub(crate) fn bind(
         device,
         version,
     };
-    let id = target;
-    let object = binding_object(&mut state, id, &binding_lock)?;
-    let driver = object.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-    let context = if object.context == 0 {
+    let context = if context == 0 {
         crate::driver::context()?
     } else {
-        object.context
+        context
     };
     let (mut state, ()) = runtime::call_unlocked(state, || binding.apply(driver, member_driver))?;
+    // The driver accepted the binding, so an import of unknown kind is the multicast
+    // object, or memory as its member.
     if let Some(id) = member {
+        state.classify(id, FabricKind::Memory);
         runtime::must_complete(
             state
                 .memblocks
@@ -418,7 +466,8 @@ pub(crate) fn bind(
         )
         .shared = true;
     }
-    let object = runtime::must_complete(binding_object(&mut state, id, &binding_lock));
+    state.classify(target, FabricKind::Multicast);
+    let object = runtime::must_complete(binding_object(&mut state, target, &binding_lock));
     object.bindings.push(binding);
     if object.context == 0 {
         object.context = context;
@@ -703,24 +752,20 @@ impl ProcessState {
 }
 
 pub(crate) fn add_device(
-    mut state: MutexGuard<'static, ProcessState>,
+    state: MutexGuard<'static, ProcessState>,
     id: AllocationId,
     device: i32,
 ) -> Result<()> {
-    let object = state
-        .memblocks
-        .get_mut(&id)
-        .and_then(Memblock::multicast_mut)
-        .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-    let driver = object.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-    let context = if object.context == 0 {
+    let (driver, context) = multicast_driver(&state, id, None)?;
+    let context = if context == 0 {
         crate::driver::context()?
     } else {
-        object.context
+        context
     };
     let (mut state, ()) = runtime::call_unlocked(state, || unsafe {
         crate::driver::cuMulticastAddDevice(driver, device)
     })?;
+    state.classify(id, FabricKind::Multicast);
     let object = runtime::must_complete(
         state
             .memblocks
@@ -771,18 +816,17 @@ pub(crate) fn unbind(
     offset: usize,
     size: usize,
 ) -> Result<()> {
-    let binding_lock = state
+    let binding_lock = binding_lock(&state, id)?;
+    let (state, _binding_guard) = lock_bindings(state, &binding_lock)?;
+    let (driver, _) = multicast_driver(&state, id, Some(&binding_lock))?;
+    let end = offset.checked_add(size).ok_or(CUDA_ERROR_INVALID_VALUE)?;
+    // An import of unknown kind has no bindings.
+    let bindings = state
         .memblocks
         .get(&id)
         .and_then(Memblock::multicast)
-        .ok_or(CUDA_ERROR_INVALID_HANDLE)?
-        .binding_lock
-        .clone();
-    let (mut state, _binding_guard) = lock_bindings(state, &binding_lock)?;
-    let object = binding_object(&mut state, id, &binding_lock)?;
-    let driver = object.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-    let end = offset.checked_add(size).ok_or(CUDA_ERROR_INVALID_VALUE)?;
-    for binding in &object.bindings {
+        .map_or(&[][..], |object| &object.bindings);
+    for binding in bindings {
         if binding.device == device
             && binding.offset < end
             && binding.offset + binding.size > offset
@@ -794,6 +838,7 @@ pub(crate) fn unbind(
     let (mut state, ()) = runtime::call_unlocked(state, || unsafe {
         crate::driver::cuMulticastUnbind(driver, device, offset, size)
     })?;
+    state.classify(id, FabricKind::Multicast);
     let object = runtime::must_complete(binding_object(&mut state, id, &binding_lock));
     object.bindings.retain(|binding| {
         binding.device != device || binding.offset >= end || binding.offset + binding.size <= offset

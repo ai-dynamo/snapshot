@@ -4,15 +4,16 @@
 //! The Pods of a group validate as one topology. Each Pod names its processes by PID in
 //! its own namespace, so a group PID puts the Pod's rank above every Linux PID. A FABRIC
 //! import does not name its creator, so it resolves to the process that exported the
-//! same handle, in any Pod. A Pod alone is a group of one, which validates exactly as a
-//! single Pod always has.
+//! same handle, in any Pod, and takes the creator's kind when its own process has not
+//! learned it. A Pod alone is a group of one, which validates exactly as a single Pod
+//! always has.
 
 use crate::topology::{self, AllocationSummary};
 use anyhow::{Context, Result, bail, ensure};
 use cuinterpose_protocol::{
-    AllocationId, AllocationOwner, AllocationReference, BindingSource, FabricHandle,
-    FabricReplacement, Manifest, MemberRange, MemoryLocation, MulticastProperties, NamespacePid,
-    Operation, Record, Reply,
+    AllocationId, AllocationOwner, AllocationReference, BindingSource, FabricHandle, FabricKind,
+    FabricReplacement, ImportKind, Manifest, MemberRange, MemoryLocation, MulticastProperties,
+    NamespacePid, Operation, Record, Reply,
 };
 use std::collections::BTreeMap;
 
@@ -47,12 +48,18 @@ pub fn alone(manifest: Manifest) -> Pods {
     Pods::from([(0, manifest)])
 }
 
+/// A process's own reference to each allocation it holds, by the allocation's ID in the
+/// group.
+type OwnReferences = BTreeMap<AllocationId, AllocationReference>;
+
 /// A group's records, validated as one topology.
 pub struct Topology {
     allocations: Vec<AllocationSummary>,
-    /// For each process by group PID, its own reference to each allocation it holds,
-    /// keyed by the allocation's ID in the group.
-    references: BTreeMap<NamespacePid, BTreeMap<AllocationId, AllocationReference>>,
+    /// For each process by group PID, its own reference to each allocation it holds.
+    references: BTreeMap<NamespacePid, OwnReferences>,
+    /// For each process by group PID, the creator's kind of each FABRIC import whose kind
+    /// the process has not learned.
+    imports: BTreeMap<NamespacePid, Vec<ImportKind>>,
     /// The bytes that each process, by group PID, copies to and from its host carrier:
     /// the size of every host-carrier allocation that it owns.
     carrier_bytes: BTreeMap<NamespacePid, u64>,
@@ -63,11 +70,14 @@ pub struct Topology {
 impl Topology {
     /// Resolve every Pod's records into group identities and validate them as one
     /// topology. FABRIC importers take the creator's allocation size, location, and
-    /// multicast properties, which they cannot observe themselves.
+    /// multicast properties, which they cannot observe themselves, and the creator's kind
+    /// where they have not learned it. An import of unknown kind has no other records, so
+    /// only BeginCheckpoint, which classifies it, adds it to the topology.
     pub fn validate(pods: &Pods) -> Result<Self> {
         let creators = Creators::collect(pods)?;
         let mut group = Manifest::new();
         let mut references = BTreeMap::new();
+        let mut imports = BTreeMap::new();
         for (&rank, pod) in pods {
             ensure!(
                 rank <= MAX_RANK,
@@ -79,9 +89,10 @@ impl Topology {
                     "rank {rank}: namespace PID {pid} is not a Linux PID"
                 );
                 let process = group_pid(rank, pid);
-                let (resolved, held) = creators.resolve(rank, process, records)?;
+                let (resolved, held, unknown) = creators.resolve(rank, process, records)?;
                 group.insert(process, resolved);
                 references.insert(process, held);
+                imports.insert(process, unknown);
             }
         }
         let grouped = pods.len() > 1;
@@ -105,9 +116,19 @@ impl Topology {
         Ok(Self {
             allocations,
             references,
+            imports,
             carrier_bytes,
             grouped,
         })
+    }
+
+    /// The creator's kind of each FABRIC import of unknown kind that `pid` in `rank`
+    /// holds, for BeginCheckpoint.
+    pub fn imports(&self, rank: Rank, pid: NamespacePid) -> Vec<ImportKind> {
+        self.imports
+            .get(&group_pid(rank, pid))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// The owner of each host-carrier allocation that `pid` in `rank` holds, by that
@@ -200,8 +221,8 @@ fn participant(grouped: bool, process: NamespacePid) -> String {
 /// What creators record and their importers cannot observe.
 #[derive(Default)]
 struct Creators {
-    /// The creator of each exported FABRIC handle, in group identities.
-    exporters: BTreeMap<FabricHandle, AllocationReference>,
+    /// The creator of each exported FABRIC handle, in group identities, and its kind.
+    exporters: BTreeMap<FabricHandle, (AllocationReference, FabricKind)>,
     allocations: BTreeMap<AllocationId, (u64, MemoryLocation)>,
     multicasts: BTreeMap<AllocationId, MulticastProperties>,
 }
@@ -214,7 +235,11 @@ impl Creators {
                 let process = group_pid(rank, pid);
                 for record in records {
                     match record {
-                        Record::FabricExport { allocation, handle } => {
+                        Record::FabricExport {
+                            allocation,
+                            handle,
+                            kind,
+                        } => {
                             ensure!(
                                 allocation.creator_pid == pid,
                                 "participant {process}: fabric export of {allocation:?} by a process that did not create it"
@@ -223,8 +248,9 @@ impl Creators {
                                 creator_pid: process,
                                 ..*allocation
                             };
-                            if let Some(known) = creators.exporters.insert(*handle, creator)
-                                && known != creator
+                            if let Some(known) =
+                                creators.exporters.insert(*handle, (creator, *kind))
+                                && known != (creator, *kind)
                             {
                                 bail!("fabric handle {handle:?} is exported by two creators");
                             }
@@ -255,26 +281,43 @@ impl Creators {
     }
 
     /// Resolve the records of `process`, in `rank`, into group identities. Returns the
-    /// resolved records, without the FABRIC records that joined them, and the process's
-    /// own reference to each allocation it holds, by the allocation's ID in the group.
+    /// resolved records, without the FABRIC records that joined them, the process's own
+    /// reference to each allocation it holds, by the allocation's ID in the group, and the
+    /// creator's kind of each import whose kind the process has not learned.
     fn resolve(
         &self,
         rank: Rank,
         process: NamespacePid,
         records: &[Record],
-    ) -> Result<(Vec<Record>, BTreeMap<AllocationId, AllocationReference>)> {
+    ) -> Result<(Vec<Record>, OwnReferences, Vec<ImportKind>)> {
         let mut imports = BTreeMap::new();
+        let mut unknown = Vec::new();
         for record in records {
-            if let Record::FabricImport { allocation, handle } = record {
+            if let Record::FabricImport {
+                allocation,
+                handle,
+                kind,
+            } = record
+            {
                 ensure!(
                     allocation.creator_pid == 0,
                     "participant {process}: fabric import {allocation:?} names a creator"
                 );
-                let creator = self.exporters.get(handle).with_context(|| {
+                let (creator, creator_kind) = self.exporters.get(handle).with_context(|| {
                     format!(
                         "participant {process}: fabric import {handle:?} has no exporter in the group"
                     )
                 })?;
+                match kind {
+                    None => unknown.push(ImportKind {
+                        allocation: *allocation,
+                        kind: *creator_kind,
+                    }),
+                    Some(kind) => ensure!(
+                        kind == creator_kind,
+                        "participant {process}: fabric import {handle:?} is {kind:?}, but its creator exported {creator_kind:?}"
+                    ),
+                }
                 imports.insert(*allocation, *creator);
             }
         }
@@ -330,7 +373,7 @@ impl Creators {
             }
             resolved.push(record);
         }
-        Ok((resolved, held))
+        Ok((resolved, held, unknown))
     }
 }
 
@@ -485,6 +528,7 @@ mod tests {
             Record::FabricExport {
                 allocation: X,
                 handle: handle(1),
+                kind: FabricKind::Memory,
             },
         ]
     }
@@ -503,6 +547,7 @@ mod tests {
             Record::FabricImport {
                 allocation: local,
                 handle,
+                kind: Some(FabricKind::Memory),
             },
         ]
     }
@@ -662,6 +707,7 @@ mod tests {
         twice.push(Record::FabricExport {
             allocation: AllocationReference { id: [8; 16], ..X },
             handle: handle(1),
+            kind: FabricKind::Memory,
         });
         let error = refusal(&alone(Manifest::from([(1, twice)])));
         assert!(error.contains("exported by two creators"), "{error}");
@@ -672,6 +718,7 @@ mod tests {
                 vec![Record::FabricExport {
                     allocation: X,
                     handle: handle(1),
+                    kind: FabricKind::Memory,
                 }],
             ),
         ])));
@@ -680,9 +727,80 @@ mod tests {
         named[2] = Record::FabricImport {
             allocation: X,
             handle: handle(1),
+            kind: Some(FabricKind::Memory),
         };
         let error = refusal(&pods([(0, vec![(1, creator())]), (1, vec![(1, named)])]));
         assert!(error.contains("names a creator"), "{error}");
+    }
+
+    #[test]
+    fn fabric_imports_of_unknown_kind_take_their_creators_kinds() {
+        // The creator exports `X` as handle 1 and a one-device team `T` as handle 3.
+        let mut creator = creator();
+        creator.extend([
+            with!(
+                multicast(),
+                Multicast.allocation = T,
+                Multicast.properties.handle_types = u64::from(FABRIC)
+            ),
+            with!(device(), MulticastDevice.allocation = T),
+            with!(
+                binding(),
+                MulticastBinding.allocation = T,
+                MulticastBinding.source = member(X, 0)
+            ),
+            Record::FabricExport {
+                allocation: T,
+                handle: handle(3),
+                kind: FabricKind::Multicast,
+            },
+        ]);
+        // The importer made no call that only one kind accepts, so it records nothing else.
+        let importer = [(9, 1), (4, 3)].map(|(id, byte)| Record::FabricImport {
+            allocation: import(id),
+            handle: handle(byte),
+            kind: None,
+        });
+        let kinds = vec![
+            ImportKind {
+                allocation: import(9),
+                kind: FabricKind::Memory,
+            },
+            ImportKind {
+                allocation: import(4),
+                kind: FabricKind::Multicast,
+            },
+        ];
+        let topology = Topology::validate(&pods([
+            (0, vec![(1, creator.clone())]),
+            (1, vec![(1, importer.to_vec())]),
+        ]))
+        .unwrap();
+        assert_eq!(topology.imports(1, 1), kinds);
+        assert!(topology.imports(0, 1).is_empty());
+        // Until BeginCheckpoint classifies the imports, the creator holds `X` alone.
+        assert!(topology.owners(1, 1).is_empty());
+        let topology = Topology::validate(&alone(Manifest::from([
+            (1, creator),
+            (2, importer.to_vec()),
+        ])))
+        .unwrap();
+        assert_eq!(topology.imports(0, 2), kinds);
+    }
+
+    #[test]
+    fn fabric_import_whose_kind_differs_from_its_creators_is_refused() {
+        let mut named = importer(handle(1));
+        named[2] = Record::FabricImport {
+            allocation: import(9),
+            handle: handle(1),
+            kind: Some(FabricKind::Multicast),
+        };
+        let error = refusal(&pods([(0, vec![(1, creator())]), (1, vec![(1, named)])]));
+        assert!(
+            error.contains("is Multicast, but its creator exported Memory"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -729,6 +847,7 @@ mod tests {
         creator.push(Record::FabricExport {
             allocation: T,
             handle: handle(3),
+            kind: FabricKind::Multicast,
         });
         let local = import(4);
         let mut importer = holder(local, AllocationReference { id: [7; 16], ..X });
@@ -745,6 +864,7 @@ mod tests {
         importer.push(Record::FabricImport {
             allocation: local,
             handle: handle(3),
+            kind: Some(FabricKind::Multicast),
         });
         (
             pods([

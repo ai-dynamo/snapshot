@@ -90,12 +90,19 @@ macro_rules! functions {
         functions!(@define $($required($($rarg: $rty),*);)* $($optional($($oarg: $oty),*);)*);
 
         pub(crate) fn initialize() -> Result<()> {
-            let symbols = Symbols::resolve();
+            let symbols = Symbols::resolve(crate::driver);
             $(if symbols.$required.is_none() {
                 return Err(Error::Startup(concat!("missing required CUDA symbol ", stringify!($required))));
             })*
             let _ = SYMBOLS.set(symbols);
             Ok(())
+        }
+
+        /// Resolve symbols through `lookup` instead of the frontend. Symbols that it does
+        /// not resolve fail as without a driver.
+        #[cfg(test)]
+        pub(crate) fn install_for_test(lookup: fn(&std::ffi::CStr) -> *mut c_void) {
+            let _ = SYMBOLS.set(Symbols::resolve(lookup));
         }
     };
     (@define $($name:ident($($arg:ident: $ty:ty),*);)*) => {
@@ -105,14 +112,14 @@ macro_rules! functions {
         static SYMBOLS: std::sync::OnceLock<Symbols> = std::sync::OnceLock::new();
 
         impl Symbols {
-            fn resolve() -> Self {
+            fn resolve(lookup: fn(&std::ffi::CStr) -> *mut c_void) -> Self {
                 // Symbol resolution can enter the dynamic loader, so it must happen
                 // outside the state mutex and OnceLock initialization. Concurrent
                 // attempts can resolve independently and publish equivalent tables
                 // without waiting.
                 Self {
                     $($name: {
-                        let address = crate::driver(
+                        let address = lookup(
                             std::ffi::CStr::from_bytes_with_nul(
                                 concat!(stringify!($name), "\0").as_bytes()).expect("static CUDA symbol"));
                         if address.is_null() {

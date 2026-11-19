@@ -9,7 +9,8 @@ mod test_records;
 use cudarc::driver::sys::CUmemAllocationHandleType;
 use cuinterpose_protocol::{
     self as protocol, AllocationOwner, AllocationReference, FABRIC_HANDLE_BYTES, FabricHandle,
-    FabricReplacement, Manifest, NamespacePid, Operation, Record, Reply, Request, Response,
+    FabricKind, FabricReplacement, ImportKind, Manifest, NamespacePid, Operation, Record, Reply,
+    Request, Response,
 };
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::io::FdFlags;
@@ -22,7 +23,9 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
-use test_records::{A, A2, allocation, mapping, shared, with};
+use test_records::{
+    A, A2, M, allocation, binding, mapping, multicast, multicast_mapping, shared, with,
+};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_cuinterpose-coordinator");
 /// The steps of each mode, without arguments: these participants hold no carrier
@@ -69,7 +72,10 @@ impl RecordRequest {
     fn request(self, namespace_pid: NamespacePid) -> Request {
         match self {
             Self::Inspect => Request::Inspect { namespace_pid },
-            Self::BeginCheckpoint => Request::BeginCheckpoint { namespace_pid },
+            Self::BeginCheckpoint => Request::BeginCheckpoint {
+                namespace_pid,
+                imports: Vec::new(),
+            },
         }
     }
 }
@@ -325,6 +331,13 @@ impl Harness {
         }
     }
 
+    /// Answer the Inspect and BeginCheckpoint requests that start preparation, with the
+    /// same records, which hold no FABRIC import of unknown kind.
+    fn begin(&self, participants: &[Vec<Record>; 2]) {
+        self.answer(RecordRequest::Inspect, participants);
+        self.answer(RecordRequest::BeginCheckpoint, participants);
+    }
+
     fn phase(&self, operation: &Operation) {
         self.phase_with(operation, [0, 0], &Owners::default());
     }
@@ -345,7 +358,7 @@ impl Harness {
 
     fn prepare(&self, participants: &[Vec<Record>; 2], owners: &Owners, saved: [u64; 2]) {
         self.coordinator("--prepare", &[], |_| {
-            self.answer(RecordRequest::BeginCheckpoint, participants);
+            self.begin(participants);
             for operation in &PREPARE {
                 let save = matches!(operation, Operation::SaveAllocations { .. });
                 let carrier = if save { saved } else { [0, 0] };
@@ -495,12 +508,17 @@ fn invalid_topology_fails_inspect_and_prepare_before_any_phase() {
         vec![allocation(), with!(mapping(), Mapping.size = 8192)],
         vec![],
     ];
-    for (mode, kind) in [
-        ("--inspect", RecordRequest::Inspect),
-        ("--prepare", RecordRequest::BeginCheckpoint),
-    ] {
-        harness.coordinator(mode, &[error], |_| harness.answer(kind, &participants));
+    // Preparation refuses at Inspect, before BeginCheckpoint freezes any participant.
+    for mode in ["--inspect", "--prepare"] {
+        harness.coordinator(mode, &[error], |_| {
+            harness.answer(RecordRequest::Inspect, &participants);
+        });
     }
+    // It validates again after BeginCheckpoint.
+    harness.coordinator("--prepare", &[error], |_| {
+        harness.answer(RecordRequest::Inspect, &[vec![], vec![]]);
+        harness.answer(RecordRequest::BeginCheckpoint, &participants);
+    });
 }
 
 #[test]
@@ -523,6 +541,9 @@ fn record_request_error_or_wrong_reply_names_participant() {
     for (mode, kind, result, detail) in cases {
         let error = format!("{kind:?}: {}: {detail}", harness.participant(2));
         harness.coordinator(mode, &[&error], |_| {
+            if mode == "--prepare" {
+                harness.answer(RecordRequest::Inspect, &[vec![], vec![]]);
+            }
             reply(harness.request(1, kind.request(1)), 1, inspection(vec![]));
             reply(harness.request(2, kind.request(2)), 2, result);
         });
@@ -553,17 +574,18 @@ fn missing_participant_socket_fails_with_connect_error() {
 #[test]
 fn participant_refusal_in_any_phase_names_that_phase() {
     let harness = Harness::new();
-    for (mode, kind, operations) in [
-        ("--prepare", RecordRequest::BeginCheckpoint, &PREPARE[..]),
-        ("--restore", RecordRequest::Inspect, &RESTORE[..]),
-    ] {
+    for (mode, operations) in [("--prepare", &PREPARE[..]), ("--restore", &RESTORE[..])] {
         for (index, operation) in operations.iter().enumerate() {
             if mode == "--restore" {
                 harness.write_state(&[vec![], vec![]]);
             }
             let error = format!("{operation}: {}: refused", harness.participant(1));
             harness.coordinator(mode, &[&error], |_| {
-                harness.answer(kind, &[vec![], vec![]]);
+                if mode == "--prepare" {
+                    harness.begin(&[vec![], vec![]]);
+                } else {
+                    harness.answer(RecordRequest::Inspect, &[vec![], vec![]]);
+                }
                 for preceding in &operations[..index] {
                     harness.phase(preceding);
                 }
@@ -584,7 +606,7 @@ fn phase_waits_for_every_participant_and_reports_each_failure_without_retry() {
         harness.participant(2)
     );
     harness.coordinator("--prepare", &[&error, "receive failed"], |coordinator| {
-        harness.answer(RecordRequest::BeginCheckpoint, &[vec![], vec![]]);
+        harness.begin(&[vec![], vec![]]);
         let [refused, lost] =
             [1, 2].map(|pid| harness.execute(pid, &Operation::PrepareMulticast, vec![]));
         reply(refused, 1, Err("refused".to_owned()));
@@ -607,7 +629,7 @@ fn silent_participant_fails_its_phase_at_the_carrier_timeout() {
     let mut silent = None;
     // EAGAIN is the read timeout. A closed connection fails differently.
     harness.coordinator("--prepare", &[&error, "(os error 11)"], |_| {
-        harness.answer(RecordRequest::BeginCheckpoint, &[vec![], vec![]]);
+        harness.begin(&[vec![], vec![]]);
         let [multicast, save, _] = PREPARE;
         harness.phase(&multicast);
         let [held, other] = [1, 2].map(|pid| harness.execute(pid, &save, vec![]));
@@ -657,7 +679,7 @@ fn completion_reply_with_wrong_pid_step_or_byte_count_fails() {
     ];
     for (operation, namespace_pid, result, errors) in cases {
         harness.coordinator("--prepare", &errors, |_| {
-            harness.answer(RecordRequest::BeginCheckpoint, &participants);
+            harness.begin(&participants);
             for preceding in PREPARE.iter().take_while(|next| *next != operation) {
                 harness.phase(preceding);
             }
@@ -676,7 +698,7 @@ fn state_write_failure_after_prepare_sends_no_further_requests() {
     harness.state = harness.directory.path().join("missing/cuinterpose.state");
     let error = format!("publish checkpoint state {}", harness.state.display());
     harness.coordinator("--prepare", &[&error], |_| {
-        harness.answer(RecordRequest::BeginCheckpoint, &[vec![], vec![]]);
+        harness.begin(&[vec![], vec![]]);
         for operation in &PREPARE {
             harness.phase(operation);
         }
@@ -701,7 +723,7 @@ fn carrier_size_overflow_fails_before_any_phase() {
         "--prepare",
         &["participant 2: carrier size overflow"],
         |_| {
-            harness.answer(RecordRequest::BeginCheckpoint, &[vec![], records.to_vec()]);
+            harness.answer(RecordRequest::Inspect, &[vec![], records.to_vec()]);
         },
     );
 }
@@ -831,48 +853,50 @@ fn unexported_allocation_with_peer_access_is_saved_to_host_carrier() {
 
 // FABRIC sharing within one Pod.
 
+const FABRIC: u32 = CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_FABRIC.0;
+
+/// How participant 2 names its import of `A`: a fabric import names no creator.
+const IMPORT: AllocationReference = AllocationReference {
+    id: [9; 16],
+    creator_pid: 0,
+};
+
+/// Participant 1 creates `A` and exports it as `handle`, and participant 2 imports it as
+/// memory whose size it does not know.
+fn fabric_sharing(handle: FabricHandle) -> [Vec<Record>; 2] {
+    [
+        vec![
+            with!(shared(), Allocation.handle_types = FABRIC),
+            mapping(),
+            Record::FabricExport {
+                allocation: A,
+                handle,
+                kind: FabricKind::Memory,
+            },
+        ],
+        vec![
+            with!(
+                shared(),
+                Allocation.allocation = IMPORT,
+                Allocation.handle_types = FABRIC,
+                Allocation.size = 0
+            ),
+            with!(mapping(), Mapping.allocation = IMPORT),
+            Record::FabricImport {
+                allocation: IMPORT,
+                handle,
+                kind: Some(FabricKind::Memory),
+            },
+        ],
+    ]
+}
+
 #[test]
 fn fabric_importer_imports_the_handle_that_its_creator_exported_at_restore() {
     let harness = Harness::new();
-    let fabric = CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_FABRIC.0;
     let [old, new] = [1, 2].map(|byte| FabricHandle([byte; FABRIC_HANDLE_BYTES]));
-    // A fabric import names no creator, and its size is unknown to the importer.
-    let local = AllocationReference {
-        id: [9; 16],
-        creator_pid: 0,
-    };
-    let records = |handle| {
-        [
-            vec![
-                with!(shared(), Allocation.handle_types = fabric),
-                mapping(),
-                Record::FabricExport {
-                    allocation: A,
-                    handle,
-                },
-            ],
-            vec![
-                with!(
-                    shared(),
-                    Allocation.allocation = local,
-                    Allocation.handle_types = fabric,
-                    Allocation.size = 0
-                ),
-                with!(mapping(), Mapping.allocation = local),
-                Record::FabricImport {
-                    allocation: local,
-                    handle,
-                },
-            ],
-        ]
-    };
-    let owners = [
-        vec![owner(1, A)],
-        vec![AllocationOwner {
-            allocation: local,
-            owner_pid: 1,
-        }],
-    ];
+    let records = fabric_sharing;
+    let owners = [vec![owner(1, A)], vec![owner(1, IMPORT)]];
     harness.prepare(&records(old), &owners, [4096, 0]);
     let replacement = FabricReplacement { old, new };
     harness.coordinator("--restore", &[], |_| {
@@ -897,4 +921,136 @@ fn fabric_importer_imports_the_handle_that_its_creator_exported_at_restore() {
         }
         harness.answer(RecordRequest::Inspect, &records(new));
     });
+}
+
+#[test]
+fn begin_checkpoint_names_the_creators_kind_of_an_import_of_unknown_kind() {
+    let harness = Harness::new();
+    let handle = FabricHandle([1; FABRIC_HANDLE_BYTES]);
+    let [creator, importer] = fabric_sharing(handle);
+    // The importer has made no call that only one kind accepts, so it records only that.
+    let unknown = vec![Record::FabricImport {
+        allocation: IMPORT,
+        handle,
+        kind: None,
+    }];
+    let imports = [
+        Vec::new(),
+        vec![ImportKind {
+            allocation: IMPORT,
+            kind: FabricKind::Memory,
+        }],
+    ];
+    let owners = [vec![owner(1, A)], vec![owner(1, IMPORT)]];
+    harness.coordinator("--prepare", &[], |_| {
+        harness.answer(RecordRequest::Inspect, &[creator.clone(), unknown]);
+        // Each process learns the kinds of its own imports, and BeginCheckpoint returns
+        // them classified.
+        for (pid, (imports, records)) in (1..).zip(imports.into_iter().zip([&creator, &importer])) {
+            let request = Request::BeginCheckpoint {
+                namespace_pid: pid,
+                imports,
+            };
+            reply(
+                harness.request(pid, request),
+                pid,
+                inspection(records.clone()),
+            );
+        }
+        for operation in &PREPARE {
+            let save = matches!(operation, Operation::SaveAllocations { .. });
+            let carrier = if save { [4096, 0] } else { [0, 0] };
+            harness.phase_with(operation, carrier, &owners);
+        }
+    });
+    // Restore starts from the classified import.
+    let saved: Manifest = protocol::decode(&std::fs::read(&harness.state).unwrap()).unwrap();
+    let mut classified = importer;
+    classified.sort();
+    assert_eq!(saved[&2], classified);
+}
+
+#[test]
+fn begin_checkpoint_classifies_a_multicast_import_that_its_process_only_maps() {
+    let harness = Harness::new();
+    let handle = FabricHandle([3; FABRIC_HANDLE_BYTES]);
+    // Participant 1 creates `M` for two devices, adds both, and binds `A` on each.
+    let object = with!(
+        multicast(),
+        Multicast.properties.devices = 2,
+        Multicast.properties.handle_types = u64::from(FABRIC)
+    );
+    let mut creator = vec![allocation(), mapping(), object];
+    for device in [0, 1] {
+        creator.push(with!(
+            test_records::device(),
+            MulticastDevice.device = device
+        ));
+        creator.push(with!(binding(), MulticastBinding.device = device));
+    }
+    creator.push(Record::FabricExport {
+        allocation: M,
+        handle,
+        kind: FabricKind::Multicast,
+    });
+    // Participant 2 imports `M` and maps it, which either kind accepts.
+    let unknown = vec![Record::FabricImport {
+        allocation: IMPORT,
+        handle,
+        kind: None,
+    }];
+    let importer = vec![
+        with!(
+            multicast(),
+            Multicast.allocation = IMPORT,
+            Multicast.properties.devices = 0,
+            Multicast.properties.size = 0,
+            Multicast.properties.handle_types = u64::from(FABRIC)
+        ),
+        with!(multicast_mapping(), MulticastMapping.allocation = IMPORT),
+        Record::FabricImport {
+            allocation: IMPORT,
+            handle,
+            kind: Some(FabricKind::Multicast),
+        },
+    ];
+    harness.coordinator("--prepare", &[], |_| {
+        harness.answer(RecordRequest::Inspect, &[creator.clone(), unknown]);
+        reply(
+            harness.request(1, RecordRequest::BeginCheckpoint.request(1)),
+            1,
+            inspection(creator.clone()),
+        );
+        let request = Request::BeginCheckpoint {
+            namespace_pid: 2,
+            imports: vec![ImportKind {
+                allocation: IMPORT,
+                kind: FabricKind::Multicast,
+            }],
+        };
+        reply(harness.request(2, request), 2, inspection(importer.clone()));
+        for operation in &PREPARE {
+            harness.phase(operation);
+        }
+    });
+}
+
+#[test]
+fn import_whose_kind_differs_from_its_creators_is_refused_before_begin_checkpoint() {
+    let harness = Harness::new();
+    let handle = FabricHandle([1; FABRIC_HANDLE_BYTES]);
+    let [creator, mut importer] = fabric_sharing(handle);
+    importer[2] = Record::FabricImport {
+        allocation: IMPORT,
+        handle,
+        kind: Some(FabricKind::Multicast),
+    };
+    let error = "participant 2: fabric import";
+    let detail = "is Multicast, but its creator exported Memory";
+    // Preparation refuses at Inspect, so no process freezes.
+    for mode in ["--inspect", "--prepare"] {
+        harness.coordinator(mode, &[error, detail], |_| {
+            harness.answer(RecordRequest::Inspect, &[creator.clone(), importer.clone()]);
+        });
+    }
 }

@@ -143,6 +143,50 @@ fn operations_and_replies_carry_only_their_own_fields() {
 }
 
 #[test]
+fn begin_checkpoint_names_the_kind_of_each_import_and_records_keep_an_unknown_one() {
+    let allocation = AllocationReference {
+        id: *b"allocation-id-01",
+        creator_pid: 0,
+    };
+    let request = Request::BeginCheckpoint {
+        namespace_pid: 1,
+        imports: vec![ImportKind {
+            allocation,
+            kind: FabricKind::Multicast,
+        }],
+    };
+    assert_eq!(
+        encode(&request).unwrap(),
+        b"\x82\xa7version\x02\xa4body\x83\xa4kind\xb0begin_checkpoint\xadnamespace_pid\x01\
+          \xa7imports\x91\x82\xaaallocation\x82\xa2id\xc4\x10allocation-id-01\
+          \xabcreator_pid\x00\xa4kind\xa9multicast"
+    );
+    let handle = FabricHandle([1; FABRIC_HANDLE_BYTES]);
+    for (record, kind) in [
+        (
+            Record::FabricImport {
+                allocation,
+                handle,
+                kind: None,
+            },
+            b"\xa4kind\xc0".as_slice(),
+        ),
+        (
+            Record::FabricExport {
+                allocation,
+                handle,
+                kind: FabricKind::Memory,
+            },
+            b"\xa4kind\xa6memory".as_slice(),
+        ),
+    ] {
+        let bytes = encode(&record).unwrap();
+        assert!(bytes.ends_with(kind), "{bytes:x?}");
+        assert_eq!(decode::<Record>(&bytes).unwrap(), record);
+    }
+}
+
+#[test]
 fn fabric_handles_print_only_a_digest() {
     let first = format!("{:?}", FabricHandle([1; FABRIC_HANDLE_BYTES]));
     let second = format!("{:?}", FabricHandle([2; FABRIC_HANDLE_BYTES]));
@@ -153,6 +197,7 @@ fn fabric_handles_print_only_a_digest() {
     let record = Record::FabricImport {
         allocation: AllocationReference::default(),
         handle: FabricHandle([1; FABRIC_HANDLE_BYTES]),
+        kind: None,
     };
     assert!(format!("{record:?}").contains(&first));
 }

@@ -75,11 +75,13 @@ pub struct Refcounts {
 
 /// Physical allocation identified by a generic CUDA handle. Unicast and multicast share
 /// ID and virtual handle namespaces while keeping their CUDA properties and restore
-/// state in separate variants.
+/// state in separate variants. A FABRIC import has no kind until the process learns
+/// whether its handle names memory or a multicast object.
 #[derive(Clone)]
 pub enum Memblock {
     Unicast(Allocation),
     Multicast(multicast::MulticastObject),
+    Unclassified(fabric::Unclassified),
 }
 
 impl Memblock {
@@ -87,6 +89,7 @@ impl Memblock {
         match self {
             Self::Unicast(allocation) => &allocation.refcounts,
             Self::Multicast(object) => &object.refcounts,
+            Self::Unclassified(import) => &import.refcounts,
         }
     }
 
@@ -94,6 +97,16 @@ impl Memblock {
         match self {
             Self::Unicast(allocation) => &mut allocation.refcounts,
             Self::Multicast(object) => &mut object.refcounts,
+            Self::Unclassified(import) => &mut import.refcounts,
+        }
+    }
+
+    /// The context that the memblock was created, imported, or first mapped in, or 0.
+    pub(crate) fn context_mut(&mut self) -> &mut usize {
+        match self {
+            Self::Unicast(allocation) => &mut allocation.context,
+            Self::Multicast(object) => &mut object.context,
+            Self::Unclassified(import) => &mut import.context,
         }
     }
 
@@ -129,6 +142,7 @@ impl Memblock {
         match self {
             Self::Unicast(allocation) => allocation.reference,
             Self::Multicast(object) => object.reference,
+            Self::Unclassified(import) => import.reference,
         }
     }
 
@@ -137,6 +151,7 @@ impl Memblock {
         match self {
             Self::Unicast(allocation) => allocation.driver,
             Self::Multicast(object) => object.driver,
+            Self::Unclassified(import) => Some(import.driver),
         }
         .ok_or(CUDA_ERROR_INVALID_HANDLE.into())
     }
@@ -301,6 +316,14 @@ impl ProcessState {
                 if let Some(driver) = object.driver {
                     unsafe { crate::driver::cuMemRelease(driver) }?;
                 }
+            }
+            // A multicast object needs its driver handle while it is mapped, so an import
+            // of unknown kind keeps it too.
+            Memblock::Unclassified(import) => {
+                if handle_live || mapped {
+                    return Ok(());
+                }
+                unsafe { crate::driver::cuMemRelease(import.driver) }?;
             }
         }
         self.memblocks.remove(&id);

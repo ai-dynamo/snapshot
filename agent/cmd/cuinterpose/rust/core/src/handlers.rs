@@ -139,11 +139,12 @@ pub fn cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u6
         }
         return Ok(());
     };
+    // A FABRIC import of unknown kind maps as a multicast object would, since it may be one.
     if state
         .memblocks
         .get(&id)
-        .and_then(Memblock::multicast)
-        .is_some()
+        .and_then(Memblock::unicast)
+        .is_none()
     {
         return multicast::map(
             state,
@@ -237,6 +238,8 @@ pub fn cuMemExportToShareableHandle(
     let requested = match memblock {
         Memblock::Unicast(allocation) => u64::from(allocation.properties.requestedHandleTypes.0),
         Memblock::Multicast(object) => object.properties.handleTypes,
+        // CUDA reports no handle types for an import.
+        Memblock::Unclassified(_) => 0,
     };
     if requested & u64::from(kind.0) == 0 {
         return Err(Error::from(CUDA_ERROR_INVALID_VALUE));

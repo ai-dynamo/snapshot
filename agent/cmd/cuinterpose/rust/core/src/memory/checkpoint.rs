@@ -9,7 +9,7 @@ use crate::driver::Context;
 use crate::error::{Error, Result};
 use crate::runtime;
 use cudarc::driver::sys::CUresult::*;
-use cuinterpose_protocol::{FabricReplacement, Operation, Reply};
+use cuinterpose_protocol::{FabricReplacement, ImportKind, Operation, Reply};
 use runtime::export_cache;
 use std::collections::BTreeMap;
 use std::ffi::c_void;
@@ -99,21 +99,15 @@ impl ProcessState {
             records.push(record);
         }
         for mapping in self.mappings.values() {
-            if self
-                .memblocks
-                .get(&mapping.id)
-                .and_then(Memblock::multicast)
-                .is_some()
-            {
-                continue;
-            }
+            let allocation = match self.memblocks.get(&mapping.id) {
+                Some(Memblock::Unicast(allocation)) => allocation.reference,
+                // A multicast object describes its own mappings. An import of unknown kind
+                // has only its FabricImport record.
+                Some(Memblock::Multicast(_) | Memblock::Unclassified(_)) => continue,
+                None => return Err(CUDA_ERROR_INVALID_HANDLE.into()),
+            };
             let record = Record::Mapping {
-                allocation: self
-                    .memblocks
-                    .get(&mapping.id)
-                    .and_then(Memblock::unicast)
-                    .ok_or(CUDA_ERROR_INVALID_HANDLE)?
-                    .reference,
+                allocation,
                 address: mapping.address,
                 size: mapping.size as u64,
                 offset: mapping.offset as u64,
@@ -129,9 +123,25 @@ impl ProcessState {
     /// The application has completed all CUDA work and remains paused through restore.
     /// Holding the mutex across both the state change and inspection keeps later phases
     /// consistent with the records returned to the coordinator.
-    pub fn begin_checkpoint(&mut self) -> Result<Vec<cuinterpose_protocol::Record>> {
+    ///
+    /// Each FABRIC import that `imports` names takes the kind that its creator recorded.
+    /// Restore needs the kind of every import, so the process refuses to enter checkpoint
+    /// mode while it holds an import of unknown kind.
+    pub fn begin_checkpoint(
+        &mut self,
+        imports: &[ImportKind],
+    ) -> Result<Vec<cuinterpose_protocol::Record>> {
         if self.phase != Phase::Active || self.unlocked_driver_calls != 0 {
             return Err(CUDA_ERROR_NOT_READY.into());
+        }
+        for import in imports {
+            self.classify(import.allocation.id, import.kind);
+        }
+        if let Some(handle) = self.memblocks.values().find_map(|memblock| match memblock {
+            Memblock::Unclassified(import) => Some(import.fabric),
+            _ => None,
+        }) {
+            return Err(Error::UnknownFabricKind(handle));
         }
         let records = self.inspect()?;
         self.phase = Phase::Checkpointing;
@@ -445,10 +455,10 @@ pub(crate) fn inspect() -> std::result::Result<Reply, String> {
     })
 }
 
-pub(crate) fn begin() -> std::result::Result<Reply, String> {
+pub(crate) fn begin(imports: &[ImportKind]) -> std::result::Result<Reply, String> {
     let mut state = runtime::get().map_err(|_| "cuinterpose state is unavailable")?;
     let records = state
-        .begin_checkpoint()
+        .begin_checkpoint(imports)
         .map_err(|error| format!("application is not ready for checkpoint: {error}"))?;
     Ok(Reply::Inspection { records })
 }
@@ -613,15 +623,15 @@ mod tests {
         let mut state = ProcessState::new(41);
         state.unlocked_driver_calls = 1;
         assert!(matches!(
-            state.begin_checkpoint(),
+            state.begin_checkpoint(&[]),
             Err(Error::Cuda(CUDA_ERROR_NOT_READY))
         ));
         assert_eq!(state.phase, Phase::Active);
         state.unlocked_driver_calls = 0;
-        assert!(state.begin_checkpoint().unwrap().is_empty());
+        assert!(state.begin_checkpoint(&[]).unwrap().is_empty());
         assert_eq!(state.phase, Phase::Checkpointing);
         assert!(matches!(
-            state.begin_checkpoint(),
+            state.begin_checkpoint(&[]),
             Err(Error::Cuda(CUDA_ERROR_NOT_READY))
         ));
         assert!(matches!(

@@ -35,6 +35,7 @@ impl ContextResources {
                         && match memblock {
                             Memblock::Unicast(allocation) => allocation.context == context,
                             Memblock::Multicast(object) => object.context == context,
+                            Memblock::Unclassified(import) => import.context == context,
                         }
                 })
                 .map(|(&id, _)| id)
@@ -65,10 +66,7 @@ impl ContextResources {
             let Some(memblock) = state.memblocks.get_mut(&id) else {
                 continue;
             };
-            let context = match memblock {
-                Memblock::Unicast(allocation) => &mut allocation.context,
-                Memblock::Multicast(object) => &mut object.context,
-            };
+            let context = memblock.context_mut();
             if *context == self.context {
                 // Direct VMM and multicast allocations survive context destruction, so
                 // later checkpoint copies fall back to a primary context when the
