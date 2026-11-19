@@ -5,12 +5,15 @@
 # Docs: https://docs.coderabbit.ai/getting-started/configure-coderabbit/
 
 language: "en-US"
-early_access: false
+early_access: true
 
 tone_instructions: "Production infrastructure software. Be direct. Flag backward-incompatibility, security implications, resource leaks, and RBAC over-permissions without softening."
 
 reviews:
   profile: "assertive"
+  slop_detection:
+    enabled: true
+    include_all_authors: true
   request_changes_workflow: false
   high_level_summary: true
   poem: false
@@ -25,7 +28,7 @@ reviews:
     auto_incremental_review: true
     auto_pause_after_reviewed_commits: 0
     base_branches:
-      - main
+      - ".*"
     ignore_title_keywords:
       - "wip"
       - "draft"
@@ -38,10 +41,61 @@ reviews:
       - "github-actions[bot]"
 
   suggested_labels: false
+  auto_apply_labels: true
+  labeling_instructions:
+    - label: bug
+      instructions: "Apply when the PR fixes incorrect behavior."
+    - label: enhancement
+      instructions: "Apply when the PR adds or improves a capability."
+    - label: documentation
+      instructions: "Apply only when the PR changes prose documentation without changing executable code, examples, manifests, or configuration."
+    - label: dependencies
+      instructions: "Apply when the PR updates dependencies."
   suggested_reviewers: false
   sequence_diagrams: true
   related_issues: false
   related_prs: false
+
+  post_merge_actions:
+    - name: "Update affected documentation"
+      prompt: |
+        After a merge into main, check whether changes to public APIs, CRDs,
+        Helm values, annotations, environment variables, CLI flags,
+        prerequisites, or user-facing behavior leave documentation outdated.
+        Follow AGENTS.md and docs/development/writing-docs.md. Verify each
+        change against the merged code and link to the relevant source.
+        Skip internal-only changes and behavior already documented.
+        Open a follow-up PR containing only the needed documentation changes.
+        Do not edit CHANGELOG.md or published release notes, commit directly
+        to main, or merge the follow-up PR.
+    - name: "Add missing changelog entries"
+      prompt: |
+        After a merge into main, check CHANGELOG.md for a missing entry about
+        a notable user-facing change in the merged PR. Skip changes already
+        covered in CHANGELOG.md or in an open follow-up PR, internal
+        refactors, tests, and CI-only changes.
+        Follow the existing format and add only under Unreleased.
+        Verify the entry against the merged code. State compatibility changes
+        and required upgrade actions when relevant.
+        Open a follow-up PR changing only CHANGELOG.md.
+        Do not edit published entries or release notes, commit directly to
+        main, or merge the follow-up PR.
+    - name: "Track agreed follow-up work"
+      prompt: |
+        Run this action after every merge into the repository's default
+        branch, even when no follow-up work was agreed during review.
+        At execution time, read the full PR discussion, including comments
+        added after the last review.
+        Identify follow-up work explicitly agreed to by a maintainer.
+        If no such work exists, do nothing. Check existing open and closed
+        issues before creating an issue. If the task is already tracked,
+        do not create another issue.
+        For each untracked agreed task, create a GitHub issue in this
+        repository with a short title, the task, and a link to the source
+        PR discussion and relevant files.
+        Do not treat an unresolved thread alone as agreement. Skip rejected
+        findings and unaccepted suggestions. Do not assign issues, apply
+        approval or priority labels, close issues, change code, or open PRs.
 
   finishing_touches:
     docstrings:
@@ -61,6 +115,9 @@ reviews:
       - name: "RBAC Least Privilege"
         mode: "warning"
         instructions: "Warn if any kubebuilder RBAC marker or Helm RBAC manifest grants wildcard verbs ('*') or resources ('*') without an explicit justification comment."
+      - name: "Docs Updated"
+        mode: "warning"
+        instructions: "Warn if the PR changes public APIs, CRDs, Helm values, annotations, environment variables, CLI flags, prerequisites, or user-facing behavior, and does not update the matching page in docs/ to describe each changed behavior. An unrelated edit to the matching page does not count. Use the 'Where Facts Live' table in docs/development/writing-docs.md to find the page. If the PR changes baseline prerequisites, also require an update to the Prerequisites section of README.md, even when the matching page in docs/ is updated. Do not warn for internal-only changes, tests, CI, or CHANGELOG.md. Do not warn if the PR description states why no docs change is needed."
 
   path_filters:
     - "!**/zz_generated*.go"
@@ -80,6 +137,23 @@ knowledge_base:
     filePatterns:
       - files: ".ai/**/*.md"
         applyTo: "**/*"
+
+issue_enrichment:
+  auto_enrich:
+    enabled: true
+  planning:
+    enabled: false
+  labeling:
+    auto_apply_labels: true
+    labeling_instructions:
+      - label: bug
+        instructions: "Apply to reports of incorrect behavior, crashes, or regressions."
+      - label: enhancement
+        instructions: "Apply to requests for new or improved capabilities."
+      - label: documentation
+        instructions: "Apply to reports of missing, incorrect, or unclear documentation."
+      - label: needs-info
+        instructions: "Apply when a bug report lacks expected and actual behavior or enough reproduction details to investigate, or a feature request lacks the problem and desired outcome. Check the full discussion first. Do not infer AI authorship or treat a short issue as incomplete when it contains the needed information."
 
 chat:
   auto_reply: true
