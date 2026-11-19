@@ -151,6 +151,7 @@ attempt ends as `DeadlineExceeded` instead, whichever member failed.
 - The restore Pod's IP, or a Pod IP the checkpoint recorded, is not IPv4 (`is not an IPv4 address` or `maps IPv4 addresses only`), which a pod group needs
 - Two members had one Pod IP at capture, or have one now, or the checkpoint records a Pod IP that does not parse. The message names the IPs
 - The restore cannot hold the connections it keeps: the node's kernel lacks nf_tables, or the agent cannot use it in the restore Pod's network namespace (`can hold connections`)
+- Members that shared GPU memory over NVLink at checkpoint are not on GPUs in one NVLink clique, or a GPU is not ready on its NVLink fabric (`must be restored onto GPUs in one NVLink clique`). The message names the rank, the GPU, and the clique, cluster, or state that differs. Compare `nvidia-smi --query-gpu=uuid,fabric.state,fabric.status,fabric.clusterUuid,fabric.cliqueId --format=csv` on the restore Pods' nodes
 - Another member refused first (`Refused`), and its agent's log carries the step
 - A member never arrived, so the attempt's deadline passed (`DeadlineExceeded`)
 
