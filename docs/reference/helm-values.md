@@ -88,12 +88,23 @@ default) or from tmpfs staging. Restore uses the format recorded in the snapshot
 | Value                              | Default                                    | Description                                       |
 |------------------------------------|--------------------------------------------|---------------------------------------------------|
 | `pageBroker.maxConcurrentRequests` | `16`                                       | Concurrent control request limit.                 |
-| `pageBroker.transferBufferCount`   | `32`                                       | Persistent ring slots per visible GPU.            |
-| `pageBroker.transferChunkBytes`    | `134217728`                                | Bytes per slot before allocation rounding.        |
-| `pageBroker.maxPinnedBytes`        | `0`                                        | Total pinned memory limit. Zero sets no limit.    |
+| `pageBroker.stagingBytesPerGPU`    | `4294967296`                               | Pinned transfer memory per visible GPU (4 GiB).   |
 | `pageBroker.resources`             | 8 CPU / 32Gi request, 32 CPU / 256Gi limit | Resources for the broker and embedded GPU engine. |
 
-The default rings reserve 4 GiB per GPU, or 32 GiB for eight GPUs, plus overhead.
+PageBroker splits this memory into 128 MiB slots that all GPUs share,
+preferring memory on the target GPU's NUMA node, so a GPU that is ready can use
+slots that another GPU is not using. Each slot holds one read in flight, and
+PageBroker runs one transfer worker for every 16 slots, from 1 to 16 workers:
+16 on an eight-GPU node and 4 on a two-GPU node with the defaults. The value
+must be a multiple of 134217728 (128 MiB). To trade restore speed for host
+memory, change `stagingBytesPerGPU`.
+
+`stagingBytesPerGPU` replaces `transferBufferCount`, `transferChunkBytes` and
+`maxPinnedBytes` from v0.3.0. The chart refuses to render while any of them is
+set. To keep a tuned budget, set `stagingBytesPerGPU` to the old
+`transferBufferCount` × `transferChunkBytes`.
+
+The default reserves 4 GiB per GPU, or 32 GiB for eight GPUs, plus overhead.
 PageBroker checks the memory budget before it reports GPU readiness. It checks
 manifest structure and exact extent lengths. It does not generate or verify GPU
 payload checksums.
