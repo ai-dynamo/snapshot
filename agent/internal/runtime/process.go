@@ -487,7 +487,7 @@ func ParseProcExitCode(statLine string) (syscall.WaitStatus, error) {
 	if len(fields) == 0 {
 		return 0, fmt.Errorf("malformed stat fields")
 	}
-	raw, err := strconv.Atoi(fields[len(fields)-1])
+	raw, err := strconv.ParseUint(fields[len(fields)-1], 10, 32)
 	if err != nil {
 		return 0, err
 	}
