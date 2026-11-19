@@ -40,6 +40,22 @@ there, runs the environment check, then runs the snapshot lifecycle tests.
 The workflow resolves the latest published Snapshot operator/agent image tag and
 passes it through `SNAPSHOT_E2E_SNAPSHOT_TAG`.
 
+The GPU suites share one host cluster, and each installs a Snapshot agent on
+every GPU node. Before a GPU, framework, or upgrade suite creates its vCluster,
+`hack/e2e-suite-slot.py` waits for a suite slot: a Lease in the host cluster's
+`snapshot-e2e-slots` namespace. The slot count is how many suites fit in the
+room other workloads leave on the tightest GPU node and in the free GPUs. Once
+two or more fit, one is kept as headroom. When the nodes cannot be read, there
+are 8 slots. A suite that finds no slot in 175 minutes fails with a
+`No suite slot` error that names the suites holding them. A suite that cannot
+read or write the slots runs without one and warns
+`Running without a suite slot`.
+
+A suite releases its slot after its cleanup, even when it fails or is
+cancelled. A slot whose run stops renewing it, for example after losing its
+runner, frees itself six minutes after the last renewal. Ten minutes after
+that, the next suite to take the slot deletes the dead run's host namespace.
+
 ### Pull requests
 
 Pull requests are tested by `e2e-pr.yaml` on their copy-pr-bot mirror branch
