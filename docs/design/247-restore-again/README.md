@@ -122,6 +122,6 @@ Restoring again needs a hook before the container's process starts, which only
 the NRI plugin gives. The control volume outlives the container, so the earlier
 `restore-complete` is still there when the next container starts. With NRI, the
 plugin removes it before the process starts. Without NRI, the agent sees the new
-container in the Pod status only after it runs. By then the optional startup
-gate, which reads `restore-complete`, has passed, so liveness probes would run
-during the second restore and could kill it.
+container in the Pod status only after it runs. The optional startup gate,
+which reads `restore-complete`, can pass before the agent removes it. Liveness
+probes would then run during the second restore and could kill it.
