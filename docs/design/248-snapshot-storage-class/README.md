@@ -407,7 +407,10 @@ A class with no `credentialsSecretRef` uses workload identity. The agent leaves
 `credentials` empty; PageBroker and the operator then use the SDK default
 credential chain under their own service accounts, with instance metadata
 excluded so the node's role is never used. Those credentials refresh on their
-own.
+own. The rule is the same on every platform. Where the default chain cannot
+perform a platform's token exchange, PageBroker and the operator need a
+credential provider for it behind the same rule; that is a follow-up, with no
+change to the class.
 
 Credentials are read per transaction, not per store: a rotated Secret reaches
 the next transaction while an in-flight one keeps its key. For a restore
@@ -574,8 +577,10 @@ the old operator ignores both and reads `storage.yaml`.
 
 - SNEP-237 artifact addressing: bound content, `storeID`, `ArtifactTarget` and
   `PublishedArtifact`; images that accept a per-request `StorageBackend`.
-- Default credential chain support in PageBroker and the operator's cleanup,
-  for classes without a Secret; tracked in issue 988.
+- Workload identity support in PageBroker and the operator's cleanup, for
+  classes without a Secret: the default credential chain, tracked in issue
+  988, and refreshable credentials from a projected service-account token,
+  tracked in issue 987.
 
 ### Test Plan
 
@@ -600,7 +605,8 @@ the old operator ignores both and reads `storage.yaml`.
 - **PageBroker:** per-request `StorageBackend`, client cache, two stores live;
   credentials from the request are not written to disk or a transaction record;
   restores from stores that differ in endpoint, region or credentials queue and
-  run in turn; stores that share them restore in parallel.
+  run in turn; stores that share them restore in parallel; with a class that
+  has no Secret, an upload and a restore each run past one token lifetime.
 - **End to end:** two S3 and one PVC class in one cluster, checkpoint and
   cross-node restore through each; a class terminates only after its content is
   gone; old content stays put when the default moves; rolling upgrade with an
