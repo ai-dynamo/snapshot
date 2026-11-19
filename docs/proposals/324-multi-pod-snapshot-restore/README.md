@@ -169,8 +169,9 @@ and [Workload contract](#workload-contract) defines which threads it covers.
 The owner must not delete or replace a source until the group's capture has
 ended, Ready or Failed, and group restore Pods must carry the group restore startup probe, which allows the longest deadline, and arrive held by Snapshot's scheduling gate. Placement stays
 with the owner, which keeps a group whose members share GPU memory across nodes
-within one fabric domain, and restore admission refuses members that shared GPU
-memory unless their GPUs are ready in one NVLink clique.
+within one fabric domain. Restore admission refuses members that shared GPU
+memory unless each set of members linked by that memory is on GPUs ready in one
+NVLink clique.
 A restore refused before it claims its Pods leaves them gated, so a new
 attempt can name them, whereas a claimed Pod serves only its attempt, and the
 owner replaces it if that attempt fails. Finally, a plain `PodSnapshot` or a single restore Pod never contacts the
@@ -206,7 +207,7 @@ Redis-compatible server.
 
 | Risk or limitation | Mitigation or decision |
 | --- | --- |
-| Every restore keeps the original group size and GPU count per member, and a group whose members share GPU memory across nodes must restore within one fabric domain. | Admission checks the group size and each member's compatibility before CRIU. It also refuses members that shared GPU memory at capture unless all their GPUs are ready in one NVLink clique of one cluster. This catches placement mistakes, but it does not promise that every later import succeeds, for example in a restore Pod without the fabric access that [Dependencies](#dependencies) lists. |
+| Every restore keeps the original group size and GPU count per member, and a group whose members share GPU memory across nodes must restore within one fabric domain. | Admission checks the group size and each member's compatibility before CRIU. It also refuses members that shared GPU memory at capture unless each set of members linked by that memory is on GPUs ready in one NVLink clique of one cluster. This catches placement mistakes, but it does not promise that every later import succeeds, for example in a restore Pod without the fabric access that [Dependencies](#dependencies) lists. |
 | Capture is not atomic: each source ends at its own dump, and a failure after the commit terminates every member that has started. Release is not atomic either, since a member can fail before its release while its peers are already released. | Admission catches every condition that can be checked without side effects, every member records when it started, and member results report partial outcomes truthfully, so the owner can retire the group and retry with a new attempt. |
 | Snapshot does not freeze restored processes until release, because CUDA, cuInterpose, and library threads do the reconstruction inside them, so an application thread that runs early could observe a half-rebuilt state. | Release relies on the existing workload contract, which this SNEP extends to every thread that could touch shared memory, communicators, or preserved connections; an integration satisfies it only by holding every such thread until release, which a wrapper that gates only the main loop does not, and an enforced hold is left to future work. |
 | Between CRIU restore and CUDA unlock, a thread that calls CUDA blocks on the lock, which is not a recommended use of CUDA Checkpoint, and a failure in that window could leave such a thread stuck. | The locked window involves no coordination and lasts as long as for a single Pod, failing a restore terminates every restored process, and qualification measures both restore windows and injects failures into each. |
@@ -651,9 +652,9 @@ agent therefore ends admission holding the complete IP map, built from the
 member table in its own artifact and the new IPs, together with the assurance
 that all members restore the same capture. Members that shared FABRIC memory,
 directly or through others, must also land on GPUs that are all ready in one
-NVLink clique of one cluster. Otherwise the attempt ends as `Refused` before
-CRIU. This catches placement mistakes, but it does not promise that every later
-import succeeds.
+NVLink clique of one cluster, while members that share nothing may use other
+cliques. Otherwise the attempt ends as `Refused` before CRIU. This catches
+placement mistakes, but it does not promise that every later import succeeds.
 
 Each agent then posts to the `admitted` barrier once its own checks pass. When
 the barrier completes, the attempt commits, and each agent records the
@@ -819,9 +820,9 @@ ranks poll until it appears; the application calls NCCL's prepare before
 reporting `ready-for-snapshot` and NCCL's restore after `restore-complete`.
 An application needs it only for communicators over a transport that Snapshot
 cannot preserve, such as RDMA; over NVLink, an existing communicator continues
-without it. NCCL Checkpoint must be loaded before the application creates its
-first communicator, for example preloaded when the application starts, so that
-it records every communicator it later prepares and restores.
+without it. The workload must start with NCCL Checkpoint's shim,
+`libnccl-checkpoint-shim.so`, in `LD_PRELOAD`, so that the shim records how
+NCCL creates every communicator it later prepares and restores.
 Because the variable is captured in the CRIU image, Snapshot requires it to point
 into the Pod's control volume, rejects other paths during admission, and records
 the path in the artifact. At restore, the agent writes that file with the
@@ -1335,8 +1336,9 @@ keys are issued or stored.
 Within a member's connection, the agent confines each local client to its
 namespace: the cuInterpose relay reaches only the `cuinterpose` namespace, and workload
 processes only the library bucket, because the agent is the component that
-knows which local client sent each request. Alpha trusts every agent for this,
-as Snapshot already does for running CRIU and entering workload namespaces;
+knows which local client sent each request. Alpha requires every Snapshot agent
+in the cluster to be trusted, since a compromised agent can interfere with other
+groups, as Snapshot already does for running CRIU and entering workload namespaces;
 every agent holds the same ServiceAccount, which can already patch any Pod, so
 the agents form one trust domain, and a compromised agent could act for any
 member of any attempt, which gives it nothing it lacks already. Inside a node, the per-Pod endpoint is
@@ -1438,9 +1440,10 @@ waits for, such as `TargetPodUnscheduled` while a claimed target finds no node,
 and each member's phase and `startedAt` show how far it progressed and whether
 Snapshot changed its workload. The operator emits events at
 every transition, agents log each phase with its attempt, member, and duration
-and export the duration of both restore windows. While a barrier waits, its
-agent logs the attempt, the barrier and the members that have not arrived yet,
-at most once every few seconds, so a stalled attempt names who it waits for. Metrics from the coordinator,
+and export the duration of both restore windows. While a barrier waits, the
+coordinator that hosts the session logs the attempt, the barrier and the
+members that have not arrived yet, at most once every few seconds, so an
+operator finds a stalled member while the attempt still waits. Metrics from the coordinator,
 for active sessions, barrier wait time and failures by reason, together with
 its embedded server's connection, memory and slow-consumer statistics, come
 after alpha.
@@ -1461,9 +1464,9 @@ after alpha.
 - For TCP connections kept between members, nf_tables in each node's kernel,
   which restore admission checks, and `pidfd_getfd`, which Linux 5.6 and newer
   provide.
-- For communicators over RDMA, NCCL 2.31 or newer for NCCL Checkpoint, loaded
-  before the application creates its first communicator, and later a release
-  that restores in CUDA Checkpoint's resume phase.
+- For communicators over RDMA, NCCL 2.31 or newer for NCCL Checkpoint, with
+  `libnccl-checkpoint-shim.so` in the workload's `LD_PRELOAD` from its start,
+  and later a release that restores in CUDA Checkpoint's resume phase.
 - The NATS server, with JetStream, embedded in the coordinator as a Go library,
   so no separate deployment is needed.
 - [SNEP-411](https://github.com/ai-dynamo/snapshot/issues/411)'s container
@@ -1498,12 +1501,14 @@ keeps; a group target on a node without the NRI plugin; and cuInterpose's valida
 of multi-rank topologies with teams that span Pods, importers resolved by
 handle, missing ranks, duplicated creators, and a leader other than rank 0.
 
-Integration tests extend the existing end-to-end suite on CPU-only nodes, and
-CI runs them on every change, on two nodes, from the installed chart. They cover
-the projected agent tokens, a token rotation followed by a reconnect, and
-refused authentication: a token for another audience, an expired token, and a
-member whose Pod runs on another node. A workload's library endpoint must fail
-to read or write another group's keys. A
+Integration tests extend the existing end-to-end suite on CPU-only nodes. They
+run as a required check on every pull request, on two Kubernetes nodes, with the
+chart installed, since envtest has no kubelet and no running Pod. They cover an
+agent that connects with its mounted token, reconnects after the token rotates,
+and is refused for a token of another audience, an expired token, or a member
+whose Pod runs on another node. Two groups share one coordinator: each
+workload reads and writes its own library data, and neither can read or change
+the other group's. A
 two-Pod group with TCP and ZeroMQ connections is captured and restored onto
 swapped nodes, the same group without the group IP map serves as a negative
 control, a member whose node runs an older or unready agent must keep the group
@@ -1516,7 +1521,9 @@ settings, one using SNEP-411's HTTP probe and notification and the other the
 control-volume files, must each be captured only after their own signal and
 notified only after `release`. The
 same harness delays one member's dump and restore to measure how long preserved
-connections survive the hold. NCCL Checkpoint's Redis client exercises the
+connections survive the hold: it reports the time between one member's network
+lock and its peer's socket dump, and the TCP timeout settings in effect, and
+checks that the original connection still carries traffic after restore. NCCL Checkpoint's Redis client exercises the
 library endpoint.
 
 End-to-end tests run on GPU nodes, including a multi-node NVLink system for
@@ -1525,8 +1532,11 @@ uses shared GPU memory and a multicast team spanning both nodes; they restore
 TensorRT-LLM at tensor parallelism 8 across two Pods, using NCCL Checkpoint and
 MPI, onto other nodes and require identical outputs for fixed prompts; and they
 kill a member during a destructive phase to confirm that every member fails.
-The same runs measure, for every member, the time from CRIU restore to CUDA
-unlock and from CUDA unlock to release, with a background thread that calls
+The same runs report, for every member, the time to release and to the first
+successful inference, split between the time spent waiting at each barrier for
+slower peers and the coordination itself, the rounds and barriers, and repeat
+it as groups grow to show how both scale. They also measure the time from CRIU
+restore to CUDA unlock and from CUDA unlock to release, with a background thread that calls
 CUDA throughout, and inject a failure into each window to confirm that no
 process is left blocked. Each of these runs as a named CI job, which names the
 GPU systems it needs.
@@ -1539,7 +1549,7 @@ including multicast, with admission refusals and fail-stop behavior tested;
 evidence that a restarted agent never replays CRIU and never kills a released
 member; measured limits for how long preserved connections survive a hold;
 measured durations of both restore windows, with fail-stop verified in each;
-the two-node CI suite below passing on every change; and an unchanged result
+the two-node CI suite below as a required check on every pull request; and an unchanged result
 for the existing single-Pod suite.
 
 **Beta** requires integration with CUDA Checkpoint's prepare and resume phases,
