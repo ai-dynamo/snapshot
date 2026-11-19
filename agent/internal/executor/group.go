@@ -29,27 +29,36 @@ var inspectWithRelayFunc = cuda.InspectCuInterpose
 // admitCapture runs a capture's admission: the member publishes its Pod IP, its
 // Pod's UID, its captured container and whether it runs a cuInterpose relay,
 // reads every other member's, inspects with the other relays, whose leader
-// validates the group's topology, and passes the admitted barrier, after which
-// the attempt commits.
-func admitCapture(ctx context.Context, g *group.Member, podIP, podUID, container string, state *types.CheckpointContainerSnapshot) error {
+// validates the group's topology and records which relays share GPU memory
+// over NVLink, and passes the admitted barrier, after which the attempt
+// commits. It returns the ranks of the members whose Pods share GPU memory
+// over NVLink with this member's.
+func admitCapture(ctx context.Context, g *group.Member, podIP, podUID, container string, state *types.CheckpointContainerSnapshot) ([]int, error) {
 	ip, err := netip.ParseAddr(podIP)
 	if err != nil {
-		return fmt.Errorf("the Pod's IP: %w", err)
+		return nil, fmt.Errorf("the Pod's IP: %w", err)
 	}
 	runsRelay := state.CuInterpose.UsesCoordinator()
 	admission := group.Admission{PodIP: ip, PodUID: podUID, Containers: []string{container}, RunsRelay: runsRelay}
 	if err := g.Admit(ctx, admission); err != nil {
-		return err
+		return nil, err
 	}
+	var fabricPeers []int
 	if runsRelay {
 		err := withRelay(ctx, g, func(relay *cuda.CuInterposeRelay) error {
 			return inspectWithRelayFunc(ctx, coordinatorTarget(state.PID, state.CuInterpose.PIDs, relay))
 		})
 		if err != nil {
-			return fmt.Errorf("inspect cuinterpose: %w", err)
+			return nil, fmt.Errorf("inspect cuinterpose: %w", err)
+		}
+		if fabricPeers, err = g.FabricPeers(ctx); err != nil {
+			return nil, err
 		}
 	}
-	return g.Barrier(ctx, group.Admitted)
+	if err := g.Barrier(ctx, group.Admitted); err != nil {
+		return nil, err
+	}
+	return fabricPeers, nil
 }
 
 // withRelay runs a cuInterpose coordinator through run, as g's relay when g is
@@ -69,18 +78,21 @@ func withRelay(ctx context.Context, g *group.Member, run func(*cuda.CuInterposeR
 	return errors.Join(err, relay.Close())
 }
 
-// groupManifest records g's part in the capture, once it has been admitted.
-func groupManifest(g *group.Member) *types.PodGroupManifest {
+// groupManifest records g's part in the capture, once it has been admitted,
+// with fabricPeers, the ranks of the members whose Pods share GPU memory over
+// NVLink with this member's.
+func groupManifest(g *group.Member, fabricPeers []int) *types.PodGroupManifest {
 	ids := g.MemberIDs()
 	members := make([]types.PodGroupManifestMember, len(ids))
 	for rank, a := range g.Admissions() {
 		members[rank] = types.PodGroupManifestMember{ID: ids[rank], PodUID: a.PodUID, Containers: a.Containers, PodIP: a.PodIP}
 	}
 	return &types.PodGroupManifest{
-		Version:    types.PodGroupManifestVersion,
-		CaptureUID: g.Attempt(),
-		MemberID:   g.ID(),
-		Members:    members,
+		Version:     types.PodGroupManifestVersion,
+		CaptureUID:  g.Attempt(),
+		MemberID:    g.ID(),
+		Members:     members,
+		FabricPeers: fabricPeers,
 	}
 }
 

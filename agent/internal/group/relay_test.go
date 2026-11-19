@@ -343,6 +343,74 @@ func TestRelayFrameWithAnUnknownFieldEndsTheService(t *testing.T) {
 	assert.NoError(t, members[0].session.Err(), "the session outlives its relay")
 }
 
+func TestFabricPeersAreTheLeadersRecordForTheMember(t *testing.T) {
+	members := joinAll(t, 3)
+	// Rank 1 has no CUDA processes, so it runs no relay.
+	each(t, members, func(ctx context.Context, m *Member) error {
+		return m.Admit(ctx, Admission{PodIP: netip.MustParseAddr("10.1.0.1"), RunsRelay: m.Rank() != 1})
+	})
+
+	// The read does not wait for a record that is not there, as a leader
+	// older than the agent leaves it out.
+	_, err := members[0].FabricPeers(within(t))
+	require.EqualError(t, err, "the leader of the cuInterpose relays recorded no inspect.fabric-peers, "+
+		"which a cuInterpose older than this agent leaves out")
+
+	// rmp_serde's encoding of the leader's map {0: [2], 2: [0]}.
+	record := []byte{0x82, 0x00, 0x91, 0x02, 0x02, 0x91, 0x00}
+	require.NoError(t, members[0].session.CuInterpose().Insert(within(t), "inspect.fabric-peers", record))
+	for _, rank := range []int{0, 2} {
+		peers, err := members[rank].FabricPeers(within(t))
+		require.NoError(t, err)
+		assert.Equal(t, []int{2 - rank}, peers)
+	}
+}
+
+func TestFabricPeersRefusesARecordItCannotUse(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		record  []byte
+		wantErr string
+	}{
+		{name: "a relay that shares memory with none", record: []byte{0x83, 0x00, 0x90, 0x01, 0x90, 0x02, 0x90}},
+		{
+			name:    "no entry for the member",
+			record:  []byte{0x81, 0x01, 0x90},
+			wantErr: "inspect.fabric-peers has no entry for rank 0",
+		},
+		{
+			name:    "the member's own rank",
+			record:  []byte{0x81, 0x00, 0x91, 0x00},
+			wantErr: "inspect.fabric-peers lists rank 0 for rank 0, which is not another relay's rank",
+		},
+		{
+			name:    "a member that runs no relay",
+			record:  []byte{0x81, 0x00, 0x91, 0x02},
+			wantErr: "inspect.fabric-peers lists rank 2 for rank 0, which is not another relay's rank",
+		},
+		{
+			name:    "a rank past the group",
+			record:  []byte{0x81, 0x00, 0x91, 0x03},
+			wantErr: "inspect.fabric-peers lists rank 3 for rank 0, which is not another relay's rank",
+		},
+		{name: "not a map", record: []byte{0x91, 0x00}, wantErr: "decode inspect.fabric-peers"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &Member{
+				session:    recordedSession{record: tc.record},
+				admissions: []Admission{{RunsRelay: true}, {RunsRelay: true}, {}},
+			}
+			peers, err := m.FabricPeers(within(t))
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Empty(t, peers)
+		})
+	}
+}
+
 // relayPastDeadline does on conn what a cuInterpose relay does when its wait
 // for key reaches the deadline args give it, by a clock ahead of its member's
 // by ahead. It waits for the session's end with a get of mode.end, which
@@ -451,6 +519,24 @@ func call(t *testing.T, conn net.Conn, request map[string]any) answer {
 	t.Helper()
 	write(t, conn, request)
 	return read(t, conn)
+}
+
+// recordedSession is a member's session of rank 0 whose relays' leader
+// recorded record, and nothing else.
+type recordedSession struct {
+	metaSession
+	record []byte
+}
+
+func (s recordedSession) CuInterpose() coordinator.Store { return recordedStore{record: s.record} }
+
+type recordedStore struct {
+	coordinator.Store
+	record []byte
+}
+
+func (s recordedStore) Get(context.Context, string, time.Duration) ([]byte, error) {
+	return s.record, nil
 }
 
 // holdingSession is a member's session of rank 0, which never ends, whose

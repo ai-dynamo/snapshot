@@ -5,13 +5,17 @@ package group
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"strconv"
 	"strings"
 
+	"github.com/vmihailenco/msgpack/v5"
 	"golang.org/x/sys/unix"
+
+	"github.com/ai-dynamo/snapshot/coordinator/session"
 )
 
 // Relay is one run of this member's cuInterpose coordinator as its Pod's relay
@@ -63,6 +67,42 @@ func (r *Relay) Close() error {
 	err := <-r.served
 	r.cancel()
 	return err
+}
+
+// fabricPeersKey is where the relays' leader records, in the cuinterpose
+// namespace, which relays share GPU memory over NVLink, once a capture's
+// inspect has validated the group: a MessagePack map from each relay's rank to
+// the sorted ranks of the relays it shares memory with, in either direction.
+const fabricPeersKey = "inspect.fabric-peers"
+
+// FabricPeers returns the ranks of the members whose Pods share GPU memory
+// over NVLink with this member's, as the relays' leader recorded them. Call it
+// once this member's relay has inspected.
+func (m *Member) FabricPeers(ctx context.Context) ([]int, error) {
+	value, err := m.session.CuInterpose().Get(ctx, fabricPeersKey, 0)
+	if errors.Is(err, session.ErrNotFound) {
+		return nil, fmt.Errorf("the leader of the cuInterpose relays recorded no %s, "+
+			"which a cuInterpose older than this agent leaves out", fabricPeersKey)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", fabricPeersKey, err)
+	}
+	var shared map[int][]int
+	if err := msgpack.Unmarshal(value, &shared); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", fabricPeersKey, err)
+	}
+	own, ok := shared[m.Rank()]
+	if !ok {
+		return nil, fmt.Errorf("%s has no entry for rank %d", fabricPeersKey, m.Rank())
+	}
+	for _, peer := range own {
+		// A restore reads the peers' admissions by these ranks.
+		if peer < 0 || peer >= len(m.admissions) || peer == m.Rank() || !m.admissions[peer].RunsRelay {
+			return nil, fmt.Errorf("%s lists rank %d for rank %d, which is not another relay's rank",
+				fabricPeersKey, peer, m.Rank())
+		}
+	}
+	return own, nil
 }
 
 func (m *Member) relayArgs() []string {

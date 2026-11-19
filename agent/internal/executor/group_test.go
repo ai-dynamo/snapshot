@@ -5,8 +5,10 @@ package executor
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -18,6 +20,7 @@ import (
 	"github.com/go-logr/logr/testr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/vmihailenco/msgpack/v5"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
@@ -209,6 +212,69 @@ func TestGroupCheckpointThatCuInterposeRefusesNeverCommits(t *testing.T) {
 	outcome := <-peerEnded
 	assert.False(t, outcome.committed, "the peer passed the admitted barrier")
 	require.ErrorIs(t, outcome.err, &session.AbortError{Reason: session.ReasonRefused})
+}
+
+func TestGroupCheckpointRecordsTheMembersItSharesGPUMemoryWith(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// record is what the relays' leader records at inspect, or nothing
+		// if it is nil.
+		record     []byte
+		wantStep   Step
+		wantErr    string
+		wantPeers  []int
+		wantReason string
+	}{
+		{
+			name: "the leader records them",
+			// rmp_serde's encoding of the leader's map {0: [1], 1: [0]}.
+			record:     []byte{0x82, 0x00, 0x91, 0x01, 0x01, 0x91, 0x00},
+			wantStep:   StepDumpCRIU,
+			wantPeers:  []int{1},
+			wantReason: session.ReasonMemberFailed,
+		},
+		{
+			name:       "the leader records nothing",
+			wantStep:   StepAdmitGroup,
+			wantErr:    "the leader of the cuInterpose relays recorded no inspect.fabric-peers",
+			wantReason: session.ReasonRefused,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			member, peer := joinMembers(t)
+			peerEnded := runPeer(t, peer, group.Admission{PodIP: netip.MustParseAddr("10.0.0.2"), RunsRelay: true},
+				group.NetFreeze)
+			socket := serveCheckpointStaging(t, t.TempDir())
+			// The member's coordinator inspects as the relays' leader.
+			stubCuInterpose(t, func(target cuda.CuInterposeTarget) error {
+				if tc.record == nil {
+					return nil
+				}
+				return insertThroughRelay(target.Relay, "inspect.fabric-peers", tc.record)
+			})
+			var recorded *types.PodGroupManifest
+			stubCapture(t, func(data *types.CheckpointManifest) (*checkpointPhaseTimings, error) {
+				recorded = data.PodGroup
+				return nil, failStep(StepDumpCRIU, errors.New("stop after the manifest is recorded"))
+			})
+			cfg := &types.AgentConfig{
+				Storage:    types.StorageSpec{BasePath: t.TempDir()},
+				PageBroker: types.PageBrokerSpec{ControlSocketPath: socket},
+			}
+			req := CheckpointRequest{ContentUID: "content-uid", ContainerName: "main", PodIP: "10.0.0.1", Group: member}
+			_, err := checkpoint(groupTestContext(t), nil, testr.New(t), req, cfg, inspectCUDA(t))
+
+			assert.Equal(t, tc.wantStep, StepOf(err), "%v", err)
+			if tc.wantErr != "" {
+				assert.ErrorContains(t, err, tc.wantErr)
+				assert.Nil(t, recorded, "the capture started")
+			} else {
+				require.NotNil(t, recorded, "the capture started")
+				assert.Equal(t, tc.wantPeers, recorded.FabricPeers)
+			}
+			require.ErrorIs(t, (<-peerEnded).err, &session.AbortError{Reason: tc.wantReason})
+		})
+	}
 }
 
 func TestGroupRestoreFailsTheAttemptAsRefusedUntilItCommits(t *testing.T) {
@@ -767,6 +833,37 @@ func stubCuInterpose(t *testing.T, inspect func(cuda.CuInterposeTarget) error) {
 		return manifest, nil
 	}
 	inspectWithRelayFunc = func(_ context.Context, target cuda.CuInterposeTarget) error { return inspect(target) }
+}
+
+// insertThroughRelay inserts value under key in the session's cuinterpose
+// namespace, through relay's session socket, as the relay's coordinator would.
+func insertThroughRelay(relay *cuda.CuInterposeRelay, key string, value []byte) error {
+	body, err := msgpack.Marshal(map[string]any{"op": "insert", "id": 1, "key": key, "value": value})
+	if err != nil {
+		return err
+	}
+	if _, err := relay.Session.Write(append(binary.LittleEndian.AppendUint32(nil, uint32(len(body))), body...)); err != nil {
+		return err
+	}
+	var header [4]byte
+	if _, err := io.ReadFull(relay.Session, header[:]); err != nil {
+		return err
+	}
+	body = make([]byte, binary.LittleEndian.Uint32(header[:]))
+	if _, err := io.ReadFull(relay.Session, body); err != nil {
+		return err
+	}
+	var answer struct {
+		OK   bool   `msgpack:"ok"`
+		Code string `msgpack:"code"`
+	}
+	if err := msgpack.Unmarshal(body, &answer); err != nil {
+		return err
+	}
+	if !answer.OK {
+		return fmt.Errorf("insert %s: %s", key, answer.Code)
+	}
+	return nil
 }
 
 // stubCapture replaces the GPU checkpoint and the dump, the first steps after

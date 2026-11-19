@@ -46,7 +46,7 @@ const PodGroupManifestVersion = 1
 
 // PodGroupManifest is a member's part in a pod group capture: what a group
 // restore checks every member against, and builds its IP map from. It is the
-// same for every member of one capture except for MemberID.
+// same for every member of one capture except for MemberID and FabricPeers.
 type PodGroupManifest struct {
 	Version int `yaml:"version"`
 	// CaptureUID is the PodGroupSnapshot's UID. Every member must restore the
@@ -56,6 +56,10 @@ type PodGroupManifest struct {
 	MemberID string `yaml:"memberID"`
 	// Members is the ordered member table, so a member's index is its rank.
 	Members []PodGroupManifestMember `yaml:"members"`
+	// FabricPeers are the ranks of the members whose Pods shared GPU memory
+	// over NVLink with this member's, in either direction. A restore checks
+	// that their GPUs and this member's are all in one NVLink clique.
+	FabricPeers []int `yaml:"fabricPeers,omitempty"`
 }
 
 // Rank returns the rank of the artifact's own member, its index in Members, or
