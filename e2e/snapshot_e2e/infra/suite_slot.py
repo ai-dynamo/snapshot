@@ -25,16 +25,24 @@ import argparse
 import json
 import os
 import random
-import re
 import shutil
 import signal
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
+
+from kubernetes import client
+from kubernetes.client import ApiException
+from kubernetes.utils import parse_quantity
+from urllib3.exceptions import HTTPError
+
+from snapshot_e2e.infra import preflight
+from snapshot_e2e.infra.setup import ensure_namespace, log, node_sync_selector
 
 
 NAMESPACE = "snapshot-e2e-slots"
@@ -43,8 +51,6 @@ E2E_NAMESPACE_SELECTOR = "snapshot-e2e=true"
 GPU_NODE_LABEL = "nvidia.com/gpu.present"
 GPU_RESOURCE = "nvidia.com/gpu"
 AGENT_ARCHITECTURES = ("amd64", "arm64")
-AKS_USER_NODE_LABEL = "kubernetes.azure.com/mode"
-AKS_USER_NODE_VALUE = "user"
 LEASE_SECONDS = 300
 GRACE_SECONDS = 60
 RENEW_SECONDS = 60
@@ -55,6 +61,7 @@ REPORT_SECONDS = 60
 REAP_AFTER_SECONDS = 600
 LEASE_ERROR_POLLS = 3
 FALLBACK_LIMIT = 8
+REQUEST_TIMEOUT_SECONDS = 60
 # The chart's default agent and PageBroker requests (10 CPUs, 33 GiB) plus the
 # hostpath mapper and vCluster's own Pods.
 SUITE_CPU = Decimal("10.5")
@@ -62,35 +69,7 @@ SUITE_MEMORY = Decimal(34 * 2**30)
 SUITE_GPUS = Decimal(2)
 DEFAULT_STATE_FILE = ".snapshot-e2e-slot.json"
 DEFAULT_TIMEOUT_MINUTES = 175
-
-QUANTITY_SUFFIXES = {
-    "Ki": Decimal(2**10),
-    "Mi": Decimal(2**20),
-    "Gi": Decimal(2**30),
-    "Ti": Decimal(2**40),
-    "Pi": Decimal(2**50),
-    "Ei": Decimal(2**60),
-    "n": Decimal("1e-9"),
-    "u": Decimal("1e-6"),
-    "m": Decimal("1e-3"),
-    "k": Decimal(10**3),
-    "M": Decimal(10**6),
-    "G": Decimal(10**9),
-    "T": Decimal(10**12),
-    "P": Decimal(10**15),
-    "E": Decimal(10**18),
-}
-
-
-class KubectlError(RuntimeError):
-    def __init__(self, args: list[str], stderr: str) -> None:
-        self.stderr = stderr.strip()
-        super().__init__(f"kubectl {' '.join(args)}: {self.stderr}")
-
-    @property
-    def reason(self) -> str:
-        match = re.search(r"Error from server \((\w+)\)", self.stderr)
-        return match.group(1) if match else ""
+API_ERRORS = (ApiException, HTTPError)
 
 
 class CapacityError(RuntimeError):
@@ -103,42 +82,22 @@ class Limit:
     detail: str
 
 
-def kubectl(*args: str, stdin: str | None = None) -> str:
-    try:
-        result = subprocess.run(
-            ["kubectl", *args],
-            input=stdin,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise KubectlError(list(args), str(exc)) from exc
-    if result.returncode != 0:
-        raise KubectlError(list(args), result.stderr)
-    return result.stdout
+def describe(exc: Exception) -> str:
+    if isinstance(exc, ApiException):
+        return f"{exc.status} {exc.reason}"
+    return str(exc)
 
 
-def kubectl_json(*args: str) -> dict:
-    return json.loads(kubectl(*args, "-o", "json"))
+def connect() -> None:
+    preflight.load_config(None, None)
 
 
 def utc_now() -> datetime:
-    return datetime.fromtimestamp(time.time(), tz=timezone.utc)
+    return datetime.now(timezone.utc)
 
 
 def format_time(moment: datetime) -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
-
-def parse_time(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
-
-
-def log(message: str) -> None:
-    print(f"[{utc_now().strftime('%H:%M:%S')}] {message}", flush=True)
 
 
 def annotate(level: str, title: str, message: str) -> None:
@@ -146,15 +105,8 @@ def annotate(level: str, title: str, message: str) -> None:
     print(f"::{level} title={title}::{escaped}", flush=True)
 
 
-def quantity(value: object) -> Decimal:
-    text = str(value).strip()
-    try:
-        for suffix, factor in QUANTITY_SUFFIXES.items():
-            if text.endswith(suffix) and len(text) > len(suffix):
-                return Decimal(text[: -len(suffix)]) * factor
-        return Decimal(text)
-    except InvalidOperation as exc:
-        raise CapacityError(f"cannot read the quantity {text!r}") from exc
+def quantities(values: dict[str, str] | None) -> dict[str, Decimal]:
+    return {name: parse_quantity(value) for name, value in (values or {}).items()}
 
 
 def amount(resources: dict[str, Decimal], name: str) -> Decimal:
@@ -166,36 +118,32 @@ def add_requests(total: dict[str, Decimal], extra: dict[str, Decimal]) -> None:
         total[name] = total.get(name, Decimal(0)) + value
 
 
-def container_requests(container: dict) -> dict[str, Decimal]:
-    requests = (container.get("resources") or {}).get("requests") or {}
-    return {name: quantity(value) for name, value in requests.items()}
+def container_requests(container: client.V1Container) -> dict[str, Decimal]:
+    return quantities(container.resources.requests if container.resources else None)
 
 
-def pod_requests(pod: dict) -> dict[str, Decimal]:
-    spec = pod.get("spec") or {}
+def pod_requests(pod: client.V1Pod) -> dict[str, Decimal]:
     requests: dict[str, Decimal] = {}
-    for container in spec.get("containers") or []:
+    for container in pod.spec.containers or []:
         add_requests(requests, container_requests(container))
-    for container in spec.get("initContainers") or []:
+    for container in pod.spec.init_containers or []:
         for name, value in container_requests(container).items():
             requests[name] = max(requests.get(name, Decimal(0)), value)
-    overhead = spec.get("overhead") or {}
-    add_requests(requests, {name: quantity(value) for name, value in overhead.items()})
+    add_requests(requests, quantities(pod.spec.overhead))
     return requests
 
 
-def node_labels(node: dict) -> dict[str, str]:
-    return node["metadata"].get("labels") or {}
+def node_labels(node: client.V1Node) -> dict[str, str]:
+    return node.metadata.labels or {}
 
 
-def agent_nodes(nodes: list[dict]) -> list[dict]:
-    # Must match the nodes vcluster_node_sync_selector_labels in e2e/snapshot_e2e/infra/setup.py syncs.
-    if any(node_labels(node).get(AKS_USER_NODE_LABEL) == AKS_USER_NODE_VALUE for node in nodes):
-        nodes = [node for node in nodes if node_labels(node).get(AKS_USER_NODE_LABEL) == AKS_USER_NODE_VALUE]
+def agent_nodes(nodes: Sequence[client.V1Node]) -> list[client.V1Node]:
+    synced = node_sync_selector(nodes)
     return [
         node
         for node in nodes
-        if node_labels(node).get(GPU_NODE_LABEL) == "true"
+        if all(node_labels(node).get(key) == value for key, value in synced.items())
+        and node_labels(node).get(GPU_NODE_LABEL) == "true"
         and node_labels(node).get("kubernetes.io/arch") in AGENT_ARCHITECTURES
     ]
 
@@ -209,8 +157,8 @@ def gib(value: Decimal) -> str:
 
 
 def compute_limit(
-    nodes: list[dict],
-    pods: list[dict],
+    nodes: Sequence[client.V1Node],
+    pods: Sequence[client.V1Pod],
     holders: set[str],
     e2e_namespaces: set[str],
 ) -> Limit:
@@ -221,10 +169,10 @@ def compute_limit(
     other: dict[str, dict[str, Decimal]] = {}
     held: dict[tuple[str, str], dict[str, Decimal]] = {}
     for pod in pods:
-        node = (pod.get("spec") or {}).get("nodeName")
-        if not node or (pod.get("status") or {}).get("phase") in ("Succeeded", "Failed"):
+        node = pod.spec.node_name if pod.spec else None
+        if not node or (pod.status and pod.status.phase in ("Succeeded", "Failed")):
             continue
-        namespace = pod["metadata"].get("namespace", "")
+        namespace = pod.metadata.namespace or ""
         if namespace in holders:
             add_requests(held.setdefault((namespace, node), {}), pod_requests(pod))
         else:
@@ -233,9 +181,8 @@ def compute_limit(
     tightest = None
     free_gpus = Decimal(0)
     for node in eligible:
-        name = node["metadata"]["name"]
-        status = node.get("status") or {}
-        allocatable = {key: quantity(value) for key, value in (status.get("allocatable") or {}).items()}
+        name = node.metadata.name
+        allocatable = quantities(node.status.allocatable if node.status else None)
         used = other.get(name, {})
         cpu, memory = amount(allocatable, "cpu"), amount(allocatable, "memory")
         used_cpu, used_memory = amount(used, "cpu"), amount(used, "memory")
@@ -270,27 +217,28 @@ def compute_limit(
 
 def list_e2e_namespaces() -> set[str] | None:
     try:
-        items = kubectl_json("get", "namespaces", "-l", E2E_NAMESPACE_SELECTOR)["items"]
-    except (KubectlError, ValueError, KeyError) as exc:
-        log(f"Could not list E2E namespaces: {exc}")
+        items = client.CoreV1Api().list_namespace(
+            label_selector=E2E_NAMESPACE_SELECTOR, _request_timeout=REQUEST_TIMEOUT_SECONDS
+        ).items
+    except API_ERRORS as exc:
+        log(f"Could not list E2E namespaces: {describe(exc)}")
         return None
-    return {item["metadata"]["name"] for item in items}
+    return {item.metadata.name for item in items}
 
 
 def current_limit(holders: set[str], e2e_namespaces: set[str] | None, max_running: int | None) -> Limit:
+    core = client.CoreV1Api()
     try:
-        nodes = kubectl_json("get", "nodes")["items"]
-        pods = kubectl_json(
-            "get",
-            "pods",
-            "--all-namespaces",
-            "--field-selector=status.phase!=Succeeded,status.phase!=Failed",
-        )["items"]
+        nodes = core.list_node(_request_timeout=REQUEST_TIMEOUT_SECONDS).items
+        pods = core.list_pod_for_all_namespaces(
+            field_selector="status.phase!=Succeeded,status.phase!=Failed",
+            _request_timeout=REQUEST_TIMEOUT_SECONDS,
+        ).items
         limit = compute_limit(nodes, pods, holders, e2e_namespaces or set())
-    except (KubectlError, CapacityError, ValueError, KeyError, ArithmeticError) as exc:
+    except (*API_ERRORS, CapacityError, ValueError, ArithmeticError) as exc:
         limit = Limit(
             FALLBACK_LIMIT,
-            f"suite limit {FALLBACK_LIMIT}, the fallback: the GPU nodes could not be read: {exc}",
+            f"suite limit {FALLBACK_LIMIT}, the fallback: the GPU nodes could not be read: {describe(exc)}",
         )
     if max_running is not None and max_running < limit.value:
         limit = Limit(max_running, f"{limit.detail}; capped at {max_running} by --max-running")
@@ -305,20 +253,24 @@ def is_slot(name: str) -> bool:
     return name.startswith(SLOT_PREFIX) and name[len(SLOT_PREFIX) :].isdigit()
 
 
-def holder(lease: dict) -> str:
-    return (lease.get("spec") or {}).get("holderIdentity") or ""
+def holder(lease: client.V1Lease) -> str:
+    return (lease.spec and lease.spec.holder_identity) or ""
 
 
-def seconds_expired(lease: dict, now: datetime) -> float:
-    spec = lease.get("spec") or {}
-    renewed = parse_time(spec.get("renewTime") or spec.get("acquireTime"))
+def acquired_at(lease: client.V1Lease) -> datetime | None:
+    return lease.spec.acquire_time if lease.spec else None
+
+
+def seconds_expired(lease: client.V1Lease, now: datetime) -> float:
+    spec = lease.spec or client.V1LeaseSpec()
+    renewed = spec.renew_time or spec.acquire_time
     if renewed is None:
         return float("inf")
-    duration = spec.get("leaseDurationSeconds") or LEASE_SECONDS
+    duration = spec.lease_duration_seconds or LEASE_SECONDS
     return (now - renewed).total_seconds() - duration - GRACE_SECONDS
 
 
-def is_free(lease: dict | None, now: datetime) -> bool:
+def is_free(lease: client.V1Lease | None, now: datetime) -> bool:
     return lease is None or not holder(lease) or seconds_expired(lease, now) >= 0
 
 
@@ -355,41 +307,44 @@ def held_spec(identity: str, acquired: datetime, renewed: datetime) -> dict:
     }
 
 
-def list_slots() -> dict[str, dict]:
-    items = kubectl_json("get", "leases", "-n", NAMESPACE)["items"]
-    return {item["metadata"]["name"]: item for item in items if is_slot(item["metadata"]["name"])}
+def list_slots() -> dict[str, client.V1Lease]:
+    items = client.CoordinationV1Api().list_namespaced_lease(
+        NAMESPACE, _request_timeout=REQUEST_TIMEOUT_SECONDS
+    ).items
+    return {item.metadata.name: item for item in items if is_slot(item.metadata.name)}
 
 
-def read_slot(name: str) -> dict | None:
+def read_slot(name: str) -> client.V1Lease | None:
     try:
-        return kubectl_json("get", "lease", name, "-n", NAMESPACE)
-    except KubectlError as exc:
-        if exc.reason == "NotFound":
+        return client.CoordinationV1Api().read_namespaced_lease(
+            name, NAMESPACE, _request_timeout=REQUEST_TIMEOUT_SECONDS
+        )
+    except ApiException as exc:
+        if exc.status == 404:
             return None
         raise
 
 
-def claim(name: str, lease: dict | None, identity: str, now: datetime) -> bool:
+def replace_slot(name: str, body: dict) -> None:
+    client.CoordinationV1Api().replace_namespaced_lease(
+        name, NAMESPACE, body, _request_timeout=REQUEST_TIMEOUT_SECONDS
+    )
+
+
+def claim(name: str, lease: client.V1Lease | None, identity: str, now: datetime) -> bool:
     spec = held_spec(identity, now, now)
     try:
         if lease is None:
-            kubectl("create", "-f", "-", stdin=json.dumps(lease_body(name, None, spec, True)))
+            client.CoordinationV1Api().create_namespaced_lease(
+                NAMESPACE, lease_body(name, None, spec, True), _request_timeout=REQUEST_TIMEOUT_SECONDS
+            )
         else:
-            version = lease["metadata"]["resourceVersion"]
-            kubectl("replace", "-f", "-", stdin=json.dumps(lease_body(name, version, spec, True)))
-    except KubectlError as exc:
-        if exc.reason in ("AlreadyExists", "Conflict", "NotFound"):
+            replace_slot(name, lease_body(name, lease.metadata.resource_version, spec, True))
+    except ApiException as exc:
+        if exc.status in (404, 409):
             return False
         raise
     return True
-
-
-def ensure_namespace() -> None:
-    try:
-        kubectl("create", "namespace", NAMESPACE)
-    except KubectlError as exc:
-        if exc.reason != "AlreadyExists":
-            raise
 
 
 def run_best_effort(command: list[str]) -> None:
@@ -401,7 +356,7 @@ def run_best_effort(command: list[str]) -> None:
         log(f"{' '.join(command)} failed: {exc}")
 
 
-def reap(name: str, lease: dict, e2e_namespaces: set[str] | None, now: datetime) -> None:
+def reap(name: str, lease: client.V1Lease, e2e_namespaces: set[str] | None, now: datetime) -> None:
     namespace = holder(lease)
     expired = seconds_expired(lease, now)
     if not e2e_namespaces or namespace not in e2e_namespaces or expired < REAP_AFTER_SECONDS:
@@ -410,28 +365,27 @@ def reap(name: str, lease: dict, e2e_namespaces: set[str] | None, now: datetime)
     run_best_effort(["helm", "uninstall", "vcluster-hpm", "-n", namespace])
     run_best_effort(["vcluster", "delete", namespace, "--namespace", namespace])
     try:
-        kubectl("delete", "namespace", namespace, "--ignore-not-found", "--wait=false")
-    except KubectlError as exc:
-        log(f"Could not delete {namespace}: {exc}")
+        client.CoreV1Api().delete_namespace(namespace, _request_timeout=REQUEST_TIMEOUT_SECONDS)
+    except API_ERRORS as exc:
+        log(f"Could not delete {namespace}: {describe(exc)}")
 
 
-def describe_holders(slots: dict[str, dict], now: datetime) -> str:
+def describe_holders(slots: dict[str, client.V1Lease], now: datetime) -> str:
     held = []
     for name in sorted(slots, key=lambda item: int(item[len(SLOT_PREFIX) :])):
         lease = slots[name]
         if is_free(lease, now):
             continue
-        acquired = parse_time((lease.get("spec") or {}).get("acquireTime"))
+        acquired = acquired_at(lease)
         minutes = f", {(now - acquired).total_seconds() / 60:.0f} min" if acquired else ""
         held.append(f"{name} {holder(lease)}{minutes}")
     return "; ".join(held) or "none"
 
 
 def start_renewer(slot: str, identity: str, log_path: Path) -> int:
-    script = str(Path(__file__).resolve())
     with log_path.open("a", encoding="utf-8") as output:
         process = subprocess.Popen(
-            [sys.executable, "-I", "-S", script, "renew", "--slot", slot, "--identity", identity],
+            [sys.executable, "-m", __spec__.name, "renew", "--slot", slot, "--identity", identity],
             stdin=subprocess.DEVNULL,
             stdout=output,
             stderr=subprocess.STDOUT,
@@ -452,7 +406,7 @@ def hold(slot: str, identity: str, state_path: Path) -> int:
 
 
 def fail_open(exc: Exception) -> int:
-    message = f"the suite slots could not be read or written: {exc}"
+    message = f"the suite slots could not be read or written: {describe(exc)}"
     annotate("warning", "Running without a suite slot", message)
     return 0
 
@@ -462,12 +416,13 @@ def take(args: argparse.Namespace) -> int:
     state_path = Path(args.state_file)
     deadline = time.monotonic() + args.timeout_minutes * 60
     try:
-        ensure_namespace()
-    except KubectlError as exc:
+        connect()
+        ensure_namespace(NAMESPACE)
+    except (RuntimeError, *API_ERRORS) as exc:
         return fail_open(exc)
 
     limit: Limit | None = None
-    slots: dict[str, dict] = {}
+    slots: dict[str, client.V1Lease] = {}
     refreshed_at = reported_at = float("-inf")
     lease_errors = 0
     e2e_namespaces: set[str] | None = None
@@ -501,11 +456,12 @@ def take(args: argparse.Namespace) -> int:
                     log(f"Took suite slot {name} of {limit.value}")
                     return hold(name, identity, state_path)
             lease_errors = 0
-        except KubectlError as exc:
+        except API_ERRORS as exc:
             lease_errors += 1
-            if exc.reason == "Forbidden" or lease_errors >= LEASE_ERROR_POLLS:
+            forbidden = isinstance(exc, ApiException) and exc.status == 403
+            if forbidden or lease_errors >= LEASE_ERROR_POLLS:
                 return fail_open(exc)
-            log(f"Suite slot API error, retrying: {exc}")
+            log(f"Suite slot API error, retrying: {describe(exc)}")
 
         allowed = limit.value if limit else 0
         remaining = deadline - time.monotonic()
@@ -524,6 +480,11 @@ def take(args: argparse.Namespace) -> int:
 
 
 def renew(args: argparse.Namespace) -> int:
+    try:
+        connect()
+    except RuntimeError as exc:
+        log(f"warning: could not renew suite slot {args.slot}: {exc}")
+        return 0
     started = time.monotonic()
     while time.monotonic() - started < RENEW_MAX_SECONDS:
         time.sleep(RENEW_SECONDS)
@@ -535,12 +496,10 @@ def renew(args: argparse.Namespace) -> int:
             if holder(lease) != args.identity:
                 log(f"warning: suite slot {args.slot} is held by {holder(lease) or 'nobody'}; stopped renewing")
                 return 0
-            acquired = parse_time((lease.get("spec") or {}).get("acquireTime")) or utc_now()
-            spec = held_spec(args.identity, acquired, utc_now())
-            body = lease_body(args.slot, lease["metadata"]["resourceVersion"], spec, True)
-            kubectl("replace", "-f", "-", stdin=json.dumps(body))
-        except KubectlError as exc:
-            log(f"Could not renew suite slot {args.slot}: {exc}")
+            spec = held_spec(args.identity, acquired_at(lease) or utc_now(), utc_now())
+            replace_slot(args.slot, lease_body(args.slot, lease.metadata.resource_version, spec, True))
+        except API_ERRORS as exc:
+            log(f"Could not renew suite slot {args.slot}: {describe(exc)}")
     log(f"warning: stopped renewing suite slot {args.slot} after {RENEW_MAX_SECONDS // 3600} hours")
     return 0
 
@@ -549,7 +508,7 @@ def stop_renewer(pid: object) -> None:
     if not isinstance(pid, int) or pid <= 0:
         return
     cmdline = Path(f"/proc/{pid}/cmdline")
-    if cmdline.exists() and b"e2e-suite-slot" not in cmdline.read_bytes():
+    if cmdline.exists() and __spec__.name.encode() not in cmdline.read_bytes():
         return
     try:
         os.kill(pid, signal.SIGTERM)
@@ -567,11 +526,10 @@ def free(slot: str, identity: str) -> None:
             log(f"Suite slot {slot} is held by {holder(lease) or 'nobody'}, not {identity}; left alone")
             return
         spec = {"leaseDurationSeconds": LEASE_SECONDS}
-        body = lease_body(slot, lease["metadata"]["resourceVersion"], spec, False)
         try:
-            kubectl("replace", "-f", "-", stdin=json.dumps(body))
-        except KubectlError as exc:
-            if exc.reason == "Conflict":
+            replace_slot(slot, lease_body(slot, lease.metadata.resource_version, spec, False))
+        except ApiException as exc:
+            if exc.status == 409:
                 continue
             raise
         log(f"Released suite slot {slot}")
@@ -591,13 +549,14 @@ def release(args: argparse.Namespace) -> int:
         if renewer_log and Path(renewer_log).exists():
             text = Path(renewer_log).read_text(encoding="utf-8", errors="replace").rstrip()
             log(f"Renewer log for {state['slot']}:\n{text}")
+        connect()
         free(state["slot"], state["identity"])
         state_path.unlink()
     except Exception as exc:  # noqa: BLE001 - releasing must never fail the job
         annotate(
             "warning",
             "Suite slot not released",
-            f"{exc}; it expires within {(LEASE_SECONDS + GRACE_SECONDS) // 60} minutes",
+            f"{describe(exc)}; it expires within {(LEASE_SECONDS + GRACE_SECONDS) // 60} minutes",
         )
     return 0
 

@@ -42,11 +42,11 @@ passes it through `SNAPSHOT_E2E_SNAPSHOT_TAG`.
 
 The GPU suites share one host cluster, and each installs a Snapshot agent on
 every GPU node. Before a GPU, framework, or upgrade suite creates its vCluster,
-`hack/e2e-suite-slot.py` waits for a suite slot: a Lease in the host cluster's
-`snapshot-e2e-slots` namespace. The slot count is how many suites fit in the
-room other workloads leave on the tightest GPU node and in the free GPUs. Once
-two or more fit, one is kept as headroom. When the nodes cannot be read, there
-are 8 slots. A suite that finds no slot in 175 minutes fails with a
+`snapshot_e2e.infra.suite_slot` waits for a suite slot: a Lease in the host
+cluster's `snapshot-e2e-slots` namespace. The slot count is how many suites fit
+in the room other workloads leave on the tightest GPU node and in the free GPUs.
+Once two or more fit, one is kept as headroom. When the nodes cannot be read,
+there are 8 slots. A suite that finds no slot in 175 minutes fails with a
 `No suite slot` error that names the suites holding them. A suite that cannot
 read or write the slots runs without one and warns
 `Running without a suite slot`.

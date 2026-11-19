@@ -72,7 +72,6 @@ jobs:
               - "hack/ci-cache-flags.sh"
               - "hack/ci-phase.sh"
               - "hack/ci-phase-summary.sh"
-              - "hack/e2e-suite-slot.py"
               - ".github/actions/**"
               - ".github/workflows/e2e-pr.yaml"
               - ".github/workflows/e2e-cpu.yaml"

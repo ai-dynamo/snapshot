@@ -284,7 +284,7 @@ jobs:
         timeout-minutes: 180
         env:
           KUBECONFIG: ${{ steps.host.outputs.kubeconfig }}
-        run: python3 hack/e2e-suite-slot.py take
+        run: uv run --locked --project e2e python -m snapshot_e2e.infra.suite_slot take
 
       - name: Validate host GPU cluster
         if: ${{ steps.selected.outputs.run == 'true' }}
@@ -516,7 +516,7 @@ jobs:
         timeout-minutes: 5
         env:
           KUBECONFIG: ${{ steps.host.outputs.kubeconfig }}
-        run: python3 hack/e2e-suite-slot.py release
+        run: uv run --locked --project e2e python -m snapshot_e2e.infra.suite_slot release
 
   # PR mirrors and ordinary dispatches compare against history with a
   # read-only token. Scheduled main runs are published instead, by
