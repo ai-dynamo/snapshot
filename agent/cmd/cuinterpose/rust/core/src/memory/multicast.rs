@@ -74,9 +74,10 @@ pub struct Binding {
 
 /// Map a multicast object, or a FABRIC import of unknown kind, which may be one. CUDA can
 /// wait for other processes while it maps a multicast object, so the registry is released
-/// around the call.
+/// around the call. The mapping counts from before the call, so the memblock stays if
+/// another thread releases its last handle meanwhile, and a refused call gives it back.
 pub fn map(
-    state: MutexGuard<'static, ProcessState>,
+    mut state: MutexGuard<'static, ProcessState>,
     id: AllocationId,
     handle: VirtualAllocationHandle,
     address: u64,
@@ -90,8 +91,14 @@ pub fn map(
     } else {
         context
     };
-    let (mut state, ()) = runtime::call_unlocked(state, || unsafe {
-        crate::driver::cuMemMap(address, size, offset, driver, flags)
+    state
+        .memblocks
+        .get_mut(&id)
+        .unwrap()
+        .refcounts_mut()
+        .mappings += 1;
+    let (mut state, mapped) = runtime::call_unlocked(state, || {
+        Ok(unsafe { crate::driver::cuMemMap(address, size, offset, driver, flags) })
     })?;
     // Another call may have classified an import meanwhile. The mapping is the same for
     // either kind.
@@ -101,11 +108,15 @@ pub fn map(
             .get_mut(&id)
             .ok_or(CUDA_ERROR_INVALID_HANDLE.into()),
     );
+    if let Err(error) = mapped {
+        memblock.refcounts_mut().mappings -= 1;
+        runtime::must_complete(state.release_unused_memblock(id));
+        return Err(error);
+    }
     let recorded = memblock.context_mut();
     if *recorded == 0 {
         *recorded = context;
     }
-    memblock.refcounts_mut().mappings += 1;
     state.mappings.insert(
         address,
         Mapping {

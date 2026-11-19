@@ -316,7 +316,7 @@ mod tests {
     use super::*;
     use crate::handlers;
     use crate::memory::vmm::Mapping;
-    use cudarc::driver::sys::CUresult::CUDA_ERROR_NOT_SUPPORTED;
+    use cudarc::driver::sys::CUresult::{CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_SUPPORTED};
     use cudarc::driver::sys::{CUmemAccess_flags, CUmemAccessDesc, CUmemLocationType};
     use cuinterpose_protocol::{
         BindingSource, BindingVersion, ImportKind, MemberRange, MemoryAccess, MemoryLocation,
@@ -686,9 +686,18 @@ mod tests {
     /// bytes are odd is a multicast object. Like CUDA, it refuses a multicast call on
     /// memory and a multicast object as a member.
     mod fake {
-        use cudarc::driver::sys::CUresult::{CUDA_ERROR_NOT_SUPPORTED, CUDA_SUCCESS};
+        use cudarc::driver::sys::CUresult::{
+            CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_SUPPORTED, CUDA_SUCCESS,
+        };
         use cudarc::driver::sys::*;
         use std::ffi::{CStr, c_void};
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        /// Set to make the next map wait at `MAP` once it is in the driver, and again
+        /// before it returns.
+        pub(super) static BLOCK_MAP: AtomicBool = AtomicBool::new(false);
+        pub(super) static MAP: Barrier = Barrier::new(2);
 
         fn multicast(handle: u64) -> bool {
             handle & 1 == 1
@@ -735,14 +744,23 @@ mod tests {
             CUDA_SUCCESS
         }
 
+        /// Like CUDA, it refuses any flags, which are reserved.
         unsafe extern "C" fn cuMemMap(
             _: CUdeviceptr,
             _: usize,
             _: usize,
             _: u64,
-            _: u64,
+            flags: u64,
         ) -> CUresult {
-            CUDA_SUCCESS
+            if BLOCK_MAP.swap(false, Ordering::SeqCst) {
+                MAP.wait();
+                MAP.wait();
+            }
+            if flags == 0 {
+                CUDA_SUCCESS
+            } else {
+                CUDA_ERROR_INVALID_VALUE
+            }
         }
 
         unsafe extern "C" fn cuMemUnmap(_: CUdeviceptr, _: usize) -> CUresult {
@@ -1046,6 +1064,51 @@ mod tests {
                     .iter()
                     .all(|record| !matches!(record, Record::FabricImport { handle: h, .. } if *h == handle(5)));
                 assert!(gone);
+            },
+        );
+    }
+
+    #[test]
+    fn a_map_that_waits_in_the_driver_keeps_its_memblock_until_its_own_release() {
+        with_driver(
+            "a_map_that_waits_in_the_driver_keeps_its_memblock_until_its_own_release",
+            || {
+                // The application releases the last handle while the map waits in the
+                // driver without the registry.
+                let map_while_released = |address, imported, flags| {
+                    fake::BLOCK_MAP.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let map = std::thread::spawn(move || {
+                        handlers::cuMemMap(address, SIZE, 0, imported, flags)
+                    });
+                    fake::MAP.wait();
+                    handlers::cuMemRelease(imported).unwrap();
+                    fake::MAP.wait();
+                    map.join().unwrap()
+                };
+                let held = |byte| {
+                    runtime::get()
+                        .unwrap()
+                        .memblocks
+                        .contains_key(&importer_reference(&handle(byte)).id)
+                };
+                // An import of unknown kind, and one that a call classified as a
+                // multicast object.
+                let object = import_handle(1);
+                handlers::cuMulticastAddDevice(object, 0).unwrap();
+                for (byte, imported) in [(2, import_handle(2)), (1, object)] {
+                    let address = 0x10_0000 * u64::from(byte);
+                    map_while_released(address, imported, 0).unwrap();
+                    assert!(held(byte), "{byte}");
+                    handlers::cuMemUnmap(address, SIZE).unwrap();
+                    assert!(!held(byte), "{byte}");
+                }
+                // A map that the driver refuses holds nothing once it returns.
+                let refused = map_while_released(0x40_0000, import_handle(4), 1);
+                assert!(
+                    matches!(refused, Err(Error::Cuda(CUDA_ERROR_INVALID_VALUE))),
+                    "{refused:?}"
+                );
+                assert!(!held(4));
             },
         );
     }
