@@ -132,6 +132,7 @@ jobs:
             e2e/tests/test_restored_state.py \
             e2e/tests/test_runtime_image_id.py \
             e2e/tests/test_setup_chart_command.py \
+            e2e/tests/test_setup_diagnostics.py \
             e2e/tests/test_setup_helm_overrides.py \
             e2e/tests/test_setup_image_digests.py \
             e2e/tests/test_upgrade_e2e_gate.py \
