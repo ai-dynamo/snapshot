@@ -42,19 +42,22 @@ passes it through `SNAPSHOT_E2E_SNAPSHOT_TAG`.
 
 The GPU suites share one host cluster, and each installs a Snapshot agent on
 every GPU node. Before a GPU, framework, or upgrade suite creates its vCluster,
-`snapshot_e2e.infra.suite_slot` waits for a suite slot: a Lease in the host
-cluster's `snapshot-e2e-slots` namespace. The slot count is how many suites fit
-in the room other workloads leave on the tightest GPU node and in the free GPUs.
-Once two or more fit, one is kept as headroom. When the nodes cannot be read,
-there are 8 slots. A suite that finds no slot in 175 minutes fails with a
-`No suite slot` error that names the suites holding them. A suite that cannot
-read or write the slots runs without one and warns
+`snapshot_e2e.infra.suite_slot` creates the suite's host namespace and waits
+for a suite slot. Up to six suites run at once, in the order their host
+namespaces were created. A suite that finds no slot in 175 minutes fails with a
+`No suite slot` error that names the suites ahead of it. A suite that cannot
+list the host namespaces runs without a slot and warns
 `Running without a suite slot`.
 
-A suite releases its slot after its cleanup, even when it fails or is
-cancelled. A slot whose run stops renewing it, for example after losing its
-runner, frees itself six minutes after the last renewal. Ten minutes after
-that, the next suite to take the slot deletes the dead run's host namespace.
+To see the suites in line, oldest first, run this against the host cluster:
+
+```bash
+kubectl get namespaces -l snapshot-e2e=true --sort-by=.metadata.creationTimestamp
+```
+
+A suite frees its slot when its cleanup deletes its host namespace, even when
+the suite fails or is cancelled. A run that loses its runner keeps its slot
+until a later suite deletes host namespaces older than 12 hours.
 
 ### Pull requests
 
