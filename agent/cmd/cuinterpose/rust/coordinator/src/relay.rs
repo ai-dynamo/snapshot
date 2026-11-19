@@ -629,6 +629,47 @@ mod tests {
         Manifest::from([(PID, records)])
     }
 
+    /// `records` with each import of memory as a process reports it before it learns the
+    /// kind: a FabricImport without a kind, and no other records.
+    fn without_memory_kind(records: Manifest) -> Manifest {
+        let unknown = |records: &[Record]| {
+            records.iter().find_map(|record| match record {
+                Record::FabricImport {
+                    allocation,
+                    kind: Some(FabricKind::Memory),
+                    ..
+                } => Some(*allocation),
+                _ => None,
+            })
+        };
+        records
+            .into_iter()
+            .map(|(pid, records)| {
+                let import = unknown(&records);
+                let records = records
+                    .into_iter()
+                    .filter_map(|record| match record {
+                        Record::Allocation { allocation, .. }
+                        | Record::Mapping { allocation, .. }
+                            if Some(allocation) == import =>
+                        {
+                            None
+                        }
+                        Record::FabricImport {
+                            allocation, handle, ..
+                        } if Some(allocation) == import => Some(Record::FabricImport {
+                            allocation,
+                            handle,
+                            kind: None,
+                        }),
+                        record => Some(record),
+                    })
+                    .collect();
+                (pid, records)
+            })
+            .collect()
+    }
+
     type Calls = Arc<Mutex<Vec<Command>>>;
 
     /// One Pod whose shims answer as scripted.
@@ -642,6 +683,9 @@ mod tests {
         slow: Option<(&'static str, Duration)>,
         /// The carrier bytes that this Pod reports, if not the ones it owns.
         carrier: Option<u64>,
+        /// Whether Inspect finds this Pod's import of `X` without a kind, as before any
+        /// call that only one kind accepts.
+        unknown_memory: bool,
         calls: Calls,
         finished: bool,
     }
@@ -656,6 +700,7 @@ mod tests {
                 failing: None,
                 slow: None,
                 carrier: None,
+                unknown_memory: false,
                 calls: Calls::default(),
                 finished: false,
             }
@@ -678,6 +723,8 @@ mod tests {
             let Some(operation) = command.operation(rank, PID) else {
                 let current = if self.restored {
                     records(self.rank, restored(1), restored(2))
+                } else if self.unknown_memory && *command == Command::Inspect {
+                    without_memory_kind(self.records.clone())
                 } else {
                     self.records.clone()
                 };
@@ -817,6 +864,45 @@ mod tests {
                 [handle(1), handle(2)]
             );
         }
+    }
+
+    #[test]
+    fn begin_checkpoint_names_each_rank_the_creators_kind_of_its_imports() {
+        let agent = FakeAgent::default();
+        let mut pods = pods();
+        // Ranks 1 and 2 have only mapped `X`, which either kind accepts.
+        for pod in &mut pods[1..] {
+            pod.unknown_memory = true;
+        }
+        let calls = Arc::clone(&pods[1].calls);
+        for (result, _) in group(&agent, Mode::Prepare, pods, LONG) {
+            result.unwrap();
+        }
+        let imports = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|command| match command {
+                Command::BeginCheckpoint { imports } => Some(imports.clone()),
+                _ => None,
+            })
+            .unwrap();
+        // Every relay reads the whole command and takes its own rank's entry.
+        let memory = |rank: u8| {
+            vec![ImportKind {
+                allocation: AllocationReference {
+                    id: [20 + rank; 16],
+                    creator_pid: 0,
+                },
+                kind: FabricKind::Memory,
+            }]
+        };
+        let expected = BTreeMap::from([
+            (0, BTreeMap::from([(PID, Vec::new())])),
+            (1, BTreeMap::from([(PID, memory(1))])),
+            (2, BTreeMap::from([(PID, memory(2))])),
+        ]);
+        assert_eq!(imports, expected);
     }
 
     #[test]
@@ -1045,7 +1131,14 @@ mod tests {
             allocation: X,
             owner_pid: REMOTE_OWNER,
         };
+        let import = ImportKind {
+            allocation: X,
+            kind: FabricKind::Memory,
+        };
         for command in [
+            Command::BeginCheckpoint {
+                imports: BTreeMap::from([(1, BTreeMap::from([(PID, vec![import])]))]),
+            },
             Command::SaveAllocations {
                 owners: BTreeMap::from([(1, BTreeMap::from([(PID, vec![owner])]))]),
             },
