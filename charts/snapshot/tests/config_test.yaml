@@ -15,7 +15,7 @@ tests:
           pattern: 'controlSocketPath: "/pagebroker/control/pagebroker.sock"'
       - notMatchRegex:
           path: data["config.yaml"]
-          pattern: "cudaCheckpoint|enableChecksumDigest|transferBufferCount|storageMode"
+          pattern: "cudaCheckpoint|enableChecksumDigest|stagingBytesPerGPU|storageMode"
 
   - it: renders both the new and the pre-rename timeout keys
     set:
