@@ -312,6 +312,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 			return nil, failStep(StepAdmitGroup, err)
 		}
 		admitDuration = time.Since(admitStart)
+		log.Info("Admitted to the pod group", "rank", req.Group.Rank(), "fabricPeers", fabricPeers)
 		if err := recordCommit(ctx, req.Committed); err != nil {
 			return nil, failStep(StepRecordGroupStart, err)
 		}

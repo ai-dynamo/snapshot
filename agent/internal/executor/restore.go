@@ -334,6 +334,10 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 			return RestoreResult{}, failStep(StepAdmitGroup, err)
 		}
 		groupDuration = time.Since(admitStart)
+		// A member with fabric peers got here only once their GPUs passed the
+		// NVLink check.
+		log.Info("Admitted to the pod group", "rank", req.Group.Rank(),
+			"fabricPeers", manifest.PodGroup.FabricPeers, "gpus", snap.TargetGPUUUIDs)
 		if err := recordCommit(ctx, req.Committed); err != nil {
 			return RestoreResult{}, failStep(StepRecordGroupStart, err)
 		}
