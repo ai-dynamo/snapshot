@@ -118,19 +118,10 @@ requires there, and will not be restored. The workload will be restored again in
 a new restore Pod, such as the one a Deployment creates after this one is
 deleted.
 
-Restoring again needs what only the plugin and the proxy give:
-
-- **A sign that the container is new.** With NRI, the proxy that an earlier
-  container left in the control directory marks the restart. Without NRI,
-  nothing records which container was restored. A terminal `Restored`
-  condition cannot stand in for it, because every healthy restored Pod keeps
-  that condition.
-- **A container that ends with its workload.** Without the proxy, the
-  container's own inert command is PID 1. The container keeps running after
-  the restored workload exits, and only a liveness probe restarts it.
-- **A hook before the process starts.** The control volume outlives the
-  container, so the earlier `restore-complete` is still there when the next
-  container starts. With NRI, the plugin removes it first. Without NRI, the
-  agent learns of the container from the Pod status after it already runs. By
-  then the optional startup gate, which reads `restore-complete`, has passed,
-  so liveness probes would run during the second restore and could kill it.
+Restoring again needs a hook before the container's process starts, which only
+the NRI plugin gives. The control volume outlives the container, so the earlier
+`restore-complete` is still there when the next container starts. With NRI, the
+plugin removes it before the process starts. Without NRI, the agent sees the new
+container in the Pod status only after it runs. By then the optional startup
+gate, which reads `restore-complete`, has passed, so liveness probes would run
+during the second restore and could kill it.
