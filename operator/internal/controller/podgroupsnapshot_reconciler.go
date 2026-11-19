@@ -262,30 +262,38 @@ func (r *PodGroupSnapshotReconciler) createMemberPodSnapshots(
 	if !started {
 		return nil
 	}
+	var ranks []int
+	for rank, m := range group.Status.Members {
+		if m.PodSnapshot == nil && observed.member(rank).podSnapshot == nil {
+			ranks = append(ranks, rank)
+		}
+	}
+	if len(ranks) == 0 {
+		return nil
+	}
+	if live, err := r.isLiveGroup(ctx, group); err != nil || !live {
+		return err
+	}
+
 	// One member's failure does not hold back the others; the error requeues.
 	var errs []error
-	groupConfirmed := false
-	for rank, m := range group.Status.Members {
-		if m.PodSnapshot != nil || observed.member(rank).podSnapshot != nil {
-			continue
-		}
-		if !groupConfirmed {
-			// The cache may not have seen the group's deletion yet.
-			live := &snapshotv1alpha1.PodGroupSnapshot{}
-			if err := r.NonCacheReadClient.Get(ctx, client.ObjectKeyFromObject(group), live); err != nil {
-				if apierrors.IsNotFound(err) {
-					return nil
-				}
-				return fmt.Errorf("confirm PodGroupSnapshot %q before creating member work: %w", group.Name, err)
-			}
-			if live.UID != group.UID || !live.DeletionTimestamp.IsZero() {
-				return nil
-			}
-			groupConfirmed = true
-		}
+	for _, rank := range ranks {
 		errs = append(errs, r.createMemberPodSnapshot(ctx, group, rank))
 	}
 	return errors.Join(errs...)
+}
+
+// isLiveGroup confirms that the API server still has this group and it is not
+// being deleted. The cache may not have seen its deletion or replacement yet.
+func (r *PodGroupSnapshotReconciler) isLiveGroup(ctx context.Context, group *snapshotv1alpha1.PodGroupSnapshot) (bool, error) {
+	live := &snapshotv1alpha1.PodGroupSnapshot{}
+	if err := r.NonCacheReadClient.Get(ctx, client.ObjectKeyFromObject(group), live); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("confirm PodGroupSnapshot %q before creating member work: %w", group.Name, err)
+	}
+	return live.UID == group.UID && live.DeletionTimestamp.IsZero(), nil
 }
 
 // createMemberPodSnapshot creates one member's PodSnapshot. On AlreadyExists,
