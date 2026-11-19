@@ -63,10 +63,16 @@ an issue.
 
 ## Issue triage and priority
 
-Maintainers triage new issues weekly and set a priority label. Only maintainers
-apply labels and priorities. The priority ladder and the stale-issue policy are
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:0e499851636364ee81218e429dc3ffd1e2421b79d466caf2a10f39904a2053aa -->
+
+Maintainers triage new issues weekly and set priority and approval labels.
+Automatic issue labeling, the priority ladder, and the stale-issue policy are
 documented in
 [CONTRIBUTING.md](CONTRIBUTING.md#triage-priority-and-inactivity).
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ## Releases
 
