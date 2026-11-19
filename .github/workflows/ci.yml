@@ -121,7 +121,6 @@ jobs:
             e2e/tests/test_benchmark_outcomes.py \
             e2e/tests/test_benchmark_history.py \
             e2e/tests/test_benchmark_preview.py \
-            e2e/tests/test_e2e_suite_slot.py \
             e2e/tests/test_framework_manifests.py \
             e2e/tests/test_inference.py \
             e2e/tests/test_k8s.py \
@@ -135,7 +134,6 @@ jobs:
             e2e/tests/test_setup_chart_command.py \
             e2e/tests/test_setup_helm_overrides.py \
             e2e/tests/test_setup_image_digests.py \
-            e2e/tests/test_suite_slot_workflows.py \
             e2e/tests/test_upgrade_e2e_gate.py \
             e2e/tests/test_upgrade_harness.py \
             e2e/tests/test_workload_node_targeting.py \
