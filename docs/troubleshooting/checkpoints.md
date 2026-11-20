@@ -42,7 +42,10 @@ agent sends the request from the node to the pod's IP. The wait has no deadline
 of its own, so a probe that never passes waits until you delete the
 `PodSnapshot`, or until the source Pod ends: it fails, exits or is deleted, or
 a `SnapshotJob`'s `activeDeadlineSeconds` stops it. The `PodSnapshot` then
-fails at most five minutes after the Pod ended.
+fails with `CheckpointResultTimeout` once `operator.checkpointCompletionGrace`
+(default `5m`) has passed since the Pod ended. If the Pod object is removed before
+a result is recorded, the `PodSnapshot` fails immediately with `SourcePodNotFound`
+instead.
 
 ## A Checkpoint Fails with `InvalidCheckpointReadinessProbe`
 
