@@ -57,8 +57,20 @@ func testPlugin(t *testing.T, restorer *fakeRestorer) (*Plugin, string) {
 	root := t.TempDir()
 	proxy := filepath.Join(root, "proxy-src")
 	require.NoError(t, os.WriteFile(proxy, []byte("proxy binary"), 0o755))
+	payload := filepath.Join(root, "payload")
+	require.NoError(t, os.MkdirAll(payload, 0o755))
+	for name, data := range map[string]string{
+		"libcuinterpose.so":      "frontend",
+		"libcuinterpose_core.so": "core",
+		"cuinterpose-launch":     "launcher",
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(payload, name), []byte(data), 0o755))
+	}
 	p := NewPlugin(restorer, testr.New(t), "")
 	p.proxyPath = proxy
+	p.cuInterposeLibDir = payload
+	p.cuInterposeLauncher = filepath.Join(payload, "cuinterpose-launch")
+	p.nodeRoot = root
 	p.openControlDir = func(podUID, containerName string) (*os.File, error) {
 		dir := filepath.Join(root, podUID, containerName)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
