@@ -75,10 +75,12 @@ kubectl logs deployment/snapshot-operator --namespace snapshot --container crd-i
 ```
 
 ```text
-Applied CRD  {"name": "podsnapshots.nvidia.com", "action": "unchanged"}
+Applied CRD  {"name": "podgrouprestores.nvidia.com", "action": "unchanged"}
+Applied CRD  {"name": "podgroupsnapshots.nvidia.com", "action": "unchanged"}
 Applied CRD  {"name": "podsnapshotcontents.nvidia.com", "action": "unchanged"}
+Applied CRD  {"name": "podsnapshots.nvidia.com", "action": "unchanged"}
 Applied CRD  {"name": "snapshotjobs.nvidia.com", "action": "unchanged"}
-CRDs already up to date, no changes applied  {"count": 3}
+CRDs already up to date, no changes applied  {"count": 5}
 ```
 
 The installer runs whenever the operator pod is recreated. A `helm upgrade`
@@ -91,7 +93,7 @@ kubectl rollout restart deployment/snapshot-operator --namespace snapshot
 ```
 
 With `rbac.create=true`, the operator gets permission to read and update the
-three Snapshot CRDs, and to create a CRD. It cannot change a CRD it does not
+Snapshot CRDs, and to create a CRD. It cannot change a CRD it does not
 own.
 
 ## Manage the CRDs Yourself
