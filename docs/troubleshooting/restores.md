@@ -70,12 +70,13 @@ Re-take the checkpoint with the agent version that will restore it.
 The artifact's content UID and container name must match what the restore
 annotation asked for, and a GPU checkpoint taken through PageBroker
 CustomStorage can only be restored on a node whose agent has CustomStorage
-available.
+available. A checkpoint of a pod group's member restores only with its group.
 
 **Likely causes:**
 
 - The restore mapping names a container that was not the one checkpointed
 - The restore pod landed on a node without CustomStorage support
+- The checkpoint was captured as a member of a pod group, and the restore pod restores it on its own
 
 Check the container mapping on the restore pod against the `PodSnapshot`, and
 the node's agent configuration.
@@ -112,23 +113,6 @@ kubectl describe pod <restore-pod> -n <ns>
 kubectl exec <restore-pod> -n <ns> -c <container> -- nvidia-smi -L
 ```
 
-### admitting the pod group
-
-For a member of a pod group, the agent checks that the checkpoint is the
-member's own part of a group capture. It publishes the restore Pod's IP and the
-capture it restores, then waits for every other member's and for every member
-to accept. Nothing has been restored yet, so the attempt ends as `Refused`. A
-member that fails at any step fails the attempt for every other member. Each of
-them then fails at the step it was waiting in, with the reason the first member
-gave, such as `Refused` or `MemberFailed`.
-
-**Likely causes:**
-
-- The checkpoint was captured on its own, or by another member of the group
-- The members restore different captures
-- Another member refused first
-- The attempt's deadline passed before every member arrived
-
 ### building GPU context
 
 The agent builds the mapping PageBroker uses to place checkpointed GPU memory
@@ -145,6 +129,51 @@ A checkpoint reports the same step when the agent builds the context from the
 source container's CUDA processes and GPUs. Check that the source pod still
 holds its GPU allocation and that its CUDA processes are running; a process
 that exited between the checkpoint request and the dump leaves nothing to map.
+
+### admitting the pod group
+
+For a member of a pod group, the agent checks that the checkpoint is the
+member's own part of a group capture. It publishes the restore Pod's IP and the
+capture it restores, then waits for every other member's. It checks that it can
+keep its connections to the other members, and waits for every member to
+accept. Nothing has been restored yet, so the attempt ends as `Refused`. A
+member that fails at any step fails the attempt for every other member. Each of
+them then fails at the step it was waiting in, with the reason the first member
+gave, such as `Refused` or `MemberFailed`. From the attempt's deadline on, the
+attempt ends as `DeadlineExceeded` instead, whichever member failed.
+
+**Likely causes:**
+
+- The checkpoint was captured on its own, or by another member of the group
+- The checkpoint's pod group section has a version this agent does not restore (`pod group section has version`). Restore with the agent version that took the checkpoint
+- The restore has a different number of members than the capture had (`the capture had <n> members, the restore has <m>`)
+- The members restore different captures, which the message names
+- The restore Pod's IP, or a Pod IP the checkpoint recorded, is not IPv4 (`is not an IPv4 address` or `maps IPv4 addresses only`), which a pod group needs
+- Two members had one Pod IP at capture, or have one now, or the checkpoint records a Pod IP that does not parse. The message names the IPs
+- The restore cannot hold the connections it keeps: the node's kernel lacks nf_tables, or the agent cannot use it in the restore Pod's network namespace (`can hold connections`)
+- Members linked by GPU memory they shared over NVLink at checkpoint, directly or through other members, are not on GPUs in one NVLink clique, or one of their GPUs is not ready on its NVLink fabric (`must be restored onto GPUs in one NVLink clique`). Separate sets of members, which share no memory with each other directly or through other members, may be in different cliques. The message names the rank, the GPU, and the clique, cluster, or state that differs. Compare `nvidia-smi --query-gpu=uuid,fabric.state,fabric.status,fabric.clusterUuid,fabric.cliqueId --format=csv` on the restore Pods' nodes
+- Another member refused first (`Refused`), and its agent's log carries the step
+- A member never arrived, so the attempt's deadline passed (`DeadlineExceeded`)
+
+```bash
+kubectl get pod <restore-pod> -n <ns> -o jsonpath='{.status.podIP}'
+```
+
+### recording that the member started
+
+Once every member of a pod group has accepted, the attempt commits, and the
+agent sets the `nvidia.com/RestoreStarted` condition on the restore Pod before
+it restores anything. If it cannot, the member fails the attempt with
+`MemberFailed`. Other members that had already started fail with it.
+
+**Likely causes:**
+
+- The API server was unreachable or refused the status write
+- The restore Pod was deleted or replaced after the operator pinned it
+
+```bash
+kubectl get pod <restore-pod> -n <ns> -o jsonpath='{.status.conditions}'
+```
 
 ### mounting agent bundle into placeholder
 
@@ -197,8 +226,8 @@ on for the connections that had it, and lets CRIU continue.
 
 **Likely causes:**
 
-- Another member failed, or the attempt's deadline passed before every member restored its sockets
-- The agent could not write the hold's nftables table in the Pod's network namespace, for example on a node whose kernel lacks nf_tables
+- Another member failed (`MemberFailed`), or the attempt's deadline passed before every member restored its sockets (`DeadlineExceeded`)
+- The agent could not write the hold's nftables table in the Pod's network namespace
 - nsrestore exited before CRIU restored the sockets, and then the agent log also names the step nsrestore failed at
 
 ```bash
@@ -368,8 +397,8 @@ first, and the agent then terminates the restored processes.
 
 **Likely causes:**
 
-- Another member failed, and its agent's log carries the step
-- The attempt's deadline passed
+- Another member failed (`MemberFailed`), and its agent's log carries the step
+- The attempt's deadline passed (`DeadlineExceeded`)
 - The coordinator was lost (`CoordinatorLost`)
 
 ```bash
