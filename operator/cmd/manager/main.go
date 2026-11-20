@@ -10,6 +10,7 @@ import (
 	"os"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -41,6 +42,7 @@ func main() {
 	}
 	bindNewContents := flag.Bool("bind-new-contents", false,
 		"Bind new content to the configured store after all agents support artifact addressing")
+	podGroups := bindPodGroupFlags(flag.CommandLine)
 	pageBrokerS3ConfigNamespace := flag.String("pagebroker-s3-config-namespace", "",
 		"Namespace of the ConfigMap PageBroker reads its S3 configuration from; defaults to POD_NAMESPACE")
 	pageBrokerS3ConfigName := flag.String("pagebroker-s3-config-name", DefaultPageBrokerS3ConfigName,
@@ -85,6 +87,13 @@ func main() {
 	if err := cuInterposeConfig.Validate(); err != nil {
 		ctrl.Log.Error(err, "invalid cuinterpose configuration")
 		os.Exit(1)
+	}
+	var agentSelector labels.Selector
+	if podGroups.enabled {
+		if agentSelector, err = podGroups.selector(); err != nil {
+			ctrl.Log.Error(err, "invalid pod group configuration")
+			os.Exit(1)
+		}
 	}
 
 	ctrl.Log.Info("starting snapshot operator", "version", version)
@@ -187,6 +196,20 @@ func main() {
 	if err := snapshotJobReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up SnapshotJob controller")
 		os.Exit(1)
+	}
+
+	if podGroups.enabled {
+		podGroupSnapshotReconciler := &controller.PodGroupSnapshotReconciler{
+			Client:             mgr.GetClient(),
+			NonCacheReadClient: mgr.GetAPIReader(),
+			Recorder:           mgr.GetEventRecorderFor("podgroupsnapshot-controller"),
+			AgentNamespace:     podGroups.agentNamespace,
+			AgentSelector:      agentSelector,
+		}
+		if err := podGroupSnapshotReconciler.SetupWithManager(mgr); err != nil {
+			ctrl.Log.Error(err, "unable to set up PodGroupSnapshot controller")
+			os.Exit(1)
+		}
 	}
 
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {

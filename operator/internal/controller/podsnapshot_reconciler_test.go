@@ -686,6 +686,42 @@ func TestSnapshotReconciler_AdoptsExistingContentAndMirrors(t *testing.T) {
 	assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
 }
 
+func TestSnapshotReconciler_AdoptsExistingContentOfAnEndedSourcePod(t *testing.T) {
+	// The content was created before the source pod ended, but the binding was never recorded. The
+	// first pass adopts it whatever the pod's state; the second mirrors the agent's Ready.
+	s := snapshotReconcilerScheme()
+	for name, mutate := range map[string]func(pod *corev1.Pod){
+		"succeeded": func(pod *corev1.Pod) { pod.Status.Phase = corev1.PodSucceeded },
+		"failed":    func(pod *corev1.Pod) { pod.Status.Phase = corev1.PodFailed },
+		"being deleted": func(pod *corev1.Pod) {
+			pod.DeletionTimestamp = ptr.To(metav1.Now())
+			pod.Finalizers = []string{"test/hold"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			snap, content := pendingBoundSnapshotContent()
+			snap.Status.BoundPodSnapshotContentName = nil
+			content.Status.Conditions = []metav1.Condition{{Type: snapshotv1alpha1.PodSnapshotConditionReady,
+				Status: metav1.ConditionTrue, Reason: "Agent", Message: "done"}}
+			pod := scheduledPod()
+			mutate(pod)
+			r := makeSnapshotReconciler(s, snap, content, pod)
+
+			reconcileSnapshot(t, r, snap.Name)
+			bound := &snapshotv1alpha1.PodSnapshot{}
+			require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), bound))
+			require.NotNil(t, bound.Status.BoundPodSnapshotContentName)
+			assert.Equal(t, content.Name, *bound.Status.BoundPodSnapshotContentName)
+			assert.Nil(t, meta.FindStatusCondition(bound.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
+
+			reconcileSnapshot(t, r, snap.Name)
+			updated := &snapshotv1alpha1.PodSnapshot{}
+			require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
+			assert.True(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+		})
+	}
+}
+
 func TestSnapshotReconciler_MirrorsReadyAndFailed(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
