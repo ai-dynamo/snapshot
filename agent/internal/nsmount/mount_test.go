@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr"
+	"github.com/stretchr/testify/require"
 )
 
 func writeFakeBinary(t *testing.T, script string) string {
@@ -223,9 +224,7 @@ func TestExecMounterUnmountErrorAndIdempotence(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("unexpected unmount error: %v", err)
 	}
-	if err2 := handle.Unmount(context.Background()); err2 != err {
-		t.Fatalf("second Unmount() = %v, want same error %v", err2, err)
-	}
+	require.Same(t, err, handle.Unmount(context.Background()))
 }
 
 func TestCHelperRejectsUnsafeSourcesBeforeMountSyscalls(t *testing.T) {

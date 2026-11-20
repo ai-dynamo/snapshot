@@ -4,6 +4,7 @@
 package runtime
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -333,7 +334,7 @@ func CheckProcessHandles(files []*os.File) error {
 		var err error
 		for {
 			_, err = unix.Poll(target, 0)
-			if err != unix.EINTR {
+			if !errors.Is(err, unix.EINTR) {
 				break
 			}
 		}

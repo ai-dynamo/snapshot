@@ -240,7 +240,7 @@ func mountReplacementFilesImage(
 	if err := os.Remove(replacementFilesImagePath); err != nil {
 		cleanupErr := removeImageView()
 		if cleanupErr != nil {
-			return nil, fmt.Errorf("failed to unlink mounted private %s: %w (cleanup failed: %v)", filesImageFilename, err, cleanupErr)
+			return nil, fmt.Errorf("failed to unlink mounted private %s: %w (cleanup failed: %w)", filesImageFilename, err, cleanupErr)
 		}
 		return nil, fmt.Errorf("failed to unlink mounted private %s: %w", filesImageFilename, err)
 	}

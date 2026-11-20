@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func processOutputOf(t *testing.T, stdout, stderr string, causePrefixes ...string) *ProcessOutput {
@@ -72,9 +74,7 @@ func TestProcessOutputCauseLineAcrossWrites(t *testing.T) {
 
 func TestWithDetail(t *testing.T) {
 	cause := errors.New("boom")
-	if err := WithDetail(cause, ""); err != cause {
-		t.Fatalf("WithDetail(empty) = %v, want the error unchanged", err)
-	}
+	require.Same(t, cause, WithDetail(cause, ""))
 	err := WithDetail(cause, "more")
 	if !errors.Is(err, cause) || err.Error() != "boom: more" {
 		t.Fatalf("WithDetail = %v", err)

@@ -189,7 +189,7 @@ func waitForEstablished(ctx context.Context, crdClient apiextensionsv1client.Cus
 		return fmt.Errorf("list/watch CRDs: %w", failFast)
 	}
 	if reflectorErr != nil {
-		err = fmt.Errorf("%w (last list/watch error: %v)", err, reflectorErr)
+		err = fmt.Errorf("%w (last list/watch error: %w)", err, reflectorErr)
 	}
 	if len(lastConditions) > 0 {
 		err = fmt.Errorf("%w (last observed conditions: %s)", err, formatConditions(lastConditions))

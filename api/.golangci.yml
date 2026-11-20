@@ -9,6 +9,7 @@ linters:
   enable:
     - dupl
     - errcheck
+    - errorlint
     - goconst
     - gocyclo
     - govet
