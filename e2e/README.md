@@ -45,8 +45,8 @@ every GPU node. Before a GPU, framework, or upgrade suite creates its vCluster,
 `snapshot_e2e.infra.suite_slot` creates the suite's host namespace and waits
 for a suite slot. Up to six suites run at once, in the order their host
 namespaces were created. A suite that finds no slot in 175 minutes fails with a
-`No suite slot` error that names the suites ahead of it. A suite that cannot
-list the host namespaces runs without a slot and warns
+`No suite slot` error that names the suites holding the slots. A suite that
+cannot list the host namespaces runs without a slot and warns
 `Running without a suite slot`.
 
 To see the suites in line, oldest first, run this against the host cluster:

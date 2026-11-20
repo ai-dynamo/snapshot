@@ -10,7 +10,7 @@ and its setup times out. So a suite first waits for a slot.
 
 A suite's host namespace is its place in line. This creates it, labelled
 snapshot-e2e=true like every suite's host namespace, and the suite starts once
-fewer than SUITE_LIMIT of those namespaces are older than its own. The suite's
+its namespace is among the SUITE_LIMIT oldest of those namespaces. The suite's
 vCluster cleanup deletes the namespace, which frees the slot, so there is
 nothing to release. A namespace that is being deleted holds no slot.
 
@@ -73,10 +73,6 @@ def queue() -> list[str]:
     return [item.metadata.name for item in live]
 
 
-def ahead_of(names: list[str], identity: str) -> list[str]:
-    return names[: names.index(identity)] if identity in names else names
-
-
 def wait(identity: str, timeout_minutes: int) -> int:
     try:
         preflight.load_config(None, None)
@@ -88,7 +84,7 @@ def wait(identity: str, timeout_minutes: int) -> int:
     deadline = time.monotonic() + timeout_minutes * 60
     reported_at = float("-inf")
     errors = 0
-    ahead: list[str] = []
+    held_by: list[str] = []
     while True:
         try:
             names = queue()
@@ -100,15 +96,12 @@ def wait(identity: str, timeout_minutes: int) -> int:
             log(f"Could not list the suite slots, retrying: {describe(exc)}")
         else:
             errors = 0
-            ahead = ahead_of(names, identity)
-            if len(ahead) < SUITE_LIMIT:
-                log(f"Took suite slot {len(ahead) + 1} of {SUITE_LIMIT} as {identity}")
+            held_by = names[:SUITE_LIMIT]
+            if identity in held_by:
+                log(f"Took suite slot {held_by.index(identity) + 1} of {SUITE_LIMIT} as {identity}")
                 return 0
             if time.monotonic() - reported_at >= REPORT_SECONDS:
-                log(
-                    f"Waiting for a suite slot, {SUITE_LIMIT} run at once; "
-                    f"{len(ahead)} ahead: {', '.join(ahead)}"
-                )
+                log(f"Waiting for one of {SUITE_LIMIT} suite slots, held by: {', '.join(held_by)}")
                 reported_at = time.monotonic()
 
         remaining = deadline - time.monotonic()
@@ -117,7 +110,7 @@ def wait(identity: str, timeout_minutes: int) -> int:
                 "error",
                 "No suite slot",
                 f"waited {timeout_minutes} minutes for one of {SUITE_LIMIT} suite slots; "
-                f"ahead: {', '.join(ahead) or 'unknown'}",
+                f"held by: {', '.join(held_by) or 'unknown'}",
             )
             return 1
         time.sleep(min(POLL_SECONDS, remaining))
