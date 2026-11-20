@@ -32,7 +32,7 @@ def test_gpu_suites_wait_for_the_verified_candidate_and_make_check(jobs):
 
 
 def test_gpu_suites_check_the_running_images_against_the_candidate(jobs):
-    verify = step(jobs["candidate"], "Check each tag resolves to the digest built here")
+    verify = step(jobs["candidate"], "Tag this attempt's images and check their digests")
     assert jobs["candidate"]["outputs"]["digests"] == f"${{{{ steps.{verify['id']}.outputs.digests }}}}"
     assert 'echo "digests=${record}" >> "${GITHUB_OUTPUT}"' in verify["run"]
     for suite in GPU_SUITES:
@@ -45,7 +45,7 @@ def test_gpu_suites_check_the_running_images_against_the_candidate(jobs):
 
 def test_candidate_checks_every_built_image(jobs):
     images = jobs["images"]["strategy"]["matrix"]["image"]
-    script = step(jobs["candidate"], "Check each tag resolves to the digest built here")["run"]
+    script = step(jobs["candidate"], "Tag this attempt's images and check their digests")["run"]
     assert f"for image in {' '.join(images)}; do" in script
     record = step(jobs["images"], "Record digest")
     assert record["env"]["DIGEST"] == "${{ steps.build.outputs.digest }}"
