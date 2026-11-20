@@ -9,11 +9,13 @@ mod record;
 mod transport;
 
 #[doc(inline)]
-pub use identity::{AllocationId, AllocationReference, NamespacePid};
+pub use identity::{
+    AllocationId, AllocationReference, FABRIC_HANDLE_BYTES, FabricHandle, NamespacePid,
+};
 #[doc(inline)]
 pub use record::{
-    BindingSource, BindingVersion, MemberRange, MemoryAccess, MemoryLocation, MulticastProperties,
-    Record,
+    BindingSource, BindingVersion, FabricKind, MemberRange, MemoryAccess, MemoryLocation,
+    MulticastProperties, Record,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
@@ -25,7 +27,7 @@ use std::{
 #[doc(inline)]
 pub use transport::{connect, receive, send};
 
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 // Limit allocations requested by socket frame prefixes and checkpoint files. Protocol
 // messages contain metadata, never allocation contents.
 pub const MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
@@ -96,18 +98,45 @@ pub fn decode_virtual_shareable_handle(
     Ok(AllocationReference { id, creator_pid })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// One lifecycle step on one process, with the arguments that step needs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
     PrepareMulticast,
-    SaveAllocations,
+    /// Save each host-carrier allocation that the process owns. `owners` names the owner
+    /// of every host-carrier allocation that the process holds.
+    SaveAllocations {
+        owners: Vec<AllocationOwner>,
+    },
     PrepareUnicast,
     LoadAllocations,
-    RestoreUnicast,
+    /// Import the allocations that another process owns. FABRIC holders import the
+    /// handle that replaced the one they recorded.
+    RestoreUnicast {
+        replacements: Vec<FabricReplacement>,
+    },
     RestoreMulticastCreators,
-    RestoreMulticastImporters,
+    RestoreMulticastImporters {
+        replacements: Vec<FabricReplacement>,
+    },
     RestoreMulticastDevices,
     RestoreMulticastBindings,
+}
+
+impl std::fmt::Display for Operation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::PrepareMulticast => "PrepareMulticast",
+            Self::SaveAllocations { .. } => "SaveAllocations",
+            Self::PrepareUnicast => "PrepareUnicast",
+            Self::LoadAllocations => "LoadAllocations",
+            Self::RestoreUnicast { .. } => "RestoreUnicast",
+            Self::RestoreMulticastCreators => "RestoreMulticastCreators",
+            Self::RestoreMulticastImporters { .. } => "RestoreMulticastImporters",
+            Self::RestoreMulticastDevices => "RestoreMulticastDevices",
+            Self::RestoreMulticastBindings => "RestoreMulticastBindings",
+        })
+    }
 }
 
 /// Which existing holder saves and recreates one shared backing allocation.
@@ -118,13 +147,32 @@ pub struct AllocationOwner {
     pub owner_pid: NamespacePid,
 }
 
+/// The kind of a FABRIC import that its process has not learned, as its creator recorded
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportKind {
+    pub allocation: AllocationReference,
+    pub kind: FabricKind,
+}
+
+/// A fabric handle that a restored creator exported in place of the one it exported
+/// before the checkpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct FabricReplacement {
+    pub old: FabricHandle,
+    pub new: FabricHandle,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Request {
     /// Enter checkpoint mode and return stable records. The application must already be
-    /// paused because this request does not synchronize GPU work.
+    /// paused because this request does not synchronize GPU work. The process first takes
+    /// the kind of each FABRIC import that `imports` names, and refuses if it still holds
+    /// an import of unknown kind.
     BeginCheckpoint {
         namespace_pid: NamespacePid,
+        imports: Vec<ImportKind>,
     },
     Inspect {
         namespace_pid: NamespacePid,
@@ -132,10 +180,6 @@ pub enum Request {
     Execute {
         namespace_pid: NamespacePid,
         operation: Operation,
-    },
-    SaveAllocations {
-        namespace_pid: NamespacePid,
-        owners: Vec<AllocationOwner>,
     },
     Export {
         namespace_pid: NamespacePid,
@@ -152,10 +196,33 @@ pub struct Response {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reply {
-    Inspection { records: Vec<Record> },
-    Completed { operation: Operation, bytes: u64 },
-    UnicastExport { size: u64, location: MemoryLocation },
-    MulticastExport { properties: MulticastProperties },
+    Inspection {
+        records: Vec<Record>,
+    },
+    /// SaveAllocations copied `bytes` into the host carrier.
+    Saved {
+        bytes: u64,
+    },
+    /// LoadAllocations copied `bytes` back from the host carrier, and the process exported
+    /// `replacements` for the FABRIC allocations that it recreated.
+    Loaded {
+        bytes: u64,
+        replacements: Vec<FabricReplacement>,
+    },
+    /// RestoreMulticastCreators exported `replacements` for the FABRIC multicast objects
+    /// that the process recreated.
+    MulticastRecreated {
+        replacements: Vec<FabricReplacement>,
+    },
+    /// Any other operation completed.
+    Completed,
+    UnicastExport {
+        size: u64,
+        location: MemoryLocation,
+    },
+    MulticastExport {
+        properties: MulticastProperties,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -203,9 +270,9 @@ pub fn control_timeout() -> Duration {
     timeout("SNAPSHOT_CONTROL_TIMEOUT_SECONDS", 10)
 }
 
-pub fn operation_timeout(operation: Operation) -> Duration {
+pub fn operation_timeout(operation: &Operation) -> Duration {
     match operation {
-        Operation::SaveAllocations | Operation::LoadAllocations => {
+        Operation::SaveAllocations { .. } | Operation::LoadAllocations => {
             timeout("SNAPSHOT_CARRIER_TIMEOUT_SECONDS", 3600)
         }
         _ => control_timeout(),

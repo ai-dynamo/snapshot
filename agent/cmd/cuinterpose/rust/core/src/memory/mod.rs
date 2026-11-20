@@ -5,6 +5,7 @@
 
 pub(crate) mod checkpoint;
 pub(crate) mod context;
+pub(crate) mod fabric;
 mod host_carrier;
 pub(crate) mod ipc;
 pub(crate) mod multicast;
@@ -15,7 +16,7 @@ use crate::error::{Error, Result};
 use crate::runtime;
 use checkpoint::Phase;
 use cudarc::driver::sys::CUresult::*;
-use cuinterpose_protocol::{AllocationId, AllocationReference, NamespacePid};
+use cuinterpose_protocol::{AllocationId, AllocationReference, FabricHandle, NamespacePid};
 use runtime::export_cache;
 use std::collections::BTreeMap;
 use vmm::{Allocation, Mapping};
@@ -70,15 +71,19 @@ pub struct Refcounts {
     /// Distinct live virtual handles, excluding repeated retains of the same handle.
     pub handle_entries: usize,
     pub mappings: usize,
+    /// Driver calls that use the memblock while the registry is released.
+    pub calls: usize,
 }
 
 /// Physical allocation identified by a generic CUDA handle. Unicast and multicast share
 /// ID and virtual handle namespaces while keeping their CUDA properties and restore
-/// state in separate variants.
+/// state in separate variants. A FABRIC import has no kind until the process learns
+/// whether its handle names memory or a multicast object.
 #[derive(Clone)]
 pub enum Memblock {
     Unicast(Allocation),
     Multicast(multicast::MulticastObject),
+    Unclassified(fabric::Unclassified),
 }
 
 impl Memblock {
@@ -86,6 +91,7 @@ impl Memblock {
         match self {
             Self::Unicast(allocation) => &allocation.refcounts,
             Self::Multicast(object) => &object.refcounts,
+            Self::Unclassified(import) => &import.refcounts,
         }
     }
 
@@ -93,6 +99,16 @@ impl Memblock {
         match self {
             Self::Unicast(allocation) => &mut allocation.refcounts,
             Self::Multicast(object) => &mut object.refcounts,
+            Self::Unclassified(import) => &mut import.refcounts,
+        }
+    }
+
+    /// The context that the memblock was created, imported, or first mapped in, or 0.
+    pub(crate) fn context_mut(&mut self) -> &mut usize {
+        match self {
+            Self::Unicast(allocation) => &mut allocation.context,
+            Self::Multicast(object) => &mut object.context,
+            Self::Unclassified(import) => &mut import.context,
         }
     }
 
@@ -128,6 +144,7 @@ impl Memblock {
         match self {
             Self::Unicast(allocation) => allocation.reference,
             Self::Multicast(object) => object.reference,
+            Self::Unclassified(import) => import.reference,
         }
     }
 
@@ -136,6 +153,7 @@ impl Memblock {
         match self {
             Self::Unicast(allocation) => allocation.driver,
             Self::Multicast(object) => object.driver,
+            Self::Unclassified(import) => Some(import.driver),
         }
         .ok_or(CUDA_ERROR_INVALID_HANDLE.into())
     }
@@ -165,6 +183,9 @@ pub struct ProcessState {
     // Set once per checkpoint after every registry is frozen. Importers can outlive
     // the creator's local references, so the carrier owner is separate from identity.
     pub checkpoint_owners: BTreeMap<AllocationId, NamespacePid>,
+    // Every FABRIC handle that a restore replaced, mapped to its newest replacement. An
+    // application can keep a handle's bytes across restores and import them later.
+    fabric_replacements: BTreeMap<FabricHandle, FabricHandle>,
     pub arena: Option<host_carrier::Arena>,
     pub unlocked_driver_calls: usize,
     next_virtual_allocation_handle: u64,
@@ -186,6 +207,7 @@ impl ProcessState {
             next_virtual_allocation_handle: 1,
             phase: Phase::Active,
             checkpoint_owners: BTreeMap::new(),
+            fabric_replacements: BTreeMap::new(),
             arena: None,
             unlocked_driver_calls: 0,
         }
@@ -268,13 +290,15 @@ impl ProcessState {
     }
 
     /// Release a unicast driver handle after the last virtual handle is removed. Remove
-    /// the memblock when no virtual handles or mappings refer to it.
+    /// the memblock when no virtual handles or mappings refer to it. A driver call in
+    /// flight holds the memblock and its driver handle, as a virtual handle does.
     pub(crate) fn release_unused_memblock(&mut self, id: AllocationId) -> Result<()> {
         let memblock = self
             .memblocks
             .get_mut(&id)
             .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-        let handle_live = memblock.refcounts().handle_entries != 0;
+        let handle_live =
+            memblock.refcounts().handle_entries != 0 || memblock.refcounts().calls != 0;
         let mapped = memblock.refcounts().mappings != 0;
         match memblock {
             Memblock::Unicast(allocation) => {
@@ -296,6 +320,14 @@ impl ProcessState {
                 if let Some(driver) = object.driver {
                     unsafe { crate::driver::cuMemRelease(driver) }?;
                 }
+            }
+            // A multicast object needs its driver handle while it is mapped, so an import
+            // of unknown kind keeps it too.
+            Memblock::Unclassified(import) => {
+                if handle_live || mapped {
+                    return Ok(());
+                }
+                unsafe { crate::driver::cuMemRelease(import.driver) }?;
             }
         }
         self.memblocks.remove(&id);
