@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import os
 import time
+from collections import Counter, defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -91,34 +92,24 @@ def run_without_slot(exc: Exception) -> int:
     return 0
 
 
-def quantities(values: dict[str, str] | None) -> dict[str, Decimal]:
-    return {name: parse_quantity(value) for name, value in (values or {}).items()}
+def quantities(values: dict[str, str] | None) -> Counter[str]:
+    return Counter({name: parse_quantity(value) for name, value in (values or {}).items()})
 
 
-def amount(resources: dict[str, Decimal], name: str) -> Decimal:
-    return resources.get(name, Decimal(0))
-
-
-def add_requests(total: dict[str, Decimal], extra: dict[str, Decimal]) -> None:
-    for name, value in extra.items():
-        total[name] = amount(total, name) + value
-
-
-def container_requests(container: client.V1Container) -> dict[str, Decimal]:
+def container_requests(container: client.V1Container) -> Counter[str]:
     return quantities(container.resources.requests if container.resources else None)
 
 
-def pod_requests(pod: client.V1Pod) -> dict[str, Decimal]:
-    requests: dict[str, Decimal] = {}
+def pod_requests(pod: client.V1Pod) -> Counter[str]:
+    requests: Counter[str] = Counter()
     init_containers = pod.spec.init_containers or []
     sidecars = [container for container in init_containers if container.restart_policy == "Always"]
     for container in [*(pod.spec.containers or []), *sidecars]:
-        add_requests(requests, container_requests(container))
+        requests.update(container_requests(container))
     for container in init_containers:
         if container.restart_policy != "Always":
-            for name, value in container_requests(container).items():
-                requests[name] = max(amount(requests, name), value)
-    add_requests(requests, quantities(pod.spec.overhead))
+            requests |= container_requests(container)
+    requests.update(quantities(pod.spec.overhead))
     return requests
 
 
@@ -143,21 +134,21 @@ def compute_limit(
     if not eligible:
         raise CapacityError(f"no node the vCluster syncs is labelled {GPU_NODE_LABEL}=true")
 
-    used: dict[str, dict[str, Decimal]] = {}
+    used: defaultdict[str, Counter[str]] = defaultdict(Counter)
     for pod in pods:
         if pod.spec.node_name and pod.metadata.namespace not in holders:
-            add_requests(used.setdefault(pod.spec.node_name, {}), pod_requests(pod))
+            used[pod.spec.node_name].update(pod_requests(pod))
 
     room = []
     free_gpus = Decimal(0)
     for node in eligible:
         allocatable = quantities(node.status.allocatable if node.status else None)
-        taken = used.get(node.metadata.name, {})
-        cpu = amount(allocatable, "cpu") - amount(taken, "cpu")
-        memory = amount(allocatable, "memory") - amount(taken, "memory")
+        taken = used[node.metadata.name]
+        cpu = allocatable["cpu"] - taken["cpu"]
+        memory = allocatable["memory"] - taken["memory"]
         fit = max(int(min(cpu / SUITE_CPU, memory / SUITE_MEMORY)), 0)
         room.append((fit, node.metadata.name, cpu, memory))
-        gpus = amount(allocatable, GPU_RESOURCE) - amount(taken, GPU_RESOURCE)
+        gpus = allocatable[GPU_RESOURCE] - taken[GPU_RESOURCE]
         free_gpus += max(gpus, Decimal(0))
 
     node_fit, name, cpu, memory = min(room)
