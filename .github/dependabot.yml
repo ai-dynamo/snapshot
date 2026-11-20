@@ -15,11 +15,12 @@ updates:
     cooldown:
       default-days: 7
 
-  # One entry covering all three modules: gomod resolves manifests per
+  # One entry covering every module: gomod resolves manifests per
   # directory and does not follow go.work.
   - package-ecosystem: gomod
     directories:
       - /api
+      - /coordinator
       - /agent
       - /operator
     schedule:
@@ -49,7 +50,7 @@ updates:
       default-days: 7
     ignore:
       # The Go toolchain version is a project decision pinned across go.work,
-      # the three go.mod files, hack/tools.mk, agent/Dockerfile and the
+      # every go.mod file, hack/tools.mk, agent/Dockerfile and the
       # workflows. Digest refreshes of the builder image are welcome; moving it
       # to a toolchain CI does not validate against is not. Bump the toolchain
       # deliberately, everywhere at once.

@@ -23,8 +23,8 @@ jobs:
       version: ${{ github.event.release.tag_name }}
 
   # Go module proxy requires sub-path tags for modules not at the repo root.
-  # Without api/v0.1.0, operator/v0.1.0, agent/v0.1.0 — `go get` of any
-  # sub-module by version fails.
+  # Without api/v0.1.0, coordinator/v0.1.0, operator/v0.1.0, agent/v0.1.0 —
+  # `go get` of any sub-module by version fails.
   go-module-tags:
     name: Create Go module sub-path tags
     needs: push-artifacts
@@ -52,7 +52,7 @@ jobs:
           release_commit="$(git rev-parse HEAD^{commit})"
           missing_tags=()
 
-          for module in api operator agent; do
+          for module in api coordinator operator agent; do
             module_tag="${module}/${TAG}"
             remote_refs="$(
               git ls-remote origin \
