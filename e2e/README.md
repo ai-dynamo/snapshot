@@ -48,9 +48,9 @@ The slot count is how many suites fit in the room other workloads leave on the
 tightest GPU node and in the free GPUs. Once two or more fit, one is kept as
 headroom. When the nodes cannot be read, there are 6 slots. A suite waiting for
 a slot logs how the count was worked out. A suite that finds no slot in 175
-minutes fails with a `No suite slot` error that names the suites ahead of it. A
-suite that cannot list the host namespaces runs without a slot and warns
-`Running without a suite slot`.
+minutes fails with a `No suite slot` error that names the suites holding the
+slots. A suite that cannot list the host namespaces runs without a slot and
+warns `Running without a suite slot`.
 
 To see the suites in line, oldest first, run this against the host cluster:
 
