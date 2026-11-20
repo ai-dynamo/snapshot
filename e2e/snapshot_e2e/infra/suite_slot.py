@@ -17,7 +17,7 @@ is nothing to release. A namespace that is being deleted holds no slot.
 The limit is recomputed while a suite waits: how many suite budgets fit into
 what the tightest GPU node has left after every Pod outside the slot-holding
 namespaces, capped by free GPUs, keeping one suite of headroom. If the nodes or
-Pods cannot be read, the limit is FALLBACK_LIMIT.
+Pods cannot be read, the last limit stays, or FALLBACK_LIMIT if there is none.
 
 Namespaces created in the same second are ordered by name, so the first check
 waits SETTLE_SECONDS for every namespace that could sort ahead to exist.
@@ -70,6 +70,7 @@ class CapacityError(RuntimeError):
 class Limit:
     value: int
     detail: str
+    computed: bool = True
 
 
 def describe(exc: Exception) -> str:
@@ -164,7 +165,7 @@ def compute_limit(
     )
 
 
-def current_limit(holders: set[str]) -> Limit:
+def refresh_limit(previous: Limit | None, holders: set[str]) -> Limit:
     core = client.CoreV1Api()
     try:
         nodes = core.list_node(_request_timeout=REQUEST_TIMEOUT_SECONDS).items
@@ -172,13 +173,18 @@ def current_limit(holders: set[str]) -> Limit:
             field_selector="status.phase!=Succeeded,status.phase!=Failed",
             _request_timeout=REQUEST_TIMEOUT_SECONDS,
         ).items
-        return compute_limit(nodes, pods, holders)
+        fresh = compute_limit(nodes, pods, holders)
     except (*API_ERRORS, CapacityError, ValueError, ArithmeticError) as exc:
-        return Limit(
-            FALLBACK_LIMIT,
-            f"suite limit {FALLBACK_LIMIT}, the fallback: the GPU nodes could not be read: "
-            f"{describe(exc)}",
+        value = previous.value if previous else FALLBACK_LIMIT
+        source = "kept from the last check" if previous else "the fallback"
+        fresh = Limit(
+            value,
+            f"suite limit {value}, {source}: the GPU nodes could not be read: {describe(exc)}",
+            computed=False,
         )
+    if previous is None or not (previous.computed and fresh.computed) or fresh.value != previous.value:
+        log(fresh.detail)
+    return fresh
 
 
 def queue() -> list[str]:
@@ -214,11 +220,8 @@ def wait(identity: str, timeout_minutes: int) -> int:
             log(f"Could not list the suite slots, retrying: {describe(exc)}")
         else:
             errors = 0
-            if time.monotonic() - refreshed_at >= LIMIT_REFRESH_SECONDS:
-                fresh = current_limit(set(names))
-                if limit is None or fresh.value != limit.value:
-                    log(fresh.detail)
-                limit, refreshed_at = fresh, time.monotonic()
+            if limit is None or time.monotonic() - refreshed_at >= LIMIT_REFRESH_SECONDS:
+                limit, refreshed_at = refresh_limit(limit, set(names)), time.monotonic()
             held_by = names[: limit.value]
             if identity in held_by:
                 log(f"Took suite slot {held_by.index(identity) + 1} of {limit.value} as {identity}")
