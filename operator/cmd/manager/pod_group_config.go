@@ -11,9 +11,9 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 )
 
-// podGroupConfig turns on the PodGroupSnapshot controller and tells it how to
-// find the node agent Pods, whose readiness and group protocols admission
-// checks on each member's node.
+// podGroupConfig turns on the PodGroupSnapshot and PodGroupRestore controllers
+// and tells them how to find the node agent Pods, whose readiness and group
+// protocols admission checks on each member's node.
 type podGroupConfig struct {
 	enabled        bool
 	agentNamespace string
@@ -23,7 +23,7 @@ type podGroupConfig struct {
 func bindPodGroupFlags(flags *flag.FlagSet) *podGroupConfig {
 	cfg := &podGroupConfig{}
 	flags.BoolVar(&cfg.enabled, "enable-pod-groups", false,
-		"Run the PodGroupSnapshot controller (alpha); requires --agent-namespace and --agent-selector")
+		"Run the PodGroupSnapshot and PodGroupRestore controllers (alpha); requires --agent-namespace and --agent-selector")
 	flags.StringVar(&cfg.agentNamespace, "agent-namespace", "",
 		"Namespace of the node agent Pods that pod-group admission checks")
 	flags.StringVar(&cfg.agentSelector, "agent-selector", "",
