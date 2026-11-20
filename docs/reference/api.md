@@ -1,9 +1,10 @@
 # API Reference
 
-Use this page to look up the Snapshot API. It lists the three custom resources,
-`PodSnapshot`, `PodSnapshotContent` and `SnapshotJob`, and the annotations,
-labels, pod conditions and control volume that work with them. All custom
-resources are in API group `nvidia.com`, version `v1alpha1`.
+Use this page to look up the Snapshot API. It lists the five custom resources,
+`PodSnapshot`, `PodSnapshotContent`, `SnapshotJob`, `PodGroupSnapshot`, and
+`PodGroupRestore`, and the annotations, labels, pod conditions, and control
+volume that work with them. All custom resources are in API group `nvidia.com`,
+version `v1alpha1`.
 
 To see how these fit together, read [Core Concepts](../overview/core-concepts.md).
 To use them in a checkpoint and restore, follow
@@ -12,11 +13,13 @@ To use them in a checkpoint and restore, follow
 
 ## Custom Resources
 
-| Kind                 | Scope      | Short name       | Created by                                   |
-|----------------------|------------|------------------|----------------------------------------------|
-| `PodSnapshot`        | Namespaced | `podsnap`        | The caller (or a controller / `SnapshotJob`) |
-| `PodSnapshotContent` | Cluster    | `podsnapcontent` | The operator only                            |
-| `SnapshotJob`        | Namespaced | `snapjob`        | The caller                                   |
+| Kind                 | Scope      | Short name        | Created by                                   |
+|----------------------|------------|-------------------|----------------------------------------------|
+| `PodSnapshot`        | Namespaced | `podsnap`         | The caller (or a controller / `SnapshotJob`) |
+| `PodSnapshotContent` | Cluster    | `podsnapcontent`  | The operator only                            |
+| `SnapshotJob`        | Namespaced | `snapjob`         | The caller                                   |
+| `PodGroupSnapshot`   | Namespaced | `podgroupsnap`    | The caller                                   |
+| `PodGroupRestore`    | Namespaced | `podgrouprestore` | The caller                                   |
 
 Each resource's `spec` is immutable after creation.
 
@@ -32,6 +35,7 @@ The namespaced binding for one container's snapshot; consumed by restore.
 | `source.podRef.uid`        | string   | no       | UID of the source pod, so the agent dumps that exact pod and not a same-named recreation.                           |
 | `source.podRef.containers` | []string | yes      | Container(s) to checkpoint. Exactly one in `v1alpha1`; each must be a DNS label.                                    |
 | `containers`               | []ContainerSnapshotConfig | no       | Settings for a checkpointed container, by `name`. At most one entry. See [Container settings](#container-settings). |
+| `podGroup` | PodGroupSnapshotMembership | no | Coordinated checkpoint membership. Omitted means standalone. See [Pod Group Membership](#pod-group-membership). |
 
 `status`:
 
@@ -56,6 +60,7 @@ when it binds a `PodSnapshot`; callers never create it.
 | `source.nodeName`       | string       | yes      | Node the source pod runs on; selects the node agent that performs the dump.                                                                                                                                      |
 | `storage.storeID`       | string       | no       | Backend-neutral store binding, immutable with the rest of `spec`. When `storage` is present, the ID must be `store-v1-` followed by 64 lowercase hexadecimal characters. Omitted by legacy filesystem producers. |
 | `containers`            | []ContainerSnapshotConfig | no       | The `PodSnapshot`'s [container settings](#container-settings), with defaults filled in. Every restore of this checkpoint uses them, even after the `PodSnapshot` or `SnapshotJob` changes or is gone.            |
+| `podGroup` | PodGroupSnapshotMembership | no | Coordinated checkpoint membership. Omitted means standalone. See [Pod Group Membership](#pod-group-membership). |
 
 `status`:
 
@@ -118,8 +123,9 @@ one declarative object.
 
 ### Container settings
 
-An entry in `PodSnapshot.spec.containers` or
-`SnapshotJob.spec.podSnapshotTemplate.containers`, of type
+An entry in `PodSnapshot.spec.containers`,
+`SnapshotJob.spec.podSnapshotTemplate.containers`, or
+`PodGroupSnapshot.spec.members[].podSnapshotTemplate.containers`, of type
 `ContainerSnapshotConfig`, sets lifecycle hooks for one checkpointed
 container. Every field but `name` is optional. What the workload
 must do for each hook is in the
@@ -161,6 +167,160 @@ timeout, as
 explains. Its failures name the steps
 `checking the post-restore action` and `running the post-restore action`; see
 [Troubleshoot Restores](../troubleshooting/restores.md#checking-the-post-restore-action).
+
+### Pod Group Membership
+
+`PodGroupSnapshotMembership` identifies one member of a coordinated checkpoint:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Name of the `PodGroupSnapshot`, a valid object name of at most 253 characters. |
+| `uid` | string | yes | UID of the group, 1 to 128 characters. |
+| `memberID` | string | yes | Member ID in the group, a DNS label of at most 63 characters. |
+
+The group controller sets the membership on each member's `PodSnapshot`.
+The snapshot controller copies it unchanged into `PodSnapshotContent`.
+A content with membership is checkpointed with its group, never alone.
+The group is in the snapshot's namespace, or `spec.snapshotRef.namespace` on
+cluster-scoped content. Membership is immutable with the rest of the spec.
+
+### PodGroupSnapshot
+
+> [!NOTE]
+> Pod groups are alpha. For how a group checkpoints and restores, see
+> [SNEP-324: Coordinated multi-Pod snapshot and restore](https://github.com/ai-dynamo/snapshot/pull/325).
+
+Checkpoints a fixed group of cooperating Pods together, so that a
+`PodGroupRestore` can restore them together. Its `metadata.name` must be at
+most 63 characters.
+
+`spec`:
+
+| Field                                      | Type                        | Required | Description                                                                                                                                                                                                            |
+|--------------------------------------------|-----------------------------|----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `deadlineSeconds`                          | int64                       | yes      | Bounds the whole checkpoint, counted from the object's creation: 1 to 86400 (a day). Members still being checkpointed when it expires fail with `DeadlineExceeded`; members already checkpointed keep their snapshots. |
+| `members`                                  | []PodGroupSnapshotMember    | yes      | The Pods to checkpoint together, 1 to 256. A member's position in the list is its rank, which every restore of the group reuses.                                                                                       |
+| `members[].id`                             | string                      | yes      | Names the member from checkpoint to restore: the `PodGroupRestore` target with the same ID restores it. A DNS label, unique in the group.                                                                              |
+| `members[].source.podRef.name`             | string                      | yes      | Name of the source Pod, in the same namespace.                                                                                                                                                                         |
+| `members[].source.podRef.uid`              | string                      | yes      | UID of the source Pod, so a recreated Pod with the same name is never checkpointed in its place.                                                                                                                       |
+| `members[].source.podRef.containers`       | []string                    | yes      | Container to checkpoint. Exactly one in `v1alpha1`; it must be a DNS label.                                                                                                                                            |
+| `members[].podSnapshotTemplate.metadata`   | PodSnapshotTemplateMetadata | no       | `labels` and `annotations` copied to the member's `PodSnapshot`, at most 4096 of each. Keys must be qualified names, and label values at most 63 characters.                                                           |
+| `members[].podSnapshotTemplate.containers` | []ContainerSnapshotConfig   | no       | [Container settings](#container-settings) for the member's checkpointed container. At most one entry, whose `name` must be in `source.podRef.containers`.                                                              |
+
+A member without a `podSnapshotTemplate` gets the default settings of a
+`PodSnapshot`. The template's labels must not set
+`nvidia.com/snapshot-job` or `nvidia.com/snapshot-job-uid`, which the
+controllers own.
+
+With 256 members whose templates hold very long values, the object and its
+status can exceed the API server's object size limit of about 1.5 MiB.
+
+`status`:
+
+| Field                   | Type                           | Description                                                                                                                                                                                                                            |
+|-------------------------|--------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `members`               | []PodGroupSnapshotMemberStatus | Each member's progress, keyed by `id`, at most 256. An entry names a member of `spec.members` and, once written, is never removed.                                                                                                     |
+| `members[].id`          | string                         | The member's ID in `spec.members`.                                                                                                                                                                                                     |
+| `members[].rank`        | int32                          | The member's position in `spec.members`, from 0 to 255.                                                                                                                                                                                |
+| `members[].nodeName`    | string                         | Node the source Pod runs on.                                                                                                                                                                                                           |
+| `members[].podSnapshot` | ObjectIdentity                 | `name` and `uid` of the `PodSnapshot` that the `PodGroupSnapshot` owns for this member.                                                                                                                                                |
+| `members[].content`     | ObjectIdentity                 | `name` and `uid` of the member's `PodSnapshotContent`, which records its snapshot.                                                                                                                                                     |
+| `members[].startedAt`   | time                           | When Snapshot began changing the source Pod: the time of the `Started` condition that the node agent sets on the member's `PodSnapshotContent` before its first irreversible step. Absent means Snapshot never changed the source Pod. |
+| `members[].phase`       | string                         | The member's progress, from the table below. Defaults to `Pending`.                                                                                                                                                                    |
+| `members[].reason`      | string                         | A CamelCase word that explains the phase, such as `DeadlineExceeded` for a `Failed` member, at most 1024 characters. See [Pod Group Conditions](#pod-group-conditions).                                                                |
+| `members[].message`     | string                         | A human-readable explanation of the phase, at most 1024 characters.                                                                                                                                                                    |
+| `conditions`            | []Condition                    | `Admitted`, `Ready`, and `Failed`. See [Pod Group Conditions](#pod-group-conditions).                                                                                                                                                  |
+
+A member's `nodeName`, `podSnapshot`, `content`, and `startedAt` are
+write-once. Its phase is one of these:
+
+| Phase           | Meaning                                                        |
+|-----------------|----------------------------------------------------------------|
+| `Pending`       | The member has not yet passed admission.                       |
+| `Admitted`      | The member passed admission and has its `PodSnapshot`.         |
+| `Checkpointing` | The member is being checkpointed.                              |
+| `Checkpointed`  | The member's snapshot is complete. Final.                      |
+| `Failed`        | Checkpointing the member failed; its `reason` says why. Final. |
+
+### PodGroupRestore
+
+Restores every member of a `PodGroupSnapshot` into its own restore Pod, as one
+attempt. A `PodGroupSnapshot` can be restored many times; each
+`PodGroupRestore` is a new attempt with new restore Pods. Each restore Pod must
+be a group target, as
+[Group Restore Targets](restore-pod-contract.md#group-restore-targets)
+describes.
+
+`spec`:
+
+| Field                         | Type                    | Required | Description                                                                                                                                                                                                                                            |
+|-------------------------------|-------------------------|----------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `snapshotRef.name`            | string                  | yes      | Name of the `PodGroupSnapshot` to restore, in this namespace, at most 253 characters.                                                                                                                                                                  |
+| `snapshotRef.uid`             | string                  | yes      | UID of that `PodGroupSnapshot`, at most 128 characters, so a recreated one with the same name is never restored in its place.                                                                                                                          |
+| `deadlineSeconds`             | int64                   | yes      | Bounds the whole restore, counted from the object's creation: 1 to 86400 (a day). Members still restoring when it expires fail with `DeadlineExceeded`; members already `Released` keep running.                                                       |
+| `targets`                     | []PodGroupRestoreTarget | yes      | The restore Pods, one for each member of the `PodGroupSnapshot`: 1 to 256, keyed by `id`. Their order carries no meaning.                                                                                                                              |
+| `targets[].id`                | string                  | yes      | ID of the `PodGroupSnapshot` member that this target restores. A DNS label. The target takes that member's rank.                                                                                                                                       |
+| `targets[].podRef.name`       | string                  | yes      | Name of the restore Pod, in this namespace, at most 253 characters. The Pod may not exist yet when the `PodGroupRestore` is created.                                                                                                                   |
+| `targets[].podRef.uid`        | string                  | no       | UID of the restore Pod, at most 128 characters. Without it, the target is the Pod with this name at admission, and its UID is recorded in `status`.                                                                                                    |
+| `targets[].containerMappings` | []ContainerMapping      | no       | Exactly one pair: `source`, the member's checkpointed container, and `destination`, the restore Pod's container that receives its processes. Each is a DNS label. Without it, the checkpointed container restores into the container of the same name. |
+
+`status`:
+
+| Field                   | Type                             | Description                                                                                                                                                                                                                         |
+|-------------------------|----------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `members`               | []PodGroupRestoreMemberStatus    | Each target's progress, keyed by `id`, at most 256. An entry names a target of `spec.targets` and, once written, is never removed.                                                                                                  |
+| `members[].id`          | string                           | The target's ID in `spec.targets`.                                                                                                                                                                                                  |
+| `members[].pod`         | ObjectIdentity                   | `name` and `uid` of the restore Pod, pinned when the operator admits the target.                                                                                                                                                    |
+| `members[].nodeName`    | string                           | Node the restore Pod runs on, pinned at admission.                                                                                                                                                                                  |
+| `members[].containers`  | []PodGroupRestoreContainerStatus | The destination container's `name`, and its runtime `containerID` when the operator pinned it at admission. One entry.                                                                                                              |
+| `members[].targetPodIP` | string                           | The restore Pod's IPv4 address, pinned at admission.                                                                                                                                                                                |
+| `members[].startedAt`   | time                             | When Snapshot began restoring into the restore Pod: the time of the Pod's `nvidia.com/RestoreStarted` condition, which the node agent sets before its first irreversible step. Absent means Snapshot never changed the restore Pod. |
+| `members[].phase`       | string                           | The member's progress, from the table below. Defaults to `Pending`.                                                                                                                                                                 |
+| `members[].reason`      | string                           | A CamelCase word that explains the phase, such as `PodIPChanged` for a `Failed` member, at most 1024 characters. See [Pod Group Conditions](#pod-group-conditions).                                                                 |
+| `members[].message`     | string                           | A human-readable explanation of the phase, at most 1024 characters.                                                                                                                                                                 |
+| `conditions`            | []Condition                      | `Admitted`, `Released`, `Ready`, and `Failed`. See [Pod Group Conditions](#pod-group-conditions).                                                                                                                                   |
+
+A member's `pod`, `nodeName`, `containers`, `targetPodIP`, and `startedAt` are
+write-once. Its phase is one of these:
+
+| Phase       | Meaning                                                                                                                                                                      |
+|-------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `Pending`   | The member has not yet passed admission.                                                                                                                                     |
+| `Admitted`  | The member passed admission, and its target is claimed and pinned.                                                                                                           |
+| `Restoring` | The member is being restored, or waits for its `postRestore` notification to succeed.                                                                                        |
+| `Released`  | The member reached its release point, its [`restore-complete`](restore-pod-contract.md#group-restore-targets), and any `postRestore` notification has also succeeded. Final. |
+| `Failed`    | The member's restore failed; its `reason` says why. Final.                                                                                                                   |
+
+### Pod Group Conditions
+
+Read each condition's `reason` and `message` for detail.
+
+| Type       | True when                                                                                                                                                                                      |
+|------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `Admitted` | The attempt is committed, with reason `Committed`.                                                                                                                                             |
+| `Released` | It turns True on the first `Released` member of a `PodGroupRestore`, which proves that the agents' release barrier completed. `Released` members keep running whatever happens to their peers. |
+| `Ready`    | Every member of a `PodGroupSnapshot` is `Checkpointed`, or every member of a `PodGroupRestore` is `Released`.                                                                                  |
+| `Failed`   | The attempt failed terminally.                                                                                                                                                                 |
+
+Before the commit, `Admitted` is `False`: with reason `Admitting` while the
+members' work is created and admitted, and with the reason of the wait or the
+failure otherwise.
+
+These reasons appear on the conditions and on the members' statuses:
+
+| Reason                 | Meaning                                                                                                                                                                                           |
+|------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `Refused`              | The attempt ended before Snapshot changed any member, for example because admission refused a member.                                                                                             |
+| `DeadlineExceeded`     | `spec.deadlineSeconds` expired.                                                                                                                                                                   |
+| `MemberFailed`         | A member failed after admission, which failed the attempt.                                                                                                                                        |
+| `CoordinatorLost`      | The attempt lost its coordination session, for example because the coordinator restarted.                                                                                                         |
+| `Cancelled`            | The attempt was cancelled because its group was deleted. A group reports it only when no member started; a member can report it after starting, when the deletion raced the commit.               |
+| `ArtifactUnavailable`  | A member's snapshot cannot be restored.                                                                                                                                                           |
+| `TargetInUse`          | The target Pod is already claimed by another `PodGroupRestore`.                                                                                                                                   |
+| `TargetPodPending`     | Admission is waiting for a restore target's Pod: it does not exist yet, or, once claimed, has no IP address or destination container ID yet. The message names each target and what it waits for. |
+| `TargetPodUnscheduled` | Admission is waiting for a claimed restore target's Pod to be scheduled to a node, typically for lack of capacity. The message names each target.                                                 |
+| `TargetPodDeleted`     | A restore member's pinned Pod is gone or was replaced. The member may have no `startedAt`, since the Pod's `nvidia.com/RestoreStarted` condition went with it.                                    |
+| `PodIPChanged`         | A restore Pod's IP or admitted container changed after the operator pinned it.                                                                                                                    |
 
 ## Restore
 

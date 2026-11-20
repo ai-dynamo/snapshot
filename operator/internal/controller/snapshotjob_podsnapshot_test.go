@@ -189,6 +189,43 @@ func TestSnapshotJobReconcileSetsPodPendingWhenPodDoesNotExistYet(t *testing.T) 
 	assert.Equal(t, "waiting for the source Job to create a pod", cond.Message)
 }
 
+// TestSnapshotJobReconcileFailsRefusedTemplateBeforePodSnapshotCreate covers a
+// SnapshotJob stored before the controller reserved a label its template sets.
+// Its source Job is already bound, so the controller first refuses the
+// template when it builds the PodSnapshot to create, and that refusal fails the
+// SnapshotJob as it does on adoption.
+func TestSnapshotJobReconcileFailsRefusedTemplateBeforePodSnapshotCreate(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	job.UID = types.UID("source-job-uid")
+	pod := sourcePodForJob(job)
+
+	sj.Spec.PodSnapshotTemplate.Metadata = &snapshotv1alpha1.PodSnapshotTemplateMetadata{
+		Labels: map[string]string{snapshotv1alpha1.SnapshotJobOwnerLabel: "caller"},
+	}
+	sj.Status.SourceJobUID = job.UID
+	r := makeSnapshotJobReconciler(s, sj, job, pod)
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err, "a refused template must fail the SnapshotJob, not retry")
+
+	snaps := &snapshotv1alpha1.PodSnapshotList{}
+	require.NoError(t, r.List(context.Background(), snaps))
+	assert.Empty(t, snaps.Items)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.True(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
+	cond := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, snapshotv1alpha1.ReasonInvalidSpec, cond.Reason)
+}
+
 // TestSnapshotJobReconcileObserveRecoversPodSnapshotIdentity covers a status-write
 // conflict after PodSnapshot creation. The next reconcile must reconstruct the
 // name and UID from the observed resource.
@@ -530,6 +567,19 @@ func TestClassifyExistingPodSnapshot(t *testing.T) {
 		_, err = r.classifyExistingPodSnapshot(context.Background(), sj, desired, errors.New("AlreadyExists"))
 		require.Error(t, err)
 		assert.ErrorIs(t, err, errPodSnapshotNameConflict)
+	})
+
+	t.Run("group membership is refused on adoption", func(t *testing.T) {
+		desired, err := buildPodSnapshot(sj, pod)
+		require.NoError(t, err)
+		existing := desired.DeepCopy()
+		existing.Spec.PodGroup = &snapshotv1alpha1.PodGroupSnapshotMembership{
+			ObjectIdentity: snapshotv1alpha1.ObjectIdentity{Name: "group", UID: "group-uid"},
+			MemberID:       "worker-0",
+		}
+		r := makeSnapshotJobReconciler(s, existing)
+		_, err = r.classifyExistingPodSnapshot(context.Background(), sj, desired, errors.New("AlreadyExists"))
+		require.ErrorIs(t, err, errPodSnapshotNameConflict)
 	})
 
 	t.Run("cache lag: NotFound surfaces the original AlreadyExists for requeue", func(t *testing.T) {
