@@ -51,7 +51,9 @@ test:
 	$(MAKE) -C agent test
 	$(MAKE) -C operator test
 
-# Only the operator has envtest-backed admission tests today.
+# The envtest-backed tests, which the integration build tag keeps out of make
+# test: the operator's admission tests, and the coordinator's tests of its
+# authorizer, its sessions and its host against an API server.
 test-integration:
 	$(MAKE) -C operator test-integration
 	$(MAKE) -C coordinator test-integration
@@ -189,7 +191,7 @@ verify-base-packages:
 AGENT_BUILD_FLAGS = --platform "$(AGENT_PLATFORM)" -f agent/Dockerfile \
 	  --build-arg "GO_VERSION=$(GO_VERSION)" \
 	  --build-arg "AGENT_BASE_IMAGE=$(AGENT_BASE_IMAGE)" \
-	  --build-context=api=./api --build-context=compliance=./hack/compliance
+	  --build-context=api=./api --build-context=coordinator=./coordinator --build-context=compliance=./hack/compliance
 
 docker-build-agent:
 	docker buildx build $(DOCKER_BUILD_ARGS) $(AGENT_BUILD_FLAGS) \
