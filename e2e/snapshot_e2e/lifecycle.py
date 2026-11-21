@@ -1174,6 +1174,148 @@ def create_artifact_staging_file(
     )
 
 
+NODE_CACHE_VOLUME = "node-cache"
+
+
+def node_cache_host_path(config: k8s.E2EConfig) -> str | None:
+    """The node directory the chart mounts as the node cache, or None when off.
+
+    Read from the agent DaemonSet rather than from the environment, so a test
+    follows the install it runs against and cannot disagree with it.
+    """
+    for daemonset in k8s.list_snapshot_daemonsets(
+        config.namespace, config.release, "snapshot-agent"
+    ):
+        for volume in daemonset.spec.template.spec.volumes or []:
+            if volume.name == NODE_CACHE_VOLUME and volume.host_path:
+                return volume.host_path.path
+    return None
+
+
+def run_local_copy_pod(
+    config: k8s.E2EConfig,
+    run: TestRun,
+    node: str,
+    script: str,
+    *,
+    timeout: int = 180,
+) -> None:
+    """Run a script on ``node`` with the checkpoint PVC and the node cache.
+
+    This is the administrator's side of the feature, done the way the storage
+    guide describes: a Pod pinned to the node mounts the store read-only at
+    /store and the node directory at /local. The agent cannot stand in for it,
+    because Snapshot mounts the directory read-only.
+    """
+    host_path = node_cache_host_path(config)
+    if host_path is None:
+        raise AssertionError("the node cache is not enabled in this install")
+    name = f"{run.suffix}-copy"
+    k8s.create_pod(
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": name, "namespace": config.namespace, "labels": run.labels},
+            "spec": {
+                "nodeName": node,
+                "restartPolicy": "Never",
+                "containers": [
+                    {
+                        "name": "copy",
+                        "image": run.image,
+                        "imagePullPolicy": "IfNotPresent",
+                        "command": ["/bin/bash", "-ec", script],
+                        # Checkpoint files belong to root and keep their modes.
+                        "securityContext": {"runAsUser": 0},
+                        "volumeMounts": [
+                            {"name": "store", "mountPath": "/store", "readOnly": True},
+                            {"name": "local", "mountPath": "/local"},
+                        ],
+                    }
+                ],
+                "volumes": [
+                    {
+                        "name": "store",
+                        "persistentVolumeClaim": {"claimName": config.pvc_name},
+                    },
+                    {"name": "local", "hostPath": {"path": host_path, "type": "Directory"}},
+                ],
+            },
+        }
+    )
+
+    def finished() -> str | None:
+        phase = k8s.read_pod(config.namespace, name).status.phase
+        return phase if phase in TERMINAL_POD_PHASES else None
+
+    try:
+        phase = wait_for(f"local copy pod {config.namespace}/{name}", finished, timeout)
+        if phase != "Succeeded":
+            raise AssertionError(
+                f"local copy pod {name} ended {phase}: "
+                f"{k8s.pod_logs(config.namespace, name)}"
+            )
+    finally:
+        if k8s.delete_pod(config.namespace, name):
+            wait_for_pod_deleted(config.namespace, name)
+
+
+def place_local_copy(
+    config: k8s.E2EConfig,
+    run: TestRun,
+    node: str,
+    content_uid: str,
+    *,
+    manifest_content_uid: str | None = None,
+) -> None:
+    """Place a copy of one checkpoint in the node cache, as the guide says to.
+
+    The copy is built beside ``artifacts/`` on the same filesystem and renamed
+    into place, because the agent treats an existing directory as complete.
+    ``manifest_content_uid`` rewrites the UID the manifest names, which makes
+    the copy one that belongs to another checkpoint.
+    """
+    source = f"/store/artifacts/{content_uid}/containers/{CONTAINER}"
+    parent = f"/local/artifacts/{content_uid}/containers"
+    incoming = f"/local/.incoming-{content_uid}"
+    steps = [
+        f"rm -rf {shlex.quote(incoming)}",
+        f"cp -a {shlex.quote(source)} {shlex.quote(incoming)}",
+    ]
+    if manifest_content_uid is not None:
+        steps.append(
+            f"sed -i s/{shlex.quote(content_uid)}/{shlex.quote(manifest_content_uid)}/g "
+            f"{shlex.quote(incoming)}/manifest.yaml"
+        )
+    steps += [
+        f"mkdir -p {shlex.quote(parent)}",
+        f"mv {shlex.quote(incoming)} {shlex.quote(parent)}/{CONTAINER}",
+    ]
+    run_local_copy_pod(config, run, node, " && ".join(steps))
+
+
+def remove_local_copy(
+    config: k8s.E2EConfig,
+    run: TestRun,
+    node: str,
+    content_uid: str,
+) -> None:
+    """Remove a checkpoint's copy from the node cache; Snapshot never does.
+
+    In the guide's two steps: rename the copy out of ``artifacts/``, so that no
+    new restore selects it, then remove it.
+    """
+    copy = shlex.quote(f"/local/artifacts/{content_uid}")
+    removing = shlex.quote(f"/local/.removing-{content_uid}")
+    incoming = shlex.quote(f"/local/.incoming-{content_uid}")
+    run_local_copy_pod(
+        config,
+        run,
+        node,
+        f"if [ -d {copy} ]; then mv {copy} {removing}; fi && rm -rf {removing} {incoming}",
+    )
+
+
 def host_monitoring_agents(config: k8s.E2EConfig, node: str) -> str:
     """Host-level monitoring agents (Datadog, DCGM) running on ``node``.
 

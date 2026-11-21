@@ -827,6 +827,92 @@ TEST_F(BrokerTest, DirectRestoreRejectsInvalidSource)
   }
 }
 
+// A node cache holds checkpoint copies on the node's local disk. Only the
+// published copies under artifacts/ are restore sources; nothing is written there.
+class NodeCacheBrokerTest : public BrokerTest {
+ protected:
+  void SetUp() override
+  {
+    BrokerTest::SetUp();
+    cache_ = root_ / "node-cache";
+    copy_ = cache_ / "artifacts" / "content-uid" / "containers" / "main";
+    fs::create_directories(copy_);
+    std::ofstream(copy_ / "image") << "image";
+    fs::create_directories(cache_ / "unpublished");
+  }
+
+  Response DirectRestore(const std::string& transaction, const fs::path& source)
+  {
+    auto request = RequestFor(transaction);
+    Configure(request.mutable_direct_restore()->mutable_source(), request.mutable_direct_restore()->mutable_io_engine(), source);
+    return broker().HandleRequest(request);
+  }
+
+  void ExpectRefused(const std::string& transaction, const fs::path& source)
+  {
+    const auto response = DirectRestore(transaction, source);
+    ASSERT_TRUE(response.has_failure()) << source;
+    EXPECT_EQ(response.failure().code(), Failure::INVALID_REQUEST) << source;
+  }
+
+  fs::path cache_;
+  fs::path copy_;
+};
+
+TEST_F(NodeCacheBrokerTest, DirectRestoreReadsACopyAndTheStore)
+{
+  broker_.emplace(root_ / "tmpfs", root_ / "storage", nullptr, std::nullopt, kDefaultTransactionLifetime,
+      model_streamer::settings::Options{}, cache_);
+  ASSERT_TRUE(DirectRestore("node-cache", copy_).has_direct_restore_ready());
+  auto abort = RequestFor("node-cache");
+  abort.mutable_abort();
+  EXPECT_TRUE(broker().HandleRequest(abort).has_abort_complete());
+  EXPECT_TRUE(fs::exists(copy_ / "image"));
+  EXPECT_TRUE(DirectRestore("store", source_).has_direct_restore_ready());
+}
+
+TEST_F(NodeCacheBrokerTest, RefusesEverythingOutsidePublishedCopies)
+{
+  broker_.emplace(root_ / "tmpfs", root_ / "storage", nullptr, std::nullopt, kDefaultTransactionLifetime,
+      model_streamer::settings::Options{}, cache_);
+  const auto link = cache_ / "artifacts" / "link";
+  fs::create_directory_symlink(copy_, link);
+  ExpectRefused("cache-root", cache_);
+  ExpectRefused("artifacts-root", cache_ / "artifacts");
+  ExpectRefused("unpublished", cache_ / "unpublished");
+  ExpectRefused("missing", cache_ / "artifacts" / "missing");
+  ExpectRefused("symlink", link);
+
+  auto checkpoint = RequestFor("checkpoint-into-cache");
+  Configure(checkpoint.mutable_prepare_direct_checkpoint()->mutable_destination(),
+      checkpoint.mutable_prepare_direct_checkpoint()->mutable_io_engine(), cache_ / "artifacts" / "new");
+  const auto response = broker().HandleRequest(checkpoint);
+  ASSERT_TRUE(response.has_failure());
+  EXPECT_EQ(response.failure().code(), Failure::INVALID_REQUEST);
+  EXPECT_FALSE(fs::exists(cache_ / "artifacts" / "new"));
+}
+
+TEST_F(NodeCacheBrokerTest, IsOffWithoutARoot)
+{
+  ExpectRefused("no-node-cache", copy_);
+}
+
+TEST_F(NodeCacheBrokerTest, ObjectStoreRestoresACopyAndNothingElseFromAFilesystem)
+{
+  broker_.emplace(root_ / "tmpfs", root_ / "storage", nullptr, TestS3Config(), kDefaultTransactionLifetime,
+      model_streamer::settings::Options{}, cache_);
+  ASSERT_TRUE(DirectRestore("node-cache", copy_).has_direct_restore_ready());
+  // An object store has no filesystem root: the store path is not a source,
+  // and no checkpoint can be written through the POSIX engine.
+  ExpectRefused("store", source_);
+  auto checkpoint = RequestFor("checkpoint");
+  Configure(checkpoint.mutable_prepare_direct_checkpoint()->mutable_destination(),
+      checkpoint.mutable_prepare_direct_checkpoint()->mutable_io_engine(), root_ / "storage" / "published");
+  const auto response = broker().HandleRequest(checkpoint);
+  ASSERT_TRUE(response.has_failure());
+  EXPECT_EQ(response.failure().code(), Failure::INVALID_REQUEST);
+}
+
 TEST_F(BrokerTest, DirectRestoreDoesNotStageOrDeleteSource)
 {
   auto request = RequestFor("direct");

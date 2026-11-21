@@ -157,6 +157,20 @@ storage:
   oci:
     uri: ""
 
+  # Node cache: restore from a checkpoint copy on the node's local disk when
+  # one is there, and from the snapshot store above when it is not. Snapshot
+  # only reads the directory; an administrator places and removes the copies.
+  # See docs/operate/configure-storage.md.
+  nodeCache:
+    enabled: false
+    # Directory on the node, for example on a local NVMe filesystem. The same
+    # path is used on every node that runs the agent.
+    path: /var/lib/snapshot/cache
+    # Create the directory, empty, on a node that does not have it. Restores on
+    # such a node read the snapshot store. With false, the agent Pod does not
+    # start on a node without the directory.
+    createIfMissing: true
+
 # PageBroker sidecar: stages CRIU images in memory and publishes them to
 # the snapshot volume it shares with the agent. See docs/operate/configure-storage.md.
 pageBroker:

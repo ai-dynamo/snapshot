@@ -55,6 +55,23 @@ func TestAgentConfigValidateRequiresFixedStorageBasePath(t *testing.T) {
 	}
 }
 
+func TestAgentConfigValidateNodeCachePath(t *testing.T) {
+	for _, path := range []string{"", NodeCacheBasePath} {
+		cfg := validAgentConfig()
+		cfg.Storage.NodeCachePath = path
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate rejected node cache path %q: %v", path, err)
+		}
+	}
+	for _, path := range []string{"node-cache", " /node-cache ", "/node-cache/", "/node-cache/../etc", "/checkpoints", "/other"} {
+		cfg := validAgentConfig()
+		cfg.Storage.NodeCachePath = path
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("Validate accepted node cache path %q", path)
+		}
+	}
+}
+
 func TestAgentConfigValidateRequiresPageBrokerControlSocket(t *testing.T) {
 	cfg := validAgentConfig()
 	cfg.PageBroker.ControlSocketPath = ""

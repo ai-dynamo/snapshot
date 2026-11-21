@@ -28,6 +28,15 @@ func ResolveArtifactPath(basePath, contentUID, containerName string) (string, er
 	return filepath.Join(root, containersDirectory, containerName), nil
 }
 
+// validateArtifactSource accepts a checkpoint artifact from the snapshot store
+// or from the published copies in the node cache, and nothing else.
+func validateArtifactSource(source string) error {
+	if err := validateWithin(NodeCacheArtifactsSrc, source); err == nil && source != NodeCacheArtifactsSrc {
+		return nil
+	}
+	return validateWithin(CheckpointSrc, source)
+}
+
 func validateWithin(root, source string) error {
 	if err := artifact.ValidateContainment(root, source); err != nil {
 		return fmt.Errorf("mount source containment: %w", err)

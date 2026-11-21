@@ -24,6 +24,9 @@ const (
 	SnapshotBinDst = "/tmp/snapshot-binaries"
 	// CheckpointSrc is the fixed agent-side checkpoint mount.
 	CheckpointSrc = types.CheckpointBasePath
+	// NodeCacheArtifactsSrc is the only part of the node cache a restore may
+	// mount: the published checkpoint copies, never the cache root itself.
+	NodeCacheArtifactsSrc = types.NodeCacheBasePath + "/artifacts"
 	// CheckpointDst is the mount destination for checkpoint data inside the
 	// placeholder namespace.
 	CheckpointDst = "/tmp/checkpoint"
@@ -132,7 +135,7 @@ func (nsm *NSMounter) MountCuInterpose(ctx context.Context, namespaceMount Mount
 // MountArtifact exposes one validated checkpoint artifact read-only and
 // non-executable in the namespace pinned by namespaceMount.
 func (nsm *NSMounter) MountArtifact(ctx context.Context, namespaceMount MountPoint, src string) (MountPoint, error) {
-	if err := validateWithin(CheckpointSrc, src); err != nil {
+	if err := validateArtifactSource(src); err != nil {
 		return nil, err
 	}
 	if namespaceMount == nil || namespaceMount.NsFd() == nil {

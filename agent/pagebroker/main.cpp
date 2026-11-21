@@ -19,7 +19,8 @@ main(int argc, char** argv)
     std::cerr << "usage: pagebroker socket_path staging_directory storage_root "
                  "[--max-concurrent-requests count] [--custom-storage-engine on|off] "
                  "[--custom-storage-staging-bytes-per-gpu bytes] "
-                 "[--storage-config path] [--model-streamer-config path]\n"
+                 "[--storage-config path] [--model-streamer-config path] "
+                 "[--node-cache-root path]\n"
               << "pagebroker: " << error.what() << '\n';
     return static_cast<int>(ExitCode::INVALID_ARGUMENTS);
   }

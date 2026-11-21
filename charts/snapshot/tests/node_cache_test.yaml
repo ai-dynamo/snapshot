@@ -1,0 +1,148 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: node cache
+templates:
+  - templates/configmap.yaml
+  - templates/daemonset.yaml
+release:
+  name: snapshot
+  namespace: storage-ns
+tests:
+  - it: leaves the agent, PageBroker and the configuration untouched by default
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: nodeCachePath
+        template: templates/configmap.yaml
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: node-cache
+          any: true
+        template: templates/daemonset.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: node-cache
+          any: true
+        template: templates/daemonset.yaml
+      - notContains:
+          path: spec.template.spec.containers[1].volumeMounts
+          content:
+            name: node-cache
+          any: true
+        template: templates/daemonset.yaml
+      - notContains:
+          path: spec.template.spec.containers[1].args
+          content: --node-cache-root
+        template: templates/daemonset.yaml
+
+  - it: mounts the node directory read-only into the agent and PageBroker
+    set:
+      storage.nodeCache.enabled: true
+      storage.nodeCache.path: /mnt/nvme/snapshot-cache
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'storage:\s+type: "pvc"\s+basePath: "/checkpoints"\s+nodeCachePath: "/node-cache"'
+        template: templates/configmap.yaml
+      # A node without the directory gets an empty one, so its agent starts.
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: node-cache
+            hostPath:
+              path: /mnt/nvme/snapshot-cache
+              type: DirectoryOrCreate
+        template: templates/daemonset.yaml
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: node-cache
+            mountPath: /node-cache
+            readOnly: true
+        template: templates/daemonset.yaml
+      - contains:
+          path: spec.template.spec.containers[1].volumeMounts
+          content:
+            name: node-cache
+            mountPath: /node-cache
+            readOnly: true
+        template: templates/daemonset.yaml
+      - contains:
+          path: spec.template.spec.containers[1].args
+          content: --node-cache-root
+        template: templates/daemonset.yaml
+      - contains:
+          path: spec.template.spec.containers[1].args
+          content: /node-cache
+        template: templates/daemonset.yaml
+
+  - it: works with an object store, where PageBroker has no filesystem root
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      storage.s3.credentialsSecretRef: s3-creds
+      operator.bindNewContents: true
+      storage.nodeCache.enabled: true
+      storage.nodeCache.path: /mnt/nvme/snapshot-cache
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[1].args
+          content: --node-cache-root
+        template: templates/daemonset.yaml
+      - contains:
+          path: spec.template.spec.containers[1].volumeMounts
+          content:
+            name: node-cache
+            mountPath: /node-cache
+            readOnly: true
+        template: templates/daemonset.yaml
+
+  - it: uses the default directory when only enabled
+    template: templates/daemonset.yaml
+    set:
+      storage.nodeCache.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: node-cache
+            hostPath:
+              path: /var/lib/snapshot/cache
+              type: DirectoryOrCreate
+
+  - it: requires an existing directory when createIfMissing is false
+    template: templates/daemonset.yaml
+    set:
+      storage.nodeCache.enabled: true
+      storage.nodeCache.createIfMissing: false
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: node-cache
+            hostPath:
+              path: /var/lib/snapshot/cache
+              type: Directory
+
+  - it: refuses an empty directory path
+    template: templates/daemonset.yaml
+    set:
+      storage.nodeCache.enabled: true
+      storage.nodeCache.path: ""
+    asserts:
+      - failedTemplate:
+          errorPattern: "storage.nodeCache.path must be an absolute path"
+
+  - it: refuses a relative, unnormalized or root directory path
+    template: templates/daemonset.yaml
+    set:
+      storage.nodeCache.enabled: true
+      storage.nodeCache.path: /mnt/nvme/../etc
+    asserts:
+      - failedTemplate:
+          errorPattern: "storage.nodeCache.path must be an absolute path"

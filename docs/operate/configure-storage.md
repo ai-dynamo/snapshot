@@ -141,6 +141,210 @@ After changing the endpoint, bucket, region or prefix, restart the agent
 DaemonSet once the operator pod is Ready, so PageBroker reads the operator's
 current configuration. PageBroker does not re-read it while running.
 
+## Node Cache
+
+The node cache is a directory on a node's local disk that holds copies of
+checkpoints. With `storage.nodeCache.enabled: true`, a restore reads a copy
+found on its node, and reads the snapshot store when the node holds none. With
+the setting off, which is the default, nothing changes.
+
+Snapshot never writes to the node cache. An administrator places and removes
+the copies with their own tools. The steps below use
+`/mnt/nvme/snapshot-cache` as the directory.
+
+### Prepare the Nodes
+
+Set these Helm values. They apply to both `pvc` and `s3` stores:
+
+```yaml
+storage:
+  nodeCache:
+    enabled: true
+    path: /mnt/nvme/snapshot-cache
+```
+
+The default path is `/var/lib/snapshot/cache`. The same path is used on every
+node that runs the agent, and any local directory works.
+
+A node that does not have the directory gets an empty one, and restores on
+that node read the snapshot store. A node takes part once it holds copies.
+Check on each node that the directory is on the intended disk before you
+place copies:
+
+```bash
+df -h /mnt/nvme/snapshot-cache
+```
+
+If you mount a disk at the path after the agent Pod started, restart the
+agent Pod on that node. The Pod otherwise keeps the directory it started with.
+
+With `storage.nodeCache.createIfMissing: false`, Snapshot does not create the
+directory. The agent Pod then does not start on a node without it. It stays
+in `ContainerCreating` with a `FailedMount` event, and that node runs no
+checkpoints or restores until the directory exists.
+
+### Place a Copy
+
+A copy lives at `<path>/artifacts/<uid>/containers/<container>/`. `<uid>`
+is the UID of the snapshot's `PodSnapshotContent`, and `<container>` is the
+name of the checkpointed container. The directory holds the same files as the
+checkpoint in the store, including `manifest.yaml`.
+
+Find the UID of a snapshot with these commands:
+
+```bash
+content=$(kubectl get podsnapshot <snapshot> --namespace <namespace> \
+  --output jsonpath='{.status.boundSnapshotContentName}')
+kubectl get podsnapshotcontent "$content" --output jsonpath='{.metadata.uid}'
+```
+
+The agent treats an existing directory as complete. Build the copy beside
+`artifacts/` on the same filesystem, then rename it into place:
+
+```bash
+cd /mnt/nvme/snapshot-cache
+cp -a <source>/artifacts/<uid>/containers/<container> .incoming-<uid>
+mkdir -p artifacts/<uid>/containers
+mv .incoming-<uid> artifacts/<uid>/containers/<container>
+```
+
+Keep the file modes and owners of the checkpoint, as `cp -a` does. A copy must
+be a directory, not a symbolic link, and its manifest must name the same
+snapshot and container. Otherwise the restore reads the snapshot store.
+
+### Fill Nodes from the Snapshot Volume
+
+With `storage.type: pvc`, a Pod on the node can copy a checkpoint from the
+snapshot volume before any restore needs it. The following Pod places one
+copy on one node. Create one Pod for each node to fill:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: place-node-cache-copy
+  namespace: snapshot
+spec:
+  nodeName: <node>
+  restartPolicy: Never
+  containers:
+    - name: copy
+      image: busybox:1.36
+      securityContext:
+        runAsUser: 0
+      env:
+        - name: SNAPSHOT_UID
+          value: <uid>
+        - name: CONTAINER
+          value: <container>
+      command:
+        - sh
+        - -ec
+        - |
+          cp -a "/store/artifacts/$SNAPSHOT_UID/containers/$CONTAINER" \
+            "/local/.incoming-$SNAPSHOT_UID"
+          mkdir -p "/local/artifacts/$SNAPSHOT_UID/containers"
+          mv "/local/.incoming-$SNAPSHOT_UID" \
+            "/local/artifacts/$SNAPSHOT_UID/containers/$CONTAINER"
+      volumeMounts:
+        - name: store
+          mountPath: /store
+          readOnly: true
+        - name: local
+          mountPath: /local
+  volumes:
+    - name: store
+      persistentVolumeClaim:
+        claimName: snapshot-pvc
+    - name: local
+      hostPath:
+        path: /mnt/nvme/snapshot-cache
+        type: Directory
+```
+
+The Pod runs in the Helm release namespace, where the snapshot volume's claim
+is. Delete the Pod after it completes.
+
+### Fill Nodes from an S3 Store
+
+With `storage.type: s3`, a checkpoint is stored under
+`<prefix>/artifacts/<uid>/containers/<container>/` in the bucket. Its files
+are the objects below `data/`. Objects carry no file modes and no empty
+directories, so `index.json` beside `data/` records both, and it lists empty
+files that have no object.
+
+Build the copy from the objects and the index. Run these commands as root on
+the node, with an S3 client and `jq`:
+
+```bash
+src=s3://<bucket>/<prefix>/artifacts/<uid>/containers/<container>
+cd /mnt/nvme/snapshot-cache
+tmp=.incoming-<uid>
+mkdir "$tmp"
+aws s3 cp "$src/index.json" "$tmp.index.json"
+aws s3 sync "$src/data/" "$tmp/"
+
+# Directories, including empty ones, with their modes.
+jq -r '.directories[] | "\(.mode) \(.path)"' "$tmp.index.json" |
+  while read -r mode path; do
+    mkdir -p "$tmp/$path"
+    chmod "$(printf '%o' "$mode")" "$tmp/$path"
+  done
+
+# Files: create the empty ones, and set every mode.
+jq -r '.files[] | "\(.mode) \(.path)"' "$tmp.index.json" |
+  while read -r mode path; do
+    [ -e "$tmp/$path" ] || : > "$tmp/$path"
+    chmod "$(printf '%o' "$mode")" "$tmp/$path"
+  done
+
+chmod "$(printf '%o' "$(jq -r .rootMode "$tmp.index.json")")" "$tmp"
+rm "$tmp.index.json"
+mkdir -p artifacts/<uid>/containers
+mv "$tmp" artifacts/<uid>/containers/<container>
+```
+
+For a store that is not Amazon S3, add `--endpoint-url <endpoint>` to the
+`aws` commands. The modes in the index are decimal numbers, which `printf`
+converts to the octal form that `chmod` takes.
+
+### Check Which Source a Restore Used
+
+With the setting on, each restore Pod gets a `RestoreSourceSelected` event. It
+says that the restore reads the node cache, or that it reads the snapshot
+store and why. Read it with this command:
+
+```bash
+kubectl get events --namespace <namespace> \
+  --field-selector \
+  involvedObject.name=<restore-pod>,reason=RestoreSourceSelected
+```
+
+### Remove a Copy
+
+Snapshot does not remove a copy, including when its snapshot is deleted.
+Remove a copy in two steps. First rename it out of `artifacts/`, so that new
+restores read the snapshot store. Then wait for restores on the node to
+finish, and remove it:
+
+```bash
+cd /mnt/nvme/snapshot-cache
+mv artifacts/<uid> .removing-<uid>
+# Wait for restores on this node to finish.
+rm -rf .removing-<uid>
+```
+
+A restore that selected the copy just before the rename can still fail.
+
+Snapshot does not limit the size of the directory, so remove copies that are
+no longer needed.
+
+### Restrict Access
+
+A copy determines the state of the restored process, and it contains process
+memory that can hold secrets. Restrict read and write access to the directory
+as you restrict the snapshot store.
+
 ## PageBroker Staging
 
 ### How Staging Works
