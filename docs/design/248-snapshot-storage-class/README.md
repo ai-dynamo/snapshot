@@ -91,8 +91,8 @@ settings to reach it, and protects it while something still depends on it.
 **Registering a store.** The administrator creates the PVC or bucket, puts any
 credentials in a Secret in the Snapshot namespace, and creates a
 `SnapshotStorageClass`. The operator computes the `storeID`, refuses a location
-another class in the cluster already holds, and sets `Ready` once a test write
-to the location succeeds; that write is the credential check. A class that is not Ready re-validates when its
+another class in the cluster already holds, and sets `Ready` once it can write, read, list
+and delete a test object at the location; that is the access check. A class that is not Ready re-validates when its
 Secret or ConfigMap changes, and on a backoff.
 
 **Sharing a store between clusters.** Classes in different clusters may point
@@ -135,7 +135,7 @@ keeps its binding. See [Default class](#default-class).
 | Class edited after binding | The location fields change; content bound to the old `storeID` would read or delete in the wrong place. Or `reclaimPolicy` flips and existing content loses data it was meant to keep. | Location fields are immutable through CEL, and the policy is frozen on the content at binding. Credentials and TLS settings stay editable because they are not identity inputs. The agent and maintenance compare the class's `status.storeID` with the content's binding before any I/O and refuse a mismatch. |
 | Class deleted under content | Content loses the only description of where its snapshots are. | Protection finalizer; a terminating class still resolves for existing content. Force-removing the finalizer leaves content with the existing `StoreInactive` handling from SNEP-237. |
 | Secret missing or revoked | An S3 class's Secret is deleted or rotated to an invalid key. | The class goes `Ready=False`, reason `CredentialsUnavailable`, and new bindings stop. In-flight operations fail with the existing credential errors; nothing is deleted on an access error. |
-| Agent holds credentials | Today only PageBroker and the operator see S3 credentials. The agent now reads the class's Secret and passes it to PageBroker in the request. | The Secret must live in the Snapshot namespace. The operator keeps the agent's Role limited by `resourceNames` to the Secrets and ConfigMaps that classes reference; a node can still read the credentials of every store, where today it holds one. The credentials stay in memory in both processes and cross only the local socket the agent already uses; they are never written to a volume, a transaction record or a log. Accepted trade-off against giving PageBroker a Kubernetes client; see Alternatives. |
+| Agent holds credentials | Today only PageBroker and the operator see S3 credentials. The agent now reads the class's Secret and passes it to PageBroker in the request. | The Secret must live in the Snapshot namespace. The operator keeps the agent's Role limited by `resourceNames` to the Secrets and ConfigMaps that classes reference, and removes a rule whose list would be empty, because an empty list allows every object; a node can still read the credentials of every store, where today it holds one. The credentials stay in memory in both processes and cross only the local socket the agent already uses; they are never written to a volume, a transaction record or a log. Accepted trade-off against giving PageBroker a Kubernetes client; see Alternatives. |
 | Shared workload identity | Classes without a Secret are all reached with one identity, that of the agent's and the operator's service accounts. | That identity needs access to every such store, so credentials do not separate those stores from each other; use a Secret per class where separation matters. Instance metadata is excluded, so a broken identity fails instead of falling back to the node's role. |
 | Duplicate location | Two classes in one cluster describe the same place, so one store gets two policies and two sets of access settings. | The operator refuses `Ready` for the later class with reason `DuplicateStore` and names the other. Two classes that reach one bucket through different hostnames are not detected; that is harmless, because a sweep keeps every directory whose content exists in the cluster, whichever class it is bound to. See [Store uniqueness](#store-uniqueness). |
 | Shared store | Several clusters use one location. A sweep or a delete in one cluster could remove another's snapshots. | Each content directory carries `.origin` with the creating cluster's ID. A sweep deletes only orphans whose `.origin` names its own cluster, and deleting content skips a directory that names another. Each cluster's credentials can still read and delete the others' snapshots, so share only between clusters that trust each other. A destroyed cluster's directories stay until an administrator removes them. |
@@ -301,10 +301,14 @@ another store's snapshots. Between clusters a location may be shared.
   immutable location fields, so a result changes only when a class is added or
   deleted. The later class by `creationTimestamp`, ties by name, is refused, so
   two classes created at once get the same answer in any reconcile order.
-- **Access.** Before `Ready`, the operator writes and deletes a test object at
-  the location, named for the cluster so two clusters never collide. A failure
-  is `StoreUnreachable`, or `CredentialsUnavailable` when the credentials are
-  the cause.
+- **Access.** Before `Ready`, the operator writes a test object at the
+  location, reads it back, finds it in a listing and deletes it. Those are the
+  four permissions a snapshot needs over its life: capture, restore, cleanup
+  and deletion. The object sits outside `artifacts/` and is named for the
+  cluster, so two clusters never collide. A failure is `StoreUnreachable`, or
+  `CredentialsUnavailable` when the credentials are the cause, and the
+  condition message names the step that failed. The check runs from the
+  operator, so it does not prove that every node can reach the store.
 
 Nothing in the store marks a location as taken, so classes in several clusters
 can point at one location. What keeps them apart is recorded per content:
@@ -449,7 +453,10 @@ and gets `StoreInactive`, as in SNEP-237.
   file mounts, under a namespaced Role: `get`/`list`/`watch` for the operator,
   `get` for the agent, and no caching of contents. The operator maintains the
   agent's Role so its `resourceNames` list only the Secrets and ConfigMaps that
-  classes reference; every node can still read every store's credentials. The
+  classes reference; every node can still read every store's credentials. An
+  empty `resourceNames` list allows every object of the kind, so when no class
+  references a Secret the operator removes the Secret rule from the Role, and
+  likewise the ConfigMap rule. The
   agent's ClusterRole gains `get`/`list`/`watch` on `snapshotstorageclasses`.
   A class without a Secret uses the service accounts' workload identity.
   The agent holds a Secret only in memory and sends it only over the local
@@ -583,11 +590,14 @@ the old operator ignores both and reads `storage.yaml`.
 - **API:** CEL rejects two store blocks, none, a move between blocks, a location change, a name over
   63 characters, or an `artifacts` path segment.
 - **Operator:** Ready/NotReady for each reason; digest detection, including
-  two classes created at once; the access check; nested stores are accepted;
+  two classes created at once; the access check, including credentials that
+  can write but not read, list or delete; nested stores are accepted;
   `.origin` is written at binding and for content bound earlier; default
   resolution from the configured name, with the named
   class missing, and after the name changes; the default class is created only
-  when no class exists; terminating class, finalizer, `Retain`, registry rebuild.
+  when no class exists; terminating class, finalizer, `Retain`, registry rebuild;
+  the agent's Role lists only referenced Secrets and ConfigMaps, and has no
+  Secret rule when no class references one.
 - **Chart:** changing only `storage.defaultClassName` changes the operator's
   pod template and leaves the agent DaemonSet's unchanged.
 - **Agent:** Secret fetch per transaction; credentials in the request and never
