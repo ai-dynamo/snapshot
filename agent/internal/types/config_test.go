@@ -161,6 +161,37 @@ func TestResolveRetryLimit(t *testing.T) {
 	}
 }
 
+func TestResolveRestoreRetryLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		document string
+		want     int
+	}{
+		{"absent keeps retry off", "restore:\n  timeoutSeconds: 60\n", 0},
+		{"a configured limit is honoured", "restore:\n  retryLimit: 4\n", 4},
+		{"a configured zero is honoured", "restore:\n  retryLimit: 0\n", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var cfg AgentConfig
+			require.NoError(t, yaml.Unmarshal([]byte(tc.document), &cfg))
+			if got := cfg.Restore.ResolveRetryLimit(); got != tc.want {
+				t.Errorf("ResolveRetryLimit() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRestoreSpecRejectsANegativeRetryLimit(t *testing.T) {
+	if err := (&RestoreSpec{TimeoutSeconds: 60, RetryLimit: ptr.To(-1)}).Validate(); err == nil {
+		t.Error("a negative retryLimit should not validate")
+	}
+	for _, limit := range []*int{nil, ptr.To(0), ptr.To(5)} {
+		if err := (&RestoreSpec{TimeoutSeconds: 60, RetryLimit: limit}).Validate(); err != nil {
+			t.Errorf("retryLimit %v should validate, got %v", limit, err)
+		}
+	}
+}
+
 func TestCheckpointSpecRejectsANegativeRetryLimit(t *testing.T) {
 	if err := (&CheckpointSpec{RetryLimit: ptr.To(-1)}).Validate(); err == nil {
 		t.Error("a negative retryLimit should not validate")
