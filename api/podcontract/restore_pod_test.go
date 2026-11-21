@@ -9,6 +9,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 )
 
 func restorePodFixture() *corev1.Pod {
@@ -378,6 +379,9 @@ func TestValidateRejectsMinimumContractDrift(t *testing.T) {
 		"annotation": func(pod *corev1.Pod) {
 			delete(pod.Annotations, RestoreFromAnnotation)
 		},
+		"retry limit": func(pod *corev1.Pod) {
+			pod.Annotations[RestoreRetryLimitAnnotation] = "-2"
+		},
 		"volume": func(pod *corev1.Pod) {
 			pod.Spec.Volumes = nil
 		},
@@ -394,6 +398,57 @@ func TestValidateRejectsMinimumContractDrift(t *testing.T) {
 			mutate(pod)
 			if err := Validate(pod, restoreRequest()); err == nil {
 				t.Fatal("Validate() unexpectedly succeeded")
+			}
+		})
+	}
+}
+
+func TestBuildKeepsRetryLimitAnnotation(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing *string
+		want     *string
+		wantErr  bool
+	}{
+		{name: "unset leaves the agent default"},
+		{name: "zero", existing: ptr.To("0"), want: ptr.To("0")},
+		{name: "positive", existing: ptr.To("2"), want: ptr.To("2")},
+		{name: "negative", existing: ptr.To("-1"), wantErr: true},
+		{name: "not a number", existing: ptr.To("many"), wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			pod := restorePodFixture()
+			if test.existing != nil {
+				pod.Annotations[RestoreRetryLimitAnnotation] = *test.existing
+			}
+			before := pod.DeepCopy()
+
+			shaped, err := Build(pod, restoreRequest(), Options{})
+			if !reflect.DeepEqual(pod, before) {
+				t.Fatal("Build() mutated its input")
+			}
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("Build() unexpectedly succeeded")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Build() failed: %v", err)
+			}
+			got, found := shaped.Annotations[RestoreRetryLimitAnnotation]
+			if test.want == nil {
+				if found {
+					t.Fatalf("%s = %q, want absent", RestoreRetryLimitAnnotation, got)
+				}
+				return
+			}
+			if !found || got != *test.want {
+				t.Fatalf("%s = %q (found %v), want %q", RestoreRetryLimitAnnotation, got, found, *test.want)
+			}
+			if err := Validate(shaped, restoreRequest()); err != nil {
+				t.Fatalf("Validate() rejected the built Pod: %v", err)
 			}
 		})
 	}
