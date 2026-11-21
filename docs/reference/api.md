@@ -61,7 +61,7 @@ when it binds a `PodSnapshot`; callers never create it.
 
 | Field                                           | Type                         | Description                                                                                                                                                                                                                                |
 |-------------------------------------------------|------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `conditions`                                    | []Condition                  | `Ready` (snapshot taken and usable for restore) and `Failed` (checkpoint failed terminally).                                                                                                                                               |
+| `conditions`                                    | []Condition                  | `Started` (the agent has begun checkpoint execution), `Ready` (snapshot taken and usable for restore) and `Failed` (checkpoint failed terminally).                                                                                                                                               |
 | `source`                                        | CheckpointSource             | Where the snapshot was taken, written with `Ready`. Informational only: the restore compatibility gates compare the snapshot's manifest, not this block. Every field below is optional and absent when the value could not be read. |
 | `source.node.name`                              | string                       | Node the source pod ran on.                                                                                                                                                                                                                |
 | `source.node.architecture`                      | string                       | Node CPU architecture, as `GOARCH` spells it.                                                                                                                                                                                              |
@@ -76,6 +76,17 @@ when it binds a `PodSnapshot`; callers never create it.
 | `storage.artifacts`                             | []PublishedContainerArtifact | Optional confirmed publications, keyed by `containerName`. Requires `spec.storage`; container names must be checkpointed containers. Does not replace Ready/Failed conditions.                                                                    |
 | `storage.artifacts[].containerName`             | string                       | Required container name; entries must be unique.                                                                                                                                                                                           |
 | `storage.artifacts[].artifactHandle`            | string                       | Required opaque publication locator within the bound store, up to 4096 characters. Callers must not interpret it as a filesystem path.                                                                                                     |
+
+If a source Pod disappears or is replaced after its content reports
+`Started=True`, the operator waits up to five minutes for the result. The wait
+begins when the operator first confirms the loss and is recorded as
+`Ready=Unknown`, reason `CheckpointResultPending`, on the `PodSnapshot`, so an
+operator restart does not reset it. A missing source before `Started` fails
+immediately. `Started` alone does not guarantee recovery after an agent restart.
+
+A successful checkpoint terminates its source process; the Pod may report
+`Failed` even when its snapshot is `Ready`. Check the snapshot's conditions for
+the checkpoint outcome.
 
 ### SnapshotJob
 

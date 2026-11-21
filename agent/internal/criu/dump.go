@@ -199,10 +199,13 @@ func BuildDumpOptions(
 }
 
 // ExecuteDump opens the image directory FD, runs the CRIU dump, and cleans up.
+// postDump runs after the images are flushed, while the source is still frozen.
+// An error from it fails the dump, leaving source recovery to the caller.
 func ExecuteDump(
 	criuOpts *criurpc.CriuOpts,
 	checkpointDir string,
 	settings *types.CRIUSettings,
+	postDump func() error,
 	log logr.Logger,
 ) (time.Duration, error) {
 	imageDir, imageDirFD, err := openPathForCRIU(checkpointDir)
@@ -219,7 +222,7 @@ func ExecuteDump(
 		return 0, err
 	}
 	criuClient.SetCriuPath(binary)
-	if err := criuClient.Dump(criuOpts, nil); err != nil {
+	if err := criuClient.Dump(criuOpts, &dumpNotify{postDump: postDump}); err != nil {
 		dumpDuration := time.Since(criuDumpStart)
 		dumpLogPath := filepath.Join(checkpointDir, dumpLogFilename)
 		log.Error(err, "CRIU dump failed",
@@ -238,6 +241,19 @@ func ExecuteDump(
 	criuDumpDuration := time.Since(criuDumpStart)
 	log.Info("CRIU dump completed", "duration", criuDumpDuration)
 	return criuDumpDuration, nil
+}
+
+// dumpNotify finishes source-dependent work before CRIU ends the frozen tree.
+type dumpNotify struct {
+	criulib.NoNotify
+	postDump func() error
+}
+
+func (n *dumpNotify) PostDump() error {
+	if n.postDump == nil {
+		return nil
+	}
+	return n.postDump()
 }
 
 func readLogTail(path string) string {

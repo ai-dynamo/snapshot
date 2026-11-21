@@ -156,6 +156,10 @@ commit-level history for each release is on its
 
 ### Fixed
 
+- Preserve checkpoints when workload controllers promptly delete ended source
+  Pods: save the filesystem before the source terminates, then wait for the
+  checkpoint result if execution had started. See [#1011](https://github.com/ai-dynamo/snapshot/pull/1011).
+
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).

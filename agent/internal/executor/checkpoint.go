@@ -650,11 +650,21 @@ func dumpCheckpoint(
 	timings *checkpointPhaseTimings,
 	log logr.Logger,
 ) error {
-	criuDumpDuration, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, log)
-	if err != nil {
-		return failStep(StepDumpCRIU, err)
+	postDump := func() error {
+		if state.UpperDir == "" {
+			return nil
+		}
+		overlayCaptureStart := time.Now()
+		err := captureOverlay(state.UpperDir, data.Overlay, checkpointDir, log)
+		timings.OverlayCaptureDuration = time.Since(overlayCaptureStart)
+		return failStep(StepCaptureOverlay, err)
 	}
-	timings.CRIUDumpDuration = criuDumpDuration
+	criuDumpDuration, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, postDump, log)
+	if err != nil {
+		return failStepUnlessNamed(StepDumpCRIU, err)
+	}
+	// ExecuteDump includes the notification; count the overlay separately.
+	timings.CRIUDumpDuration = criuDumpDuration - timings.OverlayCaptureDuration
 
 	// Recorded from the images CRIU wrote, so the manifest states what the
 	// dump did rather than what the node was expected to allow.
@@ -664,14 +674,6 @@ func dumpCheckpoint(
 	}
 	if err := types.WriteManifest(checkpointDir, data); err != nil {
 		return fmt.Errorf("failed to write checkpoint manifest: %w", err)
-	}
-
-	if state.UpperDir != "" {
-		overlayCaptureStart := time.Now()
-		if err := captureOverlay(state.UpperDir, data.Overlay, checkpointDir, log); err != nil {
-			return failStep(StepCaptureOverlay, err)
-		}
-		timings.OverlayCaptureDuration = time.Since(overlayCaptureStart)
 	}
 
 	return nil

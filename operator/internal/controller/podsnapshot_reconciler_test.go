@@ -417,23 +417,22 @@ func TestSnapshotReconciler_BoundContentPendingNoRequeue(t *testing.T) {
 	assert.Nil(t, meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
 }
 
-func TestSnapshotReconciler_SourceCompletesWithoutCaptureResult(t *testing.T) {
+func TestSnapshotReconciler_SucceededSourceWaitsForCaptureResult(t *testing.T) {
 	s := snapshotReconcilerScheme()
-	snap, content := pendingBoundSnapshotContent()
+	snap, content := startedBoundSnapshotContent()
 	pod := scheduledPod()
 	pod.Status.Phase = corev1.PodSucceeded
 	r := makeSnapshotReconciler(s, snap, content, pod)
 
 	res := reconcileSnapshot(t, r, snap.Name)
-	assert.Zero(t, res.RequeueAfter)
+	assert.Positive(t, res.RequeueAfter)
 
 	updated := &snapshotv1alpha1.PodSnapshot{}
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
-	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
-	require.NotNil(t, failed)
-	assert.Equal(t, metav1.ConditionTrue, failed.Status)
-	assert.Equal(t, snapshotv1alpha1.ReasonSourceCompletedWithoutCapture, failed.Reason)
-	assert.Contains(t, failed.Message, "completed before")
+	assert.False(t, snapshotv1alpha1.IsPodSnapshotFailed(updated))
+	ready := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady)
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionUnknown, ready.Status)
 	assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
 }
 
@@ -478,6 +477,11 @@ func TestSnapshotReconciler_FailedSourcePodWaitsForCaptureResultWithinGrace(t *t
 func TestSnapshotReconciler_FailedSourcePodFailsCaptureAfterGraceExpires(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap, content := pendingBoundSnapshotContent()
+	snap.Status.Conditions = []metav1.Condition{{
+		Type: snapshotv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionUnknown,
+		Reason:             podSnapshotReasonCheckpointResultPending,
+		LastTransitionTime: metav1.NewTime(time.Now().Add(-sourcePodTerminalGrace - time.Minute)),
+	}}
 	pod := scheduledPod()
 	pod.Status.Phase = corev1.PodFailed
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
@@ -498,7 +502,7 @@ func TestSnapshotReconciler_FailedSourcePodFailsCaptureAfterGraceExpires(t *test
 	assert.Equal(t, podSnapshotReasonSourcePodGone, failed.Reason)
 }
 
-func TestSnapshotReconciler_FailedSourcePodWithoutTerminalTimeFailsImmediately(t *testing.T) {
+func TestSnapshotReconciler_FailedSourcePodWithoutTerminalTimeRecordsWait(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap, content := pendingBoundSnapshotContent()
 	pod := scheduledPod()
@@ -506,27 +510,30 @@ func TestSnapshotReconciler_FailedSourcePodWithoutTerminalTimeFailsImmediately(t
 
 	r := makeSnapshotReconciler(s, snap, content, pod)
 	res := reconcileSnapshot(t, r, snap.Name)
-	assert.Zero(t, res.RequeueAfter, "an unknown terminal time must not requeue on a clock that can never expire")
+	assert.Positive(t, res.RequeueAfter)
 
 	updated := &snapshotv1alpha1.PodSnapshot{}
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
-	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
-	require.NotNil(t, failed)
-	assert.Equal(t, podSnapshotReasonSourcePodGone, failed.Reason)
+	assert.False(t, snapshotv1alpha1.IsPodSnapshotFailed(updated))
+	ready := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady)
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionUnknown, ready.Status)
+	assert.False(t, ready.LastTransitionTime.IsZero(), "the recorded clock must expire even without a Pod termination timestamp")
 }
 
-func TestSnapshotReconciler_PendingContentWithMissingSourceFails(t *testing.T) {
+func TestSnapshotReconciler_PendingContentWithMissingSourceWaits(t *testing.T) {
 	s := snapshotReconcilerScheme()
-	snap, content := pendingBoundSnapshotContent()
+	snap, content := startedBoundSnapshotContent()
 	r := makeSnapshotReconciler(s, snap, content)
 
-	reconcileSnapshot(t, r, snap.Name)
+	assert.Positive(t, reconcileSnapshot(t, r, snap.Name).RequeueAfter)
 
 	updated := &snapshotv1alpha1.PodSnapshot{}
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
-	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
-	require.NotNil(t, failed)
-	assert.Equal(t, "SourcePodNotFound", failed.Reason)
+	assert.False(t, snapshotv1alpha1.IsPodSnapshotFailed(updated))
+	ready := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady)
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionUnknown, ready.Status)
 }
 
 func TestSnapshotReconciler_CachedSourceMissingAuthoritativeSourceLiveRemainsPending(t *testing.T) {
