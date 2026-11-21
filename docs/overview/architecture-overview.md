@@ -102,8 +102,9 @@ From a ready pod to a stored artifact:
    [Lifecycle hooks](../design/lifecycle-hooks/README.md).
 5. **Checkpoint**, in this order, into a PageBroker transaction:
    GPU state first (PageBroker's GPU engine, or `cuda-checkpoint`), then the
-   CRIU dump, then the overlay rootfs diff. The dump always terminates the
-   source process; there is no resume-after-checkpoint mode.
+   CRIU dump, then the overlay rootfs diff while the source remains frozen.
+   Only then does the dump terminate the source process; there is no
+   resume-after-checkpoint mode.
 6. **Commit.** PageBroker publishes the snapshot into the store atomically. The
    agent writes `Ready` on the content, along with what the checkpoint ran on
    (kernel, image digest, driver, GPU models), and the operator mirrors `Ready`
@@ -129,8 +130,8 @@ sequenceDiagram
     A->>P: Open checkpoint transaction
     A->>W: Checkpoint GPU state
     A->>W: CRIU dump
+    A->>P: Write the overlay rootfs diff while the source is frozen
     Note over A,W: The dump terminates the source process
-    A->>P: Write the overlay rootfs diff
     A->>P: Commit
     P->>S: Publish the artifact
     A->>O: Content Ready, with the recorded source environment

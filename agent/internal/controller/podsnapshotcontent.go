@@ -272,6 +272,27 @@ func (w *NodeController) runCheckpoint(
 	contentUID string,
 	artifactPath string,
 ) error {
+	// Confirm Started before execution can end the source. This is an
+	// observation for the operator's result wait, not a restart recovery protocol.
+	current := &snapshotv1alpha1.PodSnapshotContent{}
+	if err := w.client.Get(ctx, client.ObjectKeyFromObject(content), current); err != nil {
+		return fmt.Errorf("read checkpoint work order before execution: %w", err)
+	}
+	if current.UID != content.UID || !current.DeletionTimestamp.IsZero() || isContentTerminal(current) {
+		return nil
+	}
+	content = current
+	if !meta.IsStatusConditionTrue(content.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionStarted) {
+		patch := client.MergeFromWithOptions(content.DeepCopy(), client.MergeFromWithOptimisticLock{})
+		meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
+			Type: snapshotv1alpha1.PodSnapshotConditionStarted, Status: metav1.ConditionTrue,
+			Reason: "CheckpointStarted", Message: "The node agent has begun checkpoint execution",
+		})
+		if err := w.client.Status().Patch(ctx, content, patch); err != nil {
+			return fmt.Errorf("record checkpoint started: %w", err)
+		}
+	}
+
 	captureCtx := ctx
 	if timeout := w.config.Checkpoint.CheckpointTimeout(); timeout > 0 {
 		var cancel context.CancelFunc
