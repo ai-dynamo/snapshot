@@ -1259,23 +1259,11 @@ func (op *restoreOperation) failRestore(ctx context.Context, restoreErr error) e
 	placeholderHostPID, _, err := w.runtime.ResolveContainer(ctx, op.containerID)
 	if err != nil {
 		// Nothing can be killed, so the marker is the only way the container's
-		// proxy learns that no restore is coming. With no process in the
-		// container to write through, it goes through the node's path of the
-		// control volume. kubelet names that path after the Pod's UID on the
-		// node, which in a vCluster differs from this Pod's; the runtime knows
-		// it while the container exists.
-		podUID := string(op.pod.UID)
-		if nodeUID, uidErr := w.runtime.ResolveContainerPodUID(ctx, op.containerID); uidErr == nil {
-			podUID = nodeUID
-		} else {
-			op.log.V(1).Info("Cannot read the Pod's UID on the node; using its own", "error", uidErr.Error())
-		}
-		if markErr := w.writePodControlSentinelFn(podUID, op.destination, podcontract.RestoreFailedFile, restoreFailedSentinelContents); markErr != nil {
-			op.log.Error(markErr, "Failed to write restore-failed sentinel through the host path")
-		}
+		// proxy learns that no restore is coming.
+		op.markRestoreFailedThroughNode(ctx)
 		return errors.Join(restoreErr, fmt.Errorf("placeholder PID could not be resolved after restore failure: %w", err))
 	}
-	op.markRestoreFailed(placeholderHostPID)
+	op.markRestoreFailed(ctx, placeholderHostPID)
 	if err := op.killPlaceholder(placeholderHostPID, "restore failed"); err != nil {
 		return errors.Join(restoreErr, fmt.Errorf("placeholder could not be killed after restore failure: %w", err))
 	}
@@ -1290,7 +1278,7 @@ func (op *restoreOperation) completeRestore(ctx context.Context, restored execut
 	contents := podcontract.FormatRestoreComplete(podcontract.RestoreComplete{PID: restored.RestoredPID})
 	if err := w.writeControlSentinelFn(placeholderHostPID, podcontract.RestoreCompleteFile, contents); err != nil {
 		op.log.Error(err, "Failed to write restore-complete sentinel")
-		op.markRestoreFailed(placeholderHostPID)
+		op.markRestoreFailed(ctx, placeholderHostPID)
 		if killErr := op.killPlaceholder(placeholderHostPID, "restore sentinel failed"); killErr != nil {
 			return errors.Join(fmt.Errorf("failed to write restore-complete sentinel: %w", err), fmt.Errorf("placeholder could not be killed: %w", killErr))
 		}
@@ -1303,9 +1291,31 @@ func (op *restoreOperation) completeRestore(ctx context.Context, restored execut
 // the placeholder, so a restarted container sees that this Pod's one restore
 // was already used instead of waiting for a restore that will not come. It is
 // best effort: the kill must happen whether or not the marker was written.
-func (op *restoreOperation) markRestoreFailed(placeholderHostPID int) {
+//
+// A failed attempt may already have stopped the container, so the PID the
+// runtime just reported can be gone. The marker then goes through the node.
+func (op *restoreOperation) markRestoreFailed(ctx context.Context, placeholderHostPID int) {
 	if err := op.controller.writeControlSentinelFn(placeholderHostPID, podcontract.RestoreFailedFile, restoreFailedSentinelContents); err != nil {
-		op.log.Error(err, "Failed to write restore-failed sentinel")
+		op.log.Error(err, "Failed to write restore-failed sentinel through the container; trying the host path")
+		op.markRestoreFailedThroughNode(ctx)
+	}
+}
+
+// markRestoreFailedThroughNode writes the restore-failed sentinel for a
+// container with no process to write through, using the node's path of the
+// control volume. kubelet names that path after the Pod's UID on the node,
+// which in a vCluster differs from this Pod's; the runtime knows it while the
+// container exists.
+func (op *restoreOperation) markRestoreFailedThroughNode(ctx context.Context) {
+	w := op.controller
+	podUID := string(op.pod.UID)
+	if nodeUID, uidErr := w.runtime.ResolveContainerPodUID(ctx, op.containerID); uidErr == nil {
+		podUID = nodeUID
+	} else {
+		op.log.V(1).Info("Cannot read the Pod's UID on the node; using its own", "error", uidErr.Error())
+	}
+	if markErr := w.writePodControlSentinelFn(podUID, op.destination, podcontract.RestoreFailedFile, restoreFailedSentinelContents); markErr != nil {
+		op.log.Error(markErr, "Failed to write restore-failed sentinel through the host path")
 	}
 }
 

@@ -1963,6 +1963,40 @@ func TestRunRestoreFailureMarksUnresolvedContainerThroughHostPath(t *testing.T) 
 	}
 }
 
+// A failed attempt can stop the container after the runtime reported its PID,
+// so the write through /host/proc fails; the marker still reaches the proxy.
+func TestRunRestoreFailureMarksAStoppedContainerThroughHostPath(t *testing.T) {
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	w := makeTestController(t, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 4242, podUID: "host-uid"}
+	artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
+		return executor.RestoreResult{}, errors.New("criu restore failed")
+	}
+	var calls []string
+	w.writeControlSentinelFn = func(pid int, name string, _ []byte) error {
+		calls = append(calls, fmt.Sprintf("write %d %s", pid, name))
+		return fmt.Errorf("open /host/proc/%d/root: %w", pid, syscall.ENOENT)
+	}
+	w.writePodControlSentinelFn = func(podUID, container, name string, _ []byte) error {
+		calls = append(calls, "write "+podUID+"/"+container+"/"+name)
+		return nil
+	}
+	w.sendSignalFn = func(logr.Logger, int, syscall.Signal, string) error {
+		calls = append(calls, "kill")
+		return nil
+	}
+
+	err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{}, false)
+
+	require.Error(t, err)
+	assert.Equal(t, []string{
+		"write 4242 " + podcontract.RestoreFailedFile,
+		"write host-uid/main/" + podcontract.RestoreFailedFile,
+		"kill",
+	}, calls)
+}
+
 func TestRestoreDestinations(t *testing.T) {
 	t.Run("map annotation needs no API read", func(t *testing.T) {
 		pod := multiRestorePod()
