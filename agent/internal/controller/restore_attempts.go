@@ -4,6 +4,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -79,9 +80,11 @@ func (op *restoreOperation) storeAttempts(record *podcontract.ContainerRetryStat
 // startAttempt resolves the attempt about to start. A limit of 0 keeps no
 // record, so a restarted agent starts the restore over with a full timeout,
 // as before retries. A restore that allows retries saves the first attempt as
-// a new record before it runs; an agent that restarted during an attempt
-// repeats it within the record's limit and deadline.
-func (op *restoreOperation) startAttempt() (*podcontract.ContainerRetryStatus, error) {
+// a new record before it runs, and otherwise picks the restore up from the
+// destination's record: it gets errRetryScheduled while an in-place retry is
+// not due, and an agent that restarted during an attempt repeats it within the
+// record's limit and deadline.
+func (op *restoreOperation) startAttempt(ctx context.Context) (*podcontract.ContainerRetryStatus, error) {
 	now := op.controller.nowFn()
 	limit, err := op.retryLimit()
 	if err != nil {
@@ -89,7 +92,7 @@ func (op *restoreOperation) startAttempt() (*podcontract.ContainerRetryStatus, e
 	}
 	if limit == 0 {
 		record := op.firstAttempt(limit, now)
-		op.logAttempt(record, now)
+		op.log = op.log.WithValues("attempt", record.Attempt, "retry_limit", record.RetryLimit)
 		return record, nil
 	}
 	record, found, err := op.loadAttempts()
@@ -98,13 +101,28 @@ func (op *restoreOperation) startAttempt() (*podcontract.ContainerRetryStatus, e
 	}
 	if !found {
 		record = op.firstAttempt(limit, now)
-	} else if !record.Deadline.IsZero() && !now.Before(record.Deadline) {
-		return nil, fmt.Errorf("restore timed out at %s, before attempt %d could start",
-			record.Deadline.UTC().Format(time.RFC3339), record.Attempt)
+	} else {
+		next := record.Attempt
+		if !record.RetryAt.IsZero() {
+			next++
+		}
+		if !record.Deadline.IsZero() && !now.Before(record.Deadline) {
+			return nil, op.retriesExhausted(ctx, record, true, fmt.Errorf("restore timed out at %s, before attempt %d could start",
+				record.Deadline.UTC().Format(time.RFC3339), next))
+		}
+		if next > record.RetryLimit+1 {
+			return nil, op.retriesExhausted(ctx, record, false, fmt.Errorf("attempt %d is over the limit of %d", next, record.RetryLimit+1))
+		}
+		if now.Before(record.RetryAt) {
+			op.log.V(1).Info("Restore retry is not due yet", "retry_at", record.RetryAt.UTC().Format(time.RFC3339))
+			return nil, errRetryScheduled
+		}
+		record.Attempt = next
+		record.RetryAt = time.Time{}
 	}
 	record.ContainerID = op.containerID
 	op.storeAttempts(record)
-	op.logAttempt(record, now)
+	op.log = op.log.WithValues("attempt", record.Attempt, "retry_limit", record.RetryLimit)
 	return record, nil
 }
 
@@ -123,14 +141,23 @@ func (op *restoreOperation) firstAttempt(limit int, now time.Time) *podcontract.
 	return record
 }
 
-// logAttempt names the attempt in the operation's log and logs its start.
-func (op *restoreOperation) logAttempt(record *podcontract.ContainerRetryStatus, now time.Time) {
-	op.log = op.log.WithValues("attempt", record.Attempt, "retry_limit", record.RetryLimit)
-	if record.Deadline.IsZero() {
-		op.log.Info("Starting restore attempt")
-		return
+// announceAttempt emits RestoreRequested for every attempt that starts. A
+// restore that allows retries names the attempt in it.
+func (op *restoreOperation) announceAttempt(ctx context.Context, record *podcontract.ContainerRetryStatus) {
+	keysAndValues := []any{
+		"content_uid", op.artifact.ContentUID,
+		"source_container", op.artifact.SourceContainerName,
+		"container_id", op.containerID,
 	}
-	op.log.Info("Starting restore attempt", "time_left", record.Deadline.Sub(now).Round(time.Second).String())
+	if !record.Deadline.IsZero() {
+		keysAndValues = append(keysAndValues, "time_left", record.Deadline.Sub(op.controller.nowFn()).Round(time.Second).String())
+	}
+	op.log.Info("Restore target detected, triggering external restore", keysAndValues...)
+	message := fmt.Sprintf("Restore requested from PodSnapshot %s for destination %s", op.artifact.SnapshotName, op.destination)
+	if record.RetryLimit > 0 {
+		message += fmt.Sprintf(restoreRequestedAttemptSuffix, record.Attempt, record.RetryLimit+1)
+	}
+	emitPodEvent(ctx, op.controller.clientset, op.log, op.pod, snapshotEventComponent, corev1.EventTypeNormal, restoreRequestedReason, message)
 }
 
 // forgetAttempts removes the destination's record after the gates refused
