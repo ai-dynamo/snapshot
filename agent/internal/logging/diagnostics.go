@@ -74,9 +74,16 @@ func LastRestoreError(checkpointPath, workDir string) string {
 // Errors logged after it come from teardown, not from what stopped the restore.
 const criuRestoreSummary = "Restoring FAILED."
 
-// criuFollowOnError matches errors CRIU logs after the failure that caused
-// them: the restore summary and the exit of a task that hit the real error.
-var criuFollowOnError = regexp.MustCompile(`^(Restoring FAILED\.|\d+ exited, status=\d+|\d+ killed by signal \d+: .*)$`)
+// criuFollowOnError matches CRIU messages that can follow the underlying
+// restore failure:
+//   - Restore failure summary: "Restoring FAILED."
+//   - Task exit: "<pid> exited, status=<code>"
+//   - Task termination: "<pid> killed by signal <signal>: ..."
+//   - Temporary directory cleanup: "mnt: Unable to remove /tmp/cr-tmpfs.<suffix>: ..."
+//
+// CRIU ignores failure to remove this temporary directory. Failure to unmount
+// it ("Unable to umount") is fatal and must remain a possible restore cause.
+var criuFollowOnError = regexp.MustCompile(`^(Restoring FAILED\.|\d+ exited, status=\d+|\d+ killed by signal \d+: .*|mnt: Unable to remove /tmp/cr-tmpfs\.[A-Za-z0-9]{6}: .*)$`)
 
 // lastCRIUError returns the message of the last "Error (file:line): msg" line
 // logged before the restore summary, skipping follow-on errors unless nothing
