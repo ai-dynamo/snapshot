@@ -55,6 +55,9 @@ type attemptHarness struct {
 	pod *corev1.Pod
 	// containerID is the destination container a pass finds.
 	containerID string
+	// recovering is whether a pass finds the restore in progress, as every
+	// pass after the first does.
+	recovering bool
 	// now is the agent's clock. It starts at the real time, since an
 	// attempt's context ends by the real clock at the record's deadline.
 	now      time.Time
@@ -89,7 +92,7 @@ func newAttemptHarness(t *testing.T, annotations map[string]string, restoreErr e
 	}
 	artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}
 	return h, func() error {
-		return w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", h.containerID, h.now, false)
+		return w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", h.containerID, h.now, h.recovering)
 	}
 }
 
@@ -174,6 +177,7 @@ func TestRunRestoreRepeatsAnInterruptedAttemptWithinItsDeadline(t *testing.T) {
 	require.Equal(t, 1, h.restores)
 	assert.True(t, first.Equal(h.deadline), "the attempt's context ends at %s, want the first attempt's %s", h.deadline, first)
 	assert.Equal(t, 2, h.seen.RetryLimit, "the limit is resolved once")
+	assert.Empty(t, h.events(restoreAttemptFailedReason))
 	assert.Equal(t, 1, h.seen.Attempt)
 	assert.True(t, first.Equal(h.seen.Deadline))
 }
