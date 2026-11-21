@@ -703,6 +703,41 @@ func TestRestorePodContainersKeepsAggregateInProgressWhileDestinationIsPending(t
 	assert.Contains(t, payload, "1 pending")
 }
 
+// Each destination's failure reaches the retry status annotation, and a pass
+// that only waits for a retry changes nothing.
+func TestRestorePodContainersRecordsEveryDestinationsLastFailure(t *testing.T) {
+	pod := multiRestorePod()
+	pod.Annotations[podcontract.RestoreRetryLimitAnnotation] = "2"
+	w := makeTestController(t, pod)
+	w.config.Restore.TimeoutSeconds = 600
+	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
+	w.restoreFn = func(_ context.Context, _ snapshotruntime.Runtime, _ logr.Logger, req executor.RestoreRequest, _ executor.RestoreMounter) (executor.RestoreResult, error) {
+		if req.DestinationContainerName == "engine-0" {
+			return executor.RestoreResult{}, untouched(storeUnreachable)
+		}
+		return executor.RestoreResult{}, changedByCRIU
+	}
+	plan := &restorePlan{
+		artifact: &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"},
+		mappings: []podcontract.ContainerMapping{{Source: "main", Destination: "engine-0"}, {Source: "main", Destination: "engine-1"}},
+	}
+
+	assert.True(t, w.restorePodContainers(context.Background(), pod, plan, "inference/restore-worker"))
+	writeQueuedRetryStatus(w)
+
+	status, found := publishedRetryStatus(t, w, pod)
+	require.True(t, found)
+	assert.Equal(t, &podcontract.FailureSummary{Step: "preparing PageBroker restore", Cause: "PageBroker STORAGE_UNAVAILABLE: store unreachable"}, status["engine-0"].LastFailure)
+	assert.False(t, status["engine-0"].RetryAt.IsZero())
+	assert.Equal(t, &podcontract.FailureSummary{Step: "restoring with CRIU", Cause: "criu restore failed"}, status["engine-1"].LastFailure)
+	assert.True(t, status["engine-1"].RetryAt.IsZero())
+
+	writes := len(retryStatusApplies(w))
+	assert.True(t, w.restorePodContainers(context.Background(), pod, plan, "inference/restore-worker"))
+	assert.Zero(t, w.retryStatusQueue.Len(), "a pass that only waited queued a retry status write")
+	assert.Len(t, retryStatusApplies(w), writes)
+}
+
 func TestLogWithStepAddsTheStepKeyOnlyWhenNamed(t *testing.T) {
 	var lines []string
 	log := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{})
