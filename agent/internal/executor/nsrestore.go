@@ -5,6 +5,7 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -40,6 +41,14 @@ type RestoreOptions struct {
 	BundleDir string
 }
 
+// RestoreInNamespaceProgress is a line nsrestore writes on stdout ahead of its
+// result.
+type RestoreInNamespaceProgress struct {
+	// ChangingContainer is sent right before nsrestore first changes the
+	// container. A failed run that never sent it left the container as it was.
+	ChangingContainer bool `json:"changingContainer"`
+}
+
 type RestoreInNamespaceResult struct {
 	RestoredPID            int           `json:"restoredPID"`
 	CleanupError           *CleanupError `json:"cleanupError,omitempty"`
@@ -49,8 +58,21 @@ type RestoreInNamespaceResult struct {
 	CUDARestoreDuration    time.Duration `json:"cudaRestoreDuration"`
 	// Error is set, with every other field empty, when nsrestore exits non-zero.
 	// Step names the part of the in-namespace restore it came from, when known.
+	// Code is the PageBroker failure code, when PageBroker reported the failure.
 	Error string `json:"error,omitempty"`
 	Step  string `json:"step,omitempty"`
+	Code  string `json:"code,omitempty"`
+}
+
+// NewRestoreInNamespaceFailure is the result nsrestore reports for a failed
+// restore.
+func NewRestoreInNamespaceFailure(err error) RestoreInNamespaceResult {
+	result := RestoreInNamespaceResult{Error: err.Error(), Step: string(StepOf(err))}
+	var failure *pagebroker.FailureError
+	if errors.As(err, &failure) {
+		result.Code = failure.Code().String()
+	}
+	return result
 }
 
 // CleanupError is the wire representation of a successful restore whose
@@ -151,6 +173,9 @@ func executeRestore(
 ) (timings *nsrestorePhaseTimings, restoredPID int, cleanupErr error, retErr error) {
 	timings = &nsrestorePhaseTimings{}
 
+	if err := json.NewEncoder(os.Stdout).Encode(RestoreInNamespaceProgress{ChangingContainer: true}); err != nil {
+		return nil, 0, nil, failStep(StepApplyRootfsDiff, fmt.Errorf("report restore progress: %w", err))
+	}
 	overlayStart := time.Now()
 	if err := snapshotruntime.ApplyRootfsDiff(opts.CheckpointPath, "/", opts.BundleDir, log); err != nil {
 		return nil, 0, nil, failStep(StepApplyRootfsDiff, fmt.Errorf("rootfs diff failed: %w", err))
