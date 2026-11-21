@@ -307,8 +307,9 @@ CHECKPOINT = (
      ("C", "Coordinator", "session", "p"), ("L", "Leader", "lowest relay rank", "t"),
      ("R", "Relays", "other ranks", "t"), ("W", "Workload", "processes, shims", "g")],
     [
-        ("m", "O", "A", "member PodSnapshotContent, owned through its PodSnapshot by the group"),
-        ("s", "A", "read rank, size, and UID from the parent PodGroupSnapshot"),
+        ("s", "O", "create the PodGroupSnapshotContent, then a PodSnapshot per member"),
+        ("m", "O", "A", "member PodSnapshotContent, naming the group content in spec.podGroup"),
+        ("s", "A", "check membership against the group content; read rank, size, deadline, and UID from the request"),
         ("s", "W", "quiesce: no new work on shared memory, communicators, or peers; until CUDA Checkpoint drives NCCL, "
                    "the app also calls NCCL Checkpoint's prepare"),
         ("m", "W", "A", "ready-for-snapshot (readiness probe)"),
@@ -367,7 +368,7 @@ CHECKPOINT = (
         ("m", "A", "W", "CRIU dump: locks the Pod's network at the freeze, member table in the manifest, the source ends"),
         ("m", "A", "O", "member Captured on its PodSnapshotContent"),
         ("m", "A", "C", "Leave(captured)"),
-        ("s", "O", "every member Captured: PodGroupSnapshot Ready"),
+        ("s", "O", "bind each member's content; every member Captured: group content and PodGroupSnapshot Ready"),
         ("x",),
     ],
 )
@@ -378,8 +379,8 @@ RESTORE = (
      ("L", "Leader", "lowest relay rank", "t"), ("R", "Relays", "other ranks", "t"),
      ("W", "Workload", "restored", "g")],
     [
-        ("m", "O", "A", "gated restore Pods, then a PodGroupRestore naming them; "
-                        "the operator claims and ungates them, then pins them"),
+        ("s", "O", "the owner creates restore Pods that name the snapshot; the operator groups them by replica labels"),
+        ("m", "O", "A", "complete group: the operator creates the PodGroupRestore, claims and pins its Pods"),
         ("s", "A", "preflight: artifact, compatibility, GPU map"),
         ("m", "A", "C", "connect for (session UID, member ID) with a Pod-bound token"),
         ("m", "C", "A", "read meta {members, ranks, deadline, epoch}", 1),
@@ -479,8 +480,8 @@ FAILURES = (
         ("m", "AA", "L", "pending Get returns with the reason", 1),
         ("s", "L", "exit failed"),
         ("n", "AA", "AB", "each agent acts on its own record: with Started or RestoreStarted it terminates its source or fails "
-                          "its restore, without one it leaves the workload as found, and after restore-complete it leaves "
-                          "the workload running"),
+                          "its restore, without one it leaves a source as found and ends an unreleased restore destination, "
+                          "and after restore-complete it leaves the workload running"),
         ("e", "else · agent connection lost or deadline passed"),
         ("s", "C", "rank 1's connection not back within the grace period, or ranks missing at the deadline"),
         ("m", "C", "AA", "ended, naming rank 1", 1),
@@ -497,7 +498,7 @@ FAILURES = (
 
 def architecture():
     b = []
-    b += box(40, 40, 180, 56, "g", "Kubernetes API", "PodGroup CRDs, status")
+    b += box(40, 40, 180, 56, "g", "Kubernetes API", "PodGroup kinds and records")
     b += box(245, 40, 180, 56, "g", "Snapshot operator", "group controllers")
     b += box(450, 40, 190, 56, "p", "Snapshot coordinator", "sessions in embedded NATS")
     b.append(line(223, 68, 242, 68, both=True))
@@ -554,7 +555,7 @@ def lifecycle():
     b.append(T(304, 232, "commit", "tm", 12))
     b.append(line(580, 266, 628, 266))
     b.append(T(604, 232, "release", "tm", 12))
-    for cx, lines in ((155, ("A failure leaves the workload", "as Snapshot found it")),
+    for cx, lines in ((155, ("Capture: the source is left as found;", "restore: the destination is ended")),
                       (455, ("A failure fails the member;", "CRIU never runs twice")),
                       (750, ("A failure only ends", "the rendezvous"))):
         for i, s in enumerate(lines):
@@ -563,8 +564,9 @@ def lifecycle():
         "The session is open until every member has left, when it closes, or until any failure, deadline, lost "
         "member or cancellation, when it fails and every pending wait returns with the reason. Each member moves from "
         "no record, to a durable record written after the commit and before its first irreversible step, to "
-        "restore-complete after release; a failure leaves a member without a record as found, fails a member with "
-        "one, and only ends the rendezvous for a released member.", b)
+        "restore-complete after release; a failure leaves a capture source without a record as found and ends a "
+        "restore destination without one, which holds no workload yet, fails a member with a record, and only ends "
+        "the rendezvous for a released member.", b)
 
 
 def phases():
@@ -676,8 +678,9 @@ def main():
              "Rank 0 of a communicator sets a new unique ID through its agent's library endpoint, and the other "
              "ranks read it through theirs.", *LIBRARIES, width=860)
     sequence("failure-paths.svg", "Failure paths",
-             "Every failure fails the session; each agent then acts on its own record: no record leaves the workload "
-             "as found, a record fails the member, and restore-complete leaves it running.", *FAILURES, width=860)
+             "Every failure fails the session; each agent then acts on its own record: no record leaves a capture "
+             "source as found and ends an unreleased restore destination, a record fails the member, and "
+             "restore-complete leaves it running.", *FAILURES, width=860)
 
 
 if __name__ == "__main__":
