@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -108,6 +110,20 @@ def test_restored_state_requires_every_remote_assertion_to_pass(
         assert sleeps.read_text().splitlines() == ["1"] * progress_after
     if failure == "no-progress":
         assert sleeps.read_text().splitlines() == ["1"] * 12
+
+
+def test_restore_retry_status_reads_the_annotation() -> None:
+    def pod(annotations: dict[str, str] | None) -> SimpleNamespace:
+        return SimpleNamespace(metadata=SimpleNamespace(
+            namespace="test-ns", name="restore", annotations=annotations,
+        ))
+
+    status = {"main": {"attempt": 2, "retryLimit": 3, "lastFailure": {"step": "s", "cause": "c"}}}
+    annotation = {lifecycle.RESTORE_RETRY_STATUS_ANNOTATION: json.dumps(status)}
+    assert lifecycle.restore_retry_status(pod(annotation)) == status
+    for without_status in (None, {}, {lifecycle.RESTORE_RETRY_STATUS_ANNOTATION: ""}):
+        with pytest.raises(AssertionError, match="test-ns/restore has no nvidia.com/restore-retry-status"):
+            lifecycle.restore_retry_status(pod(without_status))
 
 
 @pytest.mark.parametrize(

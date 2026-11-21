@@ -46,6 +46,8 @@ from snapshot_e2e.workloads import source_pod
 GROUP = "nvidia.com"
 VERSION = "v1alpha1"
 RESTORED_CONDITION = f"{GROUP}/Restored"
+RESTORE_RETRY_LIMIT_ANNOTATION = f"{GROUP}/restore-retry-limit"
+RESTORE_RETRY_STATUS_ANNOTATION = f"{GROUP}/restore-retry-status"
 PODSNAPSHOTS = "podsnapshots"
 PODSNAPSHOTCONTENTS = "podsnapshotcontents"
 SNAPSHOTJOBS = "snapshotjobs"
@@ -53,6 +55,8 @@ PROGRESS_INTERVAL_SECONDS = 30
 TERMINAL_POD_PHASES = {"Failed", "Succeeded"}
 AGENT_CHECKPOINT_DIR = "/checkpoints"
 AGENT_CONTAINER = "agent"
+# In the agent container, outside every artifact.
+INTACT_IMAGE_DIR = "/tmp"
 # /proc in the restored container. Tests point it elsewhere.
 PROC_ROOT = "/proc"
 
@@ -1109,21 +1113,58 @@ def corrupt_checkpoint_image(
     content_uid: str,
     image: str = "inventory.img",
 ) -> None:
-    """Overwrite one CRIU image in a captured artifact with junk.
+    """Overwrite one file of a captured artifact with junk.
 
-    The default is the inventory, which CRIU reads first to find every other
-    image, so a restore fails on it rather than part way through replaying a
-    process. The file is replaced rather than removed because a missing image
-    and an unreadable one are different failures, and the unreadable one is the
-    one a half-written or bit-rotted artifact produces.
+    The default is the CRIU inventory, which CRIU reads first to find every
+    other image, so a restore fails on it rather than part way through
+    replaying a process. The file is replaced rather than removed because a
+    missing image and an unreadable one are different failures, and the
+    unreadable one is the one a half-written or bit-rotted artifact produces.
+    The manifest, which the agent reads before it changes the container, fails
+    an attempt that leaves the container untouched.
+
+    The original is kept in the agent container, outside the artifact, for
+    repair_checkpoint_image.
     """
+    path = f"{checkpoint_artifact_path(content_uid)}/{shlex.quote(image)}"
     k8s.exec_command(
         config.namespace,
         checkpoint_agent_pod(config, node),
-        f"printf 'not-a-criu-image' > "
-        f"{checkpoint_artifact_path(content_uid)}/{shlex.quote(image)}",
+        f"cp -p {path} {intact_image_path(content_uid, image)}; "
+        f"printf 'not-a-criu-image' > {path}",
         container=AGENT_CONTAINER,
     )
+
+
+def repair_checkpoint_image(
+    config: k8s.E2EConfig,
+    node: str,
+    content_uid: str,
+    image: str = "inventory.img",
+) -> None:
+    """Put back the image corrupt_checkpoint_image damaged."""
+    marker = "__snapshot_checkpoint_image_repaired__"
+    output = k8s.exec_command(
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        f"mv {intact_image_path(content_uid, image)} "
+        f"{checkpoint_artifact_path(content_uid)}/{shlex.quote(image)} && printf '%s' {marker}",
+        container=AGENT_CONTAINER,
+    )
+    assert output == marker, f"repairing {image} of {content_uid} failed: {output}"
+
+
+def intact_image_path(content_uid: str, image: str) -> str:
+    return shlex.quote(f"{INTACT_IMAGE_DIR}/snapshot-e2e-intact-{content_uid}-{image}")
+
+
+def restore_retry_status(pod: client.V1Pod) -> dict[str, Any]:
+    """The node agent's nvidia.com/restore-retry-status, by destination."""
+    raw = (pod.metadata.annotations or {}).get(RESTORE_RETRY_STATUS_ANNOTATION)
+    assert raw, (
+        f"{pod.metadata.namespace}/{pod.metadata.name} has no {RESTORE_RETRY_STATUS_ANNOTATION}"
+    )
+    return json.loads(raw)
 
 
 def checkpoint_artifact_path(content_uid: str) -> str:
