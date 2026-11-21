@@ -295,6 +295,10 @@ func (r *restoreFakeRuntime) ResolveContainerPodUID(context.Context, string) (st
 	return "", errors.New("not implemented")
 }
 
+func (r *restoreFakeRuntime) ContainerRunning(context.Context, string) (bool, error) {
+	return false, errors.New("not implemented")
+}
+
 func (r *restoreFakeRuntime) TerminateContainer(_ context.Context, id string) error {
 	if r.events == nil {
 		return errors.New("not implemented")
