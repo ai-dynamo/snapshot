@@ -234,7 +234,7 @@ Redis-compatible server.
 | Pods of an incomplete group, such as a replacement waiting for its peers, take their nodes and GPUs while they wait, and Snapshot does not bound that wait. | That is placement, which belongs to the gang scheduler and the owner. The owner, which already watches its replicas, bounds the wait, and the operator names the missing members in Events on the waiting Pods. |
 | A member lost after its attempt exists fails the attempt, and a released member keeps running after a peer fails, so replacing only the failed Pods would leave a replica that cannot form a new group. | Membership is fixed for simplicity. A failed attempt ends its unreleased destinations, and the workload controller retires the whole replica, released members included, before retrying. This is its recovery policy, distinct from the Pod's `restartPolicy`, which only decides whether a container restarts. [GREP-1020](https://github.com/ai-dynamo/grove/pull/1021) proposes it for Grove, and LeaderWorkerSet's default `RecreateGroupOnPodRestart` recreates the whole group when a container restarts. |
 | A replica key built from reusable names and indexes can identify two generations of a replica at once. | A replica key must not identify two overlapping replica generations: an owner that recreates a workload under the same name waits until the previous Pods are deleted, as Grove does when it replaces its capture replica. |
-| A restore Pod identifies its member by a label value, which must equal the captured member ID. | Integrations capture with IDs taken from the same label, as Grove's Pod index and LeaderWorkerSet's worker index do, and a mismatch is reported in Events on the Pod and the group. A member map can be added when a reuse case needs one ([Appendix A](#a-open-questions)). |
+| A restore Pod identifies its member by a label value, which must equal the captured member ID. | Integrations capture with IDs taken from the same label, as Grove's Pod index and LeaderWorkerSet's worker index do, and a mismatch is reported in Events on the Pod and the group. An integration that reuses a capture with other IDs writes them into a label of its own and names that label, and an import can rename members ([Appendix A](#a-open-questions)), so Snapshot needs no mapping of its own. |
 | A restored process keeps its captured hostname namespace, so `gethostname()` returns its source's hostname, while the target Pod's hostname and `/etc/hosts` name the target. A workload that resolves its own hostname after release reaches loopback or nothing, and one that reports `gethostname()` as its identity names its source. | Preserved connections don't depend on names, and eager vLLM restored under new target hostnames. Workloads take their current identity from the Pod's metadata, refreshed at restore, select their network interfaces explicitly rather than through their hostname, and don't resolve their own hostname after release. |
 
 ## Design Details
@@ -706,8 +706,11 @@ container no longer matches what was pinned fails the member with
 `PodIPChanged` instead of restoring with a stale map.
 
 The agents' admission waits for the operator's, which pins nothing until it
-passes. Each agent then resolves its member's artifact, runs the existing
-compatibility checks, and contributes its new Pod IP, the capture ID from its
+passes. Each agent then resolves its member's artifact, finds its own row in
+the artifact's member table by the member ID the artifact recorded, and checks
+that this row's rank is the rank the group content gives the member, so a
+record's member IDs need not be the artifact's but its order must be. It runs
+the existing compatibility checks, and contributes its new Pod IP, the capture ID from its
 artifact, whether it runs a relay, and, if its Pod shared FABRIC memory at
 capture, where its GPUs are in their NVLink fabric. Every
 agent therefore ends admission holding the complete IP map, built from the
@@ -1646,7 +1649,9 @@ successful, Pods deleted after `Failed` keeping its reason, and a member
 released before a peer fails ending in `Failed`; aggregation, including a
 restore that fails before the operator ever sees it in progress, artifact
 withdrawal, cancellation, and the finalizer that keeps a snapshot while a
-restore reads it; validation rules, against a real API server, that refuse
+restore reads it; restore admission that matches each artifact by rank, with a
+renamed member accepted and a reordered one refused; validation rules, against
+a real API server, that refuse
 rebinding or removing a bound member, removing `status.members` or clearing
 the whole status, and changing or removing `boundGroupContentName`; RBAC that
 refuses a user who creates a `PodGroupRestore`;
@@ -1791,6 +1796,7 @@ review that settles the open questions in [Appendix A](#a-open-questions).
 | Snapshot recognizes Grove and LeaderWorkerSet labels directly | It ties Snapshot to each controller's label scheme and release, and still needs the generic form for every other controller. |
 | Restore settings typed on the `PodGroupSnapshot` | They put a consumer's configuration on the capture, and force one capture handle per label scheme. |
 | Membership that can change until restore starts | It needs a protocol for changing membership and restarting admission; fixing membership when the attempt is created keeps the attempt immutable, and the owner retires a replica that loses a member. |
+| A member map annotation on restore Pods, from label values to member IDs | The member label already carries any ID: whoever creates the Pods writes the captured IDs into a label of its choice and names it, as an integration does when it reuses a capture with other IDs, and an import can rename members instead. A map would add a second way to say the same thing. |
 | A check that every member of a group shares one top-level owner | It needs read access to every owner kind; requiring that a replica key never identify two overlapping replica generations covers the same case. |
 | Reusing a restore Pod across attempts | It needs a takeover of finished attempts' bindings and an identity on every report to tell attempts apart; with single-use Pods, the binding names the only attempt, and an owner replaces a failed Pod as it would after any other failure. |
 
@@ -1820,7 +1826,10 @@ review that settles the open questions in [Appendix A](#a-open-questions).
    content in `spec.members[].contentName`, and then the member contents, whose
    `source` is the existing artifact and whose `spec.podGroup` names the group
    content; the operator binds each member once both sides agree, as a
-   pre-bound `PersistentVolume` is bound. A user then binds a `PodGroupSnapshot`
+   pre-bound `PersistentVolume` is bound. The record's member IDs are the
+   cluster's names for the capture, so an import may rename members to match
+   the labels of the Pods that will restore them, but it keeps the capture's
+   rank order, which restore admission checks against each artifact. A user then binds a `PodGroupSnapshot`
    through `spec.source.existingContent`, and Pods restore from it as from any
    other. These fields are not in the alpha API, and their names and reclaim
    policy will follow the single-Pod import.
@@ -1831,10 +1840,6 @@ review that settles the open questions in [Appendix A](#a-open-questions).
 7. **Several handles per record.** Can several `PodGroupSnapshot`s, in one or
    more namespaces, bind one group content? Alpha binds one, and this follows
    the single-Pod rules for binding one content from several requests.
-8. **Member map.** Alpha requires a captured member ID to equal the restore
-   Pod's member-label value. When a concrete reuse case needs other IDs, an
-   optional annotation that maps label values to member IDs can be added
-   without changing anything else.
 
 ### B. Changes from the prototype
 
@@ -2381,7 +2386,9 @@ type PodGroupManifest struct {
 	Version int `yaml:"version"`
 	// CaptureUID is the PodGroupSnapshot's UID; every member must restore the same one.
 	CaptureUID string `yaml:"captureUID"`
-	// MemberID identifies this artifact's own member.
+	// MemberID identifies this artifact's own member in Members, as captured.
+	// A group content may rename the member, but its rank, the index of its
+	// row in Members, must match the group content's.
 	MemberID string `yaml:"memberID"`
 	// Members is the ordered member table, so its index is the rank.
 	Members []PodGroupManifestMember `yaml:"members"`
