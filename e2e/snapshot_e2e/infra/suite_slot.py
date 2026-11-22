@@ -16,8 +16,8 @@ is nothing to release. A namespace that is being deleted holds no slot.
 
 The limit is recomputed while a suite waits: how many suite budgets fit into
 what the tightest GPU node has left after every Pod outside the slot-holding
-namespaces, capped by free GPUs, keeping one suite of headroom. If the nodes or
-Pods cannot be read, the last limit stays, or FALLBACK_LIMIT if there is none.
+namespaces, capped by free GPUs, keeping one suite of headroom. If the limit
+cannot be computed, the last limit stays, or FALLBACK_LIMIT if there is none.
 
 Namespaces created in the same second are ordered by name, so the first check
 waits SETTLE_SECONDS for every namespace that could sort ahead to exist.
@@ -103,13 +103,17 @@ def container_requests(container: client.V1Container) -> Counter[str]:
 
 def pod_requests(pod: client.V1Pod) -> Counter[str]:
     requests: Counter[str] = Counter()
-    init_containers = pod.spec.init_containers or []
-    sidecars = [container for container in init_containers if container.restart_policy == "Always"]
-    for container in [*(pod.spec.containers or []), *sidecars]:
+    for container in pod.spec.containers or []:
         requests.update(container_requests(container))
-    for container in init_containers:
-        if container.restart_policy != "Always":
-            requests |= container_requests(container)
+    sidecars: Counter[str] = Counter()
+    init_peak: Counter[str] = Counter()
+    for container in pod.spec.init_containers or []:
+        if container.restart_policy == "Always":
+            sidecars.update(container_requests(container))
+        else:
+            init_peak |= container_requests(container) + sidecars
+    requests.update(sidecars)
+    requests |= init_peak
     requests.update(quantities(pod.spec.overhead))
     return requests
 
