@@ -75,10 +75,12 @@ main(int argc, char** argv)
         "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE=/var/run/fake/container-token",
         remote.ends_with("-region") ? "AWS_REGION=eu-central-1" : "AWS_REGION=us-west-2"};
     for (int i = 4; i + 1 < argc; ++i) {
-      if (std::string(argv[i]) == "--ca-cert")
+      if (std::string(argv[i]) == "--ca-cert") {
         expected.insert(std::string("AWS_CA_BUNDLE=") + argv[i + 1]);
+        expected.insert(std::string("SSL_CERT_FILE=") + argv[i + 1]);
+      }
     }
-    if (remote.ends_with("-ca") && expected.size() != 14)
+    if (remote.ends_with("-ca") && expected.size() != 15)
       return 12;
     return actual == expected ? 0 : 11;
   }

@@ -93,6 +93,7 @@ constexpr char kEnvironmentAuthEnv[] = "RCLONE_CONFIG_PAGEBROKER_ENV_AUTH=true";
 constexpr char kAwsRegionEnv[] = "AWS_REGION";
 constexpr char kAwsDefaultRegionEnv[] = "AWS_DEFAULT_REGION";
 constexpr char kAwsCaBundleEnv[] = "AWS_CA_BUNDLE=";
+constexpr char kSslCertFileEnv[] = "SSL_CERT_FILE=";
 // The only ambient variables a child may see: the inputs of web identity and
 // container credentials. Static access keys come from the credentials file alone.
 constexpr const char* kIdentityVariables[] = {"AWS_ROLE_ARN",
@@ -385,7 +386,8 @@ WaitForRclone(Child& child, int output, int diagnostics, std::size_t output_limi
 }
 
 // rclone loads credentials before it applies its own region and --ca-cert, so
-// the token exchange takes both from the environment.
+// the token exchange takes both from the environment. The container credentials
+// provider ignores AWS_CA_BUNDLE and uses default trust, hence SSL_CERT_FILE.
 void
 AppendIdentityEnvironment(const S3Connection& connection, std::vector<std::string>& environment)
 {
@@ -401,8 +403,10 @@ AppendIdentityEnvironment(const S3Connection& connection, std::vector<std::strin
   }
   if (!has_region && !connection.region.empty())
     environment.push_back(std::string(kAwsRegionEnv) + '=' + connection.region);
-  if (!connection.ca_file.empty())
+  if (!connection.ca_file.empty()) {
     environment.push_back(kAwsCaBundleEnv + connection.ca_file);
+    environment.push_back(kSslCertFileEnv + connection.ca_file);
+  }
 }
 
 } // namespace
