@@ -647,6 +647,10 @@ Candidates are grouped by namespace, `PodGroupSnapshot` UID and replica key,
 which is the replica labels' `key=value` pairs sorted by key. Every member of a
 group must carry the same three annotations, compared after parsing, and a
 missing label or a disagreement blocks the group and is reported as an Event.
+`restore-replica-labels` must not include `nvidia.com/podgroupsnapshot`, which
+Snapshot reserves for the attempt's snapshot name; the operator reports it as
+an invalid restore annotation, in an Event, and creates no attempt for that
+group.
 A Pod's member ID is its member label's value, which must be a member ID that
 the bound group content declares; a value the capture doesn't declare is
 reported as an Event, and the Pod is ignored. A group is complete when every
@@ -671,9 +675,11 @@ with its container mapping. Pod membership is fixed from then on.
 When creating a `PodGroupRestore`, Snapshot copies the labels named by
 `restore-replica-labels` from its target Pods into the attempt's metadata, and
 labels it with its snapshot's name as `nvidia.com/podgroupsnapshot`. Workload
-managers can use these labels to find and watch their replicas' attempts, and
-anyone can list the attempts of one snapshot. The target Pod UIDs remain the
-authoritative identities.
+managers can find and watch their replicas' attempts with a selector built from
+the configured replica labels. The snapshot-name label lists a snapshot's
+attempts by name, but can also match attempts from an earlier snapshot with that
+name; consumers select one snapshot by also matching `spec.snapshotRef.uid`.
+The target Pod UIDs remain the authoritative identities.
 
 The operator, not the owner, then claims each target for the attempt, and a
 claimed Pod serves only that attempt. On every reconcile of an unfinished
@@ -1645,25 +1651,27 @@ the group content, created before any member, with members bound once each
 only through the request's own `PodSnapshot` and every back-reference checked,
 a content that only names the group content never bound, Ready only for the
 complete set, and deleted before the request's finalizer is removed; grouping
-of restore candidates, including replica keys, a missing label, two candidates
-for one member, terminating and claimed Pods and targets of any attempt
-ignored, annotations that differ within a group or only in order, a member ID
-that the capture doesn't declare, a missing member, and a node whose agent
-can't restore groups; a replacement before the attempt that joins its group,
-and a loss after it, an eviction included, that fails it; identity pinning;
-the operator's claim of targets, including every state of its claim table, a
-conflict caused by a kubelet status write, a crash between two claims, two
-attempts that select the same Pod, and every surviving target claimed after a
-failure; terminal outcomes, with Pods deleted after `Ready` leaving the attempt
-successful, Pods deleted after `Failed` keeping its reason, and a member
+of restore candidates, including replica keys, rejection of
+`nvidia.com/podgroupsnapshot` in `restore-replica-labels`, a missing label, two
+candidates for one member, terminating and claimed Pods and targets of any
+attempt ignored, annotations that differ within a group or only in order, a
+member ID that the capture doesn't declare, a missing member, and a node whose
+agent can't restore groups; a replacement before the attempt that joins its
+group, and a loss after it, an eviction included, that fails it; identity
+pinning; the operator's claim of targets, including every state of its claim
+table, a conflict caused by a kubelet status write, a crash between two claims,
+two attempts that select the same Pod, and every surviving target claimed after
+a failure; terminal outcomes, with Pods deleted after `Ready` leaving the
+attempt successful, Pods deleted after `Failed` keeping its reason, and a member
 released before a peer fails ending in `Failed`; aggregation, including a
 restore that fails before the operator ever sees it in progress, artifact
 withdrawal, cancellation, and the finalizer that keeps a snapshot while a
 restore reads it; an attempt labeled with its targets' replica labels and its
-snapshot's name, found by the workload's own selector; restore admission that
-matches each artifact by rank, with a
-renamed member accepted and a reordered one refused; validation rules, against
-a real API server, that refuse
+snapshot's name, found by a selector built from the configured replica labels
+even when the Pods carry additional labels, with attempts of an earlier
+same-name snapshot excluded by `spec.snapshotRef.uid`; restore admission that
+matches each artifact by rank, with a renamed member accepted and a reordered
+one refused; validation rules, against a real API server, that refuse
 rebinding or removing a bound member, removing `status.members` or clearing
 the whole status, and changing or removing `boundGroupContentName`; RBAC that
 refuses a user who creates a `PodGroupRestore`;
@@ -1960,8 +1968,9 @@ const (
 
 	// PodGroupSnapshotLabel on a PodGroupRestore holds its PodGroupSnapshot's
 	// name. The operator also copies the targets' replica labels onto it, so
-	// workload managers find their replicas' attempts by the selector they
-	// use for their Pods. Target Pod UIDs remain the authoritative identities.
+	// workload managers find their replicas' attempts using the configured
+	// replica labels. Match spec.snapshotRef.uid to select one snapshot.
+	// Target Pod UIDs remain the authoritative identities.
 	PodGroupSnapshotLabel = "nvidia.com/podgroupsnapshot"
 
 	// PodGroupInUseFinalizer keeps a group resource, of either kind, while its
@@ -2442,6 +2451,8 @@ const (
 	// RestoreReplicaLabelsAnnotation lists, comma-separated, the keys of the
 	// labels that the workload controller sets and whose values identify the
 	// Pod's replica. The replica key is their key=value pairs sorted by key.
+	// The list must not include nvidia.com/podgroupsnapshot, which Snapshot
+	// reserves for the attempt's snapshot name.
 	RestoreReplicaLabelsAnnotation = "nvidia.com/restore-replica-labels"
 
 	// RestoreMemberLabelAnnotation names the label whose value is the Pod's
