@@ -132,6 +132,7 @@ keeps its binding. See [Default class](#default-class).
 | --- | --- | --- |
 | PVC not mounted | A PVC class names a claim the agents cannot see; captures would fail on every node. | The operator marks the class `Ready=False`, reason `ClaimNotMounted`, by checking the claim against the mounted set the chart renders. Adding a claim is a Helm upgrade (`storage.pvc.claimNames`). Documented limitation for this iteration. |
 | Agent without the claim | The class is `Ready`, because the operator reads the chart's mounted set, but a particular agent does not have the claim: it still runs the previous pod spec during a rolling upgrade, or the claim is missing on its node. | The agent maps `claimName` to a mount path from its own `config.yaml` and checks the path exists before any I/O. A claim it cannot map fails the operation with `StorageClassUnavailable`, and nothing is retried against another store. Once the retry is implemented, the agent retries `StorageClassUnavailable` and the operation succeeds when the node's agent has the mount; until then it fails and needs a new attempt. |
+| Listed claim cannot mount | A pod starts only when all its volumes mount. A listed claim that cannot mount keeps a restarted operator or agent pod from starting, which stops snapshots on every store that pod serves, not only the broken one. | Three things limit it. The chart fails the upgrade when a listed claim does not exist or is not bound. A rollout replaces one agent at a time and stops at the first pod that cannot start, so the other nodes and the running operator keep working; the chart keeps those rolling-update defaults. Kubernetes does not remove a claim while a pod mounts it. What remains: the storage behind a working claim fails and a pod then restarts. Recovery is to remove the claim from `storage.pvc.claimNames` and upgrade; its classes go `Ready=False` with `ClaimNotMounted`. Isolation per claim is out of scope for this iteration. |
 | Class edited after binding | The location fields change; content bound to the old `storeID` would read or delete in the wrong place. Or `reclaimPolicy` flips and existing content loses data it was meant to keep. | Location fields are immutable through CEL, and the policy is frozen on the content at binding. Credentials and TLS settings stay editable because they are not identity inputs. The agent and maintenance compare the class's `status.storeID` with the content's binding before any I/O and refuse a mismatch. |
 | Class deleted under content | Content loses the only description of where its snapshots are. | Protection finalizer; a terminating class still resolves for existing content. Force-removing the finalizer leaves content with the existing `StoreInactive` handling from SNEP-237. |
 | Secret missing or revoked | An S3 class's Secret is deleted or rotated to an invalid key. | The class goes `Ready=False`, reason `CredentialsUnavailable`, and new bindings stop. In-flight operations fail with the existing credential errors; nothing is deleted on an access error. |
@@ -511,7 +512,10 @@ writes the same name-to-path
 mapping into the agent's `config.yaml` and the names into the operator's
 `--pvc-claim-names` flag, so a class's `claimName` always resolves to the
 directory that was mounted. The claims must already exist in the release
-namespace and be mountable on every agent node. The list is the whole set, so
+namespace and be mountable on every agent node. On install and upgrade the
+chart looks up each listed claim and fails when one does not exist or is not
+bound, so a wrong name is an error message and not a pod that cannot start;
+a dry run, which cannot look claims up, skips the check. The list is the whole set, so
 an upgrade repeats the claims it keeps:
 
 ```yaml
@@ -631,7 +635,9 @@ reads only that one store, so the stores of other classes are not touched.
   the agent's Role lists only referenced Secrets and ConfigMaps, and has no
   Secret rule when no class references one.
 - **Chart:** changing only `storage.defaultClassName` changes the operator's
-  pod template and leaves the agent DaemonSet's unchanged.
+  pod template and leaves the agent DaemonSet's unchanged; a listed claim that
+  is missing or not bound fails the upgrade, and a claim that cannot mount
+  stops the agent rollout at the first pod.
 - **Agent:** Secret fetch per transaction; credentials in the request and never
   on a volume or in a log; empty credentials for a class without a Secret; mount mapping for the default and listed claims, and a direct restore from a listed claim; `StorageClassUnavailable`, and its retry once implemented,
   on a missing class, a `status.storeID` mismatch, or a claim with no mount.
