@@ -15,6 +15,7 @@ import (
 	"github.com/moby/sys/mountinfo"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/nvidiadevices"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
 
@@ -156,7 +157,7 @@ func containerProcDevice(mounts []types.MountInfo) string {
 // to the OCI spec, but only the container runtime reads them, to create the
 // container. Externalizing one would demand the source GPU's UUID in the restore
 // pod, which a restore onto any other GPU cannot have.
-var deviceListMarkerDirs = []string{"/run/nvidia-container-devices/", "/var/run/nvidia-container-devices/"}
+var deviceListMarkerDirs = []string{nvidiadevices.MarkerDirAlias + "/", nvidiadevices.MarkerDir + "/"}
 
 func isDeviceListMarker(mountPoint string) bool {
 	return slices.ContainsFunc(deviceListMarkerDirs, func(dir string) bool {

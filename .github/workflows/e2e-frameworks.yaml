@@ -446,14 +446,11 @@ jobs:
         timeout-minutes: 5
         env:
           HOST_KUBECONFIG: ${{ steps.host.outputs.kubeconfig }}
+          KUBECONFIG: ${{ env.SNAPSHOT_E2E_TARGET_KUBECONFIG }}
         run: |
           set +e
           out="${RUNNER_TEMP}/diagnostics"
           mkdir -p "${out}"
-          # Setup can fail before Export vCluster kubeconfig sets KUBECONFIG.
-          if [[ -s "${SNAPSHOT_E2E_TARGET_KUBECONFIG}" ]]; then
-            export KUBECONFIG="${SNAPSHOT_E2E_TARGET_KUBECONFIG}"
-          fi
           KUBECONFIG="${HOST_KUBECONFIG}" kubectl get pods -n "${HOST_NAMESPACE}" -o wide \
             > "${out}/host-pods.txt" 2>&1
           KUBECONFIG="${HOST_KUBECONFIG}" kubectl get events -n "${HOST_NAMESPACE}" \
