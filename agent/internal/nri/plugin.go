@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package nri makes snapshot-restore-proxy PID 1 in restore destination
-// containers. It is an NRI plugin: on container creation it copies the proxy
-// into the container's control directory and replaces the container's command
-// with it, before the container starts. The Pod object is not changed.
+// Package nri shapes containers before they start, as an NRI plugin. It makes
+// snapshot-restore-proxy PID 1 in restore destination containers, and starts
+// opted-in checkpoint targets under the cuinterpose launcher. Each payload is
+// copied into the container's control directory. The Pod object is not changed.
 package nri
 
 import (
@@ -98,6 +98,12 @@ type Plugin struct {
 	openControlDir func(podUID, containerName string) (*os.File, error)
 	proxyPath      string
 	socketPath     string
+	// cuInterposeLibDir and cuInterposeLauncher are the payload the plugin
+	// delivers. nodeRoot is the node's root as the agent sees it, which the
+	// runtime's bind mount source is relative to.
+	cuInterposeLibDir   string
+	cuInterposeLauncher string
+	nodeRoot            string
 	// runtimeNRIVersion is the stub's, set in Start.
 	runtimeNRIVersion func() string
 	// stub and closed are set when Start registers.
@@ -119,11 +125,14 @@ type Plugin struct {
 // namespace.
 func NewPlugin(restorer Restorer, log logr.Logger, hostNamespace string) *Plugin {
 	return &Plugin{
-		restorer:       restorer,
-		log:            log,
-		hostNamespace:  hostNamespace,
-		openControlDir: snapshotruntime.OpenPodControlDir,
-		proxyPath:      ProxyBinaryPath,
+		restorer:            restorer,
+		log:                 log,
+		hostNamespace:       hostNamespace,
+		openControlDir:      snapshotruntime.OpenPodControlDir,
+		proxyPath:           ProxyBinaryPath,
+		cuInterposeLibDir:   nsmount.CuInterposeBundlePath,
+		cuInterposeLauncher: CuInterposeLauncherSrc,
+		nodeRoot:            snapshotruntime.NodeRootPath,
 	}
 }
 
@@ -208,17 +217,25 @@ func dropsArgs(nriVersion string) bool {
 	return semver.IsValid(nriVersion) && semver.Compare(nriVersion, argsNRIVersion) < 0
 }
 
-// CreateContainer shapes restore destination containers and leaves every
-// other container alone. An error fails the container's creation, and kubelet
-// retries it: running the image's own command instead would start the
-// workload from scratch in a container the agent is about to restore into.
+// CreateContainer shapes restore destination containers and opted-in
+// cuinterpose capture containers, and leaves every other container alone. A
+// restore Pod is never shaped for capture: its destinations run the proxy.
 func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
-	if _, ok := pod.GetAnnotations()[podcontract.RestoreFromAnnotation]; !ok {
-		return nil, nil, nil
-	}
 	if p.hostNamespace != "" && pod.GetNamespace() != p.hostNamespace {
 		return nil, nil, nil
 	}
+	if _, ok := pod.GetAnnotations()[podcontract.RestoreFromAnnotation]; ok {
+		return p.shapeRestoreDestination(ctx, pod, ctr)
+	}
+	adjust, err := p.shapeCuInterposeCapture(pod, ctr)
+	return adjust, nil, err
+}
+
+// shapeRestoreDestination makes the restore proxy PID 1 in a destination
+// container. An error fails the container's creation, and kubelet retries it.
+// The image's own command would start the workload from scratch in a
+// container the agent is about to restore into.
+func (p *Plugin) shapeRestoreDestination(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
 	namespace, name, uid := podIdentity(pod)
 	log := p.log.WithValues("pod", namespace+"/"+name, "container", ctr.GetName())
 
@@ -306,12 +323,17 @@ func podIdentity(pod *api.PodSandbox) (namespace, name, uid string) {
 // installProxy copies the proxy binary into dir. It copies on every creation:
 // the emptyDir is per Pod, and the binary is a few MB.
 func installProxy(src string, dir *os.File) error {
+	return copyFile(src, dir, podcontract.RestoreProxyBinaryName, 0o755)
+}
+
+// copyFile copies src into dir as name. The write replaces name atomically.
+func copyFile(src string, dir *os.File, name string, perm os.FileMode) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	return snapshotruntime.WriteFileInDir(dir, podcontract.RestoreProxyBinaryName, 0o755, func(w io.Writer) error {
+	return snapshotruntime.WriteFileInDir(dir, name, perm, func(w io.Writer) error {
 		_, err := io.Copy(w, in)
 		return err
 	})

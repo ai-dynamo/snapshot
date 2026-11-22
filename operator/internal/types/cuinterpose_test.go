@@ -12,8 +12,17 @@ import (
 
 func TestCuInterposeContainerConfigurationValidate(t *testing.T) {
 	for _, policy := range []corev1.PullPolicy{"", corev1.PullAlways, corev1.PullIfNotPresent, corev1.PullNever} {
-		require.NoError(t, CuInterposeContainerConfiguration{Image: "registry.example/agent:v1", PullPolicy: policy}.Validate())
+		require.NoError(t, CuInterposeContainerConfiguration{
+			Preparation: MultiGPUPreparationInitContainer, Image: "registry.example/agent:v1", PullPolicy: policy,
+		}.Validate())
 	}
-	require.ErrorContains(t, CuInterposeContainerConfiguration{Image: " "}.Validate(), "image is required")
-	require.ErrorContains(t, CuInterposeContainerConfiguration{Image: "registry.example/agent:v1", PullPolicy: "sometimes"}.Validate(), "pull policy")
+	// Agent mode adds no init container, so it needs no image.
+	require.NoError(t, CuInterposeContainerConfiguration{Preparation: MultiGPUPreparationAgent}.Validate())
+
+	require.ErrorContains(t, CuInterposeContainerConfiguration{Preparation: MultiGPUPreparationInitContainer, Image: " "}.Validate(), "image is required")
+	require.ErrorContains(t, CuInterposeContainerConfiguration{
+		Preparation: MultiGPUPreparationInitContainer, Image: "registry.example/agent:v1", PullPolicy: "sometimes",
+	}.Validate(), "pull policy")
+	require.ErrorContains(t, CuInterposeContainerConfiguration{Preparation: "nri"}.Validate(), "unsupported multi-GPU preparation")
+	require.ErrorContains(t, CuInterposeContainerConfiguration{}.Validate(), "unsupported multi-GPU preparation")
 }

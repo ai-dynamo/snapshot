@@ -38,24 +38,79 @@ func TestParseCuInterposeAnnotation(t *testing.T) {
 	}
 }
 
-func TestValidateCuInterposeLauncher(t *testing.T) {
+func TestHasCuInterposeLauncher(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		argv []string
+		want bool
+	}{
+		{name: "launched workload", argv: append(CuInterposeLauncherPrefix(), "worker"), want: true},
+		{name: "no workload", argv: CuInterposeLauncherPrefix()},
+		{name: "no launcher", argv: []string{"worker"}},
+		{name: "another library", argv: []string{CuInterposeLauncherPath, "--library", "/lib/other.so", "--", "worker"}},
+		{name: "empty", argv: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := HasCuInterposeLauncher(tc.argv); got != tc.want {
+				t.Fatalf("HasCuInterposeLauncher(%q) = %v, want %v", tc.argv, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsCuInterposeDeliveryPath(t *testing.T) {
+	for mountPath, want := range map[string]bool{
+		CuInterposeMountPath:          true,
+		CuInterposeMountPath + "/":    true,
+		CuInterposeMountPath + "/lib": true,
+		"/tmp/snapshot-cuda-other":    false,
+		"/tmp":                        false,
+		SnapshotControlMountPath:      false,
+	} {
+		if got := IsCuInterposeDeliveryPath(mountPath); got != want {
+			t.Errorf("IsCuInterposeDeliveryPath(%q) = %v, want %v", mountPath, got, want)
+		}
+	}
+}
+
+func TestValidateCuInterposeTarget(t *testing.T) {
+	control := corev1.VolumeMount{Name: SnapshotControlVolumeName, MountPath: SnapshotControlMountPath, SubPath: "main"}
+	delivery := corev1.VolumeMount{Name: "snapshot-cuda", MountPath: CuInterposeMountPath, ReadOnly: true}
+	launched := append(CuInterposeLauncherPrefix(), "worker")
 	for _, tc := range []struct {
 		name          string
 		command, args []string
-		valid         bool
+		mounts        []corev1.VolumeMount
+		wantError     string
 	}{
-		{name: "workload in command", command: append(CuInterposeLauncherPrefix(), "worker"), valid: true},
-		{name: "workload in args", command: CuInterposeLauncherPrefix(), args: []string{"worker"}, valid: true},
-		{name: "no workload", command: CuInterposeLauncherPrefix()},
-		{name: "no launcher", command: []string{"worker"}},
-		{name: "another library", command: []string{CuInterposeLauncherPath, "--library", "/lib/other.so", "--", "worker"}},
-		{name: "launcher in args", args: append(CuInterposeLauncherPrefix(), "worker")},
+		{name: "agent delivers", command: []string{"worker"}, mounts: []corev1.VolumeMount{control}},
+		{name: "agent delivers to image entrypoint", mounts: []corev1.VolumeMount{control}},
+		{name: "self-delivered in command", command: launched, mounts: []corev1.VolumeMount{delivery}},
+		{
+			name: "self-delivered in args", command: CuInterposeLauncherPrefix(), args: []string{"worker"},
+			mounts: []corev1.VolumeMount{delivery},
+		},
+		{
+			name: "launcher only in args", args: launched,
+			mounts: []corev1.VolumeMount{control, delivery}, wantError: "must start with",
+		},
+		{name: "no control mount", command: []string{"worker"}, wantError: "does not mount"},
+		{
+			name: "delivery mount without launcher", command: []string{"worker"},
+			mounts: []corev1.VolumeMount{control, delivery}, wantError: "must start with",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			container := &corev1.Container{Name: "main", Command: tc.command, Args: tc.args}
-			err := ValidateCuInterposeLauncher(container)
-			if tc.valid != (err == nil) {
-				t.Fatalf("ValidateCuInterposeLauncher(%q, %q) = %v, want valid %v", tc.command, tc.args, err, tc.valid)
+			container := &corev1.Container{Name: "main", Command: tc.command, Args: tc.args, VolumeMounts: tc.mounts}
+			err := ValidateCuInterposeTarget(container)
+			if tc.wantError == "" {
+				if err != nil {
+					t.Fatalf("ValidateCuInterposeTarget() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("ValidateCuInterposeTarget() = %v, want error containing %q", err, tc.wantError)
 			}
 		})
 	}

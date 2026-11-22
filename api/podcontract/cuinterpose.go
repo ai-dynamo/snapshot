@@ -5,6 +5,7 @@ package podcontract
 
 import (
 	"fmt"
+	"path"
 	"slices"
 	"strings"
 
@@ -42,20 +43,51 @@ func ParseCuInterposeAnnotation(annotations map[string]string) (bool, error) {
 	}
 }
 
-// CuInterposeLauncherPrefix starts a target command under the launcher. SnapshotJob adds
-// it to opted-in sources, and ordinary Pods must add it themselves.
+// CuInterposeLauncherPrefix starts a target command under the launcher. The agent's
+// NRI plugin adds it to the process of an opted-in container that it delivers to.
 func CuInterposeLauncherPrefix() []string {
 	return []string{CuInterposeLauncherPath, "--library", CuInterposeLibraryPath, "--"}
 }
 
-// ValidateCuInterposeLauncher checks that an opted-in container's command starts with
-// the launcher prefix and that a workload follows in command or args.
-func ValidateCuInterposeLauncher(container *corev1.Container) error {
+// HasCuInterposeLauncher reports whether argv starts with the launcher prefix and a
+// workload follows it.
+func HasCuInterposeLauncher(argv []string) bool {
 	prefix := CuInterposeLauncherPrefix()
-	if len(container.Command) < len(prefix) || !slices.Equal(container.Command[:len(prefix)], prefix) ||
-		len(container.Command)+len(container.Args) == len(prefix) {
-		return fmt.Errorf("container %q requests cuinterpose, so its command must start with %q "+
-			"followed by the workload in command or args", container.Name, strings.Join(prefix, " "))
+	return len(argv) > len(prefix) && slices.Equal(argv[:len(prefix)], prefix)
+}
+
+// IsCuInterposeDeliveryPath reports whether a container mount path is, or is inside,
+// the cuinterpose delivery path. A container that mounts there delivers the
+// libraries itself, so the agent leaves it alone.
+func IsCuInterposeDeliveryPath(mountPath string) bool {
+	clean := path.Clean(mountPath)
+	return clean == CuInterposeMountPath || strings.HasPrefix(clean, CuInterposeMountPath+"/")
+}
+
+// ValidateCuInterposeTarget checks that an opted-in target container will start under
+// the launcher. Either the agent delivers it, which needs the snapshot-control mount
+// and no mount on the delivery path, or the container starts the launcher itself.
+// Self-delivery needs command: with only args, the image's entrypoint runs first
+// and may never start the launcher.
+func ValidateCuInterposeTarget(container *corev1.Container) error {
+	if len(container.Command) > 0 && HasCuInterposeLauncher(append(slices.Clone(container.Command), container.Args...)) {
+		return nil
+	}
+	controlMount := false
+	for _, mount := range container.VolumeMounts {
+		if IsCuInterposeDeliveryPath(mount.MountPath) {
+			return fmt.Errorf("container %q requests multi-GPU support and mounts %q at %q, "+
+				"so its command must start with %q followed by the workload",
+				container.Name, mount.Name, mount.MountPath, strings.Join(CuInterposeLauncherPrefix(), " "))
+		}
+		if path.Clean(mount.MountPath) == SnapshotControlMountPath {
+			controlMount = true
+		}
+	}
+	if !controlMount {
+		return fmt.Errorf("container %q requests multi-GPU support but does not mount the %s volume at %s, "+
+			"so the Snapshot agent cannot start it with multi-GPU support",
+			container.Name, SnapshotControlVolumeName, SnapshotControlMountPath)
 	}
 	return nil
 }

@@ -56,6 +56,18 @@ restore fails at
 
 ### Multi-GPU Workloads
 
+By default, requires a container runtime with NRI v0.10 or newer, enabled, on
+the source node: containerd 2.2 or newer. The Snapshot agent uses NRI to start
+the source workload through the multi-GPU launcher. On a node without NRI, or
+with an older runtime, the source container starts without the launcher, and the
+checkpoint fails at the
+[inspecting cuinterpose](../troubleshooting/checkpoints.md#inspecting-cuinterpose)
+step.
+
+Without NRI, set `config.checkpoint.multiGpuPreparation: initContainer` for
+`SnapshotJob` sources, and prepare a Pod you deploy yourself as shown in
+[Without NRI](../reference/workload-contract.md#without-nri).
+
 Requires [GPU CustomStorage](#gpu-customstorage), so CUDA user-mode driver
 (`libcuda.so`) 615 or newer. Without CustomStorage, a multi-GPU restore takes
 too long and uses too much memory to be practical. To select a newer user-mode
