@@ -139,6 +139,13 @@ TEST_F(RcloneProcessTest, DefaultCredentialChainPassesOnlyIdentityEnvironment)
     EXPECT_NO_THROW(
         chain.UploadFiles(directory.path(), {"bucket", "default-chain-region"}, {{"source", 8}}, Deadline()));
   }
+  unsetenv("AWS_REGION");
+  connection.ca_file = (directory.path() / "ca.pem").string();
+  std::ofstream(connection.ca_file) << "fake-ca\n";
+  {
+    S3Client chain(connection);
+    EXPECT_NO_THROW(chain.UploadFiles(directory.path(), {"bucket", "default-chain-ca"}, {{"source", 8}}, Deadline()));
+  }
   for (const auto& [name, value] : saved) {
     if (value)
       setenv(name.c_str(), value->c_str(), 1);

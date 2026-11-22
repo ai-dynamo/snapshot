@@ -56,11 +56,11 @@ main(int argc, char** argv)
     return token && std::string(token) == "fake-session-token" && auth && std::string(auth) == "false" &&
            !std::getenv("PATH") ? 0 : 4;
   }
-  if (remote == "pagebroker:bucket/default-chain" || remote == "pagebroker:bucket/default-chain-region") {
+  if (remote.starts_with("pagebroker:bucket/default-chain")) {
     std::set<std::string> actual;
     for (char** variable = environ; *variable; ++variable)
       actual.insert(*variable);
-    const std::set<std::string> expected{
+    std::set<std::string> expected{
         "RCLONE_CONFIG_PAGEBROKER_TYPE=s3",
         "RCLONE_CONFIG_PAGEBROKER_PROVIDER=AWS",
         "RCLONE_CONFIG_PAGEBROKER_ENV_AUTH=true",
@@ -74,6 +74,12 @@ main(int argc, char** argv)
         "AWS_CONTAINER_CREDENTIALS_FULL_URI=https://credentials.example.test/v1",
         "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE=/var/run/fake/container-token",
         remote.ends_with("-region") ? "AWS_REGION=eu-central-1" : "AWS_REGION=us-west-2"};
+    for (int i = 4; i + 1 < argc; ++i) {
+      if (std::string(argv[i]) == "--ca-cert")
+        expected.insert(std::string("AWS_CA_BUNDLE=") + argv[i + 1]);
+    }
+    if (remote.ends_with("-ca") && expected.size() != 14)
+      return 12;
     return actual == expected ? 0 : 11;
   }
   if (remote.starts_with("pagebroker:bucket/descriptors/")) {

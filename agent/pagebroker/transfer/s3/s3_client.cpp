@@ -92,6 +92,7 @@ constexpr char kExplicitAuthEnv[] = "RCLONE_CONFIG_PAGEBROKER_ENV_AUTH=false";
 constexpr char kEnvironmentAuthEnv[] = "RCLONE_CONFIG_PAGEBROKER_ENV_AUTH=true";
 constexpr char kAwsRegionEnv[] = "AWS_REGION";
 constexpr char kAwsDefaultRegionEnv[] = "AWS_DEFAULT_REGION";
+constexpr char kAwsCaBundleEnv[] = "AWS_CA_BUNDLE=";
 // The only ambient variables a child may see: the inputs of web identity and
 // container credentials. Static access keys come from the credentials file alone.
 constexpr const char* kIdentityVariables[] = {"AWS_ROLE_ARN",
@@ -383,10 +384,10 @@ WaitForRclone(Child& child, int output, int diagnostics, std::size_t output_limi
   return output_bytes;
 }
 
-// The token exchange needs a region before rclone applies its own, so the
-// store's region is the fallback when the platform injected none.
+// rclone loads credentials before it applies its own region and --ca-cert, so
+// the token exchange takes both from the environment.
 void
-AppendIdentityEnvironment(const std::string& region, std::vector<std::string>& environment)
+AppendIdentityEnvironment(const S3Connection& connection, std::vector<std::string>& environment)
 {
   environment.push_back(kEnvironmentAuthEnv);
   bool has_region = false;
@@ -398,8 +399,10 @@ AppendIdentityEnvironment(const std::string& region, std::vector<std::string>& e
     const std::string_view variable(name);
     has_region = has_region || variable == kAwsRegionEnv || variable == kAwsDefaultRegionEnv;
   }
-  if (!has_region && !region.empty())
-    environment.push_back(std::string(kAwsRegionEnv) + '=' + region);
+  if (!has_region && !connection.region.empty())
+    environment.push_back(std::string(kAwsRegionEnv) + '=' + connection.region);
+  if (!connection.ca_file.empty())
+    environment.push_back(kAwsCaBundleEnv + connection.ca_file);
 }
 
 } // namespace
@@ -507,7 +510,7 @@ S3Client::S3Client(S3Connection connection, S3Limits limits) : limits_(limits)
                   kDisableAwsConfigEnv,
                   kDisableAwsFileEnv};
   if (connection.UsesDefaultCredentialChain())
-    AppendIdentityEnvironment(connection.region, environment_);
+    AppendIdentityEnvironment(connection, environment_);
   else
     environment_.insert(environment_.end(), {std::string(kExplicitAuthEnv),
                                              kRemoteAccessKeyEnv + connection.access_key_id,
