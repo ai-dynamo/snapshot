@@ -408,7 +408,8 @@ between the two. The agent passes them in the request:
    on every call that carries a `StorageBackend`. The credentials are in the
    shared-credentials format PageBroker parses today.
 3. PageBroker keeps them in memory for the transaction and hands them to its
-   S3 tooling as environment or arguments, as it does today. It does not store
+   S3 tooling only through the child process's environment, as it does today;
+   credentials never appear in command arguments. It does not store
    them in a transaction record, so a call after a PageBroker restart carries
    them again. The CA bundle is not secret; where a tool needs a path,
    PageBroker writes it to its own scratch space.
@@ -551,8 +552,10 @@ read through `--snapshot-storage-config`, and passes `storage.defaultClassName`
 as `--default-storage-class`. The operator uses the file for one thing: when
 the cluster has no `SnapshotStorageClass` at all, it creates the default class
 under that name. That covers a fresh install and the first upgrade. If any
-class exists it does nothing, so it never recreates a deleted class or reverts
-an edit. Later changes to the store values do not change an existing class; to
+class exists it does nothing, so it does not recreate a deleted class or revert
+an edit while another class remains. A cluster whose last class was deleted has
+no class again, so the next operator start creates the default class; that is
+intended. Later changes to the store values do not change an existing class; to
 switch stores, create a new class and point `storage.defaultClassName` at it.
 
 Classes are the only way to define a store. The operator builds its backend
