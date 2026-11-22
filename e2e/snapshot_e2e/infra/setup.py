@@ -30,6 +30,7 @@ import yaml
 from kubernetes import client
 from kubernetes.client import ApiException
 from packaging.version import Version
+from urllib3.exceptions import HTTPError
 
 from snapshot_e2e import k8s
 from snapshot_e2e.frameworks import SharedModelCache
@@ -1442,6 +1443,9 @@ def report_unready_pod_events(namespace: str, pods: list[client.V1Pod]) -> str:
             )
         except ApiException as exc:
             log(f"  {name}: could not list events: {exc.status} {exc.reason}")
+            continue
+        except HTTPError as exc:
+            log(f"  {name}: could not list events: {exc}")
             continue
         if not events:
             log(f"  {name}: no Warning events")
