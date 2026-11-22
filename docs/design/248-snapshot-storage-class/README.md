@@ -184,8 +184,10 @@ type SnapshotStorageClassSpec struct {
     S3  *S3StoreSpec  `json:"s3,omitempty"`
 }
 
-// A claim in the Snapshot namespace that the chart already mounts.
-// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="pvc is immutable"
+// A claim in the Snapshot namespace that the chart already mounts. An absent
+// and an empty basePath or prefix compare as equal, so an update that drops
+// the empty field is not taken for a location change.
+// +kubebuilder:validation:XValidation:rule="self.claimName == oldSelf.claimName && self.?basePath.orValue('') == oldSelf.?basePath.orValue('')",message="claimName and basePath are immutable"
 // +kubebuilder:validation:XValidation:rule="!has(self.basePath) || !self.basePath.split('/').exists(p, p == 'artifacts')",message="basePath must not contain an artifacts segment"
 type PVCStoreSpec struct {
     ClaimName string `json:"claimName"`
@@ -194,7 +196,7 @@ type PVCStoreSpec struct {
 
 // Endpoint, Region, Bucket and Prefix are storeID inputs; the rest are access
 // settings and stay editable.
-// +kubebuilder:validation:XValidation:rule="self.endpoint == oldSelf.endpoint && self.region == oldSelf.region && self.bucket == oldSelf.bucket && self.?prefix == oldSelf.?prefix",message="endpoint, region, bucket and prefix are immutable"
+// +kubebuilder:validation:XValidation:rule="self.endpoint == oldSelf.endpoint && self.region == oldSelf.region && self.bucket == oldSelf.bucket && self.?prefix.orValue('') == oldSelf.?prefix.orValue('')",message="endpoint, region, bucket and prefix are immutable"
 // +kubebuilder:validation:XValidation:rule="!has(self.prefix) || !self.prefix.split('/').exists(p, p == 'artifacts')",message="prefix must not contain an artifacts segment"
 type S3StoreSpec struct {
     Endpoint string `json:"endpoint"`
@@ -216,7 +218,7 @@ type SnapshotStorageClassStatus struct {
 }
 ```
 
-`Ready` carries the reasons `ClaimNotMounted`, `CredentialsUnavailable`,
+`Ready` carries the reasons `BasePathNotAllowed`, `ClaimNotMounted`, `CredentialsUnavailable`,
 `DuplicateStore`, `StoreUnreachable` and `Terminating`.
 
 #### Request and content fields
@@ -300,6 +302,14 @@ another store's snapshots. Between clusters a location may be shared.
   segment named `artifacts`, the directory every store keeps its snapshots in,
   so no class can be placed inside another store's `artifacts/`, in this
   cluster or another.
+- **Whole claim.** A class on `storage.pvc.name`, the single claim mounted at
+  `/checkpoints`, must use the whole claim, `basePath: /`. Listed claims are
+  mounted inside that claim's mount, so a subdirectory store on it, such as
+  `basePath: /archive`, would have the same path as a listed claim named
+  `archive` and would write to that claim. The operator refuses such a class
+  with `BasePathNotAllowed`. A store in a subdirectory needs a listed claim,
+  where any `basePath` is allowed. The rule ends when the single claim is
+  removed.
 - **Digest.** Another class in the cluster with the same `storeID` is
   `DuplicateStore`. The scan reads the class informer cache and compares only
   immutable location fields, so a result changes only when a class is added or
@@ -309,8 +319,10 @@ another store's snapshots. Between clusters a location may be shared.
   location, reads it back, finds it in a listing and deletes it. Those are the
   four permissions a snapshot needs over its life: capture, restore, cleanup
   and deletion. The object is `artifacts/.access-check-<cluster ID>`. It sits
-  inside `artifacts/`, where the snapshots are, so a policy scoped by path
-  cannot pass the check and still deny the snapshots. Its name is not a UUID,
+  inside `artifacts/`, where the snapshots are, so a policy scoped to another
+  path cannot pass the check. The check proves access to that one key: a
+  policy written per key can still deny `artifacts/<uid>/`, so `Ready` does
+  not guarantee access to every snapshot key. Its name is not a UUID,
   so no sweep touches it, and it carries the cluster ID, so two clusters never
   collide. A failure is `StoreUnreachable`, or
   `CredentialsUnavailable` when the credentials are the cause, and the
@@ -384,12 +396,14 @@ new attempt; the retry removes that manual step and changes nothing else. For PV
 claim at `/checkpoints`, each listed claim at `/checkpoints/<claimName>`,
 rendered by the chart into the agent's `config.yaml` and the operator's
 `--pvc-claim-names` flag. Every store path is below `/checkpoints`, the one
-source root the privileged mount helper accepts, so a restore that mounts a
-snapshot directly from a listed claim needs no change to the helper.
+source root the privileged mount helper accepts, so the direct restore of a
+snapshot on a listed claim needs no change to the helper.
 
 Before any I/O on a PVC store, the agent confirms from its mount table that
-the store's path is a mount point; a directory that merely exists is not
-enough. A listed claim is mounted inside the default claim's mount, so
+the claim's mount path, `/checkpoints` or `/checkpoints/<claimName>`, is a
+mount point; a directory that merely exists is not enough. The class's
+`basePath` is resolved below that mount after the check, so a store in a
+subdirectory of a claim passes. A listed claim is mounted inside the default claim's mount, so
 Kubernetes creates its directory in the default claim, which every agent
 shares. An agent pod that still runs the previous spec sees that directory
 without the mount, and it also sees the new claim list, because `config.yaml`
@@ -399,7 +413,16 @@ into the default claim. A path that is not a mount point fails with
 PageBroker, which shares the pod's mounts, and the operator makes the same
 check before cleanup.
 
-Payload restores do not use that client. They go through the native restore
+How a restore reads a snapshot depends on the kind of store. From a PVC class
+the restore is direct by default: the snapshot's directory on the claim is
+mounted read-only into the pod, and nothing is copied into PageBroker's
+staging. `pageBroker.restoreMode: staged` remains the opt-in for a staged copy.
+From an S3 class the restore is always staged, because S3 has no other read
+path. Today a bound snapshot is restored only through staging, on a PVC too,
+so the direct restore of a bound snapshot on a PVC is new work that this
+proposal depends on; see [Dependencies](#dependencies).
+
+S3 payload restores do not use that client. They go through the native restore
 engine, which holds one session per PageBroker process and reads its CA bundle
 and addressing mode once at start. A session is fixed to one endpoint, one
 region and one set of credentials for its whole life. Restores whose stores
@@ -522,7 +545,10 @@ path and nobody has to choose one. The listed claims are mounted inside the
 default claim's mount, so Kubernetes creates an empty directory per name at
 the root of the default claim. The chart refuses the name `artifacts`, which
 would hide the default store's snapshots, and a name must not match a
-directory that already exists at that root. `storage.pvc.name`, the single
+directory that already exists at that root. It also refuses a list that
+contains `storage.pvc.name`, because one claim name would then map to two
+paths. A class on `storage.pvc.name` must use the whole claim; see
+[Store uniqueness](#store-uniqueness). `storage.pvc.name`, the single
 claim at `/checkpoints`, is deprecated: `claimNames` replaces it, and once it
 is removed `/checkpoints` holds only the listed claims' mounts. The chart
 writes the same name-to-path
@@ -552,8 +578,13 @@ spec:
     basePath: /prod               # A directory inside it, not the mount path.
 ```
 
-Classes require `operator.bindNewContents` and `pageBroker.artifactAddressing`;
-the chart fails the render otherwise.
+Classes require store binding and artifact addressing, the chart values
+`operator.bindNewContents` and `pageBroker.artifactAddressing`. While binding
+is off, the operator still creates the default class, unnamed requests resolve
+to it, and snapshots keep the old flow. Any other class is not reconciled, and
+a request that names it fails with `StorageClassNotReady`; the message says
+binding is off. Both values are deprecated, since classes leave them nothing
+to choose between; their removal is planned separately.
 
 Every other `storage.*` value keeps its meaning and feeds the default class: `storage.type`
 selects the `pvc` or `s3` block; `s3.endpoint`, `region`, `bucket`, `prefix`, `addressing`,
@@ -633,6 +664,9 @@ reads only that one store, so the stores of other classes are not touched.
 
 - SNEP-237 artifact addressing: bound content, `storeID`, `ArtifactTarget` and
   `PublishedArtifact`; images that accept a per-request `StorageBackend`.
+- Direct restore of a bound snapshot on a PVC store, in the agent and the
+  protocol to PageBroker. Until it exists, a restore from a PVC class is
+  staged, so it comes before binding becomes the default for PVC.
 - Workload identity support in PageBroker and the operator's cleanup, for
   classes without a Secret: the default credential chain, tracked in issue
   988, and refreshable credentials from a projected service-account token,
@@ -641,11 +675,15 @@ reads only that one store, so the stores of other classes are not touched.
 ### Test Plan
 
 - **API:** CEL rejects two store blocks, none, a move between blocks, a location change, a name over
-  63 characters, or an `artifacts` path segment.
+  63 characters, or an `artifacts` path segment; an update that drops an empty
+  `prefix` or `basePath` is accepted.
 - **Operator:** Ready/NotReady for each reason; digest detection, including
   two classes created at once; the access check, run inside `artifacts/`, including credentials that
   can write but not read, list or delete; nested stores are accepted;
   a Ready class goes `Ready=False` when its Secret is revoked or deleted;
+  a class on the single claim with a `basePath` other than `/` is refused;
+  with binding off the default class is created and a request that names
+  another class fails with `StorageClassNotReady`;
   `.origin` is written at binding and for content bound earlier; default
   resolution from the configured name, with the named
   class missing, and after the name changes; the default class is created only
@@ -655,9 +693,10 @@ reads only that one store, so the stores of other classes are not touched.
 - **Chart:** changing only `storage.defaultClassName` changes the operator's
   pod template and leaves the agent DaemonSet's unchanged; a listed claim that
   is missing or not bound fails the upgrade, and a claim that cannot mount
-  stops the agent rollout at the first pod.
+  stops the agent rollout at the first pod; a list that contains
+  `storage.pvc.name` fails the render.
 - **Agent:** Secret fetch per transaction; credentials in the request and never
-  on a volume or in a log; empty credentials for a class without a Secret; mount mapping for the default and listed claims; a listed claim's directory with nothing mounted on it is refused; and a direct restore from a listed claim; `StorageClassUnavailable`, and its retry once implemented,
+  on a volume or in a log; empty credentials for a class without a Secret; mount mapping for the default and listed claims; a listed claim's directory with nothing mounted on it is refused, and a class with a `basePath` below a mounted claim passes; a bound snapshot restores directly from the single claim and from a listed claim, staged with `pageBroker.restoreMode: staged`, and always staged from S3; `StorageClassUnavailable`, and its retry once implemented,
   on a missing class, a `status.storeID` mismatch, or a claim with no mount.
 - **Maintenance:** a sweep looks only inside `artifacts/` and deletes only
   UUID-named orphans whose `.origin` names this cluster, on S3 and on a PVC.
