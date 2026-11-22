@@ -130,7 +130,7 @@ keeps its binding. See [Default class](#default-class).
 
 | Risk | What goes wrong | How the design handles it |
 | --- | --- | --- |
-| PVC not mounted | A PVC class names a claim the agents cannot see; captures would fail on every node. | The operator marks the class `Ready=False`, reason `ClaimNotMounted`, by checking the claim against the mounted set the chart renders. Adding a claim is a Helm upgrade (`storage.pvc.additionalClaims`). Documented limitation for this iteration. |
+| PVC not mounted | A PVC class names a claim the agents cannot see; captures would fail on every node. | The operator marks the class `Ready=False`, reason `ClaimNotMounted`, by checking the claim against the mounted set the chart renders. Adding a claim is a Helm upgrade (`storage.pvc.claimNames`). Documented limitation for this iteration. |
 | Agent without the claim | The class is `Ready`, because the operator reads the chart's mounted set, but a particular agent does not have the claim: it still runs the previous pod spec during a rolling upgrade, or the claim is missing on its node. | The agent maps `claimName` to a mount path from its own `config.yaml` and checks the path exists before any I/O. A claim it cannot map fails the operation with `StorageClassUnavailable`, and nothing is retried against another store. The existing retry succeeds once the node's agent has the mount. |
 | Class edited after binding | The location fields change; content bound to the old `storeID` would read or delete in the wrong place. Or `reclaimPolicy` flips and existing content loses data it was meant to keep. | Location fields are immutable through CEL, and the policy is frozen on the content at binding. Credentials and TLS settings stay editable because they are not identity inputs. The agent and maintenance compare the class's `status.storeID` with the content's binding before any I/O and refuse a mismatch. |
 | Class deleted under content | Content loses the only description of where its snapshots are. | Protection finalizer; a terminating class still resolves for existing content. Force-removing the finalizer leaves content with the existing `StoreInactive` handling from SNEP-237. |
@@ -369,9 +369,11 @@ credentials or a changed setting get a new client. An entry idle for 15 minutes
 is dropped, the cache holds at most 64 entries, and a client with calls in
 flight is never dropped. A missing class or Secret fails the operation with
 `StorageClassUnavailable`, and nothing is retried against another store. For PVC the agent maps `claimName` to a mount path: the default
-claim at `/checkpoints`, each extra claim at `/snapshot-stores/<claimName>`,
+claim at `/checkpoints`, each listed claim at `/checkpoints/<claimName>`,
 rendered by the chart into the agent's `config.yaml` and the operator's
-`--mounted-claims` flag.
+`--pvc-claim-names` flag. Every store path is below `/checkpoints`, the one
+source root the privileged mount helper accepts, so a restore that mounts a
+snapshot directly from a listed claim needs no change to the helper.
 
 Payload restores do not use that client. They go through the native restore
 engine, which holds one session per PageBroker process and reads its CA bundle
@@ -481,19 +483,26 @@ storage:
   # the values below when the cluster has no class.
   defaultClassName: default
   pvc:
-    # Claims to mount for additional PVC classes, in the release namespace.
-    additionalClaims: []
+    # Claims that PVC classes may use, in the release namespace.
+    claimNames: []
 ```
 
-A claim name is all `additionalClaims` needs, because the chart derives the
+A claim name is all `claimNames` needs, because the chart derives the
 rest. For each name it adds a volume and a mount at
-`/snapshot-stores/<claimName>` to the operator and to the agent pod's agent and
+`/checkpoints/<claimName>` to the operator and to the agent pod's agent and
 PageBroker containers, as it already does for the default claim at
 `/checkpoints`; Kubernetes mounts them when those pods restart. The name is
 unique in the namespace and a valid path segment, so no two claims share a
-path and nobody has to choose one. The chart writes the same name-to-path
+path and nobody has to choose one. The listed claims are mounted inside the
+default claim's mount, so Kubernetes creates an empty directory per name at
+the root of the default claim. The chart refuses the name `artifacts`, which
+would hide the default store's snapshots, and a name must not match a
+directory that already exists at that root. `storage.pvc.name`, the single
+claim at `/checkpoints`, is deprecated: `claimNames` replaces it, and once it
+is removed `/checkpoints` holds only the listed claims' mounts. The chart
+writes the same name-to-path
 mapping into the agent's `config.yaml` and the names into the operator's
-`--mounted-claims` flag, so a class's `claimName` always resolves to the
+`--pvc-claim-names` flag, so a class's `claimName` always resolves to the
 directory that was mounted. The claims must already exist in the release
 namespace and be mountable on every agent node. The list is the whole set, so
 an upgrade repeats the claims it keeps:
@@ -501,9 +510,9 @@ an upgrade repeats the claims it keeps:
 ```yaml
 storage:
   pvc:
-    additionalClaims:
-      - team-a-snapshots   # /snapshot-stores/team-a-snapshots
-      - team-b-snapshots   # /snapshot-stores/team-b-snapshots
+    claimNames:
+      - team-a-snapshots   # /checkpoints/team-a-snapshots
+      - team-b-snapshots   # /checkpoints/team-b-snapshots
 ---
 apiVersion: snapshot.nvidia.com/v1alpha1
 kind: SnapshotStorageClass
@@ -611,7 +620,7 @@ reads only that one store, so the stores of other classes are not touched.
 - **Chart:** changing only `storage.defaultClassName` changes the operator's
   pod template and leaves the agent DaemonSet's unchanged.
 - **Agent:** Secret fetch per transaction; credentials in the request and never
-  on a volume or in a log; empty credentials for a class without a Secret; mount mapping for default and extra claims; `StorageClassUnavailable`
+  on a volume or in a log; empty credentials for a class without a Secret; mount mapping for the default and listed claims, and a direct restore from a listed claim; `StorageClassUnavailable`
   on a missing class, a `status.storeID` mismatch, or a claim with no mount.
 - **Maintenance:** a sweep looks only inside `artifacts/` and deletes only
   UUID-named orphans whose `.origin` names this cluster, on S3 and on a PVC.
