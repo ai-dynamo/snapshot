@@ -257,10 +257,59 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 {{- toYaml $limits -}}
 {{- end -}}
 
+{{/* Non-empty when S3 credentials come from storage.s3.credentialEndpoint. */}}
+{{- define "snapshot.s3CredentialEndpointEnabled" -}}
+{{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialEndpoint.url -}}true{{- end -}}
+{{- end -}}
+
+{{/* Directory the projected service-account token for
+     storage.s3.credentialEndpoint is mounted at, in PageBroker and the operator. */}}
+{{- define "snapshot.s3IdentityTokenMountDir" -}}/var/run/secrets/snapshot/s3-identity{{- end -}}
+
+{{/* Variables the S3 clients' default credential chain reads to present the
+     projected token to the credential endpoint. */}}
+{{- define "snapshot.s3CredentialEndpointEnv" -}}
+- name: AWS_CONTAINER_CREDENTIALS_FULL_URI
+  value: {{ .Values.storage.s3.credentialEndpoint.url | quote }}
+- name: AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE
+  value: {{ printf "%s/token" (include "snapshot.s3IdentityTokenMountDir" .) | quote }}
+{{- end -}}
+
+{{- define "snapshot.s3IdentityTokenVolumeMount" -}}
+- name: s3-identity-token
+  mountPath: {{ include "snapshot.s3IdentityTokenMountDir" . }}
+  readOnly: true
+{{- end -}}
+
+{{/* kubelet rotates the projected token before it expires, and the clients
+     read the file again on every credential refresh. */}}
+{{- define "snapshot.s3IdentityTokenVolume" -}}
+- name: s3-identity-token
+  projected:
+    sources:
+      - serviceAccountToken:
+          path: token
+          expirationSeconds: {{ .Values.storage.s3.credentialEndpoint.tokenExpirationSeconds | int }}
+          {{- with .Values.storage.s3.credentialEndpoint.tokenAudience }}
+          audience: {{ . | quote }}
+          {{- end }}
+{{- end -}}
+
 {{/* Fails the render on S3 settings PageBroker would refuse at startup. */}}
 {{- define "snapshot.validateS3Settings" -}}
 {{- if eq .Values.storage.type "s3" -}}
 {{- $s3 := .Values.storage.s3 -}}
+{{- if $s3.credentialEndpoint.url -}}
+{{- if $s3.credentialsSecretRef -}}
+{{- fail "storage.s3.credentialEndpoint.url and storage.s3.credentialsSecretRef are two credential sources; set one" -}}
+{{- end -}}
+{{- if not (hasPrefix "https://" ($s3.credentialEndpoint.url | lower)) -}}
+{{- fail "storage.s3.credentialEndpoint.url must be an https URL" -}}
+{{- end -}}
+{{- if lt ($s3.credentialEndpoint.tokenExpirationSeconds | int) 600 -}}
+{{- fail "storage.s3.credentialEndpoint.tokenExpirationSeconds must be at least 600" -}}
+{{- end -}}
+{{- end -}}
 {{- $addressing := $s3.addressing | default "" -}}
 {{- if not (has $addressing (list "" "path" "virtual")) -}}
 {{- fail (printf "storage.s3.addressing must be \"path\" or \"virtual\", got %q" $addressing) -}}

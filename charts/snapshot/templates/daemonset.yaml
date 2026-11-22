@@ -203,6 +203,9 @@ spec:
             - name: AWS_SHARED_CREDENTIALS_FILE
               value: {{ printf "%s/%s" (include "snapshot.s3CredentialsMountDir" .) .Values.storage.s3.credentialsSecretKey | quote }}
             {{- end }}
+            {{- if include "snapshot.s3CredentialEndpointEnabled" . }}
+            {{- include "snapshot.s3CredentialEndpointEnv" . | nindent 12 }}
+            {{- end }}
             {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.addressing }}
             # PageBroker refuses to start unless this agrees with the JSON's addressing.
             - name: RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING
@@ -273,6 +276,9 @@ spec:
               mountPath: {{ include "snapshot.s3CredentialsMountDir" . }}
               readOnly: true
             {{- end }}
+            {{- if include "snapshot.s3CredentialEndpointEnabled" . }}
+            {{- include "snapshot.s3IdentityTokenVolumeMount" . | nindent 12 }}
+            {{- end }}
             {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.caBundleConfigMapRef }}
             - name: s3-ca-bundle
               mountPath: {{ include "snapshot.s3CABundleMountDir" . }}
@@ -341,6 +347,9 @@ spec:
             items:
               - key: {{ .Values.storage.s3.credentialsSecretKey }}
                 path: {{ .Values.storage.s3.credentialsSecretKey }}
+        {{- end }}
+        {{- if include "snapshot.s3CredentialEndpointEnabled" . }}
+        {{- include "snapshot.s3IdentityTokenVolume" . | nindent 8 }}
         {{- end }}
         {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.caBundleConfigMapRef }}
         - name: s3-ca-bundle
