@@ -28,6 +28,9 @@ operator:
 
   # Enable only after the compatible agent/PageBroker rollout completes; see docs/operate/configure-storage.md.
   bindNewContents: false
+  serviceAccount:
+    # Annotations for the operator's service account (e.g., for IRSA).
+    annotations: {}
   resources:
     limits:
       cpu: 500m
@@ -137,7 +140,12 @@ storage:
     # re-reads the file every 5 minutes). PageBroker does not yet: it
     # snapshots credentials once at startup, so this file reaching it is
     # forward-compatible with that changing, not a rotation guarantee today.
-    # Required when type=s3.
+    #
+    # Empty selects workload identity: no Secret is mounted, and PageBroker and
+    # the operator resolve credentials through the default credential chain
+    # under their service accounts (serviceAccount.annotations and
+    # operator.serviceAccount.annotations). Those credentials refresh without a
+    # restart. Instance metadata is excluded, so the node's role is never used.
     credentialsSecretRef: ""
     # Key inside credentialsSecretRef holding the credentials file.
     credentialsSecretKey: credentials
@@ -297,7 +305,7 @@ seccomp:
   # Use seccomp.deploy; seccomp.enabled is not a chart value.
   deploy: true
 
-# Service account configuration for the agent
+# Service account configuration for the agent and PageBroker, which share a pod
 serviceAccount:
   # Create service account
   create: true

@@ -199,7 +199,7 @@ spec:
             runAsUser: 0
             runAsGroup: 0
           env:
-            {{- if eq .Values.storage.type "s3" }}
+            {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
             - name: AWS_SHARED_CREDENTIALS_FILE
               value: {{ printf "%s/%s" (include "snapshot.s3CredentialsMountDir" .) .Values.storage.s3.credentialsSecretKey | quote }}
             {{- end }}
@@ -268,7 +268,7 @@ spec:
               mountPath: /etc/snapshot-s3
               readOnly: true
             {{- end }}
-            {{- if eq .Values.storage.type "s3" }}
+            {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
             - name: s3-credentials
               mountPath: {{ include "snapshot.s3CredentialsMountDir" . }}
               readOnly: true
@@ -334,7 +334,7 @@ spec:
           configMap:
             name: {{ include "snapshot.pageBrokerS3ConfigName" . | quote }}
         {{- end }}
-        {{- if eq .Values.storage.type "s3" }}
+        {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
         - name: s3-credentials
           secret:
             secretName: {{ .Values.storage.s3.credentialsSecretRef }}
