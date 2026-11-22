@@ -16,8 +16,9 @@ is nothing to release. A namespace that is being deleted holds no slot.
 
 The limit is recomputed while a suite waits: how many suite budgets fit into
 what the tightest GPU node has left after every Pod outside the slot-holding
-namespaces, capped by free GPUs, keeping one suite of headroom. If the limit
-cannot be computed, the last limit stays, or FALLBACK_LIMIT if there is none.
+namespaces, capped by the free GPUs on the nodes the suite's workloads can use,
+keeping one suite of headroom. If the limit cannot be computed, the last limit
+stays, or FALLBACK_LIMIT if there is none.
 
 Namespaces created in the same second are ordered by name, so the first check
 waits SETTLE_SECONDS for every namespace that could sort ahead to exist.
@@ -40,6 +41,7 @@ from urllib3.exceptions import HTTPError
 
 from snapshot_e2e.infra import preflight
 from snapshot_e2e.infra.setup import create_host_namespace, log, node_sync_selector
+from snapshot_e2e.workloads import workload_scheduling
 
 
 E2E_NAMESPACE_SELECTOR = "snapshot-e2e=true"
@@ -138,6 +140,14 @@ def compute_limit(
     eligible = agent_nodes(nodes)
     if not eligible:
         raise CapacityError(f"no node the vCluster syncs is labelled {GPU_NODE_LABEL}=true")
+    selector = workload_scheduling(cpu_only=False)["nodeSelector"]
+    gpu_nodes = {
+        node.metadata.name
+        for node in eligible
+        if all((node.metadata.labels or {}).get(key) == value for key, value in selector.items())
+    }
+    if not gpu_nodes:
+        raise CapacityError(f"no synced GPU node matches the workload node selector {selector}")
 
     used: defaultdict[str, Counter[str]] = defaultdict(Counter)
     for pod in pods:
@@ -153,8 +163,8 @@ def compute_limit(
         memory = allocatable["memory"] - taken["memory"]
         fit = max(int(min(cpu / SUITE_CPU, memory / SUITE_MEMORY)), 0)
         room.append((fit, node.metadata.name, cpu, memory))
-        gpus = allocatable[GPU_RESOURCE] - taken[GPU_RESOURCE]
-        free_gpus += max(gpus, Decimal(0))
+        if node.metadata.name in gpu_nodes:
+            free_gpus += max(allocatable[GPU_RESOURCE] - taken[GPU_RESOURCE], Decimal(0))
 
     node_fit, name, cpu, memory = min(room)
     gpu_fit = int(free_gpus / SUITE_GPUS)
@@ -165,7 +175,8 @@ def compute_limit(
         f"suite limit {limit}: the tightest of {len(eligible)} GPU nodes, {name}, has "
         f"{cpu:.1f} CPUs and {memory / 2**30:.0f} GiB free outside the slot holders, room for "
         f"{node_fit} suites of {SUITE_CPU} CPUs and {SUITE_MEMORY / 2**30:.0f} GiB; "
-        f"{free_gpus:.0f} free GPUs fit {gpu_fit} suites of {SUITE_GPUS}",
+        f"{free_gpus:.0f} free GPUs on the {len(gpu_nodes)} nodes the workloads can use fit "
+        f"{gpu_fit} suites of {SUITE_GPUS}",
     )
 
 
