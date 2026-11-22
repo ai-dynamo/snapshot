@@ -590,8 +590,10 @@ content's `status.members`, once, as its name and UID: it binds the content of
 the request's own member `PodSnapshot`, after checking each back-reference, so
 a content that merely names the group content is never bound, and no entry
 ever changes. The group content is Ready only when every declared member is
-bound and its content exists with the recorded UID and is Ready. This record,
-not the request, is what a restore reads to find the complete set.
+bound and its content exists with the recorded UID and is Ready; until then,
+its `Ready` condition is False and its message identifies the members
+preventing readiness and why. This record, not the request, is what a restore
+reads to find the complete set.
 
 The operator marks the `PodGroupSnapshot` Ready only when its group content is
 Ready, which requires every member to be Checkpointed, and otherwise records
@@ -1028,7 +1030,7 @@ refused capture leaves its source untouched by Snapshot but possibly unable to
 communicate, which the `Refused` message states.
 
 A group member's capture retries follow
-[SNEP-394](../../design/394-capture-retry/README.md) only where they keep the
+[SNEP-394](../394-capture-retry/README.md) only where they keep the
 members consistent. Before the commit, a member retries nothing: a failure
 refuses the attempt, and the owner retries with a new `PodGroupSnapshot`, since
 a session serves one attempt. After the commit, a member repeats only its dump,
@@ -1842,17 +1844,18 @@ review that settles the open questions in [Appendix A](#a-open-questions).
    its `PodGroupSnapshotContent`, so reuse follows the single-Pod work on
    reusable artifacts ([#604](https://github.com/ai-dynamo/snapshot/issues/604))
    and its security boundary: namespaced objects never name artifacts. An admin
-   imports a group by creating its group content first, naming each member
-   content in `spec.members[].contentName`, and then the member contents, whose
-   `source` is the existing artifact and whose `spec.podGroup` names the group
-   content; the operator binds each member once both sides agree, as a
-   pre-bound `PersistentVolume` is bound. The record's member IDs are the
-   cluster's names for the capture, so an import may rename members to match
-   the labels of the Pods that will restore them, but it keeps the capture's
-   rank order, which restore admission checks against each artifact. A user then binds a `PodGroupSnapshot`
-   through `spec.source.existingContent`, and Pods restore from it as from any
-   other. These fields are not in the alpha API, and their names and reclaim
-   policy will follow the single-Pod import.
+   imports a group by creating one group content whose members, in rank order,
+   each name an existing artifact, with the same import source that a
+   single-Pod content uses. The operator creates each member's content from its
+   entry, with `spec.podGroup` naming the group content, and binds it: having
+   created it, the operator needs no other proof of membership. The record's
+   member IDs are the cluster's names for the capture, so an import may rename
+   members to match the labels of the Pods that will restore them, but it keeps
+   the capture's rank order, which restore admission checks against each
+   artifact. A user then binds a `PodGroupSnapshot` through
+   `spec.source.existingContent`, and Pods restore from it as from any other.
+   These fields are not in the alpha API, and their names and reclaim policy
+   will follow the single-Pod import.
 6. **Availability.** Which evidence, such as the observed rate of
    `CoordinatorLost` and the measured takeover time against the hold and library
    timeouts, would justify keeping attempts alive across a coordinator restart,
