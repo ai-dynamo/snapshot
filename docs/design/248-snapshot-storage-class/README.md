@@ -140,6 +140,7 @@ keeps its binding. See [Default class](#default-class).
 | Duplicate location | Two classes in one cluster describe the same place, so one store gets two policies and two sets of access settings. | The operator refuses `Ready` for the later class with reason `DuplicateStore` and names the other. Two classes that reach one bucket through different hostnames are not detected; that is harmless, because a sweep keeps every directory whose content exists in the cluster, whichever class it is bound to. See [Store uniqueness](#store-uniqueness). |
 | Shared store | Several clusters use one location. A sweep or a delete in one cluster could remove another's snapshots. | Each content directory carries `.origin` with the creating cluster's ID. A sweep deletes only orphans whose `.origin` names its own cluster, and deleting content skips a directory that names another. Each cluster's credentials can still read and delete the others' snapshots, so share only between clusters that trust each other. A destroyed cluster's directories stay until an administrator removes them. |
 | Older release on the same location | A cluster on a release without classes, or one rolled back to it, writes no `.origin` and sweeps every directory that has no content in that cluster. | Not preventable from the store. Do not share a location with such a cluster, and before a rollback make sure no other cluster uses the location. |
+| Rollback with retained data | The previous release ignores `reclaimPolicy` and `.retained`. After a rollback its sweep deletes retained directories in the store that `storage.*` names, and deleting a `Retain` content deletes its data. | Not preventable from the new release. The Rollback procedure tells the administrator to copy retained data out of that store first. Stores of other classes are not reached by the previous operator. |
 | Nested stores | One store's location is a parent of another's, in this cluster or another. | Allowed, because each store keeps its snapshots under its own `artifacts/`: a sweep looks only there and deletes only orphans named by a UUID, and deleting content removes only its own recorded handles. The API rejects a location inside another store's `artifacts/`. |
 | Old agent, new class | During a rolling upgrade an agent that predates this proposal receives content bound to a non-default class. | It passes its startup store to PageBroker, whose `storeID` does not match the content's; PageBroker returns `STORE_MISMATCH` and the capture fails before any I/O. The existing retry picks it up after the node upgrades. |
 | Restore from several S3 stores | The native restore engine holds one session per PageBroker process, fixed to one endpoint, one region and one set of credentials, and reads its CA bundle and addressing mode once at start. | Restores whose stores share the endpoint, region and credentials run in parallel; a restore that differs in any of them waits until the others drain, then PageBroker replaces the session. A long restore delays the others, and a waiting transaction can expire. An S3 class whose CA bundle or addressing mode differs from PageBroker's startup values cannot restore. Parallel restore across sessions is a follow-up; see [Agent and PageBroker](#agent-and-pagebroker). |
@@ -565,6 +566,15 @@ An installation upgraded from a release without classes keeps working after a
 
 Rollback to the previous chart leaves the CRD and `default` object in place;
 the old operator ignores both and reads `storage.yaml`.
+
+The previous release does not know `reclaimPolicy` or the `.retained` file, and
+its sweep cannot be turned off. In the store that `storage.*` names, a rollback
+therefore loses retained data in two ways: the first sweep deletes every
+directory that has no content in the cluster, which includes all data already
+retained, and deleting a content created with `Retain` deletes its data. Before
+a rollback, copy the retained data out of that store, and do not delete
+`Retain` content until the cluster is upgraded again. The previous operator
+reads only that one store, so the stores of other classes are not touched.
 
 ### Monitoring
 
