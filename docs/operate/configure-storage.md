@@ -152,11 +152,23 @@ PageBroker and cleanup runs in the operator:
 | PageBroker, in the agent pod | The agent's: the release's full name, for example `snapshot`, unless `serviceAccount.name` sets another | `serviceAccount.annotations` | Read, write and list |
 | Operator | The operator's, the agent's default name with `-operator` appended | `operator.serviceAccount.annotations` | List and delete |
 
-Bind each to an identity with that access. Platforms bind in one of two ways:
-with an annotation on the service account, or with an association that names the
-service account and is created on the platform side. Set the annotation values
-only in the first case. The platform must inject the identity's token and
-variables into the pods; the chart does not add them.
+Bind each to an identity with that access. How the pods get that identity
+depends on the platform:
+
+- **The platform injects it.** Bind both service accounts in the way your
+  platform defines: with an annotation on the service account, or with an
+  association that names the service account and is created on the platform
+  side. Set the annotation values only in the first case. The platform adds the
+  token and its variables to the pods
+- **A credential endpoint issues it.** Set `storage.s3.credentialEndpoint.url`
+  to the endpoint's `https` URL. The chart then mounts a service-account token
+  into PageBroker and the operator, which present it to the endpoint and renew
+  the credentials before they expire. Set
+  `storage.s3.credentialEndpoint.tokenAudience` to the audience the endpoint
+  expects. This cannot be combined with `storage.s3.credentialsSecretRef`
+
+Kubernetes rotates the token before `tokenExpirationSeconds` runs out, so an
+upload or a restore that outlasts one token keeps working.
 
 The chart applies the annotation values only to the service accounts it
 creates: the agent's with `serviceAccount.create: true`, the operator's with
