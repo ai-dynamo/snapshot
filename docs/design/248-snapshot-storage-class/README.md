@@ -131,7 +131,7 @@ keeps its binding. See [Default class](#default-class).
 | Risk | What goes wrong | How the design handles it |
 | --- | --- | --- |
 | PVC not mounted | A PVC class names a claim the agents cannot see; captures would fail on every node. | The operator marks the class `Ready=False`, reason `ClaimNotMounted`, by checking the claim against the mounted set the chart renders. Adding a claim is a Helm upgrade (`storage.pvc.claimNames`). Documented limitation for this iteration. |
-| Agent without the claim | The class is `Ready`, because the operator reads the chart's mounted set, but a particular agent does not have the claim: it still runs the previous pod spec during a rolling upgrade, or the claim is missing on its node. | The agent maps `claimName` to a mount path from its own `config.yaml` and checks the path exists before any I/O. A claim it cannot map fails the operation with `StorageClassUnavailable`, and nothing is retried against another store. The existing retry succeeds once the node's agent has the mount. |
+| Agent without the claim | The class is `Ready`, because the operator reads the chart's mounted set, but a particular agent does not have the claim: it still runs the previous pod spec during a rolling upgrade, or the claim is missing on its node. | The agent maps `claimName` to a mount path from its own `config.yaml` and checks the path exists before any I/O. A claim it cannot map fails the operation with `StorageClassUnavailable`, and nothing is retried against another store. Once the retry is implemented, the agent retries `StorageClassUnavailable` and the operation succeeds when the node's agent has the mount; until then it fails and needs a new attempt. |
 | Class edited after binding | The location fields change; content bound to the old `storeID` would read or delete in the wrong place. Or `reclaimPolicy` flips and existing content loses data it was meant to keep. | Location fields are immutable through CEL, and the policy is frozen on the content at binding. Credentials and TLS settings stay editable because they are not identity inputs. The agent and maintenance compare the class's `status.storeID` with the content's binding before any I/O and refuse a mismatch. |
 | Class deleted under content | Content loses the only description of where its snapshots are. | Protection finalizer; a terminating class still resolves for existing content. Force-removing the finalizer leaves content with the existing `StoreInactive` handling from SNEP-237. |
 | Secret missing or revoked | An S3 class's Secret is deleted or rotated to an invalid key. | The class goes `Ready=False`, reason `CredentialsUnavailable`, and new bindings stop. In-flight operations fail with the existing credential errors; nothing is deleted on an access error. |
@@ -142,7 +142,7 @@ keeps its binding. See [Default class](#default-class).
 | Older release on the same location | A cluster on a release without classes, or one rolled back to it, writes no `.origin` and sweeps every directory that has no content in that cluster. | Not preventable from the store. Do not share a location with such a cluster, and before a rollback make sure no other cluster uses the location. |
 | Rollback with retained data | The previous release ignores `reclaimPolicy` and `.retained`. After a rollback its sweep deletes retained directories in the store that `storage.*` names, and deleting a `Retain` content deletes its data. | Not preventable from the new release. The Rollback procedure tells the administrator to copy retained data out of that store first. Stores of other classes are not reached by the previous operator. |
 | Nested stores | One store's location is a parent of another's, in this cluster or another. | Allowed, because each store keeps its snapshots under its own `artifacts/`: a sweep looks only there and deletes only orphans named by a UUID, and deleting content removes only its own recorded handles. The API rejects a location inside another store's `artifacts/`. |
-| Old agent, new class | During a rolling upgrade an agent that predates this proposal receives content bound to a non-default class. | It passes its startup store to PageBroker, whose `storeID` does not match the content's; PageBroker returns `STORE_MISMATCH` and the capture fails before any I/O. The existing retry picks it up after the node upgrades. |
+| Old agent, new class | During a rolling upgrade an agent that predates this proposal receives content bound to a non-default class. | It passes its startup store to PageBroker, whose `storeID` does not match the content's; PageBroker returns `STORE_MISMATCH` and the checkpoint fails before any I/O. That agent treats the failure as final: the `PodSnapshot` fails with `BrokerRejected` and is not retried, so it needs a new attempt after the node upgrades. Create non-default classes only after every node runs the new agent. |
 | Restore from several S3 stores | The native restore engine holds one session per PageBroker process, fixed to one endpoint, one region and one set of credentials, and reads its CA bundle and addressing mode once at start. | Restores whose stores share the endpoint, region and credentials run in parallel; a restore that differs in any of them waits until the others drain, then PageBroker replaces the session. A long restore delays the others, and a waiting transaction can expire. An S3 class whose CA bundle or addressing mode differs from PageBroker's startup values cannot restore. Parallel restore across sessions is a follow-up; see [Agent and PageBroker](#agent-and-pagebroker). |
 | Default misconfigured | `storage.defaultClassName` names a class that does not exist, is not Ready or is being deleted, and unnamed `PodSnapshot`s fail. | The default is one configured name, so two defaults cannot exist. An unnamed `PodSnapshot` fails with the same reasons as a named one and retries until the class is usable. The operator reports a missing default at start, and a Warning event flags a terminating one; see [Default class](#default-class). |
 
@@ -368,7 +368,13 @@ and CA bundle bytes in the request, computed when it builds the client, so rotat
 credentials or a changed setting get a new client. An entry idle for 15 minutes
 is dropped, the cache holds at most 64 entries, and a client with calls in
 flight is never dropped. A missing class or Secret fails the operation with
-`StorageClassUnavailable`, and nothing is retried against another store. For PVC the agent maps `claimName` to a mount path: the default
+`StorageClassUnavailable`, and nothing is retried against another store. The
+agent classifies `StorageClassUnavailable` as retryable, like a store that is
+temporarily unavailable, because a class, Secret or mount that is missing
+during a rollout appears without a new request. This retry is implemented
+last, after the rest of the proposal works. Until then
+`StorageClassUnavailable` fails the operation before any I/O and it needs a
+new attempt; the retry removes that manual step and changes nothing else. For PVC the agent maps `claimName` to a mount path: the default
 claim at `/checkpoints`, each listed claim at `/checkpoints/<claimName>`,
 rendered by the chart into the agent's `config.yaml` and the operator's
 `--pvc-claim-names` flag. Every store path is below `/checkpoints`, the one
@@ -573,6 +579,10 @@ An installation upgraded from a release without classes keeps working after a
 4. `PodSnapshot`s and `SnapshotJob`s without `storageClassName` resolve to
    the default class.
 
+Create classes other than the default only after the agent rollout finishes.
+An agent from the previous release knows one store, and a checkpoint it
+receives for another class fails for good.
+
 Rollback to the previous chart leaves the CRD and `default` object in place;
 the old operator ignores both and reads `storage.yaml`.
 
@@ -620,7 +630,7 @@ reads only that one store, so the stores of other classes are not touched.
 - **Chart:** changing only `storage.defaultClassName` changes the operator's
   pod template and leaves the agent DaemonSet's unchanged.
 - **Agent:** Secret fetch per transaction; credentials in the request and never
-  on a volume or in a log; empty credentials for a class without a Secret; mount mapping for the default and listed claims, and a direct restore from a listed claim; `StorageClassUnavailable`
+  on a volume or in a log; empty credentials for a class without a Secret; mount mapping for the default and listed claims, and a direct restore from a listed claim; `StorageClassUnavailable`, and its retry once implemented,
   on a missing class, a `status.storeID` mismatch, or a claim with no mount.
 - **Maintenance:** a sweep looks only inside `artifacts/` and deletes only
   UUID-named orphans whose `.origin` names this cluster, on S3 and on a PVC.
