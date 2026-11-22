@@ -15,11 +15,13 @@
 #include <array>
 #include <cerrno>
 #include <charconv>
+#include <cstdlib>
 #include <climits>
 #include <iterator>
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -87,6 +89,19 @@ constexpr char kReadCommand[] = "cat";
 constexpr char kRemoteTypeEnv[] = "RCLONE_CONFIG_PAGEBROKER_TYPE=s3";
 constexpr char kRemoteProviderEnv[] = "RCLONE_CONFIG_PAGEBROKER_PROVIDER=AWS";
 constexpr char kExplicitAuthEnv[] = "RCLONE_CONFIG_PAGEBROKER_ENV_AUTH=false";
+constexpr char kEnvironmentAuthEnv[] = "RCLONE_CONFIG_PAGEBROKER_ENV_AUTH=true";
+constexpr char kAwsRegionEnv[] = "AWS_REGION";
+constexpr char kAwsDefaultRegionEnv[] = "AWS_DEFAULT_REGION";
+// The only ambient variables a child may see: the inputs of web identity and
+// container credentials. Static access keys come from the credentials file alone.
+constexpr const char* kIdentityVariables[] = {"AWS_ROLE_ARN",
+                                              "AWS_WEB_IDENTITY_TOKEN_FILE",
+                                              "AWS_ROLE_SESSION_NAME",
+                                              "AWS_STS_REGIONAL_ENDPOINTS",
+                                              kAwsRegionEnv,
+                                              kAwsDefaultRegionEnv,
+                                              "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+                                              "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE"};
 constexpr char kRemoteAccessKeyEnv[] = "RCLONE_CONFIG_PAGEBROKER_ACCESS_KEY_ID=";
 constexpr char kRemoteSecretKeyEnv[] = "RCLONE_CONFIG_PAGEBROKER_SECRET_ACCESS_KEY=";
 constexpr char kRemoteTokenEnv[] = "RCLONE_CONFIG_PAGEBROKER_SESSION_TOKEN=";
@@ -368,6 +383,25 @@ WaitForRclone(Child& child, int output, int diagnostics, std::size_t output_limi
   return output_bytes;
 }
 
+// The token exchange needs a region before rclone applies its own, so the
+// store's region is the fallback when the platform injected none.
+void
+AppendIdentityEnvironment(const std::string& region, std::vector<std::string>& environment)
+{
+  environment.push_back(kEnvironmentAuthEnv);
+  bool has_region = false;
+  for (const auto* name : kIdentityVariables) {
+    const auto* value = std::getenv(name);
+    if (!value || *value == '\0')
+      continue;
+    environment.push_back(std::string(name) + '=' + value);
+    const std::string_view variable(name);
+    has_region = has_region || variable == kAwsRegionEnv || variable == kAwsDefaultRegionEnv;
+  }
+  if (!has_region && !region.empty())
+    environment.push_back(std::string(kAwsRegionEnv) + '=' + region);
+}
+
 } // namespace
 
 void
@@ -461,22 +495,24 @@ S3Client::S3Client(S3Connection connection, S3Limits limits) : limits_(limits)
 {
   connection.Validate();
   limits_.Validate();
-  if (connection.access_key_id.empty())
-    throw std::invalid_argument("rclone requires resolved startup S3 credentials");
   if (!connection.ca_file.empty() && !std::filesystem::is_regular_file(connection.ca_file))
     throw std::invalid_argument("S3 CA certificate file does not exist");
-  // The child receives only the startup snapshot, never ambient credential sources.
+  // Instance metadata and the shared files stay off for both credential sources,
+  // so a broken workload identity fails instead of falling back to the node's role.
   environment_ = {kRemoteTypeEnv,
                   kRemoteProviderEnv,
-                  kExplicitAuthEnv,
-                  kRemoteAccessKeyEnv + connection.access_key_id,
-                  kRemoteSecretKeyEnv + connection.secret_access_key,
-                  kRemoteTokenEnv + connection.session_token,
                   kRemoteRegionEnv + connection.region,
                   kRemoteEndpointEnv + connection.endpoint,
                   kDisableImdsEnv,
                   kDisableAwsConfigEnv,
                   kDisableAwsFileEnv};
+  if (connection.UsesDefaultCredentialChain())
+    AppendIdentityEnvironment(connection.region, environment_);
+  else
+    environment_.insert(environment_.end(), {std::string(kExplicitAuthEnv),
+                                             kRemoteAccessKeyEnv + connection.access_key_id,
+                                             kRemoteSecretKeyEnv + connection.secret_access_key,
+                                             kRemoteTokenEnv + connection.session_token});
   arguments_.assign(std::begin(kCommonArguments), std::end(kCommonArguments));
   const std::string part_bytes = std::to_string(limits.part_size) + kBytesSuffix;
   arguments_.insert(arguments_.end(),

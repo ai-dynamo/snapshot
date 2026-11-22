@@ -39,16 +39,25 @@ Command failures throw `S3Error`, carrying only the HTTP status extracted from
 the pinned CLI format (zero when unavailable). Cancellation and deadlines throw
 the shared `CancellationError` directly.
 
-The daemon reads the `[default]` profile from `AWS_SHARED_CREDENTIALS_FILE` once
-at startup. The file must contain `aws_access_key_id` and `aws_secret_access_key`;
-`aws_session_token` is optional. Files are bounded to 64 KiB, and Kubernetes
-Secret symlinks are supported. Missing, malformed or incomplete files fail
-startup; environment access keys and named profiles cannot override or supplement
-them. The daemon shares that snapshot with rclone and Model Streamer.
-`S3Client` accepts only resolved connection settings and never discovers credentials.
+With `AWS_SHARED_CREDENTIALS_FILE` set, the daemon reads the `[default]` profile
+from that file once at startup. The file must contain `aws_access_key_id` and
+`aws_secret_access_key`; `aws_session_token` is optional. Files are bounded to
+64 KiB, and Kubernetes Secret symlinks are supported. Missing, malformed or
+incomplete files fail startup; environment access keys and named profiles cannot
+override or supplement them. The daemon shares that snapshot with rclone and
+Model Streamer. Restart PageBroker to adopt changed static credentials; they are
+not refreshed.
+
+With the variable unset or empty, `S3Client` receives no credentials and starts
+rclone with environment authentication. The child then runs the default
+credential chain on the workload identity variables listed in
+[the S3 guide](../../S3.md#configuration-and-credentials), which `S3Client`
+copies from the daemon's environment when it is constructed. Those credentials
+refresh inside rclone. Instance metadata and the shared configuration files stay
+disabled in both modes.
+
 Region and endpoint come from the storage JSON. The optional `AWS_CA_BUNDLE`
-fallback must be absolute. Restart PageBroker to adopt changed credentials;
-there is no automatic refresh. Credential values never appear in arguments or logs.
+fallback must be absolute. Credential values never appear in arguments or logs.
 
 `active_files` bounds concurrent CLI processes, including metadata operations.
 A payload batch occupies one slot and transfers one file at a time. Independent

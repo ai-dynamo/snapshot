@@ -12,7 +12,12 @@
 
 #include <cerrno>
 #include <climits>
+#include <cstdlib>
 #include <fstream>
+#include <vector>
+#include <utility>
+#include <string>
+#include <optional>
 #include <future>
 #include <system_error>
 #include <thread>
@@ -96,6 +101,50 @@ class RcloneProcessTest : public ::testing::Test {
 TEST_F(RcloneProcessTest, PassesLiteralArgumentsAndOnlySuppliedEnvironment)
 {
   EXPECT_NO_THROW(Upload({"bucket", "literal/$(false); `false` with spaces quote'\""}, Deadline()));
+}
+
+TEST_F(RcloneProcessTest, DefaultCredentialChainPassesOnlyIdentityEnvironment)
+{
+  const std::vector<std::pair<const char*, const char*>> variables{
+      {"AWS_ROLE_ARN", "arn:aws:iam::000000000000:role/fake-role"},
+      {"AWS_WEB_IDENTITY_TOKEN_FILE", "/var/run/fake/web-identity-token"},
+      {"AWS_ROLE_SESSION_NAME", nullptr},
+      {"AWS_STS_REGIONAL_ENDPOINTS", nullptr},
+      {"AWS_REGION", nullptr},
+      {"AWS_DEFAULT_REGION", nullptr},
+      {"AWS_CONTAINER_CREDENTIALS_FULL_URI", "https://credentials.example.test/v1"},
+      {"AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE", "/var/run/fake/container-token"},
+      {"AWS_ACCESS_KEY_ID", "fake-ambient-key"},
+      {"AWS_SECRET_ACCESS_KEY", "fake-ambient-secret"},
+      {"AWS_SESSION_TOKEN", "fake-ambient-token"},
+      {"AWS_PROFILE", "other"}};
+  std::vector<std::pair<std::string, std::optional<std::string>>> saved;
+  for (const auto& [name, value] : variables) {
+    const auto* current = std::getenv(name);
+    saved.push_back({name, current ? std::optional<std::string>(current) : std::nullopt});
+    if (value)
+      setenv(name, value, 1);
+    else
+      unsetenv(name);
+  }
+  S3Connection connection;
+  connection.region = "us-west-2";
+  {
+    S3Client chain(connection);
+    EXPECT_NO_THROW(chain.UploadFiles(directory.path(), {"bucket", "default-chain"}, {{"source", 8}}, Deadline()));
+  }
+  setenv("AWS_REGION", "eu-central-1", 1);
+  {
+    S3Client chain(connection);
+    EXPECT_NO_THROW(
+        chain.UploadFiles(directory.path(), {"bucket", "default-chain-region"}, {{"source", 8}}, Deadline()));
+  }
+  for (const auto& [name, value] : saved) {
+    if (value)
+      setenv(name.c_str(), value->c_str(), 1);
+    else
+      unsetenv(name.c_str());
+  }
 }
 
 TEST_F(RcloneProcessTest, DividesBufferBudgetBetweenRcloneProcesses)

@@ -71,15 +71,15 @@ class CredentialEnvironment {
   std::vector<std::pair<std::string, std::optional<std::string>>> saved_;
 };
 
-TEST(S3ClientTest, RequiresResolvedCredentialsEvenWhenEnvironmentIsAvailable)
+TEST(S3ClientTest, AcceptsStaticCredentialsAndTheDefaultCredentialChain)
 {
   CredentialEnvironment environment;
-  setenv("AWS_ACCESS_KEY_ID", "fake-key", 1);
-  setenv("AWS_SECRET_ACCESS_KEY", "fake-secret", 1);
-  EXPECT_THROW(S3Client({}, SmallLimits()), std::invalid_argument);
-  const auto connection = OfflineConnection();
-  unsetenv("AWS_ACCESS_KEY_ID");
-  unsetenv("AWS_SECRET_ACCESS_KEY");
+  EXPECT_NO_THROW(S3Client(OfflineConnection(), SmallLimits()));
+  auto connection = OfflineConnection();
+  connection.access_key_id.clear();
+  connection.secret_access_key.clear();
+  connection.session_token.clear();
+  EXPECT_TRUE(connection.UsesDefaultCredentialChain());
   EXPECT_NO_THROW(S3Client(connection, SmallLimits()));
 }
 

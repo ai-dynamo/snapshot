@@ -29,10 +29,14 @@ struct S3Connection {
   std::string endpoint;
   bool use_virtual_addressing = true;
   std::string ca_file;
-  // Resolved startup credentials. Never log these values.
+  // Static credentials resolved at startup. Never log these values. All empty
+  // selects the default credential chain, which resolves and refreshes
+  // workload identity credentials on its own.
   std::string access_key_id;
   std::string secret_access_key;
   std::string session_token;
+
+  bool UsesDefaultCredentialChain() const { return access_key_id.empty(); }
 
   // Checks text, endpoint scheme, absolute CA path and credential completeness without network I/O.
   void Validate() const;
@@ -100,7 +104,8 @@ class S3ResponseError : public std::runtime_error {
 // Keep the client alive until all calls return; concurrent calls share resource limits.
 class S3Client {
  public:
-  // Requires the resolved startup credential snapshot; never discovers credentials.
+  // Static credentials are passed to rclone as given. Without them rclone runs
+  // the default credential chain on the workload identity variables captured here.
   explicit S3Client(S3Connection connection, S3Limits limits = {});
   S3Client(const S3Client&) = delete;
   S3Client& operator=(const S3Client&) = delete;

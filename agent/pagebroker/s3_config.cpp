@@ -302,8 +302,12 @@ LoadS3Credentials(S3Connection connection)
     connection.ca_file = Environment(kAwsCaBundleEnv);
   connection.Validate();
   const auto path = Environment(kCredentialsFileEnv);
-  if (path.empty())
-    throw std::invalid_argument("AWS_SHARED_CREDENTIALS_FILE is required for S3");
+  if (path.empty()) {
+    connection.access_key_id.clear();
+    connection.secret_access_key.clear();
+    connection.session_token.clear();
+    return connection;
+  }
   try {
     return ParseCredentials(utils::config::ReadBoundedConfigFile(path, kMaxCredentialsBytes), std::move(connection));
   }
