@@ -12,6 +12,10 @@
             "retryLimit": {
               "type": "integer",
               "minimum": 0
+            },
+            "multiGpuPreparation": {
+              "type": "string",
+              "enum": ["agent", "initContainer"]
             }
           }
         }

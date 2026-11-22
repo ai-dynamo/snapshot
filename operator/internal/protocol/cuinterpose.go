@@ -5,8 +5,6 @@ package protocol
 
 import (
 	"fmt"
-	"path"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -55,6 +53,17 @@ func ShapeCuInterposeCapture(template *corev1.PodTemplateSpec, targetName string
 	return nil
 }
 
+// ValidateCuInterposeAgentTarget checks a target that the agent's NRI plugin
+// prepares, with the same rule the agent applies before checkpointing it.
+func ValidateCuInterposeAgentTarget(spec *corev1.PodSpec, targetName string) error {
+	for i := range spec.Containers {
+		if spec.Containers[i].Name == targetName {
+			return podcontract.ValidateCuInterposeTarget(&spec.Containers[i])
+		}
+	}
+	return fmt.Errorf("cuinterpose target container %q not found", targetName)
+}
+
 func checkCuInterposeReservedNames(spec *corev1.PodSpec) error {
 	for _, volume := range spec.Volumes {
 		if volume.Name == cuInterposeVolumeName {
@@ -89,9 +98,7 @@ func cuInterposeTarget(spec *corev1.PodSpec, name string) (*corev1.Container, er
 		return nil, fmt.Errorf("container %q: cuinterpose requires container.command", name)
 	}
 	for _, mount := range target.VolumeMounts {
-		mountPath := path.Clean(mount.MountPath)
-		if mount.Name == cuInterposeVolumeName || mountPath == podcontract.CuInterposeMountPath ||
-			strings.HasPrefix(mountPath, podcontract.CuInterposeMountPath+"/") {
+		if mount.Name == cuInterposeVolumeName || podcontract.IsCuInterposeDeliveryPath(mount.MountPath) {
 			return nil, fmt.Errorf("container %q: mount %q at %q conflicts with cuinterpose delivery", name, mount.Name, mount.MountPath)
 		}
 	}

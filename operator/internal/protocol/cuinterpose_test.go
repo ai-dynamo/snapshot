@@ -26,7 +26,11 @@ func cuInterposeTemplate() *corev1.PodTemplateSpec {
 }
 
 func testCuInterposeInstaller() operatortypes.CuInterposeContainerConfiguration {
-	return operatortypes.CuInterposeContainerConfiguration{Image: "registry.example/snapshot-agent:v1", PullPolicy: corev1.PullNever}
+	return operatortypes.CuInterposeContainerConfiguration{
+		Preparation: operatortypes.MultiGPUPreparationInitContainer,
+		Image:       "registry.example/snapshot-agent:v1",
+		PullPolicy:  corev1.PullNever,
+	}
 }
 
 func TestShapeCuInterposeCapture(t *testing.T) {
@@ -47,7 +51,7 @@ func TestShapeCuInterposeCapture(t *testing.T) {
 
 	worker := template.Spec.Containers[0]
 	assert.Equal(t, append(podcontract.CuInterposeLauncherPrefix(), before.Spec.Containers[0].Command...), worker.Command)
-	require.NoError(t, podcontract.ValidateCuInterposeLauncher(&worker))
+	require.NoError(t, podcontract.ValidateCuInterposeTarget(&worker))
 	assert.Equal(t, before.Spec.Containers[0].Args, worker.Args)
 	assert.Equal(t, before.Spec.Containers[0].Env, worker.Env)
 	assert.Equal(t, before.Spec.Containers[0].EnvFrom, worker.EnvFrom)
