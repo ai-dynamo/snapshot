@@ -24,6 +24,7 @@ func main() {
 
 	os.Exit(restoreproxy.Run(restoreproxy.Config{
 		ControlDir: restoreproxy.ControlDirFromEnv(),
+		Args:       os.Args[1:],
 		ProcRoot:   "/proc",
 		Signals:    signals,
 		// Not internal/logging: it links the container runtime clients, and

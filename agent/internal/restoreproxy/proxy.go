@@ -4,12 +4,15 @@
 // Package restoreproxy is the PID 1 of a restore destination container. It
 // waits for the agent to finish the restore, then follows the restored process
 // and exits with its status, so the container's lifecycle is the workload's.
+// If the agent asks for a cold start instead, it becomes the container's own
+// command.
 package restoreproxy
 
 import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -35,8 +38,12 @@ const DefaultPollInterval = 5 * time.Second
 
 // Config is what Run needs from the process around it.
 type Config struct {
-	// ControlDir holds RestoreCompleteFile and RestoreFailedFile.
+	// ControlDir holds ColdStartFile, RestoreCompleteFile and
+	// RestoreFailedFile.
 	ControlDir string
+	// Args are the proxy's arguments. The container's own command follows a
+	// "--": the NRI plugin passes it so that a cold start can run it.
+	Args []string
 	// ProcRoot is normally /proc. The restored PID is read relative to it.
 	ProcRoot string
 	// Signals delivers the ForwardedSignals the caller subscribed to.
@@ -44,6 +51,24 @@ type Config struct {
 	// PollInterval backs up inotify while waiting for the restore.
 	PollInterval time.Duration
 	Log          logr.Logger
+	// Exec replaces the process with the container's command. It is a function
+	// pointer so that tests can override it.
+	Exec func(path string, argv, env []string) error
+	// LookPath finds the container's command on PATH. It is a function pointer
+	// so that tests can override it.
+	LookPath func(file string) (string, error)
+}
+
+// withDefaults returns a copy of the config with what the caller left out
+// filled in: the real Exec and LookPath.
+func (cfg Config) withDefaults() Config {
+	if cfg.Exec == nil {
+		cfg.Exec = syscall.Exec
+	}
+	if cfg.LookPath == nil {
+		cfg.LookPath = exec.LookPath
+	}
+	return cfg
 }
 
 // ControlDirFromEnv resolves the control directory the restore Pod contract
@@ -56,15 +81,26 @@ func ControlDirFromEnv() string {
 }
 
 // Run waits for the restore and follows the restored process. It returns the
-// container's exit code. It never deletes the control files: an emptyDir
-// survives a container restart, and a file left by an earlier container is
-// how a restarted proxy knows the Pod's one restore is spent.
+// container's exit code, unless the agent asks for a cold start: then it does
+// not return, because the process becomes the container's own command.
+//
+// It never deletes the restore result files: an emptyDir survives a container
+// restart, and a file left by an earlier container is how a restarted proxy
+// knows the Pod's one restore is spent. The cold-start file is the one it does
+// delete, as soon as it acts on it, so that a restarted container does not
+// find a request the agent made for an earlier one.
 func Run(cfg Config) int {
+	cfg = cfg.withDefaults()
 	log := cfg.Log
-	if prior, done, err := checkRestore(cfg.ControlDir); err != nil {
+	prior, done, err := checkRestore(cfg.ControlDir)
+	if err != nil {
 		log.Error(err, "Cannot inspect control directory")
 		return podcontract.RestoreProxyErrorExitCode
-	} else if done {
+	}
+	if prior.coldStart {
+		return startCold(cfg, 0)
+	}
+	if done {
 		log.Info("Restore already used by an earlier container; restores are not repeatable", "restore_failed", prior.failed)
 		return podcontract.RestoreNotRepeatableExitCode
 	}
@@ -74,6 +110,9 @@ func Run(cfg Config) int {
 	if err != nil {
 		log.Error(err, "Failed waiting for restore")
 		return podcontract.RestoreProxyErrorExitCode
+	}
+	if outcome.coldStart {
+		return startCold(cfg, outcome.signal)
 	}
 	if outcome.complete == nil {
 		if outcome.failed {
@@ -120,6 +159,48 @@ func Run(cfg Config) int {
 	}
 }
 
+// startCold runs the container's own command in place of the restore. It
+// removes the cold-start file first, even if the command then cannot be run, so
+// that a restarted container waits for a restore again instead of finding a
+// stale request. sig is a SIGTERM or SIGINT that arrived with the request: the
+// container is being stopped, so nothing is started.
+func startCold(cfg Config, sig syscall.Signal) int {
+	log := cfg.Log
+	if err := os.Remove(filepath.Join(cfg.ControlDir, podcontract.ColdStartFile)); err != nil && !os.IsNotExist(err) {
+		log.Error(err, "Cannot remove the cold-start file; not running the command")
+		return podcontract.RestoreProxyErrorExitCode
+	}
+	if sig != 0 {
+		log.Info("Signal with the cold-start request; exiting", "signal", sig.String())
+		return 128 + int(sig)
+	}
+	argv := containerCommand(cfg.Args)
+	if len(argv) == 0 {
+		log.Error(nil, "Cold start requested, but the container has no command to run")
+		return podcontract.RestoreProxyErrorExitCode
+	}
+	path, err := cfg.LookPath(argv[0])
+	if err != nil {
+		log.Error(err, "Cold start: command not found", "command", argv[0])
+		return podcontract.ColdStartCommandNotFoundExitCode
+	}
+	log.Info("Cold start: running the container's command", "command", path)
+	// On success Exec does not return.
+	err = cfg.Exec(path, argv, os.Environ())
+	log.Error(err, "Cold start: cannot run the command", "command", path)
+	return podcontract.ColdStartExecFailedExitCode
+}
+
+// containerCommand returns what follows the first "--" in the proxy's
+// arguments: the container's own command and its arguments. Without the "--"
+// there is none, as in a container made before the NRI plugin passed it.
+func containerCommand(args []string) []string {
+	if len(args) == 0 || args[0] != "--" {
+		return nil
+	}
+	return args[1:]
+}
+
 // forwardSignal passes sig on to the restored process. It logs before
 // sending, so the container log shows every signal the proxy received,
 // whatever the workload does with it.
@@ -133,6 +214,8 @@ func forwardSignal(log logr.Logger, pid int, sig syscall.Signal) {
 
 // restoreOutcome is how the wait for the restore ended.
 type restoreOutcome struct {
+	// coldStart means ColdStartFile exists. It wins over the other two.
+	coldStart bool
 	// complete holds RestoreCompleteFile once it exists.
 	complete []byte
 	// failed means RestoreFailedFile appeared instead.
@@ -142,9 +225,9 @@ type restoreOutcome struct {
 	signal syscall.Signal
 }
 
-// waitForRestore waits until RestoreCompleteFile or RestoreFailedFile exists,
-// or SIGTERM or SIGINT arrives. Other signals are ignored until there is a
-// process to forward them to.
+// waitForRestore waits until ColdStartFile, RestoreCompleteFile or
+// RestoreFailedFile exists, or SIGTERM or SIGINT arrives. Other signals are
+// ignored until there is a process to forward them to.
 //
 // On a restore error the agent normally writes RestoreFailedFile and kills
 // this container, but it cannot kill it when it fails to find the container,
@@ -173,8 +256,8 @@ func waitForRestore(cfg Config) (restoreOutcome, error) {
 				continue
 			}
 			// The restore may have landed or failed in the same instant. Run
-			// decides with its usual order: complete, then failed, then the
-			// signal. If the directory cannot be read, the signal still wins:
+			// decides with its usual order: cold start, complete, then failed,
+			// then the signal. If the directory cannot be read, the signal still wins:
 			// the container is being stopped either way.
 			next, _, err := checkRestore(cfg.ControlDir)
 			if err != nil {
@@ -188,8 +271,17 @@ func waitForRestore(cfg Config) (restoreOutcome, error) {
 	}
 }
 
-// checkRestore reports whether the agent has published a restore result.
+// checkRestore reports whether the agent has published a restore result or a
+// cold-start request. The request is checked first: a restore result left by an
+// earlier container must not hide it.
 func checkRestore(dir string) (restoreOutcome, bool, error) {
+	coldStart, err := fileExists(filepath.Join(dir, podcontract.ColdStartFile))
+	if err != nil {
+		return restoreOutcome{}, false, err
+	}
+	if coldStart {
+		return restoreOutcome{coldStart: true}, true, nil
+	}
 	data, err := os.ReadFile(filepath.Join(dir, podcontract.RestoreCompleteFile))
 	if err == nil {
 		return restoreOutcome{complete: data}, true, nil
