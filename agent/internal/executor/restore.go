@@ -556,16 +556,12 @@ var readInitCmdline = func(pid int) (string, error) {
 // The agent's NRI plugin makes the proxy PID 1 when the container is created.
 // Without the proxy, nothing in the container waits for the restore, and the
 // container does not end when the restored workload does.
-//
-// The proxy may be followed by arguments: the NRI plugin passes it the
-// container's own command after a "--". The space added to the command line
-// ends the path there, so another program in the same folder, such as
-// snapshot-restore-proxy-other, is not taken for the proxy.
 func checkRestoreProxy(pid int) error {
 	cmdline, err := readInitCmdline(pid)
 	if err != nil {
 		return fmt.Errorf("read the command of the container's PID 1: %w", err)
 	}
+	// Adding " " makes sure the path is not just the start of a different app's name (snapshot-restore-proxy-other).
 	if !strings.HasPrefix(cmdline+" ", podcontract.RestoreProxyPath+" ") {
 		return fmt.Errorf("the container's PID 1 is %q, not %s: the agent's NRI plugin did not set up this container; check that NRI is enabled in the container runtime",
 			cmdline, podcontract.RestoreProxyPath)
