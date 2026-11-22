@@ -668,6 +668,13 @@ the `PodGroupSnapshot` and the group content it is bound to, the deadline from
 the operator's configuration, and each member's target Pod by name and UID,
 with its container mapping. Pod membership is fixed from then on.
 
+When creating a `PodGroupRestore`, Snapshot copies the labels named by
+`restore-replica-labels` from its target Pods into the attempt's metadata, and
+labels it with its snapshot's name as `nvidia.com/podgroupsnapshot`. Workload
+managers can use these labels to find and watch their replicas' attempts, and
+anyone can list the attempts of one snapshot. The target Pod UIDs remain the
+authoritative identities.
+
 The operator, not the owner, then claims each target for the attempt, and a
 claimed Pod serves only that attempt. On every reconcile of an unfinished
 attempt, the operator reads each target Pod and classifies it. A Pod that is
@@ -1273,6 +1280,9 @@ kind: PodGroupRestore                   # one attempt, created by the operator
 metadata:
   name: llm-tp8-<hash of the member Pods' UIDs>
   namespace: serving
+  labels:
+    workload.example.com/replica: llm-r1           # copied from the targets' replica labels
+    nvidia.com/podgroupsnapshot: llm-tp8           # the snapshot's name
   ownerReferences:                      # one per target Pod
   - {apiVersion: v1, kind: Pod, name: llm-worker-0-r1, uid: <uid>}
   - {apiVersion: v1, kind: Pod, name: llm-worker-1-r1, uid: <uid>}
@@ -1420,7 +1430,7 @@ remain a compatible addition.
 | --- | --- | --- |
 | `PodGroupSnapshotContent` | New cluster-scoped kind, created by the operator when capture starts: an immutable spec with the member IDs in rank order, and a status that binds each member's content by name and UID, once, and is Ready only when every member is bound, present and Ready | One record of the captured set, separate from the request, that restore reads and a later import can recreate |
 | `PodGroupSnapshot` status | Adds `boundGroupContentName`; each member's entry keeps its child `PodSnapshot` and progress, while the binding of its content lives only in the group content | The request reports progress and the outcome; the record holds the captured set |
-| `PodGroupRestore` | Created only by the operator, owned by its target Pods, with a spec frozen at creation: the snapshot, its group content, the deadline, and each target's Pod and container mapping | One attempt per complete group, with no request from the owner |
+| `PodGroupRestore` | Created only by the operator, owned by its target Pods, labeled with its targets' replica labels and `nvidia.com/podgroupsnapshot`, with a spec frozen at creation: the snapshot, its group content, the deadline, and each target's Pod and container mapping | One attempt per complete group, with no request from the owner |
 | `PodSnapshot` and `PodSnapshotContent` | An optional, immutable `spec.podGroup` (`name`, `uid`, `memberID`) names the group content a member belongs to, set by the group controller and copied unchanged into the content; group-owned children also carry an owner reference, take their settings from the member's template, and cannot be restored on their own, and the agent sets a new `Started` condition on a member's `PodSnapshotContent` before its first irreversible step | The agent checks membership against the group content and reads the attempt's live context from the request, each member keeps its own settings, and the operator learns which sources Snapshot changed |
 | Artifact manifest | Adds an optional `podGroup` section with the capture ID, the member's own ID, the ordered member table of Pod UIDs, containers, and Pod IPs, and the ranks of the members that the Pod shared FABRIC memory with | Restore admission checks that all members come from one capture, builds the IP map from the artifacts, and checks that members that shared FABRIC memory land in one NVLink clique |
 | Restore Pod contract | New annotations, set at creation through `podcontract.BuildGroupTarget` and identical on every member: `nvidia.com/restore-from-group`, `nvidia.com/restore-replica-labels` and `nvidia.com/restore-member-label`; the existing single-pair `nvidia.com/restore-container-map`, per Pod, only when the destination's name differs; the group restore startup probe, with the largest failure threshold the API accepts, and the control volume; new annotation `nvidia.com/restore-group-uid: <PodGroupRestore UID>`, written only by the operator in a conditional patch when it claims the Pod; the destination's own command must be inert, as for a standalone restore | One template for every replica, identity from labels the workload controller already sets, and one attempt per Pod, never inherited through a reused name |
@@ -1649,7 +1659,9 @@ successful, Pods deleted after `Failed` keeping its reason, and a member
 released before a peer fails ending in `Failed`; aggregation, including a
 restore that fails before the operator ever sees it in progress, artifact
 withdrawal, cancellation, and the finalizer that keeps a snapshot while a
-restore reads it; restore admission that matches each artifact by rank, with a
+restore reads it; an attempt labeled with its targets' replica labels and its
+snapshot's name, found by the workload's own selector; restore admission that
+matches each artifact by rank, with a
 renamed member accepted and a reordered one refused; validation rules, against
 a real API server, that refuse
 rebinding or removing a bound member, removing `status.members` or clearing
@@ -1946,6 +1958,12 @@ const (
 	// the agent supports, comma-separated, for example "v1" or "v1,v2".
 	PodGroupProtocolsAnnotation = "nvidia.com/snapshot-podgroup-protocols"
 
+	// PodGroupSnapshotLabel on a PodGroupRestore holds its PodGroupSnapshot's
+	// name. The operator also copies the targets' replica labels onto it, so
+	// workload managers find their replicas' attempts by the selector they
+	// use for their Pods. Target Pod UIDs remain the authoritative identities.
+	PodGroupSnapshotLabel = "nvidia.com/podgroupsnapshot"
+
 	// PodGroupInUseFinalizer keeps a group resource, of either kind, while its
 	// own attempt runs, and a PodGroupSnapshot, with the snapshots of its
 	// members, also while any unfinished PodGroupRestore references its UID.
@@ -2112,7 +2130,7 @@ type PodGroupSnapshotStatus struct {
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Failed")].reason`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
-// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="metadata.name must be no more than 63 characters because member PodSnapshots carry it as a label value"
+// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="metadata.name must be no more than 63 characters because its PodGroupRestores carry it as a label value"
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.members) || self.status.members.all(m, m.rank < size(self.spec.members) && self.spec.members[m.rank].id == m.id)",message="status.members rank must be the member's position in spec.members"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.boundGroupContentName) || (has(self.status) && has(self.status.boundGroupContentName) && self.status.boundGroupContentName == oldSelf.status.boundGroupContentName)",message="status.boundGroupContentName is write-once"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.members) || (has(self.status) && has(self.status.members))",message="status.members cannot be removed"
