@@ -154,6 +154,12 @@ commit-level history for each release is on its
   such as UCX shared-memory endpoints (#802), work after a restore. Only
   checkpoints taken after the upgrade get it; take older ones again.
 
+### Fixed
+
+- GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
+  values used by the NVIDIA device plugin's `volume-mounts` strategy. See
+  [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
+
 ### Deprecated
 
 - `SNAPSHOT_RESTORE_STANDBY` (`podcontract.RestoreStandbyModeEnv`): restore
