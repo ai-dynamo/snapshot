@@ -6,11 +6,13 @@ package backends
 import (
 	"context"
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -218,6 +220,68 @@ func TestNewS3BackendReachesEndpointWithoutCABundle(t *testing.T) {
 	require.Len(t, *requests, 1)
 	assert.Equal(t, "artifacts/", (*requests)[0].URL.Query().Get("prefix"))
 	assert.Contains(t, (*requests)[0].Header.Get("Authorization"), "Credential=FAKEACCESSKEY/")
+}
+
+// clearAmbientS3Credentials removes every credential source the default chain
+// would otherwise pick up from the machine running the test.
+func clearAmbientS3Credentials(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE",
+		"AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE",
+		"AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+		"AWS_CONTAINER_AUTHORIZATION_TOKEN", "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+		"AWS_EC2_METADATA_DISABLED",
+	} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("HOME", t.TempDir())
+}
+
+func TestNewS3BackendUsesContainerCredentialsWithoutCredentialsPath(t *testing.T) {
+	clearAmbientS3Credentials(t)
+	server, requests := newListObjectsServer(t, httptest.NewServer)
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(tokenPath, []byte("fake-projected-token"), 0o600))
+	var presentedTokens []string
+	credentialEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		presentedTokens = append(presentedTokens, r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"AccessKeyId":"FAKECONTAINERKEY","SecretAccessKey":"fake-secret","Token":"fake-session","Expiration":%q}`,
+			time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+	}))
+	t.Cleanup(credentialEndpoint.Close)
+	t.Setenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", credentialEndpoint.URL)
+	t.Setenv("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE", tokenPath)
+
+	b, err := NewS3Backend(context.Background(), S3Config{Bucket: "checkpoints", Region: "us-east-1", Endpoint: server.URL})
+	require.NoError(t, err)
+
+	_, err = b.Candidates(context.Background(), logr.Discard())
+	require.NoError(t, err)
+	require.Len(t, *requests, 1)
+	assert.Contains(t, (*requests)[0].Header.Get("Authorization"), "Credential=FAKECONTAINERKEY/")
+	assert.Equal(t, []string{"fake-projected-token"}, presentedTokens)
+}
+
+func TestNewS3BackendNeverUsesInstanceMetadata(t *testing.T) {
+	clearAmbientS3Credentials(t)
+	server, requests := newListObjectsServer(t, httptest.NewServer)
+	metadataRequests := 0
+	metadata := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		metadataRequests++
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(metadata.Close)
+	t.Setenv("AWS_EC2_METADATA_SERVICE_ENDPOINT", metadata.URL)
+
+	b, err := NewS3Backend(context.Background(), S3Config{Bucket: "checkpoints", Region: "us-east-1", Endpoint: server.URL})
+	require.NoError(t, err)
+
+	_, err = b.Candidates(context.Background(), logr.Discard())
+	require.Error(t, err)
+	assert.Empty(t, *requests)
+	assert.Zero(t, metadataRequests)
 }
 
 func TestNewS3BackendTrustsCustomCABundle(t *testing.T) {

@@ -30,6 +30,13 @@ func TestArtifactCleanupConfigValidateS3DoesNotRequireBasePath(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 }
 
+func TestArtifactCleanupConfigValidateS3AllowsNoCredentialsPath(t *testing.T) {
+	cfg := validArtifactCleanupConfig()
+	cfg.BackendType = "s3"
+	cfg.S3 = &S3Config{Bucket: "checkpoints", Region: "us-east-1"}
+	require.NoError(t, cfg.Validate())
+}
+
 func TestArtifactCleanupConfigValidateS3RequiresS3Config(t *testing.T) {
 	cfg := validArtifactCleanupConfig()
 	cfg.BackendType = "s3"

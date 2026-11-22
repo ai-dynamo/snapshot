@@ -15,6 +15,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/go-logr/logr"
@@ -67,13 +68,24 @@ type S3Backend struct {
 	artifactsPrefix string
 }
 
-// NewS3Backend constructs an S3Backend whose credentials are re-read from
-// cfg.CredentialsPath every s3CredentialsRefreshInterval.
+// NewS3Backend constructs an S3Backend. With cfg.CredentialsPath set, its
+// credentials are re-read from that file every s3CredentialsRefreshInterval.
+// With it empty, the SDK's default credential chain resolves and refreshes
+// them under the operator's workload identity. Instance metadata is excluded
+// from that chain, so a workload identity that does not resolve fails instead
+// of falling back to the node's role.
 func NewS3Backend(ctx context.Context, cfg S3Config) (*S3Backend, error) {
 	loadOptions := []func(*config.LoadOptions) error{
 		config.WithRegion(cfg.Region),
 		config.WithSharedConfigFiles([]string{}),
-		config.WithCredentialsProvider(aws.NewCredentialsCache(sharedCredentialsFileProvider(cfg.CredentialsPath))),
+	}
+	if cfg.CredentialsPath != "" {
+		loadOptions = append(loadOptions,
+			config.WithCredentialsProvider(aws.NewCredentialsCache(sharedCredentialsFileProvider(cfg.CredentialsPath))))
+	} else {
+		loadOptions = append(loadOptions,
+			config.WithSharedCredentialsFiles([]string{}),
+			config.WithEC2IMDSClientEnableState(imds.ClientDisabled))
 	}
 	if cfg.CABundlePath != "" {
 		caBundle, err := readCABundle(cfg.CABundlePath)
