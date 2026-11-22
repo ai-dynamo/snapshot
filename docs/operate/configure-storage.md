@@ -106,7 +106,13 @@ With `storage.type: s3`, set these values:
 - `storage.s3.endpoint` - S3-compatible endpoint
 - `storage.s3.region` - Bucket region
 - `storage.s3.bucket` - Bucket that holds the snapshots
-- `storage.s3.credentialsSecretRef` - Secret that holds the credentials file
+
+Credentials come from one of two places:
+
+- `storage.s3.credentialsSecretRef` - Secret that holds a credentials file with
+  static keys
+- No Secret - the workload identity of the Snapshot pods; see
+  [Use Workload Identity for S3](#use-workload-identity-for-s3)
 
 See [Helm Chart Values](../reference/helm-values.md#storage) for all S3 values,
 including the key prefix and the credentials key.
@@ -129,6 +135,40 @@ When `pageBroker.s3.limits.stagingBytes` is omitted, the chart fills it from the
 staging volume cap, so PageBroker refuses a staged restore the volume cannot
 hold instead of filling it. An explicit `stagingBytes` is not checked against
 the volume.
+
+### Use Workload Identity for S3
+
+Leave `storage.s3.credentialsSecretRef` empty to reach the bucket without static
+keys. No Secret is mounted. PageBroker and the operator then resolve credentials
+through the default credential chain of their S3 clients, and those credentials
+refresh without a restart.
+
+Two identities need access to the bucket, because uploads and restores run in
+PageBroker and cleanup runs in the operator:
+
+| Component | Service account | Annotations value |
+|-----------|-----------------|-------------------|
+| PageBroker, in the agent pod | The agent's, named by `serviceAccount.name` | `serviceAccount.annotations` |
+| Operator | The operator's, the agent's default name with `-operator` appended | `operator.serviceAccount.annotations` |
+
+Bind both to an identity that can read, write, list and delete under the store's
+prefix, using the annotation your platform defines. The platform must inject the
+identity's token and variables into the pods; the chart does not add them.
+
+Instance metadata is excluded from the chain. A workload identity that does not
+resolve therefore fails the operation and never falls back to the node's role,
+which every pod on the node shares.
+
+To check it, list the variables your platform injected into the PageBroker
+container, then take a snapshot:
+
+```bash
+kubectl get pod <agent-pod> -n <snapshot-ns> \
+  -o jsonpath='{range .spec.containers[?(@.name=="pagebroker")].env[*]}{.name}{"\n"}{end}'
+```
+
+When credentials do not resolve, uploads and restores fail with a storage error
+on the `PodSnapshot`, and the operator logs the failed cleanup request.
 
 ### Change S3 Settings
 

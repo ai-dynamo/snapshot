@@ -47,7 +47,7 @@ values, see [values.yaml](../../charts/snapshot/values.yaml).
 | `storage.s3.region`                       | `""`                      | Required with `storage.type: s3`. Bucket region.                                                                                                                                                          |
 | `storage.s3.bucket`                       | `""`                      | Required with `storage.type: s3`. Bucket holding the snapshots.                                                                                                                                         |
 | `storage.s3.prefix`                       | `""`                      | Key prefix inside the bucket; empty is the bucket root.                                                                                                                                                   |
-| `storage.s3.credentialsSecretRef`         | `""`                      | Required with `storage.type: s3`. Secret holding a shared-credentials file, mounted into PageBroker and the operator.                                                                                     |
+| `storage.s3.credentialsSecretRef`         | `""`                      | Secret holding a shared-credentials file, mounted into PageBroker and the operator. Empty selects [workload identity](../operate/configure-storage.md#use-workload-identity-for-s3). |
 | `storage.s3.credentialsSecretKey`         | `credentials`             | Key in that Secret holding the credentials file.                                                                                                                                                          |
 | `storage.s3.addressing`                   | `""`                      | Bucket addressing PageBroker uses: `virtual` (its default when empty) or `path`.                                                                                                                          |
 | `storage.s3.allowHttp`                    | `false`                   | Accept a plain-http endpoint.                                                                                                                                                                             |
@@ -121,6 +121,7 @@ payload checksums.
 | `operator.nodeSelector` | `{}` | Node selector for the operator pod. |
 | `operator.affinity` | `{}` | Affinity rules for the operator pod. |
 | `operator.tolerations` | `[]` | Tolerations for the operator pod. |
+| `operator.serviceAccount.annotations` | `{}` | Annotations for the operator's service account, for example to bind a workload identity. |
 
 ## Agent DaemonSet and Access
 
@@ -137,6 +138,7 @@ payload checksums.
 | `seccomp.deploy`               | `true`                                  | Install the block-iouring seccomp profile (required for CRIU; set `false` on RHCOS 9.6+).                                                 |
 | `rbac.create`                  | `true`                                  | Create agent and operator RBAC.                                                                                                           |
 | `serviceAccount.create`        | `true`                                  | Create the agent service account.                                                                                                         |
+| `serviceAccount.annotations` | `{}` | Annotations for the service account that the agent and PageBroker share, for example to bind a workload identity. |
 
 ## Agent Config (`config.*`)
 
