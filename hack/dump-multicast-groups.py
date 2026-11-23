@@ -72,9 +72,11 @@ def iter_participants(path):
     an unexpected envelope version rather than silently misreading it.
     """
     warned = False
+    decoded = 0
     with open(path, "rb") as fh:
         unpacker = msgpack.Unpacker(fh, raw=False, strict_map_key=False)
         for obj in unpacker:
+            decoded += 1
             if isinstance(obj, dict) and "body" in obj:
                 version = obj.get("version")
                 if not warned and version != _SUPPORTED_VERSION:
@@ -91,6 +93,8 @@ def iter_participants(path):
                 continue
             for pid, records in body.items():
                 yield pid, records
+    if decoded == 0:
+        raise ValueError("no msgpack objects decoded (empty or truncated file)")
 
 
 def multicast_groups(records):

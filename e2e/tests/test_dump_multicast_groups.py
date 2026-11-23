@@ -156,6 +156,16 @@ def test_unexpected_version_warns(tool, tmp_path, capsys):
 
 
 @pytest.mark.workload
+def test_empty_file_errors(tool, tmp_path, capsys):
+    # An empty or truncated state decodes no objects; it must error rather
+    # than silently report zero groups (which would hide restore devices).
+    path = tmp_path / "empty.state"
+    path.write_bytes(b"")
+    assert tool.main([str(path)]) == 1
+    assert "error" in capsys.readouterr().err
+
+
+@pytest.mark.workload
 def test_undecodable_file_clean_error(tool, tmp_path, capsys):
     path = tmp_path / "bad.state"
     path.write_bytes(b"\xc1\x00\xffnot-msgpack")
