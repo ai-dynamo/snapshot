@@ -140,7 +140,7 @@ func reportedCause(result RestoreInNamespaceResult) error {
 	}
 	cause := errors.New(message)
 	if code, ok := pagebroker.Failure_Code_value[result.Code]; ok {
-		cause = &reportedFailure{message: message, failure: pagebroker.NewFailureError(pagebroker.Failure_Code(code), message)}
+		cause = &reportedFailureError{message: message, failure: pagebroker.NewFailureError(pagebroker.Failure_Code(code), message)}
 	}
 	if result.Step == "" {
 		return cause
@@ -148,16 +148,16 @@ func reportedCause(result RestoreInNamespaceResult) error {
 	return failStep(Step(result.Step), cause)
 }
 
-// reportedFailure is a PageBroker failure nsrestore reported: its message is
+// reportedFailureError is a PageBroker failure nsrestore reported: its message is
 // nsrestore's text, and errors.As still finds the code.
-type reportedFailure struct {
+type reportedFailureError struct {
 	message string
 	failure *pagebroker.FailureError
 }
 
-func (e *reportedFailure) Error() string { return e.message }
+func (e *reportedFailureError) Error() string { return e.message }
 
-func (e *reportedFailure) Unwrap() error { return e.failure }
+func (e *reportedFailureError) Unwrap() error { return e.failure }
 
 // detail prefers a cause line (nsenter, panic) and otherwise the last line
 // nsrestore logged at error level or above. nsrestore's stderr is its log, so
