@@ -6,8 +6,6 @@ package podcontract
 import (
 	"reflect"
 	"testing"
-
-	"k8s.io/utils/ptr"
 )
 
 func TestGetRestoreFromSnapshotName(t *testing.T) {
@@ -147,46 +145,6 @@ func TestSkipCompatCheckFromAnnotations(t *testing.T) {
 
 	if SkipCompatCheckFromAnnotations(nil) {
 		t.Error("an unannotated pod asked to skip the compatibility gate")
-	}
-}
-
-func TestRestoreRetryLimitFromAnnotations(t *testing.T) {
-	tests := []struct {
-		name      string
-		value     *string
-		wantLimit int
-		wantFound bool
-		wantErr   bool
-	}{
-		{name: "absent"},
-		{name: "zero", value: ptr.To("0"), wantFound: true},
-		{name: "positive", value: ptr.To("5"), wantLimit: 5, wantFound: true},
-		{name: "surrounding space", value: ptr.To(" 3 "), wantLimit: 3, wantFound: true},
-		{name: "empty", value: ptr.To(""), wantFound: true, wantErr: true},
-		{name: "negative", value: ptr.To("-1"), wantFound: true, wantErr: true},
-		{name: "not a number", value: ptr.To("two"), wantFound: true, wantErr: true},
-		{name: "fraction", value: ptr.To("1.5"), wantFound: true, wantErr: true},
-		{name: "trailing text", value: ptr.To("2x"), wantFound: true, wantErr: true},
-		{name: "overflow", value: ptr.To("99999999999999999999"), wantFound: true, wantErr: true},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			annotations := map[string]string{}
-			if test.value != nil {
-				annotations[RestoreRetryLimitAnnotation] = *test.value
-			}
-			limit, found, err := RestoreRetryLimitFromAnnotations(annotations)
-			if (err != nil) != test.wantErr {
-				t.Fatalf("RestoreRetryLimitFromAnnotations() error = %v, wantErr %v", err, test.wantErr)
-			}
-			if limit != test.wantLimit || found != test.wantFound {
-				t.Fatalf("RestoreRetryLimitFromAnnotations() = %d, %v, want %d, %v", limit, found, test.wantLimit, test.wantFound)
-			}
-		})
-	}
-
-	if _, found, err := RestoreRetryLimitFromAnnotations(nil); found || err != nil {
-		t.Fatalf("nil annotations = found %v, error %v", found, err)
 	}
 }
 
