@@ -176,7 +176,7 @@ type SnapshotStorageClassSpec struct {
 // and an empty basePath or prefix compare as equal, so an update that drops
 // the empty field is not taken for a location change.
 // +kubebuilder:validation:XValidation:rule="self.claimName == oldSelf.claimName && self.?basePath.orValue('') == oldSelf.?basePath.orValue('')",message="claimName and basePath are immutable"
-// +kubebuilder:validation:XValidation:rule="!has(self.basePath) || !self.basePath.split('/').exists(p, p == 'artifacts')",message="basePath must not contain an artifacts segment"
+// +kubebuilder:validation:XValidation:rule="!has(self.basePath) || !self.basePath.split('/').exists(p, p == 'artifacts' || p == '..')",message="basePath must not contain an artifacts or .. segment"
 type PVCStoreSpec struct {
     ClaimName string `json:"claimName"`
     BasePath  string `json:"basePath,omitempty"` // Default "/", the whole claim.
@@ -276,7 +276,8 @@ snapshots. Between clusters a location may be shared.
 
 - **Reserved path.** The API rejects a `prefix` or `basePath` with a path segment named `artifacts`,
   the directory every store keeps its snapshots in, so no class can be placed inside another store's
-  `artifacts/`, in this cluster or another.
+  `artifacts/`, in this cluster or another. It also rejects a `..` segment, as the store identity
+  code already does, so a `basePath` cannot leave its claim.
 - **Whole claim.** A class on `storage.pvc.name`, the single claim mounted at `/checkpoints`, must
   use the whole claim, `basePath: /`. Listed claims are mounted inside that claim's mount, so a
   subdirectory store on it, such as `basePath: /archive`, would have the same path as a listed claim
@@ -285,8 +286,9 @@ snapshots. Between clusters a location may be shared.
   allowed. The rule ends when the single claim is removed.
 - **Digest.** Another class in the cluster with the same `storeID` is `DuplicateStore`. The scan
   reads the class informer cache and compares only immutable location fields, so a result changes
-  only when a class is added or deleted. The later class by `creationTimestamp`, ties by name, is
-  refused, so two classes created at once get the same answer in any reconcile order.
+  only when a class is added or deleted. A class that is already `Ready` keeps its place. Between
+  the rest, the later class by `creationTimestamp`, ties by name, is refused, so two classes created
+  at once get the same answer in any reconcile order.
 - **Access.** Before `Ready`, the operator writes a test object at the location, reads it back,
   finds it in a listing and deletes it. Those are the four permissions a snapshot needs over its
   life: capture, restore, cleanup and deletion. The object is
@@ -434,10 +436,13 @@ content, and skips, with a Warning event, a directory whose `.origin` names anot
 Sweeps run per class and never cross stores. A sweep looks only inside `<location>/artifacts/` and
 deletes a directory only when all of these hold: its name is a UUID, the `PodSnapshotContent` UID
 that PageBroker names it by; no content in the cluster has that UID; it carries no `.retained`; and
-its `.origin` names this cluster. Only the content check exists today, when every directory there
-with a safe name and no matching content is an orphan. So leftovers from before the upgrade, which
-have no `.origin`, are never swept and need a one-time manual cleanup. Content whose class is gone
-keeps its finalizer and gets `StoreInactive`, as in SNEP-237.
+its `.origin` names this cluster. The sweep checks the content first and reads `.retained` right
+before deleting, after `delete-content` has written it. Only the content check exists today, when
+every directory there with a safe name and no matching content is an orphan. So leftovers from
+before the upgrade, which have no `.origin`, are never swept and need a one-time manual cleanup.
+Content whose class is gone keeps its finalizer and gets `StoreInactive`; SNEP-237 defines that
+[handling](../237-s3-storage/README.md#limitations-risks-and-mitigations), and this proposal does
+not change it.
 
 ### Security
 
@@ -480,10 +485,10 @@ PageBroker containers, as it already does for the default claim at `/checkpoints
 them when those pods restart. The name is unique in the namespace and a valid path segment, so no
 two claims share a path and nobody has to choose one. The listed claims are mounted inside the
 default claim's mount, so Kubernetes creates an empty directory per name at the root of the default
-claim. The chart refuses the name `artifacts`, which would hide the default store's snapshots, and a
-name must not match a directory that already exists at that root. It also refuses a list that
-contains `storage.pvc.name`, because one claim name would then map to two paths. A class on
-`storage.pvc.name` must use the whole claim; see [Store uniqueness](#store-uniqueness).
+claim. The chart refuses the name `artifacts`, which would hide the default store's snapshots. It
+also refuses a list that contains `storage.pvc.name`, because one claim name would then map to two
+paths. A class on `storage.pvc.name` must use the whole claim; see
+[Store uniqueness](#store-uniqueness).
 `storage.pvc.name`, the single claim at `/checkpoints`, is deprecated: `claimNames` replaces it, and
 once it is removed `/checkpoints` holds only the listed claims' mounts. The chart writes the same
 name-to-path mapping into the agent's `config.yaml` and the names into the operator's
@@ -554,7 +559,7 @@ with the previous values:
    bound `PodSnapshotContent`.
 2. Existing content is not rewritten. Content that has a `storeID` but no class name is matched to a
    class by digest whenever it is used, and it protects that class from deletion; content matching
-   none keeps the `StoreInactive` handling.
+   none keeps SNEP-237's [`StoreInactive` handling](../237-s3-storage/README.md#limitations-risks-and-mitigations).
 3. Content with no `spec.storage`, bound before SNEP-237, keeps the legacy path-addressed flow and
    is never assigned a class.
 4. `PodSnapshot`s and `SnapshotJob`s without `storageClassName` resolve to the default class.
