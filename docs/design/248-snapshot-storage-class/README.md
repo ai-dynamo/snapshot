@@ -130,7 +130,7 @@ overwrites a class. The default moves by changing the value; bound content keeps
 | Secret missing or revoked | An S3 class's Secret is deleted or rotated to an invalid key. | The class goes `Ready=False`, reason `CredentialsUnavailable`, and new bindings stop. In-flight operations fail with the existing credential errors; nothing is deleted on an access error. |
 | Agent holds credentials | Today only PageBroker and the operator see S3 credentials. The agent now reads the class's Secret and passes it to PageBroker in the request. | The Secret must live in the Snapshot namespace. The operator keeps the agent's Role limited by `resourceNames` to the Secrets and ConfigMaps that classes reference, and removes a rule whose list would be empty, because an empty list allows every object; a node can still read the credentials of every store, where today it holds one. The credentials stay in memory in both processes and cross only the local socket the agent already uses; they are never written to a volume, a transaction record or a log. Accepted trade-off against giving PageBroker a Kubernetes client; see Alternatives. |
 | Shared workload identity | Classes without a Secret are all reached with one identity, that of the agent's and the operator's service accounts. | That identity needs access to every such store, so credentials do not separate those stores from each other; use a Secret per class where separation matters. Instance metadata is excluded, so a broken identity fails instead of falling back to the node's role. |
-| Duplicate location | Two classes in one cluster describe the same place, so one store gets two policies and two sets of access settings. | The operator refuses `Ready` for the later class with reason `DuplicateStore` and names the other. Two classes that reach one bucket through different hostnames are not detected; that is harmless, because a sweep keeps every directory whose content exists in the cluster, whichever class it is bound to. See [Store uniqueness](#store-uniqueness). |
+| Duplicate location | Two classes in one cluster describe the same place, so one store gets two policies and two sets of access settings. | The operator refuses `Ready` for the later class with reason `DuplicateStore` and names the other; a class with bound content is never the one refused. Two classes that reach one bucket through different hostnames are not detected; that is harmless, because a sweep keeps every directory whose content exists in the cluster, whichever class it is bound to. See [Store uniqueness](#store-uniqueness). |
 | Shared store | Several clusters use one location. A sweep or a delete in one cluster could remove another's snapshots. | Each content directory carries `.origin` with the creating cluster's ID. A sweep deletes only orphans whose `.origin` names its own cluster, and deleting content skips a directory that names another. Each cluster's credentials can still read and delete the others' snapshots, so share only between clusters that trust each other. A destroyed cluster's directories stay until an administrator removes them. |
 | Older release on the same location | A cluster on a release without classes, or one rolled back to it, writes no `.origin` and sweeps every directory that has no content in that cluster. | Not preventable from the store. Do not share a location with such a cluster, and before a rollback make sure no other cluster uses the location. |
 | Rollback with retained data | The previous release ignores `reclaimPolicy` and `.retained`. After a rollback its sweep deletes retained directories in the store that `storage.*` names, and deleting a `Retain` content deletes its data. | Not preventable from the new release. The Rollback procedure tells the administrator to copy retained data out of that store first. Stores of other classes are not reached by the previous operator. |
@@ -185,7 +185,7 @@ type PVCStoreSpec struct {
 // Endpoint, Region, Bucket and Prefix are storeID inputs; the rest are access
 // settings and stay editable.
 // +kubebuilder:validation:XValidation:rule="self.endpoint == oldSelf.endpoint && self.region == oldSelf.region && self.bucket == oldSelf.bucket && self.?prefix.orValue('') == oldSelf.?prefix.orValue('')",message="endpoint, region, bucket and prefix are immutable"
-// +kubebuilder:validation:XValidation:rule="!has(self.prefix) || !self.prefix.split('/').exists(p, p == 'artifacts')",message="prefix must not contain an artifacts segment"
+// +kubebuilder:validation:XValidation:rule="!has(self.prefix) || !self.prefix.split('/').exists(p, p == 'artifacts' || p == '..')",message="prefix must not contain an artifacts or .. segment"
 type S3StoreSpec struct {
     Endpoint string `json:"endpoint"`
     Region   string `json:"region"`
@@ -285,10 +285,11 @@ snapshots. Between clusters a location may be shared.
   `BasePathNotAllowed`. A store in a subdirectory needs a listed claim, where any `basePath` is
   allowed. The rule ends when the single claim is removed.
 - **Digest.** Another class in the cluster with the same `storeID` is `DuplicateStore`. The scan
-  reads the class informer cache and compares only immutable location fields, so a result changes
-  only when a class is added or deleted. A class that is already `Ready` keeps its place. Between
-  the rest, the later class by `creationTimestamp`, ties by name, is refused, so two classes created
-  at once get the same answer in any reconcile order.
+  reads the class informer cache, compares only immutable location fields, and runs on every
+  reconcile of each class, so a stale cache can only delay a refusal, never make one permanent. A
+  class with bound content is never refused, whatever its condition. Among the rest, the later
+  class by `creationTimestamp`, ties by name, is refused, so two classes created at once get the
+  same answer in any reconcile order.
 - **Access.** Before `Ready`, the operator writes a test object at the location, reads it back,
   finds it in a listing and deletes it. Those are the four permissions a snapshot needs over its
   life: capture, restore, cleanup and deletion. The object is
@@ -424,7 +425,8 @@ client cache.
 
 #### Maintenance
 
-The backend registry is built from Ready and terminating classes. `backendForContent` resolves the
+The backend registry is built from Ready and terminating classes, and from any class with bound
+content, whatever its condition, so bound content always resolves. `backendForContent` resolves the
 content's class by name, or by `storeID` for content with no class name, checks its `storeID`
 against the binding, and returns that backend. Under the content's `reclaimPolicy: Retain`,
 `delete-content` writes `artifacts/<uid>/.retained`, a JSON file with the cluster ID, the class
