@@ -154,5 +154,4 @@ The code that implements restore retry is in these packages and files:
 | `agent/internal/executor/nsrestore_output.go` | Reading nsrestore's progress message and its PageBroker code |
 | `agent/internal/nri/plugin.go` | The report that a destination container stopped |
 | `agent/internal/runtime/container_state.go` | Whether the runtime still runs a container |
-| `api/podcontract/restore_status.go` | The retry status annotation and its type |
-| `api/podcontract/protocol.go` | The retry limit annotation |
+| `api/podcontract/restore_retry.go` | The retry limit annotation, and the retry status annotation and its type |
