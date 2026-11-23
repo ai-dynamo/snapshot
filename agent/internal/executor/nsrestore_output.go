@@ -28,9 +28,9 @@ func newNSRestoreOutput(mirror io.Writer) *nsrestoreOutput {
 	return &nsrestoreOutput{ProcessOutput: snapshotruntime.NewProcessOutput(mirror, "nsenter:", "panic:", "fatal error:")}
 }
 
-// stdoutLines splits nsrestore's stdout into its progress messages and the
+// splitStdout splits nsrestore's stdout into its progress messages and the
 // other lines, the last of which is the result.
-func (o *nsrestoreOutput) stdoutLines() (changingContainer bool, other []string) {
+func (o *nsrestoreOutput) splitStdout() (changingContainer bool, other []string) {
 	for _, line := range strings.Split(string(o.Stdout()), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -48,7 +48,7 @@ func (o *nsrestoreOutput) stdoutLines() (changingContainer bool, other []string)
 func (o *nsrestoreOutput) parseResult() (RestoreInNamespaceResult, error) {
 	var result RestoreInNamespaceResult
 	last := ""
-	if _, other := o.stdoutLines(); len(other) > 0 {
+	if _, other := o.splitStdout(); len(other) > 0 {
 		last = other[len(other)-1]
 	}
 	err := json.Unmarshal([]byte(last), &result)
@@ -83,7 +83,7 @@ func (o *nsrestoreOutput) failure(runErr, ctxErr error) error {
 	case errors.Is(ctxErr, context.Canceled):
 		err = fmt.Errorf("%w; the restore was cancelled", err)
 	}
-	if changingContainer, _ := o.stdoutLines(); changingContainer {
+	if changingContainer, _ := o.splitStdout(); changingContainer {
 		return &changedContainerError{err: err}
 	}
 	return err
@@ -140,7 +140,7 @@ func reportedCause(result RestoreInNamespaceResult) error {
 	}
 	cause := errors.New(message)
 	if code, ok := pagebroker.Failure_Code_value[result.Code]; ok {
-		cause = &reportedFailure{message: message, failure: pagebroker.NewFailureError(pagebroker.Failure_Code(code), message)}
+		cause = &reportedFailureError{message: message, failure: pagebroker.NewFailureError(pagebroker.Failure_Code(code), message)}
 	}
 	if result.Step == "" {
 		return cause
@@ -148,16 +148,16 @@ func reportedCause(result RestoreInNamespaceResult) error {
 	return failStep(Step(result.Step), cause)
 }
 
-// reportedFailure is a PageBroker failure nsrestore reported: its message is
+// reportedFailureError is a PageBroker failure nsrestore reported: its message is
 // nsrestore's text, and errors.As still finds the code.
-type reportedFailure struct {
+type reportedFailureError struct {
 	message string
 	failure *pagebroker.FailureError
 }
 
-func (e *reportedFailure) Error() string { return e.message }
+func (e *reportedFailureError) Error() string { return e.message }
 
-func (e *reportedFailure) Unwrap() error { return e.failure }
+func (e *reportedFailureError) Unwrap() error { return e.failure }
 
 // detail prefers a cause line (nsenter, panic) and otherwise the last line
 // nsrestore logged at error level or above. nsrestore's stderr is its log, so
