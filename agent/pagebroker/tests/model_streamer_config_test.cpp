@@ -161,6 +161,11 @@ TEST_F(ModelStreamerConfigTest, DefaultCredentialChainKeepsOnlyWorkloadIdentityF
 
   setenv("AWS_DEFAULT_REGION", "ap-south-1", 1);
   ConfigureEnvironment(Options{}, &storage);
+  EXPECT_STREQ(std::getenv("AWS_DEFAULT_REGION"), "eu-central-1");
+
+  unsetenv("AWS_REGION");
+  setenv("AWS_DEFAULT_REGION", "ap-south-1", 1);
+  ConfigureEnvironment(Options{}, &storage);
   EXPECT_STREQ(std::getenv("AWS_DEFAULT_REGION"), "ap-south-1");
 }
 
@@ -250,7 +255,6 @@ TEST_F(ModelStreamerConfigTest, InvalidEnvironmentFailsBeforeAnySettingsAreAppli
 
 TEST_F(ModelStreamerConfigTest, DaemonRejectsRelativeCaBeforeApplyingSettings)
 {
-  SaveAndClear("AWS_SHARED_CREDENTIALS_FILE");
   setenv("AWS_CA_BUNDLE", "relative/ca.pem", 1);
   test::TemporaryDirectory root;
   const auto credentials = root.path() / "credentials";

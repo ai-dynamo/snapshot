@@ -330,20 +330,20 @@ ConfigureEnvironment(const Options& options, const S3Config* storage)
     environment[kAwsCaBundleEnv] = connection.ca_file;
     if (connection.UsesDefaultCredentialChain()) {
       // The native chain reads static keys and profiles before workload identity,
-      // and takes the token exchange region only from AWS_DEFAULT_REGION.
+      // and takes the token exchange region only from AWS_DEFAULT_REGION, while
+      // rclone prefers AWS_REGION.
       for (const auto* name : kStaticCredentialVariables) {
         if (unsetenv(name) != 0)
           throw std::runtime_error(std::string("configure Model Streamer startup environment: ") + name);
       }
       environment[kAwsConfigFileEnv] = kNoFile;
       environment[kAwsSharedCredentialsFileEnv] = kNoFile;
-      const auto* default_region = std::getenv(kAwsDefaultRegionEnv);
-      if (!default_region || *default_region == '\0') {
-        const auto* injected = std::getenv(kAwsRegionEnv);
-        const std::string region = injected && *injected != '\0' ? injected : connection.region;
-        if (!region.empty())
-          environment[kAwsDefaultRegionEnv] = region;
-      }
+      const auto* injected = std::getenv(kAwsRegionEnv);
+      const auto* fallback = std::getenv(kAwsDefaultRegionEnv);
+      if (injected != nullptr && *injected != '\0')
+        environment[kAwsDefaultRegionEnv] = injected;
+      else if ((fallback == nullptr || *fallback == '\0') && !connection.region.empty())
+        environment[kAwsDefaultRegionEnv] = connection.region;
     }
   }
   for (const auto& [name, value] : environment) {
