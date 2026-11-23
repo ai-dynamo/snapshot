@@ -37,7 +37,6 @@ constexpr char kUploadActiveFilesKey[] = "uploadActiveFiles";
 constexpr char kRequestSecondsKey[] = "requestSeconds";
 constexpr char kUploadRequestRetriesKey[] = "uploadRequestRetries";
 constexpr char kUploadConnectSecondsKey[] = "uploadConnectSeconds";
-constexpr char kCredentialsFileEnv[] = "AWS_SHARED_CREDENTIALS_FILE";
 constexpr char kDefaultProfile[] = "default";
 constexpr char kAccessKey[] = "aws_access_key_id";
 constexpr char kSecretKey[] = "aws_secret_access_key";
@@ -56,9 +55,7 @@ ParseCredentials(std::string_view text, S3Connection connection)
 {
   if (text.size() > kMaxCredentialsBytes || text.find('\0') != text.npos)
     throw std::invalid_argument("invalid S3 credentials file");
-  connection.access_key_id.clear();
-  connection.secret_access_key.clear();
-  connection.session_token.clear();
+  connection.ClearCredentials();
   std::istringstream input{std::string(text)};
   std::string line;
   std::string profile;
@@ -301,11 +298,9 @@ LoadS3Credentials(S3Connection connection)
   if (connection.ca_file.empty())
     connection.ca_file = Environment(kAwsCaBundleEnv);
   connection.Validate();
-  const auto path = Environment(kCredentialsFileEnv);
+  const auto path = Environment(kAwsSharedCredentialsFileEnv);
   if (path.empty()) {
-    connection.access_key_id.clear();
-    connection.secret_access_key.clear();
-    connection.session_token.clear();
+    connection.ClearCredentials();
     return connection;
   }
   try {

@@ -15,13 +15,12 @@
 #include <array>
 #include <cerrno>
 #include <charconv>
-#include <cstdlib>
 #include <climits>
+#include <cstdlib>
 #include <iterator>
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <sstream>
-#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -90,20 +89,7 @@ constexpr char kRemoteTypeEnv[] = "RCLONE_CONFIG_PAGEBROKER_TYPE=s3";
 constexpr char kRemoteProviderEnv[] = "RCLONE_CONFIG_PAGEBROKER_PROVIDER=AWS";
 constexpr char kExplicitAuthEnv[] = "RCLONE_CONFIG_PAGEBROKER_ENV_AUTH=false";
 constexpr char kEnvironmentAuthEnv[] = "RCLONE_CONFIG_PAGEBROKER_ENV_AUTH=true";
-constexpr char kAwsRegionEnv[] = "AWS_REGION";
-constexpr char kAwsDefaultRegionEnv[] = "AWS_DEFAULT_REGION";
-constexpr char kAwsCaBundleEnv[] = "AWS_CA_BUNDLE=";
-constexpr char kSslCertFileEnv[] = "SSL_CERT_FILE=";
-// The only ambient variables a child may see: the inputs of web identity and
-// container credentials. Static access keys come from the credentials file alone.
-constexpr const char* kIdentityVariables[] = {"AWS_ROLE_ARN",
-                                              "AWS_WEB_IDENTITY_TOKEN_FILE",
-                                              "AWS_ROLE_SESSION_NAME",
-                                              "AWS_STS_REGIONAL_ENDPOINTS",
-                                              kAwsRegionEnv,
-                                              kAwsDefaultRegionEnv,
-                                              "AWS_CONTAINER_CREDENTIALS_FULL_URI",
-                                              "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE"};
+constexpr char kSslCertFileEnv[] = "SSL_CERT_FILE";
 constexpr char kRemoteAccessKeyEnv[] = "RCLONE_CONFIG_PAGEBROKER_ACCESS_KEY_ID=";
 constexpr char kRemoteSecretKeyEnv[] = "RCLONE_CONFIG_PAGEBROKER_SECRET_ACCESS_KEY=";
 constexpr char kRemoteTokenEnv[] = "RCLONE_CONFIG_PAGEBROKER_SESSION_TOKEN=";
@@ -391,25 +377,33 @@ WaitForRclone(Child& child, int output, int diagnostics, std::size_t output_limi
 void
 AppendIdentityEnvironment(const S3Connection& connection, std::vector<std::string>& environment)
 {
+  const auto entry = [](const char* name, const std::string& value) { return std::string(name) + '=' + value; };
   environment.push_back(kEnvironmentAuthEnv);
-  bool has_region = false;
-  for (const auto* name : kIdentityVariables) {
+  for (const auto* name : kWorkloadIdentityVariables) {
     const auto* value = std::getenv(name);
-    if (!value || *value == '\0')
-      continue;
-    environment.push_back(std::string(name) + '=' + value);
-    const std::string_view variable(name);
-    has_region = has_region || variable == kAwsRegionEnv || variable == kAwsDefaultRegionEnv;
+    if (value != nullptr && *value != '\0')
+      environment.push_back(entry(name, value));
   }
-  if (!has_region && !connection.region.empty())
-    environment.push_back(std::string(kAwsRegionEnv) + '=' + connection.region);
+  if (const auto region = TokenExchangeRegion(connection); !region.empty())
+    environment.push_back(entry(kAwsRegionEnv, region));
   if (!connection.ca_file.empty()) {
-    environment.push_back(kAwsCaBundleEnv + connection.ca_file);
-    environment.push_back(kSslCertFileEnv + connection.ca_file);
+    environment.push_back(entry(kAwsCaBundleEnv, connection.ca_file));
+    environment.push_back(entry(kSslCertFileEnv, connection.ca_file));
   }
 }
 
 } // namespace
+
+std::string
+TokenExchangeRegion(const S3Connection& connection)
+{
+  for (const auto* name : {kAwsRegionEnv, kAwsDefaultRegionEnv}) {
+    const auto* value = std::getenv(name);
+    if (value != nullptr && *value != '\0')
+      return value;
+  }
+  return connection.region;
+}
 
 void
 S3Connection::Validate() const

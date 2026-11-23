@@ -3,16 +3,22 @@
 
 #include "model_streamer_config.hpp"
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <cstdlib>
+#include <iterator>
 #include <limits>
 #include <set>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 #include "s3_config.hpp"
 #include "utils/config.hpp"
 #include "utils/json.hpp"
+
+extern char** environ;
 
 namespace snapshot::pagebroker::model_streamer::settings {
 namespace {
@@ -48,13 +54,8 @@ constexpr char kLogLevelEnv[] = "RUNAI_STREAMER_LOG_LEVEL";
 constexpr char kLogToStderrEnv[] = "RUNAI_STREAMER_LOG_TO_STDERR";
 constexpr char kLegacyConcurrencyEnv[] = "RUNAI_STREAMER_CONCURRENCY";
 constexpr char kAwsEc2MetadataDisabledEnv[] = "AWS_EC2_METADATA_DISABLED";
-constexpr char kAwsConfigFileEnv[] = "AWS_CONFIG_FILE";
-constexpr char kAwsSharedCredentialsFileEnv[] = "AWS_SHARED_CREDENTIALS_FILE";
-constexpr char kAwsRegionEnv[] = "AWS_REGION";
-constexpr char kAwsDefaultRegionEnv[] = "AWS_DEFAULT_REGION";
+constexpr char kAwsVariablePrefix[] = "AWS_";
 constexpr char kNoFile[] = "/dev/null";
-constexpr const char* kStaticCredentialVariables[] = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
-                                                      "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_DEFAULT_PROFILE"};
 
 constexpr char kNativeBooleanTrue[] = "1";
 constexpr char kNativeBooleanFalse[] = "0";
@@ -318,6 +319,26 @@ ResolveOptions(Options options, const S3Config* storage)
   return options;
 }
 
+namespace {
+// Ambient AWS_* variables that are neither workload identity inputs nor set by
+// ConfigureEnvironment. rclone never receives them, so the native reader must not either.
+std::vector<std::string>
+UnlistedAwsVariables(const std::map<std::string, std::string>& kept)
+{
+  std::vector<std::string> names;
+  for (char** variable = environ; variable != nullptr && *variable != nullptr; ++variable) {
+    const std::string_view entry(*variable);
+    const std::string name(entry.substr(0, entry.find('=')));
+    if (!name.starts_with(kAwsVariablePrefix) || kept.contains(name))
+      continue;
+    if (std::find(std::begin(kWorkloadIdentityVariables), std::end(kWorkloadIdentityVariables), name) ==
+        std::end(kWorkloadIdentityVariables))
+      names.push_back(name);
+  }
+  return names;
+}
+}  // namespace
+
 void
 ConfigureEnvironment(const Options& options, const S3Config* storage)
 {
@@ -330,20 +351,17 @@ ConfigureEnvironment(const Options& options, const S3Config* storage)
     environment[kAwsCaBundleEnv] = connection.ca_file;
     if (connection.UsesDefaultCredentialChain()) {
       // The native chain reads static keys and profiles before workload identity,
-      // and takes the token exchange region only from AWS_DEFAULT_REGION, while
-      // rclone prefers AWS_REGION.
-      for (const auto* name : kStaticCredentialVariables) {
-        if (unsetenv(name) != 0)
-          throw std::runtime_error(std::string("configure Model Streamer startup environment: ") + name);
-      }
+      // and takes the token exchange region only from AWS_DEFAULT_REGION.
       environment[kAwsConfigFileEnv] = kNoFile;
       environment[kAwsSharedCredentialsFileEnv] = kNoFile;
-      const auto* injected = std::getenv(kAwsRegionEnv);
-      const auto* fallback = std::getenv(kAwsDefaultRegionEnv);
-      if (injected != nullptr && *injected != '\0')
-        environment[kAwsDefaultRegionEnv] = injected;
-      else if ((fallback == nullptr || *fallback == '\0') && !connection.region.empty())
-        environment[kAwsDefaultRegionEnv] = connection.region;
+      if (const auto region = TokenExchangeRegion(connection); !region.empty()) {
+        environment[kAwsRegionEnv] = region;
+        environment[kAwsDefaultRegionEnv] = region;
+      }
+      for (const auto& name : UnlistedAwsVariables(environment)) {
+        if (unsetenv(name.c_str()) != 0)
+          throw std::runtime_error("configure Model Streamer startup environment: " + name);
+      }
     }
   }
   for (const auto& [name, value] : environment) {

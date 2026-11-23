@@ -20,6 +20,19 @@ namespace snapshot::pagebroker {
 inline constexpr char kHttpsEndpointPrefix[] = "https://";
 inline constexpr char kHttpEndpointPrefix[] = "http://";
 inline constexpr char kAwsCaBundleEnv[] = "AWS_CA_BUNDLE";
+inline constexpr char kAwsRegionEnv[] = "AWS_REGION";
+inline constexpr char kAwsDefaultRegionEnv[] = "AWS_DEFAULT_REGION";
+inline constexpr char kAwsSharedCredentialsFileEnv[] = "AWS_SHARED_CREDENTIALS_FILE";
+inline constexpr char kAwsConfigFileEnv[] = "AWS_CONFIG_FILE";
+// The inputs of web identity and container credentials. Under the default
+// credential chain these are the only ambient AWS_* variables that rclone and
+// the native reader receive; the region is chosen by TokenExchangeRegion.
+inline constexpr const char* kWorkloadIdentityVariables[] = {"AWS_ROLE_ARN",
+                                                             "AWS_WEB_IDENTITY_TOKEN_FILE",
+                                                             "AWS_ROLE_SESSION_NAME",
+                                                             "AWS_STS_REGIONAL_ENDPOINTS",
+                                                             "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+                                                             "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE"};
 inline constexpr std::uint64_t kDefaultS3PartSize = 64ULL * 1024 * 1024;
 
 // Connection settings shared by rclone clients and native restore configuration.
@@ -37,11 +50,21 @@ struct S3Connection {
   std::string session_token;
 
   bool UsesDefaultCredentialChain() const { return access_key_id.empty(); }
+  void ClearCredentials()
+  {
+    access_key_id.clear();
+    secret_access_key.clear();
+    session_token.clear();
+  }
 
   // Checks text, endpoint scheme, absolute CA path and credential completeness without network I/O.
   void Validate() const;
   bool operator==(const S3Connection&) const = default;
 };
+
+// Region of the workload identity token exchange, for rclone and the native
+// reader alike: AWS_REGION, else AWS_DEFAULT_REGION, else the store's region.
+std::string TokenExchangeRegion(const S3Connection& connection);
 
 // Identifies one object using a bucket and its literal key, rather than a URL.
 struct S3ObjectLocation {

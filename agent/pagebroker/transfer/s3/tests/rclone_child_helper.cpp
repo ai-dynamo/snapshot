@@ -60,6 +60,11 @@ main(int argc, char** argv)
     std::set<std::string> actual;
     for (char** variable = environ; *variable; ++variable)
       actual.insert(*variable);
+    std::string ca;
+    for (int i = 4; i + 1 < argc; ++i) {
+      if (std::string(argv[i]) == "--ca-cert")
+        ca = argv[i + 1];
+    }
     std::set<std::string> expected{
         "RCLONE_CONFIG_PAGEBROKER_TYPE=s3",
         "RCLONE_CONFIG_PAGEBROKER_PROVIDER=AWS",
@@ -74,14 +79,18 @@ main(int argc, char** argv)
         "AWS_CONTAINER_CREDENTIALS_FULL_URI=https://credentials.example.test/v1",
         "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE=/var/run/fake/container-token",
         remote.ends_with("-region") ? "AWS_REGION=eu-central-1" : "AWS_REGION=us-west-2"};
-    for (int i = 4; i + 1 < argc; ++i) {
-      if (std::string(argv[i]) == "--ca-cert") {
-        expected.insert(std::string("AWS_CA_BUNDLE=") + argv[i + 1]);
-        expected.insert(std::string("SSL_CERT_FILE=") + argv[i + 1]);
-      }
+    if (remote.ends_with("-ca")) {
+      expected.insert("AWS_CA_BUNDLE=" + ca);
+      expected.insert("SSL_CERT_FILE=" + ca);
     }
-    if (remote.ends_with("-ca") && expected.size() != 15)
-      return 12;
+    for (const auto& entry : actual) {
+      if (!expected.contains(entry))
+        std::cerr << "unexpected: " << entry << '\n';
+    }
+    for (const auto& entry : expected) {
+      if (!actual.contains(entry))
+        std::cerr << "missing: " << entry << '\n';
+    }
     return actual == expected ? 0 : 11;
   }
   if (remote.starts_with("pagebroker:bucket/descriptors/")) {

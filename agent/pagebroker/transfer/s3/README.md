@@ -39,22 +39,19 @@ Command failures throw `S3Error`, carrying only the HTTP status extracted from
 the pinned CLI format (zero when unavailable). Cancellation and deadlines throw
 the shared `CancellationError` directly.
 
-With `AWS_SHARED_CREDENTIALS_FILE` set, the daemon reads the `[default]` profile
-from that file once at startup. The file must contain `aws_access_key_id` and
-`aws_secret_access_key`; `aws_session_token` is optional. Files are bounded to
-64 KiB, and Kubernetes Secret symlinks are supported. Missing, malformed or
-incomplete files fail startup; environment access keys and named profiles cannot
-override or supplement them. The daemon shares that snapshot with rclone and
-Model Streamer. Restart PageBroker to adopt changed static credentials; they are
-not refreshed.
+The daemon resolves credentials once at startup, as described in
+[the S3 guide](../../S3.md#configuration-and-credentials). With a credentials
+file, `S3Client` receives that snapshot and passes it to rclone as explicit
+credentials. The file is bounded to 64 KiB, and Kubernetes Secret symlinks are
+supported.
 
-With the variable unset or empty, `S3Client` receives no credentials and starts
+Without a credentials file, `S3Client` receives no credentials and starts
 rclone with environment authentication. The child then runs the default
-credential chain on the workload identity variables listed in
-[the S3 guide](../../S3.md#configuration-and-credentials), which `S3Client`
-copies from the daemon's environment when it is constructed. Those credentials
-refresh inside rclone. Instance metadata and the shared configuration files stay
-disabled in both modes.
+credential chain on the workload identity variables listed in the S3 guide,
+which `S3Client` copies from the daemon's environment when it is constructed.
+Those credentials refresh inside rclone. Model Streamer runs its own default
+credential chain in the daemon process, with the same variables; see
+[the S3 guide](../../S3.md#configuration-and-credentials).
 
 Region and endpoint come from the storage JSON. The optional `AWS_CA_BUNDLE`
 fallback must be absolute. Credential values never appear in arguments or logs.
