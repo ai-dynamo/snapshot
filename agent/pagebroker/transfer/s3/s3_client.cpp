@@ -394,17 +394,6 @@ AppendIdentityEnvironment(const S3Connection& connection, std::vector<std::strin
 
 } // namespace
 
-std::string
-TokenExchangeRegion(const S3Connection& connection)
-{
-  for (const auto* name : {kAwsRegionEnv, kAwsDefaultRegionEnv}) {
-    const auto* value = std::getenv(name);
-    if (value != nullptr && *value != '\0')
-      return value;
-  }
-  return connection.region;
-}
-
 void
 S3Connection::Validate() const
 {

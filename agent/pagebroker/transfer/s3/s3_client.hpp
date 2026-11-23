@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <mutex>
 #include <optional>
@@ -64,7 +65,16 @@ struct S3Connection {
 
 // Region of the workload identity token exchange, for rclone and the native
 // reader alike: AWS_REGION, else AWS_DEFAULT_REGION, else the store's region.
-std::string TokenExchangeRegion(const S3Connection& connection);
+inline std::string
+TokenExchangeRegion(const S3Connection& connection)
+{
+  for (const auto* name : {kAwsRegionEnv, kAwsDefaultRegionEnv}) {
+    const auto* value = std::getenv(name);
+    if (value != nullptr && *value != '\0')
+      return value;
+  }
+  return connection.region;
+}
 
 // Identifies one object using a bucket and its literal key, rather than a URL.
 struct S3ObjectLocation {
