@@ -58,7 +58,7 @@ text{font-family:Helvetica,Arial,"Liberation Sans",sans-serif}
 <rect class="k-g" x="20.0" y="86.0" width="244.3" height="60" rx="5" stroke-width="0.8"/>
 <text x="142.2" y="100.0" class="k-g-t" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">the owner creates restore Pods that</text>
 <text x="142.2" y="116.0" class="k-g-t" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">name the snapshot; the operator</text>
-<text x="142.2" y="132.0" class="k-g-t" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">groups them by replica labels</text>
+<text x="142.2" y="132.0" class="k-g-t" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">groups them by group labels</text>
 <text x="159.3" y="166.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">complete group: the operator creates the</text>
 <text x="159.3" y="182.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">PodGroupRestore, claims and pins its Pods</text>
 <line class="arw" x1="88.6" y1="194.0" x2="223.7" y2="194.0" stroke-width="1.2" marker-end="url(#ah)"/>

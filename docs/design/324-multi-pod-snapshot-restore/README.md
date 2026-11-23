@@ -232,8 +232,8 @@ Redis-compatible server.
 | CUDA Checkpoint's prepare and resume phases are not released yet. | Until they are, an application whose communicators use a transport that Snapshot cannot preserve, such as RDMA, calls NCCL Checkpoint's prepare and restore itself, and NCCL restores after release through the library endpoint. Over NVLink, an existing communicator continues without either call, since cuInterpose restores its memory and Snapshot preserves its connections. |
 | A group restore Pod's container starts when the Pod is created, so its startup probe runs through the wait for a complete group, which has no limit, and then through the restore. | The group restore startup probe uses the largest failure threshold the API accepts, `math.MaxInt32` one-second checks, so it never expires in practice and only the attempt's deadline and the owner bound a restore. Pod membership is fixed when the attempt is created, and container identity when it is pinned: a lost Pod, evicted or not, is replaced and joins its group before the attempt, and fails the attempt after it. A destination container that exits, for example when it is killed for memory, fails its Pod under `restartPolicy: Never`, which is a loss as above; under `Always`, it restarts and its proxy waits again, since no restore has used the Pod, so it stays usable until pinning, which records its new ID, and after pinning a changed container fails the member. |
 | Pods of an incomplete group, such as a replacement waiting for its peers, take their nodes and GPUs while they wait, and Snapshot does not bound that wait. | That is placement, which belongs to the gang scheduler and the owner. The owner, which already watches its replicas, bounds the wait, and the operator names the missing members in Events on the waiting Pods. |
-| A member lost after its attempt exists fails the attempt, and a released member keeps running after a peer fails, so replacing only the failed Pods would leave a replica that cannot form a new group. | Membership is fixed for simplicity. A failed attempt ends its unreleased destinations, and the workload controller retires the whole replica, released members included, before retrying. This is its recovery policy, distinct from the Pod's `restartPolicy`, which only decides whether a container restarts. [GREP-1020](https://github.com/ai-dynamo/grove/pull/1021) proposes it for Grove, and LeaderWorkerSet's default `RecreateGroupOnPodRestart` recreates the whole group when a container restarts. |
-| A replica key built from reusable names and indexes can identify two generations of a replica at once. | A replica key must not identify two overlapping replica generations: an owner that recreates a workload under the same name waits until the previous Pods are deleted, as Grove does when it replaces its capture replica. |
+| A member lost while its attempt is unfinished fails it, one lost after it succeeds leaves it successful, and released members keep running either way, so replacing only the lost or failed Pods would leave a replica that cannot form a new group. | Membership is fixed for simplicity. A failed attempt ends its unreleased destinations, and the workload controller retires the whole replica, released members included, before retrying; it does the same when a restored replica loses a member. This is its recovery policy, distinct from the Pod's `restartPolicy`, which only decides whether a container restarts. [GREP-1020](https://github.com/ai-dynamo/grove/pull/1021) proposes it for Grove, and LeaderWorkerSet's default `RecreateGroupOnPodRestart` recreates the whole group when a container restarts. |
+| A group key built from reusable names and indexes can identify two generations of a replica at once. | A group key must not identify two overlapping replica generations: an owner that recreates a workload under the same name waits until the previous Pods are deleted, as Grove does when it replaces its capture replica. |
 | A restore Pod identifies its member by a label value, which must equal the captured member ID. | Integrations capture with IDs taken from the same label, as Grove's Pod index and LeaderWorkerSet's worker index do, and a mismatch is reported in Events on the Pod and the group. An integration that reuses a capture with other IDs writes them into a label of its own and names that label, and an import can rename members ([Appendix A](#a-open-questions)), so Snapshot needs no mapping of its own. |
 | A restored process keeps its captured hostname namespace, so `gethostname()` returns its source's hostname, while the target Pod's hostname and `/etc/hosts` name the target. A workload that resolves its own hostname after release reaches loopback or nothing, and one that reports `gethostname()` as its identity names its source. | Preserved connections don't depend on names, and eager vLLM restored under new target hostnames. Workloads take their current identity from the Pod's metadata, refreshed at restore, select their network interfaces explicitly rather than through their hostname, and don't resolve their own hostname after release. |
 
@@ -617,8 +617,8 @@ creation what it restores, as a single restore Pod does. The declaration is
 three annotations, identical on every member of a group, which
 `podcontract.BuildGroupTarget` adds to a template or the owner writes:
 `nvidia.com/restore-from-group` names the `PodGroupSnapshot`, in the Pod's
-namespace; `nvidia.com/restore-replica-labels` names the labels, set by the
-workload controller, whose values identify the Pod's replica; and
+namespace; `nvidia.com/restore-group-labels` names the labels, set by the
+workload controller, whose values identify the Pods that restore together; and
 `nvidia.com/restore-member-label` names the label whose value is the Pod's
 member ID. Snapshot therefore knows no workload controller: a Grove scaling
 group names its replica and Pod-index labels, and a LeaderWorkerSet its group
@@ -645,11 +645,11 @@ existing Pod cache. A candidate is not terminating, carries no
 `nvidia.com/restore-group-uid`, and is not a target of any attempt, finished or
 not: a Pod gets one attempt, as it gets one restore, and an unclaimed Pod has
 never been restored, because a group restore starts only after its claim.
-Candidates are grouped by namespace, `PodGroupSnapshot` UID and replica key,
-which is the replica labels' `key=value` pairs sorted by key. Every member of a
+Candidates are grouped by namespace, `PodGroupSnapshot` UID and group key,
+which is the group labels' `key=value` pairs sorted by key. Every member of a
 group must carry the same three annotations, compared after parsing, and a
 missing label or a disagreement blocks the group and is reported as an Event.
-`restore-replica-labels` must not include `nvidia.com/podgroupsnapshot`, which
+`restore-group-labels` must not include `nvidia.com/podgroupsnapshot`, which
 Snapshot reserves for the attempt's snapshot name; the operator reports it as
 an invalid restore annotation, in an Event, and creates no attempt for that
 group.
@@ -675,10 +675,10 @@ the operator's configuration, and each member's target Pod by name and UID,
 with its container mapping. Pod membership is fixed from then on.
 
 When creating a `PodGroupRestore`, Snapshot copies the labels named by
-`restore-replica-labels` from its target Pods into the attempt's metadata, and
+`restore-group-labels` from its target Pods into the attempt's metadata, and
 labels it with its snapshot's name as `nvidia.com/podgroupsnapshot`. Workload
 managers can find and watch their replicas' attempts with a selector built from
-the configured replica labels. The snapshot-name label lists a snapshot's
+the configured group labels. The snapshot-name label lists a snapshot's
 attempts by name, but can also match attempts from an earlier snapshot with that
 name; consumers select one snapshot by also matching `spec.snapshotRef.uid`.
 The target Pod UIDs remain the authoritative identities.
@@ -1011,7 +1011,7 @@ either window of the [workload contract](#workload-contract).
 | Agent connection not restored within the grace period, agent restart, or coordinator restart | Left as found | Fails with `MemberFailed` or `CoordinatorLost` | Keeps running; the rendezvous ends |
 | Deadline expires | Left as found; the attempt ends with `DeadlineExceeded` | Fails with `DeadlineExceeded` | Keeps running; the session closes |
 | Group resource deleted | Left as found: a member without work is cancelled at once, and an attempt that has not committed ends with `Cancelled` | Goes on until the attempt ends; the finalizer holds the group until every member with work has reported its end, bounded by the deadline | The session closes |
-| A target Pod is lost after its restore attempt exists | The attempt fails with `TargetPodDeleted` | Fails with `MemberFailed` | Keeps running until the owner retires the replica |
+| A target Pod is lost while its restore attempt is unfinished | The attempt fails with `TargetPodDeleted` | Fails with `MemberFailed` | Keeps running until the owner retires the replica |
 
 At restore, "left as found" describes the workload, not its destination: a
 failed attempt ends every destination that it claimed and that has not been
@@ -1278,7 +1278,7 @@ metadata:
     workload.example.com/member: worker-0
   annotations:
     nvidia.com/restore-from-group: llm-tp8                               # the PodGroupSnapshot
-    nvidia.com/restore-replica-labels: workload.example.com/replica      # labels whose values identify the replica
+    nvidia.com/restore-group-labels: workload.example.com/replica        # labels whose values identify the group
     nvidia.com/restore-member-label: workload.example.com/member         # label whose value is the member ID
     nvidia.com/restore-container-map: main=server  # optional: only when the names differ
     nvidia.com/restore-group-uid: <uid>            # written by the operator when it claims the Pod
@@ -1289,7 +1289,7 @@ metadata:
   name: llm-tp8-<hash of the member Pods' UIDs>
   namespace: serving
   labels:
-    workload.example.com/replica: llm-r1           # copied from the targets' replica labels
+    workload.example.com/replica: llm-r1           # copied from the targets' group labels
     nvidia.com/podgroupsnapshot: llm-tp8           # the snapshot's name
   ownerReferences:                      # one per target Pod
   - {apiVersion: v1, kind: Pod, name: llm-worker-0-r1, uid: <uid>}
@@ -1438,10 +1438,10 @@ remain a compatible addition.
 | --- | --- | --- |
 | `PodGroupSnapshotContent` | New cluster-scoped kind, created by the operator when capture starts: an immutable spec with the member IDs in rank order, and a status that binds each member's content by name and UID, once, and is Ready only when every member is bound, present and Ready | One record of the captured set, separate from the request, that restore reads and a later import can recreate |
 | `PodGroupSnapshot` status | Adds `boundGroupContentName`; each member's entry keeps its child `PodSnapshot` and progress, while the binding of its content lives only in the group content | The request reports progress and the outcome; the record holds the captured set |
-| `PodGroupRestore` | Created only by the operator, owned by its target Pods, labeled with its targets' replica labels and `nvidia.com/podgroupsnapshot`, with a spec frozen at creation: the snapshot, its group content, the deadline, and each target's Pod and container mapping | One attempt per complete group, with no request from the owner |
+| `PodGroupRestore` | Created only by the operator, owned by its target Pods, labeled with its targets' group labels and `nvidia.com/podgroupsnapshot`, with a spec frozen at creation: the snapshot, its group content, the deadline, and each target's Pod and container mapping | One attempt per complete group, with no request from the owner |
 | `PodSnapshot` and `PodSnapshotContent` | An optional, immutable `spec.podGroup` (`name`, `uid`, `memberID`) names the group content a member belongs to, set by the group controller and copied unchanged into the content; group-owned children also carry an owner reference, take their settings from the member's template, and cannot be restored on their own, and the agent sets a new `Started` condition on a member's `PodSnapshotContent` before its first irreversible step | The agent checks membership against the group content and reads the attempt's live context from the request, each member keeps its own settings, and the operator learns which sources Snapshot changed |
 | Artifact manifest | Adds an optional `podGroup` section with the capture ID, the member's own ID, the ordered member table of Pod UIDs, containers, and Pod IPs, and the ranks of the members that the Pod shared FABRIC memory with | Restore admission checks that all members come from one capture, builds the IP map from the artifacts, and checks that members that shared FABRIC memory land in one NVLink clique |
-| Restore Pod contract | New annotations, set at creation through `podcontract.BuildGroupTarget` and identical on every member: `nvidia.com/restore-from-group`, `nvidia.com/restore-replica-labels` and `nvidia.com/restore-member-label`; the existing single-pair `nvidia.com/restore-container-map`, per Pod, only when the destination's name differs; the group restore startup probe, with the largest failure threshold the API accepts, and the control volume; new annotation `nvidia.com/restore-group-uid: <PodGroupRestore UID>`, written only by the operator in a conditional patch when it claims the Pod; the destination's own command must be inert, as for a standalone restore | One template for every replica, identity from labels the workload controller already sets, and one attempt per Pod, never inherited through a reused name |
+| Restore Pod contract | New annotations, set at creation through `podcontract.BuildGroupTarget` and identical on every member: `nvidia.com/restore-from-group`, `nvidia.com/restore-group-labels` and `nvidia.com/restore-member-label`; the existing single-pair `nvidia.com/restore-container-map`, per Pod, only when the destination's name differs; the group restore startup probe, with the largest failure threshold the API accepts, and the control volume; new annotation `nvidia.com/restore-group-uid: <PodGroupRestore UID>`, written only by the operator in a conditional patch when it claims the Pod; the destination's own command must be inert, as for a standalone restore | One template for every replica, identity from labels the workload controller already sets, and one attempt per Pod, never inherited through a reused name |
 | `restore-complete` file | Adds an `attempt` key holding the `PodGroupRestore` UID next to `pid`, keeping the existing format | Lets a restarted agent prove release for this attempt |
 | Restore Pod conditions | New condition `nvidia.com/RestoreStarted`, set to True before the agent starts restoring into the Pod, its first irreversible step, under a field manager of its own; ending an unreleased destination of a failed attempt restores nothing and does not set it; and never removed or relabelled; new condition `nvidia.com/GroupRestoreFailed`, set to True with the group's reason when a member fails for one, in the same update as `nvidia.com/Restored`; `nvidia.com/Restored` keeps its public reasons and gains only `GroupPending`, an agent-internal wait reason like today's `SnapshotPending` | Restart safety, an exact `startedAt`, and the group's reasons with `ClassifyRestoreOutcome` unchanged |
 | Control volume | Reserves `coordination/` for rendezvous endpoints | Gives every Pod a private and stable endpoint path |
@@ -1653,13 +1653,13 @@ the group content, created before any member, with members bound once each
 only through the request's own `PodSnapshot` and every back-reference checked,
 a content that only names the group content never bound, Ready only for the
 complete set, and deleted before the request's finalizer is removed; grouping
-of restore candidates, including replica keys, rejection of
-`nvidia.com/podgroupsnapshot` in `restore-replica-labels`, a missing label, two
+of restore candidates, including group keys, rejection of
+`nvidia.com/podgroupsnapshot` in `restore-group-labels`, a missing label, two
 candidates for one member, terminating and claimed Pods and targets of any
 attempt ignored, annotations that differ within a group or only in order, a
 member ID that the capture doesn't declare, a missing member, and a node whose
 agent can't restore groups; a replacement before the attempt that joins its
-group, and a loss after it, an eviction included, that fails it; identity
+group, and a loss during it, an eviction included, that fails it; identity
 pinning; the operator's claim of targets, including every state of its claim
 table, a conflict caused by a kubelet status write, a crash between two claims,
 two attempts that select the same Pod, and every surviving target claimed after
@@ -1668,8 +1668,8 @@ attempt successful, Pods deleted after `Failed` keeping its reason, and a member
 released before a peer fails ending in `Failed`; aggregation, including a
 restore that fails before the operator ever sees it in progress, artifact
 withdrawal, cancellation, and the finalizer that keeps a snapshot while a
-restore reads it; an attempt labeled with its targets' replica labels and its
-snapshot's name, found by a selector built from the configured replica labels
+restore reads it; an attempt labeled with its targets' group labels and its
+snapshot's name, found by a selector built from the configured group labels
 even when the Pods carry additional labels, with attempts of an earlier
 same-name snapshot excluded by `spec.snapshotRef.uid`; restore admission that
 matches each artifact by rank, with a renamed member accepted and a reordered
@@ -1819,7 +1819,7 @@ review that settles the open questions in [Appendix A](#a-open-questions).
 | Restore settings typed on the `PodGroupSnapshot` | They put a consumer's configuration on the capture, and force one capture handle per label scheme. |
 | Membership that can change until restore starts | It needs a protocol for changing membership and restarting admission; fixing membership when the attempt is created keeps the attempt immutable, and the owner retires a replica that loses a member. |
 | A member map annotation on restore Pods, from label values to member IDs | The member label already carries any ID: whoever creates the Pods writes the captured IDs into a label of its choice and names it, as an integration does when it reuses a capture with other IDs, and an import can rename members instead. A map would add a second way to say the same thing. |
-| A check that every member of a group shares one top-level owner | It needs read access to every owner kind; requiring that a replica key never identify two overlapping replica generations covers the same case. |
+| A check that every member of a group shares one top-level owner | It needs read access to every owner kind; requiring that a group key never identify two overlapping replica generations covers the same case. |
 | Reusing a restore Pod across attempts | It needs a takeover of finished attempts' bindings and an identity on every report to tell attempts apart; with single-use Pods, the binding names the only attempt, and an owner replaces a failed Pod as it would after any other failure. |
 
 ## Appendix
@@ -1970,9 +1970,9 @@ const (
 	PodGroupProtocolsAnnotation = "nvidia.com/snapshot-podgroup-protocols"
 
 	// PodGroupSnapshotLabel on a PodGroupRestore holds its PodGroupSnapshot's
-	// name. The operator also copies the targets' replica labels onto it, so
+	// name. The operator also copies the targets' group labels onto it, so
 	// workload managers find their replicas' attempts using the configured
-	// replica labels. Match spec.snapshotRef.uid to select one snapshot.
+	// group labels. Match spec.snapshotRef.uid to select one snapshot.
 	// Target Pod UIDs remain the authoritative identities.
 	PodGroupSnapshotLabel = "nvidia.com/podgroupsnapshot"
 
@@ -2451,12 +2451,12 @@ const (
 	// without it is never a group target, and the operator indexes Pods by it.
 	RestoreFromGroupAnnotation = "nvidia.com/restore-from-group"
 
-	// RestoreReplicaLabelsAnnotation lists, comma-separated, the keys of the
+	// RestoreGroupLabelsAnnotation lists, comma-separated, the keys of the
 	// labels that the workload controller sets and whose values identify the
-	// Pod's replica. The replica key is their key=value pairs sorted by key.
-	// The list must not include nvidia.com/podgroupsnapshot, which Snapshot
-	// reserves for the attempt's snapshot name.
-	RestoreReplicaLabelsAnnotation = "nvidia.com/restore-replica-labels"
+	// Pods that restore together. The group key is their key=value pairs sorted
+	// by key. The list must not include nvidia.com/podgroupsnapshot, which
+	// Snapshot reserves for the attempt's snapshot name.
+	RestoreGroupLabelsAnnotation = "nvidia.com/restore-group-labels"
 
 	// RestoreMemberLabelAnnotation names the label whose value is the Pod's
 	// member ID, which must equal a member ID that the group content declares.
