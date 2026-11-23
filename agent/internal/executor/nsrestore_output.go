@@ -28,9 +28,9 @@ func newNSRestoreOutput(mirror io.Writer) *nsrestoreOutput {
 	return &nsrestoreOutput{ProcessOutput: snapshotruntime.NewProcessOutput(mirror, "nsenter:", "panic:", "fatal error:")}
 }
 
-// stdoutLines splits nsrestore's stdout into its progress messages and the
+// splitStdout splits nsrestore's stdout into its progress messages and the
 // other lines, the last of which is the result.
-func (o *nsrestoreOutput) stdoutLines() (changingContainer bool, other []string) {
+func (o *nsrestoreOutput) splitStdout() (changingContainer bool, other []string) {
 	for _, line := range strings.Split(string(o.Stdout()), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -48,7 +48,7 @@ func (o *nsrestoreOutput) stdoutLines() (changingContainer bool, other []string)
 func (o *nsrestoreOutput) parseResult() (RestoreInNamespaceResult, error) {
 	var result RestoreInNamespaceResult
 	last := ""
-	if _, other := o.stdoutLines(); len(other) > 0 {
+	if _, other := o.splitStdout(); len(other) > 0 {
 		last = other[len(other)-1]
 	}
 	err := json.Unmarshal([]byte(last), &result)
@@ -83,7 +83,7 @@ func (o *nsrestoreOutput) failure(runErr, ctxErr error) error {
 	case errors.Is(ctxErr, context.Canceled):
 		err = fmt.Errorf("%w; the restore was cancelled", err)
 	}
-	if changingContainer, _ := o.stdoutLines(); changingContainer {
+	if changingContainer, _ := o.splitStdout(); changingContainer {
 		return &changedContainerError{err: err}
 	}
 	return err
