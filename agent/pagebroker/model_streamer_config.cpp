@@ -48,6 +48,13 @@ constexpr char kLogLevelEnv[] = "RUNAI_STREAMER_LOG_LEVEL";
 constexpr char kLogToStderrEnv[] = "RUNAI_STREAMER_LOG_TO_STDERR";
 constexpr char kLegacyConcurrencyEnv[] = "RUNAI_STREAMER_CONCURRENCY";
 constexpr char kAwsEc2MetadataDisabledEnv[] = "AWS_EC2_METADATA_DISABLED";
+constexpr char kAwsConfigFileEnv[] = "AWS_CONFIG_FILE";
+constexpr char kAwsSharedCredentialsFileEnv[] = "AWS_SHARED_CREDENTIALS_FILE";
+constexpr char kAwsRegionEnv[] = "AWS_REGION";
+constexpr char kAwsDefaultRegionEnv[] = "AWS_DEFAULT_REGION";
+constexpr char kNoFile[] = "/dev/null";
+constexpr const char* kStaticCredentialVariables[] = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+                                                      "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_DEFAULT_PROFILE"};
 
 constexpr char kNativeBooleanTrue[] = "1";
 constexpr char kNativeBooleanFalse[] = "0";
@@ -321,6 +328,23 @@ ConfigureEnvironment(const Options& options, const S3Config* storage)
         ? kS3VirtualAddressingEnabled : kS3VirtualAddressingDisabled;
     environment[kAwsEc2MetadataDisabledEnv] = kDisableEc2Metadata;
     environment[kAwsCaBundleEnv] = connection.ca_file;
+    if (connection.UsesDefaultCredentialChain()) {
+      // The native chain reads static keys and profiles before workload identity,
+      // and takes the token exchange region only from AWS_DEFAULT_REGION.
+      for (const auto* name : kStaticCredentialVariables) {
+        if (unsetenv(name) != 0)
+          throw std::runtime_error(std::string("configure Model Streamer startup environment: ") + name);
+      }
+      environment[kAwsConfigFileEnv] = kNoFile;
+      environment[kAwsSharedCredentialsFileEnv] = kNoFile;
+      const auto* default_region = std::getenv(kAwsDefaultRegionEnv);
+      if (!default_region || *default_region == '\0') {
+        const auto* injected = std::getenv(kAwsRegionEnv);
+        const std::string region = injected && *injected != '\0' ? injected : connection.region;
+        if (!region.empty())
+          environment[kAwsDefaultRegionEnv] = region;
+      }
+    }
   }
   for (const auto& [name, value] : environment) {
     if (setenv(name.c_str(), value.c_str(), 1) != 0)
