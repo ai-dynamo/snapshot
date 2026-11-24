@@ -1,0 +1,87 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Build image
+description: >-
+  Build one Snapshot image through its make target with the shared layer cache,
+  and report the digest buildx produced.
+
+# CPU builds call the same helper concurrently. Keep this action in the
+# caller's job so it can use the local registry or sign the resulting digest.
+
+inputs:
+  image:
+    description: Image to build -- operator, agent, or pagebroker.
+    required: true
+  registry:
+    description: Registry the image is tagged for, and pushed to when push is true.
+    required: false
+    default: ghcr.io/ai-dynamo/snapshot
+  tags:
+    description: Space-separated tags. Empty keeps the Makefile's VERSION.
+    required: false
+    default: ""
+  push:
+    description: >-
+      "true" to push the image under its tags, "digest" to push it by digest
+      alone with no tag, or "false" to only build it.
+    required: false
+    default: "true"
+  platform:
+    description: >-
+      Platform to build for. Each one other than linux/amd64 keeps a layer
+      cache of its own.
+    required: false
+    default: linux/amd64
+  cache_mode:
+    description: >-
+      read or write, as hack/ci-cache-flags.sh takes it. Only push-artifacts.yaml
+      writes: a cache a pull request can write is a cache a fork can poison.
+    required: false
+    default: read
+  cache_branch:
+    description: Branch whose layer cache is read, and written in write mode.
+    required: true
+  cache_ref_prefix:
+    description: Repository the layer cache tags live in.
+    required: false
+    default: ghcr.io/ai-dynamo/snapshot/cache
+  cache_tag_suffix:
+    description: Appended to every cache tag; see hack/ci-cache-flags.sh.
+    required: false
+    default: ""
+  build_args:
+    description: Extra docker buildx build flags, such as attestations.
+    required: false
+    default: ""
+  phase:
+    description: >-
+      When set, the label hack/ci-phase.sh records this build under. The
+      calling job must set CI_PHASE_LOG.
+    required: false
+    default: ""
+
+outputs:
+  digest:
+    description: Digest buildx reported for the image. Empty when it was not pushed.
+    value: ${{ steps.build.outputs.digest }}
+
+runs:
+  using: composite
+  steps:
+    - name: Build ${{ inputs.image }} image
+      id: build
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        REGISTRY: ${{ inputs.registry }}
+        TAGS: ${{ inputs.tags }}
+        PUSH: ${{ inputs.push }}
+        PLATFORM: ${{ inputs.platform }}
+        CACHE_MODE: ${{ inputs.cache_mode }}
+        CACHE_BRANCH: ${{ inputs.cache_branch }}
+        CACHE_REF_PREFIX: ${{ inputs.cache_ref_prefix }}
+        CACHE_TAG_SUFFIX: ${{ inputs.cache_tag_suffix }}
+        BUILD_ARGS: ${{ inputs.build_args }}
+        PHASE: ${{ inputs.phase }}
+      run: bash hack/ci-build-image.sh

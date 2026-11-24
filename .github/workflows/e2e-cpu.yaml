@@ -1,20 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Checkpoint/restore e2e on every pull request, without a GPU.
+# Checkpoint/restore e2e without a GPU.
 #
 # The cluster is k3d, so the Kubernetes node is a Docker container and CRIU
 # dumps a workload nested inside it. That works: see the proof run linked from
 # issue 241. Images are built in this job and pushed to its disposable local
 # registry, from which the cluster pulls them.
 #
-# The GPU suite stays on its own schedule in e2e.yaml; this job shares the
-# chart installer with it and differs only in the cluster it installs into.
+# Pull requests reach this through e2e-pr.yaml on their copy-pr-bot mirror
+# branch, which runs the GPU suite in e2e.yaml only once this job has passed.
+# The two share the chart installer and differ only in the cluster they
+# install into.
 
 name: E2E CPU (k3d)
 
 on:
-  pull_request:
+  # Called by e2e-pr.yaml, which decides whether a pull request's changes
+  # need this job at all, so it runs once per mirrored commit, in the same run
+  # as the GPU suite that depends on it.
+  workflow_call:
+    inputs:
+      cache_scope_suffix:
+        description: See the workflow_dispatch input of the same name.
+        required: false
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       qualify_restore_failure:
@@ -76,9 +87,10 @@ env:
   # See the comment on CACHE_REF_PREFIX there for why this is not the Actions
   # cache, and hack/ci-cache-flags.sh for why the tag is keyed by branch.
   CACHE_REF_PREFIX: ghcr.io/ai-dynamo/snapshot/cache
-  # The branch this change targets, whose cache it reads. base_ref is set on a
-  # pull request; ref_name covers a workflow_dispatch run on a branch.
-  CACHE_BRANCH: ${{ github.base_ref || github.ref_name }}
+  # The branch whose cache it reads. A copy-pr-bot mirror push names no base
+  # branch and has no cache of its own, so it reads main's; ref_name covers a
+  # workflow_dispatch run on any other branch.
+  CACHE_BRANCH: ${{ startsWith(github.ref_name, 'pull-request/') && 'main' || github.ref_name }}
 
 jobs:
   cpu-e2e:
@@ -140,39 +152,35 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Read-only against the cache push-artifacts.yaml writes from main, so
-      # this reads the layers of the last merged build and writes nothing.
-      # Two runs of the same pull request therefore do not help each other;
-      # that is the price of a cache no pull request can corrupt.
-      - name: Build operator image
-        timeout-minutes: 15
+      - name: Install kubectl
         run: |
           set -euo pipefail
-          start=$(date +%s)
-          # Assigned, not inlined into the argument: a command substitution
-          # that fails inside a simple command does not trip `set -e`, so an
-          # inline call would drop the cache flags and still build -- the same
-          # silent cache loss this whole change exists to fix.
-          cache_flags="$(hack/ci-cache-flags.sh read operator "${CACHE_BRANCH}")"
-          make docker-build-operator \
-            REGISTRY="${IMAGE_REGISTRY}" \
-            TAGS="${IMAGE_TAG}" \
-            DOCKER_BUILD_ARGS="--push --build-arg GO_BUILD_TAGS=snapshot_e2e ${cache_flags}"
-          hack/ci-phase.sh "Build operator image" "${start}" \
-            "${IMAGE_REGISTRY}/operator:${IMAGE_TAG}"
+          curl -fsSL -o /tmp/kubectl \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+          kubectl version --client
 
-      - name: Build agent image
-        timeout-minutes: 50
-        run: |
-          set -euo pipefail
-          start=$(date +%s)
-          cache_flags="$(hack/ci-cache-flags.sh read agent "${CACHE_BRANCH}")"
-          make docker-build-agent \
-            REGISTRY="${IMAGE_REGISTRY}" \
-            TAGS="${IMAGE_TAG}" \
-            DOCKER_BUILD_ARGS="--push ${cache_flags}"
-          hack/ci-phase.sh "Build agent image" "${start}" \
-            "${IMAGE_REGISTRY}/agent:${IMAGE_TAG}"
+      - name: Install Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Install Python tooling
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.10.11"
+          checksum: "5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583"
+          enable-cache: "false"
+          download-from-astral-mirror: "false"
+
+      # Build the three images while k3d starts, then wait for all four tasks.
+      - name: Build images and create k3d cluster
+        timeout-minutes: 60
+        env:
+          REGISTRY: ${{ env.IMAGE_REGISTRY }}
+          TAGS: ${{ env.IMAGE_TAG }}
+          PUSH: "true"
+          PLATFORM: linux/amd64
+          CACHE_MODE: read
+        run: exec bash hack/ci-prepare-cpu-e2e.sh
 
       # The restore path extracts the rootfs diff with the bundled tar, run
       # under the bundled loader so the placeholder's glibc never has to
@@ -191,19 +199,6 @@ jobs:
             BUNDLE_DEST="${RUNNER_TEMP}/agent-bundle" \
             DOCKER_BUILD_ARGS="${cache_flags}"
           hack/verify-bundle-glibc.sh "${RUNNER_TEMP}/agent-bundle"
-
-      - name: Build PageBroker image
-        timeout-minutes: 30
-        run: |
-          set -euo pipefail
-          start=$(date +%s)
-          cache_flags="$(hack/ci-cache-flags.sh read pagebroker "${CACHE_BRANCH}")"
-          make docker-build-pagebroker \
-            REGISTRY="${IMAGE_REGISTRY}" \
-            TAGS="${IMAGE_TAG}" \
-            DOCKER_BUILD_ARGS="--push ${cache_flags}"
-          hack/ci-phase.sh "Build PageBroker image" "${start}" \
-            "${IMAGE_REGISTRY}/pagebroker:${IMAGE_TAG}"
 
       # A pass has to be attributable to the images this job built, not to
       # whatever a registry happened to serve. The registry read below is this
@@ -243,29 +238,6 @@ jobs:
               echo "| \`${image}\` | \`${digest}\` |"
             done
           } >>"${GITHUB_STEP_SUMMARY}"
-
-      - name: Install kubectl
-        run: |
-          set -euo pipefail
-          curl -fsSL -o /tmp/kubectl \
-            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
-          sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
-          kubectl version --client
-
-      - name: Install Helm
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
-
-      - name: Install Python tooling
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-        with:
-          version: "0.10.11"
-          checksum: "5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583"
-          enable-cache: "false"
-          download-from-astral-mirror: "false"
-
-      - name: Create k3d cluster
-        timeout-minutes: 10
-        run: hack/k3d-cpu-e2e.sh cluster-up
 
       - name: Install Snapshot
         timeout-minutes: 10
@@ -377,9 +349,9 @@ jobs:
         if: ${{ always() }}
         run: |
           set -euo pipefail
-          state="warm (\`${CACHE_BRANCH}\`)"
+          state="registry cache requested (\`${CACHE_BRANCH}\`)"
           if [ -n "${CACHE_TAG_SUFFIX}" ]; then
-            state="cold (tag suffix \`${CACHE_TAG_SUFFIX}\`)"
+            state="isolated cache namespace (tag suffix \`${CACHE_TAG_SUFFIX}\`)"
           fi
           hack/ci-phase-summary.sh "${state}" >>"${GITHUB_STEP_SUMMARY}"
           # This job used to delete ~25 GB of preinstalled SDKs before it

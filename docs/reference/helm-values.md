@@ -88,12 +88,23 @@ default) or from tmpfs staging. Restore uses the format recorded in the snapshot
 | Value                              | Default                                    | Description                                       |
 |------------------------------------|--------------------------------------------|---------------------------------------------------|
 | `pageBroker.maxConcurrentRequests` | `16`                                       | Concurrent control request limit.                 |
-| `pageBroker.transferBufferCount`   | `32`                                       | Persistent ring slots per visible GPU.            |
-| `pageBroker.transferChunkBytes`    | `134217728`                                | Bytes per slot before allocation rounding.        |
-| `pageBroker.maxPinnedBytes`        | `0`                                        | Total pinned memory limit. Zero sets no limit.    |
+| `pageBroker.stagingBytesPerGPU`    | `4294967296`                               | Pinned transfer memory per visible GPU (4 GiB).   |
 | `pageBroker.resources`             | 8 CPU / 32Gi request, 32 CPU / 256Gi limit | Resources for the broker and embedded GPU engine. |
 
-The default rings reserve 4 GiB per GPU, or 32 GiB for eight GPUs, plus overhead.
+PageBroker splits this memory into 128 MiB slots that all GPUs share,
+preferring memory on the target GPU's NUMA node, so a GPU that is ready can use
+slots that another GPU is not using. Each slot holds one read in flight, and
+PageBroker runs one transfer worker for every 16 slots, from 1 to 16 workers:
+16 on an eight-GPU node and 4 on a two-GPU node with the defaults. The value
+must be a multiple of 134217728 (128 MiB). To trade restore speed for host
+memory, change `stagingBytesPerGPU`.
+
+`stagingBytesPerGPU` replaces `transferBufferCount`, `transferChunkBytes` and
+`maxPinnedBytes` from v0.3.0. The chart refuses to render while any of them is
+set. To keep a tuned budget, set `stagingBytesPerGPU` to the old
+`transferBufferCount` × `transferChunkBytes`.
+
+The default reserves 4 GiB per GPU, or 32 GiB for eight GPUs, plus overhead.
 PageBroker checks the memory budget before it reports GPU readiness. It checks
 manifest structure and exact extent lengths. It does not generate or verify GPU
 payload checksums.
@@ -129,6 +140,7 @@ payload checksums.
 
 - `config.overlay.exclusions` - Rootfs-diff tar exclusions. Default: `/proc`, `/sys`, `/dev`, `*/.cache/huggingface`, `*/__pycache__`, `*.pyc`. A file the checkpointed processes hold open or mapped at dump time is archived even when an exclusion matches it, so CRIU can reopen it. Other excluded files are not restored; the workload must recreate them if needed.
 - `config.checkpoint.timeoutSeconds` - Maximum seconds for a checkpoint before the agent marks it failed. Default `3600`.
+- `config.checkpoint.retryLimit` - Times a failed checkpoint may be retried, beyond the first attempt. Default `0`, which keeps retry off. The limit is cluster-wide; a `PodSnapshot` cannot ask for its own. `config.checkpoint.timeoutSeconds` above covers every attempt together, and a fresh attempt waits 5 seconds, doubling to at most 60, before it starts, so a large limit ends at that deadline, as `CheckpointTimeout`, rather than with `RetriesExhausted`. See [A Checkpoint Fails with `RetriesExhausted`](../troubleshooting/checkpoints.md#a-checkpoint-fails-with-retriesexhausted).
 - `config.restore.timeoutSeconds` - Maximum seconds for a restore before the agent marks it failed. Default `7200`.
 
 `config.criu.*` - CRIU options:

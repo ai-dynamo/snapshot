@@ -56,6 +56,61 @@ If a `SnapshotJob` created it, create a new `SnapshotJob` with the probe fixed
 in `podSnapshotTemplate.containers` instead: the `SnapshotJob` copies its
 template into the `PodSnapshot` it creates.
 
+## A Checkpoint Fails with `RetriesExhausted`
+
+The checkpoint was retried as often as its retry limit allows and failed every
+time. The limit is `config.checkpoint.retryLimit`.
+
+Only a failure another attempt could have cleared ends under this reason. One
+that settled on its own terms keeps its own reason however many retries ran
+first, so the reason does not say how many attempts there were. The message
+does: any failure that followed at least one retry names the retries it spent
+and the last cause, as `after 2 of 2 retries: <cause>`. Treat the cause as the
+failure; the retries only say it did not clear on its own.
+
+```bash
+kubectl get podsnapshotcontent <name> -o jsonpath='{.status.conditions[?(@.type=="Failed")].message}'
+kubectl get events -n <ns> --field-selector involvedObject.name=<source-pod>
+```
+
+Each attempt a retry follows emits a `CheckpointAttemptFailed` event on the
+source pod, including the repeats of the dump, so the events show what each
+attempt hit rather than only how the checkpoint ended. The attempt that ended
+it reports under the terminal reason instead, so the last failure is not one of
+them.
+
+Whether the workload is still running is reported separately. See
+[After a Failed Checkpoint, Is the Workload Still Running?](#after-a-failed-checkpoint-is-the-workload-still-running).
+
+## A Checkpoint Fails with `ImageTooLarge`, `StagingUnavailable`, or `StoreExhausted`
+
+Three different shortages, which need different fixes:
+
+| Reason | What ran out | What to do |
+| --- | --- | --- |
+| `StagingUnavailable` | The node's staging volume was occupied when the checkpoint needed it. An image the size check could not prove too large lands here too, since that check reads a floor rather than the final size. Retried only when `config.checkpoint.retryLimit` allows one, which by default it does not | Take the checkpoint again once staging frees. If it keeps happening, stagger the checkpoints sharing that node, or raise `config.checkpoint.retryLimit` so the agent waits for them. If it keeps happening against an empty volume, treat it as `ImageTooLarge`: the image does not fit after all |
+| `ImageTooLarge` | The image cannot fit the node's staging volume, however empty it is. The message gives the shortfall in bytes | Raise `pageBroker.staging.sizeLimit`. The chart lowers a cap its writers have no room under, to the smaller of `daemonset.resources.limits.memory` and `pageBroker.resources.limits.memory` less a reserve, so raise both of those with it. See [How the Cap Is Chosen](../operate/configure-storage.md#how-the-cap-is-chosen) |
+| `StoreExhausted` | The destination store is full. No retry on this node frees room there | Free space in the store, or point the checkpoint at one with room |
+
+`ImageTooLarge` is reported two ways: refused before the dump starts, from a
+floor on what the image must write, or after a dump has run out of room
+part-written. Both name the same shortfall.
+
+Whether the workload is still running after any of these: see
+[After a Failed Checkpoint, Is the Workload Still Running?](#after-a-failed-checkpoint-is-the-workload-still-running).
+
+## After a Failed Checkpoint, Is the Workload Still Running?
+
+A failure after the workload was suspended terminates the source Pod, unless the
+agent resumes it for another attempt. The outcome is reported on that pod:
+`SourcePodResumed` when the agent put it back for another attempt,
+`SourcePodTerminated` when the checkpoint ended, and `SourcePodTerminationFailed`
+when it could not be stopped.
+
+```bash
+kubectl get events -n <ns> --field-selector involvedObject.name=<source-pod>
+```
+
 ## Checkpoint Fails at a Step
 
 ### resolving checkpoint artifact path
@@ -85,6 +140,12 @@ discovers its CUDA processes and GPUs.
 kubectl get pod <source-pod> -n <ns> -o jsonpath='{.status.containerStatuses}'
 ```
 
+If the cause is `unsupported NVIDIA_VISIBLE_DEVICES selection` with
+`/var/run/nvidia-container-devices` or `/run/nvidia-container-devices`, the
+agent lacks support for the NVIDIA device plugin's `volume-mounts` strategy.
+Upgrade the node agent to a release containing the GPU discovery fix; no
+workload or device-plugin configuration changes are required.
+
 ### preparing PageBroker checkpoint
 
 The agent asks PageBroker to open a transaction and provide the staging or
@@ -112,6 +173,24 @@ answer before the checkpoint becomes destructive.
 - A CUDA process started without the shim
 - The delivery mount is writable
 - The coordinator is not running
+
+### admitting the pod group
+
+For a member of a pod group, the agent publishes the Pod's IP, then waits for
+every other member's and for every member to accept. The cuInterpose coordinator
+of every Pod that runs one inspects as its Pod's relay in the group, and the
+lowest-ranked relay checks the group's topology. Nothing has changed in any
+workload yet, so the attempt ends as `Refused` and every member is left as
+Snapshot found it. A member that fails at any step fails the attempt for every
+other member. Each of them then fails at the step it was waiting in, with the
+reason the first member gave, such as `Refused` or `MemberFailed`.
+
+**Likely causes:**
+
+- The Pod has no IP yet
+- Another member refused first
+- The attempt's deadline passed before every member arrived
+- The cuInterpose relay refused the group's topology, for example memory one Pod imports that no member exported, which its error names
 
 ### staging CUDA job file
 
@@ -146,6 +225,23 @@ it.
 - A kernel still running or a stream still busy when the lock was taken
 - A driver without checkpoint support for this GPU
 - Another process holding the device, such as a GPU monitoring agent
+
+### waiting for the pod group's other members
+
+Once its GPU state is checkpointed, a member of a pod group waits at the
+`net-freeze` barrier until every other member arrives, so no member's network
+freezes while another member still needs it. The step fails when the attempt
+ends first. The source has stopped by then.
+
+**Likely causes:**
+
+- Another member failed, and its agent's log carries the step
+- The attempt's deadline passed
+- The coordinator was lost (`CoordinatorLost`)
+
+```bash
+kubectl logs $agent -n <snapshot-ns> -c agent | grep -i 'pod group'
+```
 
 ### dumping with CRIU
 

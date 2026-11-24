@@ -6,8 +6,12 @@
 from __future__ import annotations
 
 import argparse
+from functools import cache
+import hashlib
+import http.client
 import json
 import os
+import re
 import shlex
 import ssl
 import subprocess
@@ -15,6 +19,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -390,11 +395,243 @@ def snapshot_helm_overrides(
 ) -> list[str]:
     """Helm --set assignments for every install and upgrade of the chart."""
     overrides = parse_helm_overrides(helm_set, os.environ.get("SNAPSHOT_E2E_HELM_SET"))
+    if expected_image_digests():
+        # A rebuild can republish a tag, and a node that still caches the old
+        # image would run it under IfNotPresent. Pull every image so the digest
+        # check after rollout compares against what the registry serves now.
+        overrides[:0] = [f"{value}.pullPolicy=Always" for value in IMAGE_VALUES.values()]
     if mode == "vcluster" and host_namespace:
         # Other clusters may share the vCluster's nodes: restore only this
         # vCluster's Pods. First, so the user's overrides still win.
         overrides.insert(0, f"daemonset.nriHostNamespace={host_namespace}")
     return overrides
+
+
+# Chart value prefix of each image the Snapshot release runs, keyed by the last
+# path component of its repository.
+IMAGE_VALUES = {
+    "operator": "image.operator",
+    "agent": "image.agent",
+    "pagebroker": "image.pageBroker",
+}
+DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def expected_image_digests() -> dict[str, str]:
+    """Digests the installed images must have, from SNAPSHOT_E2E_IMAGE_DIGESTS.
+
+    A JSON object keyed by image name, as e2e-pr.yaml records its candidate.
+    Empty when unset: the suite then trusts the tag.
+    """
+    raw = os.environ.get("SNAPSHOT_E2E_IMAGE_DIGESTS", "").strip()
+    if not raw:
+        return {}
+    try:
+        digests = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SetupError(f"SNAPSHOT_E2E_IMAGE_DIGESTS is not JSON: {exc}") from exc
+    if not isinstance(digests, dict) or not digests:
+        raise SetupError("SNAPSHOT_E2E_IMAGE_DIGESTS must be a non-empty JSON object")
+    for image, digest in digests.items():
+        if image not in IMAGE_VALUES:
+            raise SetupError(
+                f"SNAPSHOT_E2E_IMAGE_DIGESTS names unknown image {image!r}; "
+                f"expected one of {', '.join(IMAGE_VALUES)}"
+            )
+        if not isinstance(digest, str) or not DIGEST_PATTERN.match(digest):
+            raise SetupError(f"SNAPSHOT_E2E_IMAGE_DIGESTS[{image!r}] is not a sha256 digest")
+    return digests
+
+
+def image_name(image: str) -> str:
+    """Last path component of an image reference, without its tag or digest."""
+    name = image.split("@", 1)[0].rsplit("/", 1)[-1]
+    return name.split(":", 1)[0]
+
+
+def running_image_mismatches(
+    pods: Sequence[client.V1Pod], expected: dict[str, str],
+    *,
+    equivalent: Callable[[client.V1Pod, str, str, str], bool] | None = None,
+) -> list[str]:
+    """Describe every way the running containers differ from the expected digests."""
+    problems = []
+    seen = set()
+    for pod in pods:
+        if pod.spec is None:
+            problems.append(f"{pod.metadata.name} has no Pod spec to identify running images")
+            continue
+        groups = (
+            (pod.status.init_container_statuses or [], pod.spec.init_containers or []),
+            (pod.status.container_statuses or [], pod.spec.containers or []),
+        )
+        for statuses, containers in groups:
+            for status in statuses:
+                matches = [container for container in containers if container.name == status.name]
+                if len(matches) != 1 or not matches[0].image:
+                    problems.append(
+                        f"{pod.metadata.name}/{status.name} needs one matching container image "
+                        f"in the Pod spec, found {len(matches)}"
+                    )
+                    continue
+                # Runtime image names can be stale or rewritten by a registry
+                # mirror. The Pod spec names the requested repository; only
+                # image_id supplies evidence of the content actually running.
+                image = matches[0].image
+                name = image_name(image)
+                if name not in expected:
+                    continue
+                seen.add(name)
+                running = (status.image_id or "").rsplit("@", 1)[-1]
+                if running != expected[name]:
+                    detail = ""
+                    if equivalent is not None:
+                        try:
+                            if equivalent(pod, image, running, expected[name]):
+                                continue
+                        except SetupError as exc:
+                            detail = f"; could not verify platform image: {exc}"
+                    problems.append(
+                        f"{pod.metadata.name}/{status.name} runs {name} {running or 'unknown'}, "
+                        f"expected {expected[name]}{detail}"
+                    )
+    for name in sorted(set(expected) - seen):
+        problems.append(f"no running container uses the {name} image")
+    return problems
+
+
+def platform_image_digest(
+    image: str, digest: str, platform: tuple[str, str],
+    read_manifest: Callable[[str, str], dict],
+) -> str:
+    """Resolve an immutable GHCR reference to its runnable platform manifest."""
+    repository = image.split("@", 1)[0].rsplit(":", 1)[0]
+    if not repository.startswith("ghcr.io/"):
+        raise SetupError(f"cannot resolve image outside GHCR: {image}")
+    repository = repository.removeprefix("ghcr.io/")
+    if not re.fullmatch(r"[a-z0-9._-]+(?:/[a-z0-9._-]+)+", repository):
+        raise SetupError(f"invalid GHCR repository: {repository}")
+    seen = set()
+    while True:
+        if not isinstance(digest, str) or not DIGEST_PATTERN.fullmatch(digest):
+            raise SetupError(f"invalid manifest digest: {digest!r}")
+        if digest in seen:
+            raise SetupError("manifest index contains a cycle")
+        seen.add(digest)
+        manifest = read_manifest(repository, digest)
+        media_type = manifest.get("mediaType")
+        if media_type in (
+            "application/vnd.oci.image.manifest.v1+json",
+            "application/vnd.docker.distribution.manifest.v2+json",
+        ):
+            return digest
+        if media_type not in (
+            "application/vnd.oci.image.index.v1+json",
+            "application/vnd.docker.distribution.manifest.list.v2+json",
+        ):
+            raise SetupError(f"unsupported manifest type: {media_type!r}")
+        entries = manifest.get("manifests")
+        if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
+            raise SetupError(f"invalid manifest entries in {digest}")
+        candidates = []
+        for entry in entries:
+            target = entry.get("platform") or {}
+            annotations = entry.get("annotations") or {}
+            if not isinstance(target, dict) or not isinstance(annotations, dict):
+                raise SetupError(f"invalid platform descriptor in {digest}")
+            if (target.get("os"), target.get("architecture")) == platform and (
+                annotations.get("vnd.docker.reference.type") != "attestation-manifest"
+            ):
+                candidates.append(entry)
+        if len(candidates) != 1:
+            raise SetupError(f"expected one {'/'.join(platform)} image in {digest}, found {len(candidates)}")
+        digest = candidates[0].get("digest")
+
+
+def verify_running_images(*, namespace: str, release: str, expected: dict[str, str]) -> None:
+    selector = ",".join([SNAPSHOT_LABEL, f"app.kubernetes.io/instance={release}"])
+    pods = client.CoreV1Api().list_namespaced_pod(
+        namespace=namespace, label_selector=selector
+    ).items
+
+    def registry_read(request: str | urllib.request.Request) -> bytes:
+        # Retry transient read failures. Digest and JSON checks stay outside
+        # this loop so invalid content fails immediately.
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    return response.read()
+            except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as exc:
+                permanent_http_error = isinstance(exc, urllib.error.HTTPError) and exc.code not in (
+                    408, 429, 500, 502, 503, 504
+                )
+                if permanent_http_error or attempt == 2:
+                    raise
+            log(f"Retrying image registry read after transient failure, attempt {attempt + 2}/3")
+            time.sleep(attempt + 1)
+        raise AssertionError("registry read exhausted without a result")
+
+    @cache
+    def registry_token(repository: str) -> str:
+        query = urllib.parse.urlencode({"service": "ghcr.io", "scope": f"repository:{repository}:pull"})
+        return json.loads(registry_read(f"https://ghcr.io/token?{query}"))["token"]
+
+    @cache
+    def read_manifest(repository: str, digest: str) -> dict:
+        request = urllib.request.Request(
+            f"https://ghcr.io/v2/{repository}/manifests/{digest}",
+            headers={
+                "Authorization": f"Bearer {registry_token(repository)}",
+                "Accept": ", ".join([
+                    "application/vnd.oci.image.index.v1+json",
+                    "application/vnd.docker.distribution.manifest.list.v2+json",
+                    "application/vnd.oci.image.manifest.v1+json",
+                    "application/vnd.docker.distribution.manifest.v2+json",
+                ]),
+            },
+        )
+        raw = registry_read(request)
+        if "sha256:" + hashlib.sha256(raw).hexdigest() != digest:
+            raise SetupError(f"registry manifest bytes do not match {digest}")
+        manifest = json.loads(raw)
+        if not isinstance(manifest, dict):
+            raise SetupError(f"manifest {digest} is not an object")
+        return manifest
+
+    @cache
+    def node_platform(name: str) -> tuple[str, str]:
+        node = k8s.read_node(name)
+        labels = (node.metadata.labels or {}) if node.metadata else {}
+        platform = (labels.get("kubernetes.io/os", ""), labels.get("kubernetes.io/arch", ""))
+        if not all(platform):
+            raise SetupError(f"node {name} has no OS/architecture labels")
+        return platform
+
+    lookup_errors: dict[tuple[str, str, str], SetupError] = {}
+
+    def equivalent(pod: client.V1Pod, image: str, running: str, recorded: str) -> bool:
+        # containerd can report an older index for the same runnable image.
+        # Compare platform manifests and keep the recorded provenance index.
+        key = (image, running, recorded)
+        if key in lookup_errors:
+            raise lookup_errors[key]
+        try:
+            if pod.spec is None or not pod.spec.node_name:
+                raise SetupError(f"pod {pod.metadata.name} has no assigned node")
+            platform = node_platform(pod.spec.node_name)
+            return platform_image_digest(image, running, platform, read_manifest) == platform_image_digest(
+                image, recorded, platform, read_manifest
+            )
+        except (OSError, ValueError, KeyError, TypeError, ApiException, http.client.IncompleteRead) as exc:
+            error = SetupError(f"image identity lookup failed: {exc}")
+            lookup_errors[key] = error
+            raise error from exc
+
+    problems = running_image_mismatches(pods, expected, equivalent=equivalent)
+    if problems:
+        raise SetupError("Snapshot is not running the expected images: " + "; ".join(problems))
+    for name, digest in sorted(expected.items()):
+        log(f"Snapshot {name} matches recorded image {digest}")
 
 
 def setup_snapshot_readiness(args: argparse.Namespace, context: SetupContext) -> None:
@@ -405,6 +642,13 @@ def setup_snapshot_readiness(args: argparse.Namespace, context: SetupContext) ->
         release=args.snapshot_release,
         timeout_seconds=args.ready_timeout_seconds,
     )
+    expected = expected_image_digests()
+    if expected:
+        verify_running_images(
+            namespace=args.test_namespace,
+            release=args.snapshot_release,
+            expected=expected,
+        )
 
 
 def setup_snapshot_uninstall(args: argparse.Namespace, context: SetupContext) -> None:
