@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Gate restore on capture completion with Argo CD
+# Gate restore on checkpoint completion with Argo CD
 
 Put a `SnapshotJob` in an earlier Argo CD sync wave and a restoring
 `Deployment` in a later wave. A custom health check holds restore until
@@ -16,8 +16,9 @@ separate Applications, and selective sync bypasses this ordering. See
 
 ## Prerequisites
 
-Install [Snapshot](../get-started/installation.md), configure the [checkpoint store](configure-storage.md),
-and meet the [vLLM guide prerequisites](../get-started/prerequisites.md).
+Install [Snapshot](../get-started/installation.md), configure the
+[snapshot store](configure-storage.md), and meet the
+[vLLM guide prerequisites](../get-started/prerequisites.md).
 The examples use vLLM with Qwen3-0.6B, one NVIDIA GPU, and a model-cache PVC.
 The restore command stays inert on nodes without the restore proxy. Readiness
 and liveness check `/health`, which calls the vLLM engine's health check. The
@@ -33,6 +34,8 @@ syncs.
 Validated with Argo CD 3.0.6 and Snapshot commit
 `67664dfa43f08f1f9f92a2e9ec00668f00c7b476`. Cross-node restore, shared-store HA,
 other GPU/driver/Argo CD combinations, and cascading deletion were not tested.
+The no-proxy path was smoke-tested for engine health and startup gating. It has
+not been validated end to end through restore and inference.
 
 ## Configure health
 
@@ -66,7 +69,7 @@ control health. See
 
 ## Prepare the Application
 
-The [capture manifest](argocd/capture.yaml) creates `worker-r1` in wave `0`.
+The [checkpoint manifest](argocd/capture.yaml) creates `worker-r1` in wave `0`.
 The [restore manifest](argocd/restore.yaml) creates `worker-r1-restored` in wave
 `1`. From this repository's root, prepare their files and dependencies:
 
@@ -90,12 +93,12 @@ without a consumer Pod: `WaitForFirstConsumer` can block this wave.
 Commit these four files to an Argo-readable Git repository. Configure a
 directory Application targeting a pre-created namespace. Disable automatic
 pruning for the first verification. Configure any serving Service to select
-`app: worker-r1-restored`, excluding capture pods. Disable injected sidecars or
-configure them to finish with the capture workload.
+`app: worker-r1-restored`, excluding source Pods. Disable injected sidecars or
+configure them to finish with the checkpoint workload.
 
 The restore annotation belongs on the `Deployment` pod template and names the
-same-namespace `PodSnapshot`, `worker-r1`. Keep it consistent with the capture
-name. Both manifests use container name `main` and follow the
+same-namespace `PodSnapshot`, `worker-r1`. Keep it consistent with the
+`SnapshotJob` name. Both manifests use container name `main` and follow the
 [Restore Pod contract](../reference/restore-pod-contract.md).
 
 A `Deployment` requires `restartPolicy: Always`, but a Pod gets only one
@@ -111,7 +114,7 @@ namespace. Start a full sync:
 argocd app sync "$APP"
 ```
 
-From another terminal, inspect the capture and restore:
+From another terminal, inspect the checkpoint and restore:
 
 ```bash
 argocd app get "$APP"
@@ -141,7 +144,7 @@ curl --fail http://localhost:8000/generate \
 ```
 
 Test failure in a separate Application and namespace with new resource names
-and a matching restore reference. In its capture manifest:
+and a matching restore reference. In its checkpoint manifest:
 
 - Set `spec.activeDeadlineSeconds: 60`.
 - Remove the model-download init container.
@@ -152,28 +155,30 @@ Inspect the source Job and Pods if these differ. Degraded health may precede
 sync-operation failure; inspect both in `argocd app get`.
 
 After terminal `Failed=True`, retry with a new `SnapshotJob` name and restore
-reference. Snapshot manages capture retries before that terminal state. Argo
-self-heal does not recapture a completed checkpoint or repair missing artifacts.
+reference. Snapshot manages checkpoint retries before that terminal state. Argo
+self-heal does not take a new snapshot after completion or repair missing
+artifacts.
 
-## Reuse and retain checkpoints
+## Reuse and retain snapshots
 
 Keep `worker-r1` when resyncing, scaling to zero and back, or replacing a
 restore Pod. Use a new name, such as `worker-r2`, for a new image, model, or
-capture configuration, and update the restore reference. Do not edit a completed
-capture's pod template or use capture hooks recreated on each sync.
+checkpoint configuration, and update the restore reference. Do not edit a
+completed `SnapshotJob`'s pod template or use checkpoint hooks recreated on each
+sync.
 
-The capture manifest uses `Prune=false,Delete=false` to retain the
+The checkpoint manifest uses `Prune=false,Delete=false` to retain the
 `SnapshotJob` during pruning and Application deletion. Keep revisions needed
 for serving or rollback in Git, along with their ConfigMaps and model-cache
-data. Removing a retained capture from Git leaves the Application OutOfSync.
+data. Removing a retained `SnapshotJob` from Git leaves the Application OutOfSync.
 
 For Application retirement, use non-cascading deletion. Retain the
 `SnapshotJob`, generated `PodSnapshot`, bound `PodSnapshotContent`, and
-checkpoint artifacts until no serving or rollback reference needs them.
+snapshot artifacts until no serving or rollback reference needs them.
 Namespace, PVC, and direct API deletion bypass Argo retention. Follow
 [storage retention](configure-storage.md#retention) for cleanup.
 
-On disposable resources, compare checkpoint resource UIDs and content binding
+On disposable resources, compare snapshot resource UIDs and content binding
 after resync, scale to zero/back, and restore Pod replacement. Confirm reuse
 with an inference request. Test pruning and non-cascading Application deletion
 separately before relying on retention.
