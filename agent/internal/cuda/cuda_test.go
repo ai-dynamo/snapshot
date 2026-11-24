@@ -277,6 +277,67 @@ func TestNsenterNvidiaSMIReturnsCommandFailure(t *testing.T) {
 	}
 }
 
+// nsenter forks to enter a PID namespace, and its child inherits the output
+// pipes. Killing only nsenter would leave nvidia-smi running and the output
+// wait blocked until it exits.
+func TestNsenterNvidiaSMICancellationKillsForkedChild(t *testing.T) {
+	childPath := filepath.Join(t.TempDir(), "child-pid")
+	t.Setenv("TEST_CHILD_PID", childPath)
+	installFakeNSenter(t, `
+sleep 300 &
+echo "$!" > "$TEST_CHILD_PID"
+wait
+`)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	finished := make(chan error, 1)
+	go func() {
+		_, err := nsenterNvidiaSMI(ctx, "/host/proc", 42, "-L")
+		finished <- err
+	}()
+
+	// Cancel only once the child runs; cancelling earlier would not test it.
+	childPID := 0
+	for deadline := time.Now().Add(3 * time.Second); childPID == 0; {
+		select {
+		case err := <-finished:
+			t.Fatalf("nsenterNvidiaSMI returned %v before its child started", err)
+		case <-time.After(10 * time.Millisecond):
+		}
+		if data, err := os.ReadFile(childPath); err == nil {
+			childPID, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+		}
+		if childPID == 0 && time.Now().After(deadline) {
+			t.Fatal("fake nsenter did not start its child")
+		}
+	}
+	// A pidfd reports the child's exit before anyone reaps it, and lets cleanup
+	// stop the child if cancellation does not.
+	childFD, err := unix.PidfdOpen(childPID, 0)
+	if err != nil {
+		t.Fatalf("pidfd_open(%d): %v", childPID, err)
+	}
+	defer unix.Close(childFD)
+	defer func() { _ = unix.PidfdSendSignal(childFD, unix.SIGKILL, nil, 0) }()
+
+	cancel()
+	select {
+	case err := <-finished:
+		if err == nil || !strings.Contains(err.Error(), "pid 42") {
+			t.Fatalf("nsenterNvidiaSMI error = %v, want the cancelled command's failure wrapped with pid 42", err)
+		}
+	case <-time.After(helperWaitDelay + time.Second):
+		t.Fatal("nsenterNvidiaSMI waited for the child's output pipes after cancellation")
+	}
+	fds := []unix.PollFd{{Fd: int32(childFD), Events: unix.POLLIN}}
+	if _, err := unix.Poll(fds, 1000); err != nil {
+		t.Fatalf("poll pidfd: %v", err)
+	}
+	if fds[0].Revents&unix.POLLIN == 0 {
+		t.Fatal("forked child survived cancellation")
+	}
+}
+
 // writeHostGPUs lists cards in a host procfs's driver directory, the first in
 // the lowest PCI bus slot.
 func writeHostGPUs(t *testing.T, hostProc string, uuids ...string) {

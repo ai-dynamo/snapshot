@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 
+	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/api/compat"
 )
 
@@ -381,6 +382,9 @@ func nsenterNvidiaSMI(ctx context.Context, hostProcPath string, pid int, args ..
 			"nvidia-smi",
 		}, args...)...,
 	)
+	// nsenter forks to enter the PID namespace, and nvidia-smi inherits the
+	// output pipes, so a deadline must kill both, or the wait outlasts it.
+	snapshotruntime.SetProcessGroupCancellation(cmd, helperWaitDelay)
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("nvidia-smi via nsenter (pid %d) failed: %w", pid, err)
