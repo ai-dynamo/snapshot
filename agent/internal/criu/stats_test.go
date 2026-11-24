@@ -49,7 +49,7 @@ func TestReadDumpStatsReadsServiceHeader(t *testing.T) {
 
 func TestReadDumpStatsRejectsBareStatsMagic(t *testing.T) {
 	dir := t.TempDir()
-	payload := statsEntry(dumpStatsMessage(dumpStatsFixture{freezingUsec: 1, memwriteUsec: 2}))
+	payload := statsEntry(dumpStatsMessage(dumpStatsFixture{freezingUsec: 1, memdumpUsec: 3, memwriteUsec: 2}))
 	if err := os.WriteFile(filepath.Join(dir, criustats.StatsDump), frameStats(false, payload), 0o644); err != nil {
 		t.Fatal(err)
 	}
