@@ -28,9 +28,11 @@ _MAX_LARGE_FILES = 40
 _BLOCK_SIZE = 512
 
 # Portable awk (mawk or gawk). High-volume lines are reduced to a count and
-# a first/last timestamp. Phase boundaries are printed in full so the
-# post-write tail can be split: page list, core dump, thread cores, mm,
-# pstree, namespace dump, the kill ("Unfreezing tasks"), stats, finish.
+# a first/last timestamp. The marks CRIU logs once per dump are printed in
+# full: first core, pstree, namespace dump, "Unfreezing tasks", stats, finish.
+# They are CRIU's log clock, not phases. A multi-process tree interleaves
+# pages and cores task by task, so these marks do not split page-write from
+# metadata from kill.
 _DUMP_LOG_AWK = r"""
 function ts(line,    s, e) {
   s = index(line, "(")
