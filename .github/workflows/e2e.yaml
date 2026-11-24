@@ -199,3 +199,135 @@ jobs:
         uses: ./.github/actions/e2e-vcluster-down
         with:
           host_kubeconfig: ${{ steps.host.outputs.kubeconfig }}
+
+  s3-credential-endpoint:
+    name: Run the S3 credential endpoint e2e test in vCluster
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 60
+    env:
+      HOST_NAMESPACE: snapshot-e2e-wi-${{ github.run_id }}-${{ github.run_attempt }}
+      VCLUSTER_NAME: snapshot-e2e-wi-${{ github.run_id }}-${{ github.run_attempt }}
+      TEST_NAMESPACE: snapshot-e2e
+      SNAPSHOT_E2E_HOST_NAMESPACE: snapshot-e2e-wi-${{ github.run_id }}-${{ github.run_attempt }}
+      SNAPSHOT_E2E_VCLUSTER_NAME: snapshot-e2e-wi-${{ github.run_id }}-${{ github.run_attempt }}
+      SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
+      SNAPSHOT_E2E_TARGET_KUBECONFIG: ${{ github.workspace }}/.kubeconfig-snapshot-e2e-wi
+      SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot
+      SNAPSHOT_E2E_PVC_NAME: snapshot-pvc
+      SNAPSHOT_E2E_PVC_SIZE: 2Gi
+      SNAPSHOT_E2E_STORAGE_CLASS: azurefile-csi
+      SNAPSHOT_E2E_MODE: vcluster
+      SNAPSHOT_E2E_AVOID_MIG: "true"
+      SNAPSHOT_E2E_VCLUSTER_K8S_VERSION: v1.32.13
+      # The lifecycle job forwards the vCluster on 8443 on the same runner.
+      SNAPSHOT_E2E_VCLUSTER_LOCAL_PORT: "8444"
+      SNAPSHOT_E2E_HELM_TIMEOUT: 6m
+      SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "480"
+      SNAPSHOT_E2E_RESULT_FILE: ${{ github.workspace }}/.snapshot-e2e-wi-setup-result.json
+      SNAPSHOT_E2E_IMAGE_DIGESTS: ${{ inputs.image_digests || '' }}
+      SNAPSHOT_E2E_STORAGE: s3
+      SNAPSHOT_E2E_S3_CREDENTIALS: endpoint
+      PYTHONUNBUFFERED: "1"
+      UV_LINK_MODE: copy
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Resolve Snapshot image tag
+        if: ${{ (inputs.snapshot_tag || '') == '' }}
+        timeout-minutes: 23
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 hack/resolve-snapshot-image-tag.py --wait-seconds 1200
+
+      - name: Use provided Snapshot image tag
+        if: ${{ (inputs.snapshot_tag || '') != '' }}
+        timeout-minutes: 1
+        env:
+          SNAPSHOT_TAG: ${{ inputs.snapshot_tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${SNAPSHOT_TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "::error::snapshot_tag is not a valid image tag: ${SNAPSHOT_TAG}" >&2
+            exit 2
+          fi
+          echo "SNAPSHOT_E2E_SNAPSHOT_TAG=${SNAPSHOT_TAG}" >> "$GITHUB_ENV"
+
+      - name: Capture host kubeconfig
+        id: host
+        run: |
+          echo "kubeconfig=${KUBECONFIG:-}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create vCluster target
+        timeout-minutes: 30
+        uses: ./.github/actions/e2e-vcluster-up
+
+      - name: Deploy the S3 store and the credential endpoint in the vCluster
+        timeout-minutes: 10
+        env:
+          KUBECONFIG: ${{ env.SNAPSHOT_E2E_TARGET_KUBECONFIG }}
+        run: |
+          set -euo pipefail
+          access_key="$(openssl rand -hex 8)"
+          secret_key="$(openssl rand -hex 16)"
+          echo "::add-mask::${access_key}"
+          echo "::add-mask::${secret_key}"
+          # Node-network ports of this run, apart from the framework jobs'
+          # range (20000 to 29999) and the lifecycle job's forward.
+          port=$((30000 + (GITHUB_RUN_ID % 2000) * 3))
+          export SNAPSHOT_E2E_S3_PORT="${port}"
+          export SNAPSHOT_E2E_S3_CONSOLE_PORT="$((port + 1))"
+          export SNAPSHOT_E2E_S3_CREDENTIAL_PORT="$((port + 2))"
+          export SNAPSHOT_E2E_S3_ACCESS_KEY="${access_key}"
+          export SNAPSHOT_E2E_S3_SECRET_KEY="${secret_key}"
+          uv run --locked --project e2e python -m snapshot_e2e.s3 deploy > /dev/null
+          values="$(uv run --locked --project e2e python -m snapshot_e2e.credential_endpoint deploy)"
+          {
+            echo "SNAPSHOT_E2E_HELM_SET<<SNAPSHOT_E2E_HELM_SET_END"
+            echo "${values}"
+            echo "SNAPSHOT_E2E_HELM_SET_END"
+          } >> "${GITHUB_ENV}"
+
+      - name: Install Snapshot in vCluster
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+            --phase snapshot-install
+
+      - name: Wait for Snapshot components
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+            --phase snapshot-ready
+
+      - name: Export vCluster target
+        timeout-minutes: 6
+        uses: ./.github/actions/e2e-vcluster-export
+
+      - name: Run the credential endpoint tests
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e pytest e2e/tests -m environment -vv
+          uv run --locked --project e2e pytest e2e/tests/test_s3_credential_endpoint.py \
+            -vv -s --junitxml="${RUNNER_TEMP}/s3-credential-endpoint-junit.xml"
+
+      - name: Upload test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: s3-credential-endpoint-tests-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/s3-credential-endpoint-junit.xml
+          if-no-files-found: warn
+
+      - name: Cleanup e2e vCluster
+        if: ${{ always() }}
+        uses: ./.github/actions/e2e-vcluster-down
+        with:
+          host_kubeconfig: ${{ steps.host.outputs.kubeconfig }}

@@ -196,6 +196,24 @@ cluster service names. The job derives `SNAPSHOT_E2E_S3_PORT` and
 the test needs no S3 client of its own: it checks the descriptor in the
 PodSnapshotContent status and that nothing was written to the checkpoint volume.
 
+### S3 without a credentials Secret
+
+`python -m snapshot_e2e.credential_endpoint deploy`, run after the store is up, adds
+a credential endpoint next to it and prints the store's chart values with
+`storage.s3.credentialEndpoint` in place of `storage.s3.credentialsSecretRef`. The
+endpoint checks the projected service-account token that PageBroker and the operator
+present, with a `TokenReview` for the audience the chart sets, and answers with the
+store's keys as 15-minute credentials, so a run exercises renewal. Its certificate
+comes from a CA generated per run, published as the chart's
+`storage.s3.caBundleConfigMapRef`. It listens on the node network like the store, on
+`SNAPSHOT_E2E_S3_CREDENTIAL_PORT` (default 19443).
+
+`test_s3_credential_endpoint.py` runs with `SNAPSHOT_E2E_S3_CREDENTIALS=endpoint`: it
+checks the identity variables in PageBroker, takes a CPU checkpoint into the store and
+deletes it, and reads the endpoint's log for the credentials it issued to the agent and
+to the operator. It does not restore: the native reader cannot reach an endpoint behind
+a private CA yet. The `s3-credential-endpoint` job of `e2e.yaml` runs it.
+
 ### Local Direct Mode
 
 Use direct mode when `KUBECONFIG` already points at the cluster where Snapshot
