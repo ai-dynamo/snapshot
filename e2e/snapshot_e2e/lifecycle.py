@@ -1398,8 +1398,11 @@ def assert_restored_state(
     # names the observations file.
     restored_command = CUDA_HOLD if gpu else OBSERVATIONS
     success_marker = "__snapshot_restored_state_verified__"
+    # The proxy's own arguments follow it ("-- <container command>"), so only
+    # the first word of PID 1's command line is compared.
     proxy_checks = f"""
-    test "$(tr -d '\\0' < {PROC_ROOT}/1/cmdline)" = {RESTORE_PROXY}
+    IFS= read -r -d '' pid_1_program < {PROC_ROOT}/1/cmdline
+    test "$pid_1_program" = {RESTORE_PROXY}
     restored_pid="$(sed -n 's/^pid=//p' {RESTORE_DONE})"
     test -n "$restored_pid"
     tr '\\0' ' ' < "{PROC_ROOT}/$restored_pid/cmdline" | grep -qF {shlex.quote(restored_command)}
