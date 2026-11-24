@@ -459,7 +459,7 @@ A `PodSnapshot` with `sharedSnapshotRef` cannot set `spec.containers`. The
   requires both for a checkpoint, and neither for an import. An import requires
   `spec.storage`.
 - `status.boundSnapshots` is a new list of `{namespace, name, uid}`, keyed by
-  `uid`.
+  `uid`, with at most 64 entries.
 - `status.sharedSnapshots` is a new list of `{name, uid}`, keyed by `uid`.
 - The validation rules that read `spec.source.podRef.containers` are adjusted
   for a content that has no source pod.
@@ -526,10 +526,11 @@ only new cost on the restore path, and it is paid when a `PodSnapshot` is
 created, not when a Pod restores.
 
 `status.boundSnapshots` grows with the number of `PodSnapshot` objects that use
-a snapshot. An entry holds a namespace, a name, and a UID.
-
-**Open question:** what is the limit on entries, and how does a `PodSnapshot`
-past the limit report it?
+a snapshot. An entry holds a namespace, a name, and a UID. The list holds at
+most 64 entries, which bounds the size of the content and the cost of its
+validation rules. A `PodSnapshot` that would be the 65th stays not `Ready`, with
+a reason that says the snapshot has reached its limit, and binds when an entry
+is removed. Raising the limit later is a compatible change.
 
 ### Monitoring
 
@@ -539,7 +540,7 @@ reason names are proposals.
 | Object | Signal |
 | --- | --- |
 | `SharedSnapshot` | `Ready` is `False` while the named `PodSnapshot` is not ready, when the store is not one the cluster is configured with, or when its container settings differ from the content it resolves to. |
-| `PodSnapshot` | `Ready` is `False` with a reason that says the namespace is not allowed, the `SharedSnapshot` does not exist, or the `SharedSnapshot` is not ready. |
+| `PodSnapshot` | `Ready` is `False` with a reason that says the namespace is not allowed, the `SharedSnapshot` does not exist, the `SharedSnapshot` is not ready, or the snapshot has reached its limit of bound `PodSnapshot` objects. |
 | `PodSnapshot` | An Event when it is bound through a `SharedSnapshot`, naming the `SharedSnapshot`. |
 | `PodSnapshotContent` | `status.boundSnapshots` and `status.sharedSnapshots` show who uses the snapshot. |
 
