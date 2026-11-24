@@ -163,9 +163,15 @@ depends on the platform:
 - **A credential endpoint issues it.** Set `storage.s3.credentialEndpoint.url`
   to the endpoint's `https` URL. The chart then mounts a service-account token
   into PageBroker and the operator, which present it to the endpoint and renew
-  the credentials before they expire. Set
+  the credentials before they expire. Also set
   `storage.s3.credentialEndpoint.tokenAudience` to the audience the endpoint
-  expects. This cannot be combined with `storage.s3.credentialsSecretRef`
+  expects; it is required, because a token without an audience is also valid
+  for the Kubernetes API. This cannot be combined with
+  `storage.s3.credentialsSecretRef`
+
+The endpoint must implement the container-credentials protocol of the S3
+clients: a `GET` request that carries the token as the `Authorization` header,
+answered with JSON credentials and their expiry.
 
 Kubernetes rotates the token before `tokenExpirationSeconds` runs out, so an
 upload or a restore that outlasts one token keeps working.
