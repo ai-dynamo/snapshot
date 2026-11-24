@@ -4,17 +4,20 @@
 package backends
 
 import (
-	"bytes"
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net/http"
 	"os"
 	"path"
 	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials/endpointcreds"
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -88,11 +91,13 @@ func NewS3Backend(ctx context.Context, cfg S3Config) (*S3Backend, error) {
 			config.WithEC2IMDSClientEnableState(imds.ClientDisabled))
 	}
 	if cfg.CABundlePath != "" {
-		caBundle, err := readCABundle(cfg.CABundlePath)
+		httpClient, err := caBundleHTTPClient(cfg.CABundlePath)
 		if err != nil {
 			return nil, err
 		}
-		loadOptions = append(loadOptions, config.WithCustomCABundle(bytes.NewReader(caBundle)))
+		loadOptions = append(loadOptions,
+			config.WithHTTPClient(httpClient),
+			config.WithEndpointCredentialOptions(func(o *endpointcreds.Options) { o.HTTPClient = httpClient }))
 	}
 	awsCfg, err := config.LoadDefaultConfig(ctx, loadOptions...)
 	if err != nil {
@@ -134,15 +139,23 @@ func sharedCredentialsFileProvider(credentialsPath string) aws.CredentialsProvid
 	}
 }
 
-func readCABundle(caBundlePath string) ([]byte, error) {
+// caBundleHTTPClient returns the client for S3 requests and for credential
+// requests, trusting only the certificates in caBundlePath.
+func caBundleHTTPClient(caBundlePath string) (*awshttp.BuildableClient, error) {
 	pem, err := os.ReadFile(caBundlePath)
 	if err != nil {
 		return nil, fmt.Errorf("read CA bundle %q: %w", caBundlePath, err)
 	}
-	if !x509.NewCertPool().AppendCertsFromPEM(pem) {
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(pem) {
 		return nil, fmt.Errorf("CA bundle %q contains no usable certificates", caBundlePath)
 	}
-	return pem, nil
+	return awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
+		if tr.TLSClientConfig == nil {
+			tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		}
+		tr.TLSClientConfig.RootCAs = roots
+	}), nil
 }
 
 func (b *S3Backend) Name() string {
