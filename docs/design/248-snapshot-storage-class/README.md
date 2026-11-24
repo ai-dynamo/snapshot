@@ -562,8 +562,9 @@ with the previous values:
    from the same `storage.*` values, so its `storeID` is byte-identical to the one recorded on every
    bound `PodSnapshotContent`.
 2. Existing content is not rewritten. Content that has a `storeID` but no class name is matched to a
-   class by digest whenever it is used, and it protects that class from deletion; content matching
-   none keeps SNEP-237's [`StoreInactive` handling](../237-s3-storage/README.md#limitations-risks-and-mitigations).
+   class by digest whenever it is used, and it protects that class from deletion. That class is
+   `default`: it is created before any other class can exist, so it is the oldest class with its
+   digest and is never the one refused as `DuplicateStore`. Content matching none keeps SNEP-237's [`StoreInactive` handling](../237-s3-storage/README.md#limitations-risks-and-mitigations).
 3. Content with no `spec.storage`, bound before SNEP-237, keeps the legacy path-addressed flow and
    is never assigned a class.
 4. `PodSnapshot`s and `SnapshotJob`s without `storageClassName` resolve to the default class.
