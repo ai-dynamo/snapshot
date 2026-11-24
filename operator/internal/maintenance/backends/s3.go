@@ -35,6 +35,11 @@ const (
 	s3CredentialsRefreshInterval = 5 * time.Minute
 )
 
+// s3CredentialRequestTimeout bounds one request to a container credentials
+// endpoint. The SDK shields that request from the caller's deadline, so
+// without it an endpoint that never answers would block every later cleanup.
+var s3CredentialRequestTimeout = 30 * time.Second
+
 // s3API is the subset of the S3 client S3Backend depends on.
 type s3API interface {
 	ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
@@ -90,15 +95,18 @@ func NewS3Backend(ctx context.Context, cfg S3Config) (*S3Backend, error) {
 			config.WithSharedCredentialsFiles([]string{}),
 			config.WithEC2IMDSClientEnableState(imds.ClientDisabled))
 	}
+	credentialHTTPClient := awshttp.NewBuildableClient()
 	if cfg.CABundlePath != "" {
 		httpClient, err := caBundleHTTPClient(cfg.CABundlePath)
 		if err != nil {
 			return nil, err
 		}
-		loadOptions = append(loadOptions,
-			config.WithHTTPClient(httpClient),
-			config.WithEndpointCredentialOptions(func(o *endpointcreds.Options) { o.HTTPClient = httpClient }))
+		loadOptions = append(loadOptions, config.WithHTTPClient(httpClient))
+		credentialHTTPClient = httpClient
 	}
+	credentialHTTPClient = credentialHTTPClient.WithTimeout(s3CredentialRequestTimeout)
+	loadOptions = append(loadOptions,
+		config.WithEndpointCredentialOptions(func(o *endpointcreds.Options) { o.HTTPClient = credentialHTTPClient }))
 	awsCfg, err := config.LoadDefaultConfig(ctx, loadOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("load S3 client config: %w", err)

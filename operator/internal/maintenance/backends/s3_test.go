@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -288,6 +289,45 @@ func TestNewS3BackendTrustsCustomCABundleForContainerCredentials(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, *requests, 1)
 	assert.Contains(t, (*requests)[0].Header.Get("Authorization"), "Credential=FAKECONTAINERKEY/")
+}
+
+func TestNewS3BackendRecoversFromACredentialEndpointThatDoesNotAnswer(t *testing.T) {
+	clearAmbientS3Credentials(t)
+	previous := s3CredentialRequestTimeout
+	s3CredentialRequestTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { s3CredentialRequestTimeout = previous })
+	server, requests := newListObjectsServer(t, httptest.NewServer)
+	var silent atomic.Bool
+	silent.Store(true)
+	credentialEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if silent.Load() {
+			<-r.Context().Done()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"AccessKeyId":"FAKECONTAINERKEY","SecretAccessKey":"fake-secret","Token":"fake-session","Expiration":%q}`,
+			time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+	}))
+	t.Cleanup(credentialEndpoint.Close)
+	t.Setenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", credentialEndpoint.URL)
+
+	b, err := NewS3Backend(context.Background(), S3Config{Bucket: "checkpoints", Region: "us-east-1", Endpoint: server.URL})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, err = b.Candidates(ctx, logr.Discard())
+	require.Error(t, err)
+	assert.Empty(t, *requests)
+
+	silent.Store(false)
+	require.Eventually(t, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, err := b.Candidates(ctx, logr.Discard())
+		return err == nil
+	}, 30*time.Second, 100*time.Millisecond)
+	assert.Contains(t, (*requests)[len(*requests)-1].Header.Get("Authorization"), "Credential=FAKECONTAINERKEY/")
 }
 
 func TestNewS3BackendNeverUsesInstanceMetadata(t *testing.T) {
