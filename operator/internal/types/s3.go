@@ -27,3 +27,11 @@ func (c S3Config) Validate() error {
 	}
 	return nil
 }
+
+// CredentialSource names where the S3 maintenance backend gets credentials.
+func (c S3Config) CredentialSource() string {
+	if c.CredentialsPath == "" {
+		return "default credential chain"
+	}
+	return "credentials file"
+}
