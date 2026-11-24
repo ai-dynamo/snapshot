@@ -379,8 +379,8 @@ RESTORE = (
      ("L", "Leader", "lowest relay rank", "t"), ("R", "Relays", "other ranks", "t"),
      ("W", "Workload", "restored", "g")],
     [
-        ("s", "O", "the owner creates restore Pods that name the snapshot; the operator groups them by group labels"),
-        ("m", "O", "A", "complete group: the operator creates the PodGroupRestore, claims and pins its Pods"),
+        ("s", "O", "the owner creates restore Pods that name the snapshot; the first Pod creates the group's PodGroupRestore, where the operator records and claims each Pod"),
+        ("m", "O", "A", "group formed: the operator writes its members and pins their Pods"),
         ("s", "A", "preflight: artifact, compatibility, GPU map"),
         ("m", "A", "C", "connect for (session UID, member ID) with a Pod-bound token"),
         ("m", "C", "A", "read meta {members, ranks, deadline, epoch}", 1),
