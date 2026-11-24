@@ -92,7 +92,7 @@ is_portable_path_char(char value)
 }
 
 static int
-is_below(const char* value, const char* root)
+has_ancestor_prefix(const char* value, const char* root)
 {
   size_t root_len = strlen(root);
   return strncmp(value, root, root_len) == 0 && value[root_len] == '/';
@@ -104,7 +104,7 @@ static int
 check_storage_path(const char* value, const char* root)
 {
   size_t root_len = strlen(root);
-  if (!is_below(value, root)) {
+  if (!has_ancestor_prefix(value, root)) {
     fprintf(stderr, "storage path must be below %s: %s\n", root, value);
     return -1;
   }
@@ -135,7 +135,7 @@ check_storage_path(const char* value, const char* root)
 static int
 check_checkpoint_path(const char* value)
 {
-  if (is_below(value, NODE_CACHE_ARTIFACTS_ROOT))
+  if (has_ancestor_prefix(value, NODE_CACHE_ARTIFACTS_ROOT))
     return check_storage_path(value, NODE_CACHE_ARTIFACTS_ROOT);
   return check_storage_path(value, CHECKPOINT_ROOT);
 }

@@ -13,7 +13,7 @@ tests:
     asserts:
       - notMatchRegex:
           path: data["config.yaml"]
-          pattern: nodeCachePath
+          pattern: nodeCacheEnabled
         template: templates/configmap.yaml
       - notContains:
           path: spec.template.spec.volumes
@@ -38,6 +38,22 @@ tests:
           content: --node-cache-root
         template: templates/daemonset.yaml
 
+  - it: treats a missing nodeCache map as disabled
+    set:
+      storage:
+        nodeCache: null
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: nodeCacheEnabled
+        template: templates/configmap.yaml
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: node-cache
+          any: true
+        template: templates/daemonset.yaml
+
   - it: mounts the node directory read-only into the agent and PageBroker
     set:
       storage.nodeCache.enabled: true
@@ -45,7 +61,7 @@ tests:
     asserts:
       - matchRegex:
           path: data["config.yaml"]
-          pattern: 'storage:\s+type: "pvc"\s+basePath: "/checkpoints"\s+nodeCachePath: "/node-cache"'
+          pattern: 'storage:\s+type: "pvc"\s+basePath: "/checkpoints"\s+nodeCacheEnabled: true'
         template: templates/configmap.yaml
       # A node without the directory gets an empty one, so its agent starts.
       - contains:

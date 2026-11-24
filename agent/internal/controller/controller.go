@@ -74,7 +74,10 @@ type NodeController struct {
 	controlSentinelExistsFn   func(int, string) (bool, error)
 	sendSignalFn              func(logr.Logger, int, syscall.Signal, string) error
 	// hostProcPath is where the agent reads the node's processes; tests point it elsewhere.
-	hostProcPath         string
+	hostProcPath string
+	// nodeCacheBasePath is where node cache copies are read. Empty when off.
+	nodeCacheBasePath string
+
 	stagingCapacityFn    func(string) (int64, error)
 	minimumImageSizeFn   func(string, []int) (int64, error)
 	reviveGPUProcessesFn func(context.Context, []int, string, logr.Logger) error
@@ -132,6 +135,12 @@ type restoreArtifact struct {
 	// NodeCacheMiss says why a node with the cache enabled restores from the
 	// snapshot store instead. Empty when NodeCache is set or the cache is off.
 	NodeCacheMiss string
+	// BasePath and RestoreMode are chosen with the source: the node cache is
+	// read in place, the snapshot store as configured.
+	BasePath    string
+	RestoreMode string
+	// Manifest is the parsed manifest of a node cache copy, kept for preflight.
+	Manifest *types.CheckpointManifest
 }
 
 type restoreTarget struct {
@@ -298,6 +307,9 @@ func newDefaultController(
 		hookHTTP:                  lifecyclehooks.NewHTTPClient(),
 		nowFn:                     time.Now,
 		postRestoreWaitFn:         waitOrDone,
+	}
+	if cfg.Storage.NodeCacheEnabled {
+		w.nodeCacheBasePath = types.NodeCacheBasePath
 	}
 	w.requeueCaptureFn = w.captureQueue.AddAfter
 	w.checkpointFn = w.executorCheckpoint
@@ -798,6 +810,8 @@ func (w *NodeController) resolveRestoreArtifact(
 	if err != nil {
 		return nil, err
 	}
+	artifact.BasePath = w.config.Storage.BasePath
+	artifact.RestoreMode = w.config.PageBroker.RestoreMode
 	artifact.NodeCacheMiss = miss
 	return artifact, nil
 }
@@ -805,7 +819,7 @@ func (w *NodeController) resolveRestoreArtifact(
 // resolveNodeCacheArtifact looks for a copy in the node cache. It never fails
 // a restore: an absent or unusable copy is reported as a miss.
 func (w *NodeController) resolveNodeCacheArtifact(podKey string, target *restoreTarget) (*restoreArtifact, string) {
-	basePath := w.config.Storage.NodeCachePath
+	basePath := w.nodeCacheBasePath
 	if basePath == "" {
 		return nil, ""
 	}
@@ -834,6 +848,9 @@ func (w *NodeController) resolveNodeCacheArtifact(podKey string, target *restore
 		SourceContainerName: target.SourceContainerName,
 		Path:                path,
 		NodeCache:           true,
+		BasePath:            w.nodeCacheBasePath,
+		RestoreMode:         restoreModeDirect,
+		Manifest:            manifest,
 	}, ""
 }
 
@@ -1099,10 +1116,6 @@ func (w *NodeController) restoreDestination(
 		"container_id", containerID,
 	)
 	emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeNormal, restoreRequestedReason, fmt.Sprintf("Restore requested from PodSnapshot %s for destination %s", artifact.SnapshotName, destination))
-	if source := restoreSourceMessage(artifact); source != "" {
-		log.Info("Restore source selected", "source", source)
-		emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeNormal, restoreSourceSelectedReason, source)
-	}
 
 	if err := w.runRestore(ctx, pod, plan, destination, containerID, startedAt, recovering); err != nil {
 		if errors.Is(err, errRestoreInterrupted) {
@@ -1210,6 +1223,12 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		}
 	}
 
+	// Emitted only here, so a recovered restore that never reruns stays silent.
+	if source := restoreSourceMessage(plan.artifact); source != "" {
+		op.log.Info("Restore source selected", "source", source)
+		emitPodEvent(ctx, w.clientset, op.log, pod, snapshotEventComponent, corev1.EventTypeNormal, restoreSourceSelectedReason, source)
+	}
+
 	// One deadline covers the restore and its post-restore action.
 	restoreCtx := ctx
 	if timeout := w.config.Restore.RestoreTimeout(); timeout > 0 {
@@ -1309,17 +1328,9 @@ func (w *NodeController) newRestoreOperation(
 
 func (op *restoreOperation) executeRestore(ctx context.Context) (executor.RestoreResult, error) {
 	w := op.controller
-	basePath := w.config.Storage.BasePath
-	restoreMode := w.config.PageBroker.RestoreMode
-	if op.artifact.NodeCache {
-		// A copy is already on the node's local disk, so it is read in place
-		// even where the snapshot store is configured to be staged.
-		basePath = w.config.Storage.NodeCachePath
-		restoreMode = restoreModeDirect
-	}
 	req := executor.RestoreRequest{
 		ContentUID:                  op.artifact.ContentUID,
-		BasePath:                    basePath,
+		BasePath:                    op.artifact.BasePath,
 		ContainerID:                 op.containerID,
 		StartedAt:                   op.startedAt,
 		PodName:                     op.pod.Name,
@@ -1332,7 +1343,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (executor.Restor
 		Clientset:                   w.clientset,
 		CustomStorageAvailable:      w.config.CustomStorageAvailable,
 		PageBrokerControlSocketPath: w.config.PageBroker.ControlSocketPath,
-		PageBrokerRestoreMode:       restoreMode,
+		PageBrokerRestoreMode:       op.artifact.RestoreMode,
 		PublishedArtifact:           op.artifact.PublishedArtifact,
 	}
 	return w.restoreFn(ctx, w.runtime, op.log, req, w.injector)

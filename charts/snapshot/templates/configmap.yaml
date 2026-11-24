@@ -79,8 +79,8 @@ data:
     storage:
       type: "pvc"
       basePath: "/checkpoints"
-      {{- if .Values.storage.nodeCache.enabled }}
-      nodeCachePath: {{ include "snapshot.nodeCacheMountPath" . | quote }}
+      {{- if (.Values.storage.nodeCache | default dict).enabled }}
+      nodeCacheEnabled: true
       {{- end }}
 
     overlay:

@@ -148,6 +148,9 @@ func (w *NodeController) preflightCompatibility(
 // bound content. The second return value names where it looked, for the
 // unreadable-manifest log and event.
 func (w *NodeController) preflightManifest(ctx context.Context, artifact *restoreArtifact) (*types.CheckpointManifest, string, error) {
+	if artifact.Manifest != nil {
+		return artifact.Manifest, artifact.Path, nil
+	}
 	if artifact.PublishedArtifact != nil {
 		location := artifact.PublishedArtifact.GetArtifactHandle()
 		if w.fetchManifestFn == nil {

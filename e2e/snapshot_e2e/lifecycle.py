@@ -1191,6 +1191,42 @@ def node_cache_host_path(config: k8s.E2EConfig) -> str | None:
     return None
 
 
+def _node_cache_pod_spec(
+    config: k8s.E2EConfig, run: TestRun, node: str, script: str, host_path: str, name: str
+) -> dict:
+    """Pod that runs ``script`` on ``node`` with the store and the node cache mounted."""
+    return {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": name, "namespace": config.namespace, "labels": run.labels},
+        "spec": {
+            "nodeName": node,
+            "restartPolicy": "Never",
+            "containers": [
+                {
+                    "name": "copy",
+                    "image": run.image,
+                    "imagePullPolicy": "IfNotPresent",
+                    "command": ["/bin/bash", "-ec", script],
+                    # Checkpoint files belong to root and keep their modes.
+                    "securityContext": {"runAsUser": 0},
+                    "volumeMounts": [
+                        {"name": "store", "mountPath": "/store", "readOnly": True},
+                        {"name": "local", "mountPath": "/local"},
+                    ],
+                }
+            ],
+            "volumes": [
+                {
+                    "name": "store",
+                    "persistentVolumeClaim": {"claimName": config.pvc_name},
+                },
+                {"name": "local", "hostPath": {"path": host_path, "type": "Directory"}},
+            ],
+        },
+    }
+
+
 def run_node_cache_pod(
     config: k8s.E2EConfig,
     run: TestRun,
@@ -1207,38 +1243,7 @@ def run_node_cache_pod(
     if host_path is None:
         raise AssertionError("the node cache is not enabled in this install")
     name = f"{run.suffix}-copy"
-    k8s.create_pod(
-        {
-            "apiVersion": "v1",
-            "kind": "Pod",
-            "metadata": {"name": name, "namespace": config.namespace, "labels": run.labels},
-            "spec": {
-                "nodeName": node,
-                "restartPolicy": "Never",
-                "containers": [
-                    {
-                        "name": "copy",
-                        "image": run.image,
-                        "imagePullPolicy": "IfNotPresent",
-                        "command": ["/bin/bash", "-ec", script],
-                        # Checkpoint files belong to root and keep their modes.
-                        "securityContext": {"runAsUser": 0},
-                        "volumeMounts": [
-                            {"name": "store", "mountPath": "/store", "readOnly": True},
-                            {"name": "local", "mountPath": "/local"},
-                        ],
-                    }
-                ],
-                "volumes": [
-                    {
-                        "name": "store",
-                        "persistentVolumeClaim": {"claimName": config.pvc_name},
-                    },
-                    {"name": "local", "hostPath": {"path": host_path, "type": "Directory"}},
-                ],
-            },
-        }
-    )
+    k8s.create_pod(_node_cache_pod_spec(config, run, node, script, host_path, name))
 
     def finished() -> str | None:
         phase = k8s.read_pod(config.namespace, name).status.phase

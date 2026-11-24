@@ -15,29 +15,28 @@ namespace {
 constexpr char kNodeCacheArtifactsDirectory[] = "artifacts";
 
 Path
-CanonicalRoot(Path root)
+CanonicalPath(Path path)
 {
-  return root.empty() ? Path{} : fs::weakly_canonical(std::move(root));
+  return path.empty() ? Path{} : fs::weakly_canonical(std::move(path));
 }
 }  // namespace
 
 PosixCopyEngine::PosixCopyEngine(Path storage_root, Path node_cache_root)
-    : storage_root_(CanonicalRoot(std::move(storage_root)))
+    : storage_root_(CanonicalPath(std::move(storage_root)))
 {
-  if (!node_cache_root.empty())
-    node_cache_artifacts_ = CanonicalRoot(std::move(node_cache_root)) / kNodeCacheArtifactsDirectory;
+  if (!node_cache_root.empty()) {
+    node_cache_root_ = CanonicalPath(std::move(node_cache_root));
+    node_cache_artifacts_ = node_cache_root_ / kNodeCacheArtifactsDirectory;
+  }
 }
 
 const Path&
 PosixCopyEngine::RestoreRoot(const StorageBackend& source) const
 {
-  if (filesystem_storage::IsWithinRoot(source, node_cache_artifacts_)) {
-    // The storage helpers reject symlinks below a root, not the root itself.
-    // The node cache root is canonical, but artifacts/ is appended to it.
-    if (fs::is_symlink(node_cache_artifacts_))
-      throw std::invalid_argument("node cache artifacts directory is a symlink");
-    return node_cache_artifacts_;
-  }
+  // Only copies under artifacts/ are sources. The root is the node cache
+  // itself, so the storage helpers also reject a symlinked artifacts/.
+  if (filesystem_storage::IsWithinRoot(source, node_cache_artifacts_))
+    return node_cache_root_;
   if (storage_root_.empty())
     throw std::invalid_argument("source must be within the node cache");
   return storage_root_;

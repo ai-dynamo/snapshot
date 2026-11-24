@@ -11,8 +11,11 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/testr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
+	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
@@ -52,22 +55,39 @@ func nodeCacheController(t *testing.T) (*NodeController, *snapshotv1alpha1.PodSn
 		Artifacts: []snapshotv1alpha1.PublishedContainerArtifact{{ContainerName: nodeCacheTestContainer, ArtifactHandle: "h"}},
 	}
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
-	w.config.Storage.NodeCachePath = t.TempDir()
+	w.nodeCacheBasePath = t.TempDir()
 	return w, content
 }
 
 func TestResolveRestoreArtifactPrefersNodeCacheCopy(t *testing.T) {
 	w, content := nodeCacheController(t)
-	path := writeNodeCacheCopy(t, w.config.Storage.NodeCachePath, "content-uid", "content-uid")
+	path := writeNodeCacheCopy(t, w.nodeCacheBasePath, "content-uid", "content-uid")
 
 	artifact, err := w.resolveRestoreArtifact("pod-key", nodeCacheTarget(), content)
 	require.NoError(t, err)
 	assert.True(t, artifact.NodeCache)
 	assert.Equal(t, path, artifact.Path)
+	assert.Equal(t, w.nodeCacheBasePath, artifact.BasePath)
+	assert.Equal(t, "direct", artifact.RestoreMode)
 	assert.Nil(t, artifact.PublishedArtifact, "a node cache copy is read by path, not through the store")
 	assert.Equal(t, "snap", artifact.SnapshotName)
 	assert.Equal(t, "content-uid", artifact.ContentUID)
 	assert.Equal(t, "Restoring from the node cache", restoreSourceMessage(artifact))
+}
+
+func TestPreflightReusesTheNodeCacheManifest(t *testing.T) {
+	w, content := nodeCacheController(t)
+	path := writeNodeCacheCopy(t, w.nodeCacheBasePath, "content-uid", "content-uid")
+	artifact, err := w.resolveRestoreArtifact("pod-key", nodeCacheTarget(), content)
+	require.NoError(t, err)
+	require.NotNil(t, artifact.Manifest)
+	require.NoError(t, os.Remove(filepath.Join(path, "manifest.yaml")))
+
+	manifest, location, err := w.preflightManifest(context.Background(), artifact)
+
+	require.NoError(t, err)
+	assert.Same(t, artifact.Manifest, manifest)
+	assert.Equal(t, path, location)
 }
 
 // A node cache problem never fails a restore: every miss falls back to the
@@ -87,6 +107,15 @@ func TestResolveRestoreArtifactFallsBackToTheStore(t *testing.T) {
 			name: "copy without a manifest",
 			arrange: func(t *testing.T, basePath string) {
 				writeNodeCacheCopy(t, basePath, "content-uid", "")
+			},
+			miss: "the copy on this node has no readable manifest",
+		},
+		{
+			name: "manifest behind a symlink",
+			arrange: func(t *testing.T, basePath string) {
+				path := writeNodeCacheCopy(t, basePath, "content-uid", "")
+				elsewhere := writeNodeCacheCopy(t, t.TempDir(), "content-uid", "content-uid")
+				require.NoError(t, os.Symlink(filepath.Join(elsewhere, "manifest.yaml"), filepath.Join(path, "manifest.yaml")))
 			},
 			miss: "the copy on this node has no readable manifest",
 		},
@@ -121,11 +150,14 @@ func TestResolveRestoreArtifactFallsBackToTheStore(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w, content := nodeCacheController(t)
-			tc.arrange(t, w.config.Storage.NodeCachePath)
+			w.config.PageBroker.RestoreMode = "staged"
+			tc.arrange(t, w.nodeCacheBasePath)
 
 			artifact, err := w.resolveRestoreArtifact("pod-key", nodeCacheTarget(), content)
 			require.NoError(t, err)
 			assert.False(t, artifact.NodeCache)
+			assert.Equal(t, w.config.Storage.BasePath, artifact.BasePath)
+			assert.Equal(t, "staged", artifact.RestoreMode)
 			require.NotNil(t, artifact.PublishedArtifact, "the snapshot store must serve the restore")
 			assert.Equal(t, tc.miss, artifact.NodeCacheMiss)
 			assert.Equal(t, "Restoring from the snapshot store: "+tc.miss, restoreSourceMessage(artifact))
@@ -133,11 +165,33 @@ func TestResolveRestoreArtifactFallsBackToTheStore(t *testing.T) {
 	}
 }
 
+func TestNodeCacheCopyRestoresWithoutTheStoreLink(t *testing.T) {
+	w, content := nodeCacheController(t)
+	content.Spec.Storage.StoreID = "another-store"
+	writeNodeCacheCopy(t, w.nodeCacheBasePath, "content-uid", "content-uid")
+
+	artifact, err := w.resolveRestoreArtifact("pod-key", nodeCacheTarget(), content)
+	require.NoError(t, err)
+	assert.True(t, artifact.NodeCache)
+	assert.Nil(t, artifact.PublishedArtifact)
+
+	w, content = nodeCacheController(t)
+	content.Spec.Storage.StoreID = "another-store"
+
+	artifact, err = w.resolveRestoreArtifact("pod-key", nodeCacheTarget(), content)
+	require.NoError(t, err)
+	assert.False(t, artifact.NodeCache)
+	require.NotNil(t, artifact.PublishedArtifact)
+	// PageBroker rejects a mismatched store ID, so only the cache miss
+	// is checked against the configured store.
+	assert.Equal(t, "another-store", artifact.PublishedArtifact.StoreId)
+}
+
 // With the node cache off nothing changes: no lookup, and no source event.
 func TestResolveRestoreArtifactIgnoresNodeCacheWhenOff(t *testing.T) {
 	w, content := nodeCacheController(t)
-	writeNodeCacheCopy(t, w.config.Storage.NodeCachePath, "content-uid", "content-uid")
-	w.config.Storage.NodeCachePath = ""
+	writeNodeCacheCopy(t, w.nodeCacheBasePath, "content-uid", "content-uid")
+	w.nodeCacheBasePath = ""
 
 	artifact, err := w.resolveRestoreArtifact("pod-key", nodeCacheTarget(), content)
 	require.NoError(t, err)
@@ -158,32 +212,35 @@ func TestResolveRestoreArtifactKeepsStoreErrorsOnAMiss(t *testing.T) {
 	assert.Equal(t, "ArtifactPending", pending.reason)
 }
 
-// A copy is already on the node's local disk, so it is read in place even
-// where the snapshot store is configured to be staged.
-func TestExecuteRestoreReadsANodeCacheCopyInPlace(t *testing.T) {
-	for name, nodeCache := range map[string]bool{"snapshot store": false, "node cache": true} {
-		t.Run(name, func(t *testing.T) {
-			pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
-			w := makeTestController(t, pod)
-			w.config.PageBroker.RestoreMode = "staged"
-			w.config.Storage.NodeCachePath = "/node-cache"
-			var got executor.RestoreRequest
-			w.restoreFn = func(_ context.Context, _ snapshotruntime.Runtime, _ logr.Logger, req executor.RestoreRequest, _ executor.RestoreMounter) (executor.RestoreResult, error) {
-				got = req
-				return executor.RestoreResult{}, nil
-			}
-			plan := &restorePlan{artifact: &restoreArtifact{NodeCache: nodeCache}}
+func TestExecuteRestoreSendsTheChosenRootAndMode(t *testing.T) {
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	w := makeTestController(t, pod)
+	var got executor.RestoreRequest
+	w.restoreFn = func(_ context.Context, _ snapshotruntime.Runtime, _ logr.Logger, req executor.RestoreRequest, _ executor.RestoreMounter) (executor.RestoreResult, error) {
+		got = req
+		return executor.RestoreResult{}, nil
+	}
+	plan := &restorePlan{artifact: &restoreArtifact{BasePath: "/some-root", RestoreMode: "direct"}}
 
-			_, err := w.newRestoreOperation(pod, plan, "main", "container-id", time.Now()).executeRestore(context.Background())
+	_, err := w.newRestoreOperation(pod, plan, "main", "container-id", time.Now()).executeRestore(context.Background())
 
-			require.NoError(t, err)
-			if nodeCache {
-				assert.Equal(t, "direct", got.PageBrokerRestoreMode)
-				assert.Equal(t, "/node-cache", got.BasePath)
-			} else {
-				assert.Equal(t, "staged", got.PageBrokerRestoreMode)
-				assert.Equal(t, w.config.Storage.BasePath, got.BasePath)
-			}
-		})
+	require.NoError(t, err)
+	assert.Equal(t, "/some-root", got.BasePath)
+	assert.Equal(t, "direct", got.PageBrokerRestoreMode)
+}
+
+// The chart writes this key into the agent's configuration. A node cache that
+// is on must reach the controller as the fixed mount path, and off as empty.
+func TestNodeCacheSettingReachesTheController(t *testing.T) {
+	for document, want := range map[string]string{
+		"storage:\n  nodeCacheEnabled: true\n": "/node-cache",
+		"storage:\n  type: pvc\n":              "",
+	} {
+		cfg := &types.AgentConfig{}
+		require.NoError(t, yaml.Unmarshal([]byte(document), cfg))
+		w := newDefaultController(cfg, fake.NewClientset(), nil, nil, &fakeRuntime{}, noopInjector{}, testr.New(t))
+		t.Cleanup(w.restoreQueue.ShutDown)
+
+		assert.Equal(t, want, w.nodeCacheBasePath, document)
 	}
 }

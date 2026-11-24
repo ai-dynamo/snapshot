@@ -142,7 +142,7 @@ spec:
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath }}
             {{- end }}
-            {{- if .Values.storage.nodeCache.enabled }}
+            {{- if (.Values.storage.nodeCache | default dict).enabled }}
             # Checkpoint copies an administrator placed on this node. Read only:
             # Snapshot never writes to or removes from the node cache.
             - name: node-cache
@@ -242,7 +242,7 @@ spec:
             - --model-streamer-config
             - {{ include "snapshot.modelStreamerConfigPath" . }}
             {{- end }}
-            {{- if .Values.storage.nodeCache.enabled }}
+            {{- if (.Values.storage.nodeCache | default dict).enabled }}
             - --node-cache-root
             - {{ include "snapshot.nodeCacheMountPath" . }}
             {{- end }}
@@ -258,7 +258,7 @@ spec:
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath }}
             {{- end }}
-            {{- if .Values.storage.nodeCache.enabled }}
+            {{- if (.Values.storage.nodeCache | default dict).enabled }}
             - name: node-cache
               mountPath: {{ include "snapshot.nodeCacheMountPath" . }}
               readOnly: true
@@ -317,7 +317,7 @@ spec:
           persistentVolumeClaim:
             claimName: {{ .Values.storage.pvc.name }}
         {{- end }}
-        {{- if .Values.storage.nodeCache.enabled }}
+        {{- if (.Values.storage.nodeCache | default dict).enabled }}
         # By default a node without the directory gets an empty one, so its
         # agent still starts and its restores read the snapshot store.
         - name: node-cache

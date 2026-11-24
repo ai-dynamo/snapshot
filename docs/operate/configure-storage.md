@@ -151,8 +151,12 @@ the setting off, which is the default, nothing changes.
 Snapshot never writes to the node cache. An administrator places and removes
 the copies with their own tools.
 
-The sections below describe how to place a copy of a checkpoint on a node
-before a restore needs it.
+A restore from a copy does not read the snapshot store. It therefore also
+works after the installation is pointed at another store. Remove the copies
+when that is not wanted.
+
+The sections below describe how to place, check and remove copies of a
+checkpoint on a node.
 
 Place the copy before the workloads that restore from that checkpoint are
 scheduled to the node. A copy can also be added while such workloads are
@@ -234,8 +238,8 @@ cd /mnt/nvme/snapshot-cache &&
   mv -T .incoming-<uid>-<container> artifacts/<uid>/containers/<container>
 ```
 
-`mv -T` fails when a copy is already there. Remove the existing copy first, as
-in [Remove a Copy](#remove-a-copy).
+`mv -T` fails when a non-empty copy is already there. Remove the existing
+copy first, as in [Remove a Copy](#remove-a-copy).
 
 After a failed `cp`, remove the `.incoming-` directory before you copy again.
 
@@ -267,7 +271,9 @@ following script on the node, set the five values at its top, and run it as
 root. It needs `jq` and the AWS CLI, with credentials that can read the
 bucket. The script stops at the first failed command, and it places the copy
 only after every file has the size that the index records. A failed download
-therefore never leaves a copy in place.
+therefore never leaves a copy in place. The script assumes file names without
+a newline, and it does not check objects under `data/` that the index does not
+list.
 
 ```bash
 #!/usr/bin/env bash
@@ -519,11 +525,11 @@ together after upgrading, or pass all three explicitly.
 
 ## Store Identity and Artifact Addressing
 
-Snapshot ties each snapshot to the store it was written to. Every restore and
-delete checks this link first, so a snapshot cannot be read or deleted through a
-different store, for example after the installation is pointed at another
-bucket. This is called artifact addressing. It is off by default, and
-`storage.type: s3` requires it.
+Snapshot ties each snapshot to the store it was written to. Every restore from
+the snapshot store and every delete checks this link first, so a snapshot cannot
+be read or deleted through a different store, for example after the installation
+is pointed at another bucket. This is called artifact addressing. It is off by
+default, and `storage.type: s3` requires it.
 
 - **Artifact:** the stored data of one checkpointed container
 - **Content:** the `PodSnapshotContent` object that records one snapshot

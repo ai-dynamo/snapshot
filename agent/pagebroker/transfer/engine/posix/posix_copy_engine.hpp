@@ -47,6 +47,7 @@ class PosixCopyEngine final : public TransferEngine {
   const Path& RestoreRoot(const StorageBackend& source) const;
 
   Path storage_root_;
+  Path node_cache_root_;
   Path node_cache_artifacts_;
 };
 }  // namespace snapshot::pagebroker
