@@ -290,9 +290,7 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
       - serviceAccountToken:
           path: token
           expirationSeconds: {{ .Values.storage.s3.credentialEndpoint.tokenExpirationSeconds | int }}
-          {{- with .Values.storage.s3.credentialEndpoint.tokenAudience }}
-          audience: {{ . | quote }}
-          {{- end }}
+          audience: {{ .Values.storage.s3.credentialEndpoint.tokenAudience | quote }}
 {{- end -}}
 
 {{/* Fails the render on S3 settings PageBroker would refuse at startup. */}}
@@ -305,6 +303,9 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 {{- end -}}
 {{- if not (hasPrefix "https://" ($s3.credentialEndpoint.url | lower)) -}}
 {{- fail "storage.s3.credentialEndpoint.url must be an https URL" -}}
+{{- end -}}
+{{- if not $s3.credentialEndpoint.tokenAudience -}}
+{{- fail "storage.s3.credentialEndpoint.tokenAudience is required with storage.s3.credentialEndpoint.url: a token without an audience is also valid for the Kubernetes API" -}}
 {{- end -}}
 {{- if lt ($s3.credentialEndpoint.tokenExpirationSeconds | int) 600 -}}
 {{- fail "storage.s3.credentialEndpoint.tokenExpirationSeconds must be at least 600" -}}

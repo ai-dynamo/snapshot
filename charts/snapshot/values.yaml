@@ -157,10 +157,11 @@ storage:
     # platform does not inject an identity into the pods by itself. Cannot be
     # combined with credentialsSecretRef.
     credentialEndpoint:
-      # https URL of the endpoint. Empty disables this.
+      # https URL of the endpoint. Empty disables this. The endpoint must
+      # implement the container-credentials protocol of the S3 clients.
       url: ""
-      # Audience the endpoint expects in the token. Empty requests the
-      # cluster's default audience.
+      # Audience the endpoint expects in the token. Required with url: a token
+      # without an audience is also valid for the Kubernetes API.
       tokenAudience: ""
       # Lifetime of the token; kubelet rotates it before it expires. At least 600.
       tokenExpirationSeconds: 3600

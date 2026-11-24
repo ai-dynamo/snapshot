@@ -401,6 +401,16 @@ tests:
           content:
             name: s3-identity-token
           any: true
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "agent")].env
+          content:
+            name: AWS_CONTAINER_CREDENTIALS_FULL_URI
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "agent")].env
+          content:
+            name: AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE
+          any: true
       - contains:
           path: spec.template.spec.volumes
           content:
@@ -421,6 +431,7 @@ tests:
       storage.s3.bucket: snapshot-bucket
       operator.bindNewContents: true
       storage.s3.credentialEndpoint.url: https://credentials.example.com/v1
+      storage.s3.credentialEndpoint.tokenAudience: credentials.example.com
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
@@ -447,6 +458,7 @@ tests:
                 - serviceAccountToken:
                     path: token
                     expirationSeconds: 3600
+                    audience: credentials.example.com
 
   - it: adds no projected token without a credential endpoint
     template: templates/daemonset.yaml
@@ -478,6 +490,7 @@ tests:
       operator.bindNewContents: true
       storage.s3.credentialsSecretRef: s3-creds
       storage.s3.credentialEndpoint.url: https://credentials.example.com/v1
+      storage.s3.credentialEndpoint.tokenAudience: credentials.example.com
     asserts:
       - failedTemplate:
           errorMessage: storage.s3.credentialEndpoint.url and storage.s3.credentialsSecretRef are two credential sources; set one
@@ -491,9 +504,23 @@ tests:
       storage.s3.bucket: snapshot-bucket
       operator.bindNewContents: true
       storage.s3.credentialEndpoint.url: http://credentials.example.com/v1
+      storage.s3.credentialEndpoint.tokenAudience: credentials.example.com
     asserts:
       - failedTemplate:
           errorMessage: storage.s3.credentialEndpoint.url must be an https URL
+
+  - it: rejects a credential endpoint without a token audience
+    template: templates/configmap.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      operator.bindNewContents: true
+      storage.s3.credentialEndpoint.url: https://credentials.example.com/v1
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.credentialEndpoint.tokenAudience is required with storage.s3.credentialEndpoint.url: a token without an audience is also valid for the Kubernetes API"
 
   - it: rejects a token lifetime below the cluster minimum
     template: templates/configmap.yaml
@@ -504,6 +531,7 @@ tests:
       storage.s3.bucket: snapshot-bucket
       operator.bindNewContents: true
       storage.s3.credentialEndpoint.url: https://credentials.example.com/v1
+      storage.s3.credentialEndpoint.tokenAudience: credentials.example.com
       storage.s3.credentialEndpoint.tokenExpirationSeconds: 300
     asserts:
       - failedTemplate:
