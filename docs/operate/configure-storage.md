@@ -213,8 +213,8 @@ kubectl get pod <agent-pod> -n <snapshot-ns> \
 ```
 
 When credentials do not resolve, a checkpoint fails with a storage error on the
-`PodSnapshotContent`, and a restore fails on the restore pod's
-`nvidia.com/Restored` condition; see
+`PodSnapshotContent` that ends in `S3 credentials did not resolve`, and a
+restore fails on the restore pod's `nvidia.com/Restored` condition; see
 [Find the Message](../troubleshooting/reading-a-failure-message.md#find-the-message).
 The operator logs the failed cleanup request.
 

@@ -104,6 +104,13 @@ main(int argc, char** argv)
     std::getline(file, bytes);
     return bytes == "original" ? 0 : 6;
   }
+  if (remote == "pagebroker:bucket/no-credentials") {
+    std::cerr << "{\"level\":\"error\",\"msg\":\"Failed to create file system for \\\"pagebroker:bucket/no-credentials\\\": "
+                 "operation error S3: HeadBucket, get identity: get credentials: failed to refresh cached credentials, "
+                 "no EC2 IMDS role found, operation error ec2imds: GetMetadata, access disabled to EC2 IMDS via client "
+                 "option, or \\\"AWS_EC2_METADATA_DISABLED\\\" environment variable\"}\n";
+    return 1;
+  }
   if (remote == "pagebroker:bucket/flood") {
     for (int i = 0; i < 256; ++i)
       std::cerr << std::string(4096, 'e');

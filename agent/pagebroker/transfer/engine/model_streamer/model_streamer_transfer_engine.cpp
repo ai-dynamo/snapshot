@@ -5,6 +5,7 @@
 
 #include <exception>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 #include "transfer/filesystem/filesystem_storage.hpp"
@@ -31,7 +32,9 @@ RethrowS3TransferError(std::exception_ptr exception, Cancellation cancellation)
       throw TransferError(TransferFailureCode(CancellationError(*reason)), "S3 checkpoint operation cancelled");
     throw TransferError(error.http_status == 401 || error.http_status == 403
                             ? Failure::ACCESS_DENIED : Failure::STORAGE_UNAVAILABLE,
-                        "S3 checkpoint operation failed");
+                        error.credentials_unresolved
+                            ? std::string("S3 checkpoint operation failed: ") + S3Error::kCredentialsUnresolvedMessage
+                            : "S3 checkpoint operation failed");
   }
   catch (const std::invalid_argument&) {
     throw TransferError(Failure::INVALID_REQUEST, "invalid checkpoint request or source");

@@ -219,5 +219,25 @@ TEST(S3ClientTest, RejectsInvalidOrCancelledMetadataWithoutConnecting)
     }
   }
 }
+
+TEST(CredentialsUnresolvedTest, NamesAnEmptyCredentialChain)
+{
+  EXPECT_TRUE(CredentialsUnresolved(
+      "{\"level\":\"error\",\"msg\":\"Failed to create file system: get credentials: "
+      "failed to refresh cached credentials, no EC2 IMDS role found\"}\n"));
+  EXPECT_TRUE(CredentialsUnresolved(
+      "{\"level\":\"debug\",\"msg\":\"starting\"}\n"
+      "{\"level\":\"error\",\"msg\":\"operation error STS: AssumeRoleWithWebIdentity, "
+      "api error InvalidIdentityToken: token expired\"}\n"));
+}
+
+TEST(CredentialsUnresolvedTest, IgnoresStoreResponsesAndPlainText)
+{
+  EXPECT_FALSE(CredentialsUnresolved(
+      "{\"level\":\"error\",\"msg\":\"operation error S3: PutObject, https response error "
+      "StatusCode: 403, api error AccessDenied: Access Denied\"}\n"));
+  EXPECT_FALSE(CredentialsUnresolved("failed to refresh cached credentials\n"));
+  EXPECT_FALSE(CredentialsUnresolved(""));
+}
 } // namespace
 } // namespace snapshot::pagebroker
