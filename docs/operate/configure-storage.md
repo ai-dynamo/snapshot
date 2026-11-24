@@ -152,8 +152,11 @@ PageBroker and cleanup runs in the operator:
 | Operator | The operator's, the agent's default name with `-operator` appended | `operator.serviceAccount.annotations` |
 
 Bind both to an identity that can read, write, list and delete under the store's
-prefix, using the annotation your platform defines. The platform must inject the
-identity's token and variables into the pods; the chart does not add them.
+prefix. Platforms bind in one of two ways: with an annotation on the service
+account, or with an association that names the service account and is created on
+the platform side. Set the annotation values only in the first case. The
+platform must inject the identity's token and variables into the pods; the chart
+does not add them.
 
 Instance metadata is excluded from the chain. A workload identity that does not
 resolve therefore fails the operation and never falls back to the node's role,
