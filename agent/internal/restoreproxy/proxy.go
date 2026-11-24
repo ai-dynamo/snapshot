@@ -92,6 +92,9 @@ func ControlDirFromEnv() string {
 func Run(cfg Config) int {
 	cfg = cfg.withDefaults()
 	log := cfg.Log
+	// Look before waiting: a restore result already here was left by an earlier
+	// container, so the restore is spent. The same file arriving while the proxy
+	// waits is a fresh result, and waitForRestore cannot tell the two apart.
 	prior, done, err := checkRestore(cfg.ControlDir)
 	if err != nil {
 		log.Error(err, "Cannot inspect control directory")
@@ -176,7 +179,7 @@ func startCold(cfg Config, sig syscall.Signal) int {
 	}
 	argv := containerCommand(cfg.Args)
 	if len(argv) == 0 {
-		log.Error(nil, "Cold start requested, but the container has no command to run")
+		log.Error(errors.New("no command after the --"), "Cold start requested, but the container has no command to run")
 		return podcontract.RestoreProxyErrorExitCode
 	}
 	path, err := cfg.LookPath(argv[0])
@@ -257,8 +260,8 @@ func waitForRestore(cfg Config) (restoreOutcome, error) {
 			}
 			// The restore may have landed or failed in the same instant. Run
 			// decides with its usual order: cold start, complete, then failed,
-			// then the signal. If the directory cannot be read, the signal still wins:
-			// the container is being stopped either way.
+			// then the signal. If the directory cannot be read, the signal
+			// still wins: the container is being stopped either way.
 			next, _, err := checkRestore(cfg.ControlDir)
 			if err != nil {
 				cfg.Log.Error(err, "Cannot recheck control directory after signal")
