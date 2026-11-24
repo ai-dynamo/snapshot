@@ -150,8 +150,13 @@ container is created. That needs NRI v0.10 or newer, enabled in the container
 runtime: containerd 2.2 or newer. The proxy is the container's PID 1. It waits
 for the restore, then follows the restored process: it forwards signals to it,
 and exits with its exit code, so the container ends when the restored workload
-does. If the proxy is not PID 1, the agent fails the restore. Keep the source's
-command in restore Pods; it never runs. Other containers in the Pod, such as
+does. If the proxy is not PID 1, the agent fails the restore.
+
+The plugin passes the container's own command and arguments to the proxy, after
+a `--`, as
+`/snapshot-control/snapshot-restore-proxy -- <command> <args...>`. Keep the
+source's command in restore Pods; it does not run unless the agent asks for a
+cold start (see [Cold start](#cold-start)). Other containers in the Pod, such as
 sidecars, are left alone. Nodes whose runtime cannot run the proxy restore
 without it; see [Nodes Without the Restore Proxy](#nodes-without-the-restore-proxy).
 
@@ -176,15 +181,32 @@ and its proxy exits with code 112. With `restartPolicy: Always` or `OnFailure`,
 as in a Deployment, the container then ends in `CrashLoopBackOff` once the
 restored workload exits. Delete the Pod to restore again.
 
-The proxy reserves two exit codes:
+## Cold start
+
+The agent can ask the proxy to give up on the restore and run the container's
+own command in its place, by writing an empty `cold-start` file in the
+container's control directory (`/snapshot-control`). The proxy checks for it
+before `restore-complete` and `restore-failed`, so it wins over both. It removes
+the file, so a restarted container does not find it, then replaces itself with
+the command that follows the `--`, looked up in the container's `PATH`. That
+command is PID 1, with the environment and user the Pod spec gives.
+
+## Exit codes
+
+The proxy reserves these exit codes:
 
 - 112 (`RestoreNotRepeatableExitCode`): the Pod's one restore is used up. The
   restore failed, or an earlier container in the Pod already used it.
 - 113 (`RestoreProxyErrorExitCode`): the proxy could not follow the restored
-  process.
+  process. On a cold start: there was no command after the `--`, or the proxy
+  could not remove the `cold-start` file.
+- 126 (`ColdStartExecFailedExitCode`): on a cold start, the command was found
+  but could not be run.
+- 127 (`ColdStartCommandNotFoundExitCode`): on a cold start, the command was not
+  found.
 
-Every other exit code is the restored workload's own, or 128 plus the number of
-the signal that ended it.
+Every other exit code is the restored workload's own, or, after a cold start,
+the command's own, or 128 plus the number of the signal that ended it.
 
 ## Nodes Without the Restore Proxy
 
@@ -208,4 +230,5 @@ Without the proxy:
   the workload gets no `SIGTERM`; it is killed at the end of the grace period.
 - After a failed restore, the agent kills the container. If it starts again, it
   runs the inert command and is not restored. Delete the Pod to restore again.
-- The proxy's exit codes, 112 and 113, do not apply.
+- The proxy's exit codes, 112, 113, 126 and 127, do not apply, and there is no
+  cold start.
