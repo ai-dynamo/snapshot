@@ -1283,8 +1283,14 @@ def assert_restored_state(
       exit 1
     fi
     before=$(awk '/^observation / {{count++}} END {{print count+0}}' {OBSERVATIONS})
-    sleep 12
-    after=$(awk '/^observation / {{count++}} END {{print count+0}}' {OBSERVATIONS})
+    after=$before
+    for ((attempt=0; attempt<12; attempt++)); do
+      sleep 1
+      after=$(awk '/^observation / {{count++}} END {{print count+0}}' {OBSERVATIONS})
+      if test "$after" -gt "$before"; then
+        break
+      fi
+    done
     echo "source_token=$source_token restore_token=$restore_token checkpoint_observations={checkpoint_observations} before=$before after=$after"
     test "$before" -ge "{checkpoint_observations}"
     test "$after" -gt "$before"

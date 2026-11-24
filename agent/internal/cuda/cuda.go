@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/nvidiadevices"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/api/compat"
 )
@@ -491,9 +492,17 @@ func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podNa
 // what gets recorded does not depend on how this cluster allocates GPUs.
 // Explicit environment selections are resolved on the host; disabled legacy
 // selections inspect only container visibility, which can include CDI devices.
+// Device-plugin marker-directory selections use allocation-based discovery,
+// with the allocated GPUs ordered by the container's bus-ordered listing.
 // visible is what the container sees, from ListVisibleGPUs.
 func DiscoverGPUs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName string, env []string, visible VisibleGPULister, log logr.Logger) (compat.GPUInfo, error) {
 	if value := VisibleDevicesValue(env); value != nil && *value != "all" {
+		if *value == nvidiadevices.MarkerDir || *value == nvidiadevices.MarkerDirAlias {
+			// The device plugin's volume-mounts strategy names a marker
+			// directory, not a GPU. Resolve the container's allocation and
+			// verify its visible devices instead of reading the agent's directory.
+			return discoverGPUs(ctx, clientset, podName, podNamespace, containerName, visible, log)
+		}
 		if *value == "" || *value == "none" || *value == "void" {
 			// These disable legacy injection, not CDI. Inspect only actual
 			// container visibility; never substitute host/allocation UUIDs.

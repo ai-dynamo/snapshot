@@ -408,6 +408,45 @@ func TestRunCheckpointReportsTheFailureThatEndedIt(t *testing.T) {
 	assert.Contains(t, events[0].Message, "broker restarting", "the cause to act on, not just the count")
 }
 
+// The deadline can pass while the agent waits to retry. That attempt never
+// runs, so nothing spends or announces it. Time ran out, so that is what the
+// capture reports.
+func TestRunCheckpointDoesNotSpendARetryTheDeadlineCancels(t *testing.T) {
+	attemptRetryInitialDelayOriginal := attemptRetryInitialDelay
+	t.Cleanup(func() { attemptRetryInitialDelay = attemptRetryInitialDelayOriginal })
+	// Outlasts the deadline below, so the deadline always lands inside the wait.
+	attemptRetryInitialDelay = time.Minute
+
+	content := makeWorkOrder("content-a", "node-a", "a")
+	w := makeNodeController(t, &fakeCheckpointer{}, content)
+	w.config.Checkpoint.RetryLimit = ptr.To(3)
+	w.config.Checkpoint.TimeoutSeconds = ptr.To(1)
+
+	attempts := 0
+	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		attempts++
+		// Budget remains after the repeat, so a fresh attempt is waited for.
+		return nil, executor.SuspendedSourceFailure(
+			pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting"),
+			executor.SuspendedSource{DumpRetriesUsed: 1})
+	}
+
+	require.NoError(t, w.runCheckpoint(context.Background(), content, makeSourcePod(),
+		"main", "cid", os.Getpid(), false, string(content.UID), t.TempDir()))
+
+	assert.Equal(t, 1, attempts, "the deadline passed before the waited-for attempt began")
+	assert.Empty(t, eventsForReason(w.clientset.(*fake.Clientset), reasonCheckpointAttemptFailed),
+		"no attempt followed the wait, so none was announced")
+
+	events := eventsForReason(w.clientset.(*fake.Clientset), reasonCheckpointTimeout)
+	require.Len(t, events, 1, "time ran out, so the checkpoint ends as a timeout")
+	assert.Contains(t, events[0].Message, "deadline passed before retry 2 of 3 could start",
+		"the retry it was waiting on, counting the repeat the dump already spent")
+	assert.Contains(t, events[0].Message, "broker restarting", "the last cause, not just the timeout")
+	assert.Empty(t, eventsForReason(w.clientset.(*fake.Clientset), reasonCheckpointFailed),
+		"the last attempt's own reason would point at the wrong cause")
+}
+
 // A settled failure ended the checkpoint on its own terms. Reporting that the
 // retries ran out would bury the thing an operator has to act on.
 func TestTerminalReasonKeepsASettledReason(t *testing.T) {

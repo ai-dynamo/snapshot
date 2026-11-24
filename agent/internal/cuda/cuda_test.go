@@ -1189,6 +1189,7 @@ func TestDiscoverGPUsDescribePodResourcesGPUs(t *testing.T) {
 				return VisibleGPUs{GPUs: compat.GPUInfo{
 					DriverVersion: "580.65.06",
 					Devices: []compat.GPUDevice{
+						{UUID: "GPU-unallocated", ProductName: "NVIDIA L4"},
 						{UUID: "GPU-b", ProductName: "NVIDIA L4"},
 						{UUID: "GPU-a", ProductName: "NVIDIA L4"},
 					},
@@ -1220,25 +1221,66 @@ func TestDiscoverGPUsDescribePodResourcesGPUs(t *testing.T) {
 			wantErr: "does not list allocated GPUs [GPU-a GPU-b]",
 		},
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
+	for _, selection := range []string{"all", "/var/run/nvidia-container-devices", "/run/nvidia-container-devices"} {
+		env := []string{"NVIDIA_VISIBLE_DEVICES=" + selection}
+		for _, tc := range tests {
+			t.Run(selection+"/"+tc.name, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
 
-			got, err := discoverGPUs(
-				ctx, nil, "test-pod", "default", "main", tc.visible, logr.Discard(),
-			)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("discoverGPUs() error = %v, want %q", err, tc.wantErr)
+				got, err := DiscoverGPUs(
+					ctx, nil, "test-pod", "default", "main", env, tc.visible, logr.Discard(),
+				)
+				if tc.wantErr != "" {
+					if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+						t.Fatalf("DiscoverGPUs() error = %v, want %q", err, tc.wantErr)
+					}
+					return
 				}
-				return
+				if err != nil {
+					t.Fatalf("DiscoverGPUs: %v", err)
+				}
+				if !reflect.DeepEqual(got, tc.want) {
+					t.Fatalf("DiscoverGPUs() = %#v, want %#v", got, tc.want)
+				}
+			})
+		}
+	}
+}
+
+func TestDeviceDirectorySelectionFailsOnAllocationError(t *testing.T) {
+	previousSocketPath := podResourcesSocketPath
+	podResourcesSocketPath = filepath.Join(t.TempDir(), "missing-kubelet.sock")
+	t.Cleanup(func() { podResourcesSocketPath = previousSocketPath })
+
+	for _, selection := range []string{"/var/run/nvidia-container-devices", "/run/nvidia-container-devices"} {
+		t.Run(selection, func(t *testing.T) {
+			visible := func() (VisibleGPUs, error) {
+				t.Fatal("failed allocation lookup must not fall back to visible GPUs")
+				return VisibleGPUs{}, nil
 			}
-			if err != nil {
-				t.Fatalf("discoverGPUs: %v", err)
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			_, err := DiscoverGPUs(ctx, nil, "test-pod", "default", "main",
+				[]string{"NVIDIA_VISIBLE_DEVICES=" + selection}, visible, logr.Discard())
+			if err == nil || !strings.Contains(err.Error(), "PodResources GPU UUID lookup failed") {
+				t.Fatalf("DiscoverGPUs() error = %v, want allocation lookup failure", err)
 			}
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("discoverGPUs() = %#v, want %#v", got, tc.want)
+		})
+	}
+}
+
+func TestDiscoverGPUsRejectsUnknownDeviceDirectory(t *testing.T) {
+	for _, selection := range []string{"/tmp/devices", "/var/run/nvidia-container-devices-other"} {
+		t.Run(selection, func(t *testing.T) {
+			visible := func() (VisibleGPUs, error) {
+				t.Fatal("unknown directory must not fall back to container visibility")
+				return VisibleGPUs{}, nil
+			}
+			_, err := DiscoverGPUs(context.Background(), nil, "", "", "",
+				[]string{"NVIDIA_VISIBLE_DEVICES=" + selection}, visible, logr.Discard())
+			if err == nil || !strings.Contains(err.Error(), "unsupported NVIDIA_VISIBLE_DEVICES selection") {
+				t.Fatalf("DiscoverGPUs() error = %v, want unsupported selection", err)
 			}
 		})
 	}
@@ -1290,22 +1332,25 @@ func TestDiscoverGPUsFallBackToVisibleGPUs(t *testing.T) {
 		Devices:       []compat.GPUDevice{{UUID: "GPU-a", ProductName: "NVIDIA L4"}},
 	}
 
-	got, err := discoverGPUs(
-		context.Background(),
-		nil,
-		"test-pod",
-		"default",
-		"main",
-		func() (VisibleGPUs, error) {
-			return VisibleGPUs{GPUs: want}, nil
-		},
-		logr.Discard(),
-	)
-	if err != nil {
-		t.Fatalf("discoverGPUs: %v", err)
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("discoverGPUs() = %#v, want %#v", got, want)
+	// An empty successful allocation lookup retains the existing visibility
+	// fallback, including for the device plugin's marker-directory selections.
+	for _, selection := range []string{"all", "/var/run/nvidia-container-devices", "/run/nvidia-container-devices"} {
+		t.Run(selection, func(t *testing.T) {
+			got, err := DiscoverGPUs(
+				context.Background(), nil, "test-pod", "default", "main",
+				[]string{"NVIDIA_VISIBLE_DEVICES=" + selection},
+				func() (VisibleGPUs, error) {
+					return VisibleGPUs{GPUs: want}, nil
+				},
+				logr.Discard(),
+			)
+			if err != nil {
+				t.Fatalf("DiscoverGPUs: %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("DiscoverGPUs() = %#v, want %#v", got, want)
+			}
+		})
 	}
 }
 

@@ -62,6 +62,16 @@ commit-level history for each release is on its
   already `Ready` before it is not backfilled.
 - `config.checkpoint.timeoutSeconds` (default `3600`) fails a
   checkpoint that outruns it.
+- Checkpoint retries, off by default and cluster-wide.
+  `config.checkpoint.retryLimit` (default `0`) sets how many times a failed
+  checkpoint is retried beyond the first attempt, and an attempt a retry
+  follows emits a `CheckpointAttemptFailed` event on the source Pod. See
+  [Checkpoint retries](docs/troubleshooting/checkpoints.md#a-checkpoint-fails-with-retriesexhausted).
+- Storage shortages on a checkpoint now read distinctly, as
+  `StagingUnavailable`, `ImageTooLarge`, or `StoreExhausted`. See
+  [Storage shortages](docs/troubleshooting/checkpoints.md#a-checkpoint-fails-with-imagetoolarge-stagingunavailable-or-storeexhausted).
+- A failed CRIU dump records the CRIU version that produced it, which the agent
+  also logs at startup.
 - S3 connection and transfer settings for `storage.type: s3`:
   `storage.s3.addressing`, `storage.s3.allowHttp`, a CA bundle
   (`storage.s3.caBundleConfigMapRef`), `pageBroker.s3.limits` and
@@ -160,6 +170,12 @@ commit-level history for each release is on its
   side as no model, as it does an empty name: checkpoints that recorded it
   restore onto the same GPUs, and the check never refuses it against another
   model.
+
+### Fixed
+
+- GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
+  values used by the NVIDIA device plugin's `volume-mounts` strategy. See
+  [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 
 ### Deprecated
 
