@@ -9,6 +9,9 @@ Snapshot currently focuses on inference cold-start; further use cases are on the
 - Workloads, including multi-GPU workloads, must run on a single node.
   Multi-node is on the [roadmap](../roadmap.md).
 - vGPU is not supported.
+- CUDA unified memory allocations, including `cudaMallocManaged`, are not
+  supported by the CUDA checkpoint API. A failed checkpoint can leave the CUDA
+  process in an unusable state. See the [CUDA checkpoint limitations](https://github.com/NVIDIA/cuda-checkpoint#functionality).
 - Runs only on NVIDIA GPUs supported by the required CUDA driver.
 - The checkpointed workload must not have tools that intercept `libcuda.so`
   calls (e.g. Datadog GPU monitoring). CUDA calls may fail or hang after
