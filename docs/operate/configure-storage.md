@@ -190,8 +190,16 @@ which every pod on the node shares.
 With `storage.s3.caBundleConfigMapRef` set, PageBroker and the operator trust
 only that bundle, for the store and for the service that issues the credentials.
 The bundle must therefore also contain the CA of the token or credential
-service. When that service uses a private CA, uploads and cleanup work. Restores
-do not: they cannot reach a token or credential service behind a private CA yet.
+service.
+
+A credential endpoint behind a private CA works for uploads, restores and
+cleanup. With `storage.s3.credentialEndpoint.url` set, the chart also mounts the
+bundle as the system certificate file of the PageBroker container, which
+restores use for the credential request. That mount does not follow a change to
+the ConfigMap; restart the agent pods after you replace the bundle.
+
+A token service that the platform runs behind a private CA works for uploads
+and cleanup. Restores cannot reach it yet.
 
 To check it, list the variables your platform injected into the PageBroker
 container, then take a snapshot:

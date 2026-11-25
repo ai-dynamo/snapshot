@@ -284,6 +284,12 @@ spec:
               mountPath: {{ include "snapshot.s3CABundleMountDir" . }}
               readOnly: true
             {{- end }}
+            {{- if and (include "snapshot.s3CredentialEndpointEnabled" .) .Values.storage.s3.caBundleConfigMapRef }}
+            - name: s3-ca-bundle
+              mountPath: {{ include "snapshot.pageBrokerSystemCABundlePath" . }}
+              subPath: {{ required "storage.s3.caBundleConfigMapKey is required with storage.s3.caBundleConfigMapRef" .Values.storage.s3.caBundleConfigMapKey | quote }}
+              readOnly: true
+            {{- end }}
             {{- if and (eq .Values.storage.type "s3") .Values.pageBroker.transferEngine.modelStreamer }}
             - name: model-streamer-config
               mountPath: {{ include "snapshot.modelStreamerMountDir" . }}

@@ -422,6 +422,54 @@ tests:
                     expirationSeconds: 900
                     audience: credentials.example.com
 
+  - it: gives PageBroker the CA bundle as its system certificate file with a credential endpoint
+    template: templates/daemonset.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      operator.bindNewContents: true
+      storage.s3.credentialEndpoint.url: https://credentials.example.com/v1
+      storage.s3.credentialEndpoint.tokenAudience: credentials.example.com
+      storage.s3.caBundleConfigMapRef: snapshot-s3-ca
+      storage.s3.caBundleConfigMapKey: bundle.pem
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            name: s3-ca-bundle
+            mountPath: /etc/ssl/certs/ca-certificates.crt
+            subPath: bundle.pem
+            readOnly: true
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            name: s3-ca-bundle
+            mountPath: /etc/snapshot-s3-ca
+            readOnly: true
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
+          content:
+            mountPath: /etc/ssl/certs/ca-certificates.crt
+          any: true
+
+  - it: leaves PageBroker's system certificate file alone without a credential endpoint
+    template: templates/daemonset.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      operator.bindNewContents: true
+      storage.s3.caBundleConfigMapRef: snapshot-s3-ca
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            mountPath: /etc/ssl/certs/ca-certificates.crt
+          any: true
+
   - it: gives the operator a projected token and the credential endpoint
     template: templates/operator-deployment.yaml
     set:

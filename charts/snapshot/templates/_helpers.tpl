@@ -262,6 +262,12 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialEndpoint.url -}}true{{- end -}}
 {{- end -}}
 
+{{/* The certificate file PageBroker's image trusts by default. The reader used
+     on restore applies storage.s3.caBundleConfigMapRef to its S3 requests only
+     and takes the trust for its credential request from this file, so the
+     bundle is also mounted here when a credential endpoint is set. */}}
+{{- define "snapshot.pageBrokerSystemCABundlePath" -}}/etc/ssl/certs/ca-certificates.crt{{- end -}}
+
 {{/* Directory the projected service-account token for
      storage.s3.credentialEndpoint is mounted at, in PageBroker and the operator. */}}
 {{- define "snapshot.s3IdentityTokenMountDir" -}}/var/run/secrets/snapshot/s3-identity{{- end -}}
