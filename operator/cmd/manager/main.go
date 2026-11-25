@@ -199,6 +199,10 @@ func main() {
 	}
 
 	if podGroups.enabled {
+		if err := controller.IndexPodGroupRestores(context.Background(), mgr.GetFieldIndexer()); err != nil {
+			ctrl.Log.Error(err, "unable to index PodGroupRestores")
+			os.Exit(1)
+		}
 		podGroupSnapshotReconciler := &controller.PodGroupSnapshotReconciler{
 			Client:             mgr.GetClient(),
 			NonCacheReadClient: mgr.GetAPIReader(),
@@ -208,6 +212,17 @@ func main() {
 		}
 		if err := podGroupSnapshotReconciler.SetupWithManager(mgr); err != nil {
 			ctrl.Log.Error(err, "unable to set up PodGroupSnapshot controller")
+			os.Exit(1)
+		}
+		podGroupRestoreReconciler := &controller.PodGroupRestoreReconciler{
+			Client:             mgr.GetClient(),
+			NonCacheReadClient: mgr.GetAPIReader(),
+			Recorder:           mgr.GetEventRecorderFor("podgrouprestore-controller"),
+			AgentNamespace:     podGroups.agentNamespace,
+			AgentSelector:      agentSelector,
+		}
+		if err := podGroupRestoreReconciler.SetupWithManager(mgr); err != nil {
+			ctrl.Log.Error(err, "unable to set up PodGroupRestore controller")
 			os.Exit(1)
 		}
 	}

@@ -251,9 +251,30 @@ agent require `failureThreshold` to be at least
 `periodSeconds: 1`, must match the restore probe.
 
 Name the destination container in the `PodGroupRestore`, in the target's
-`containerMappings`. The operator claims the Pod in one patch: it writes
+`containerMappings`. The operator claims no target until every target passes
+its checks. It then claims each Pod in one patch: it writes
 `nvidia.com/restore-group-uid` and the mapping as
-`nvidia.com/restore-container-map`, and removes the gate.
+`nvidia.com/restore-container-map`, and removes the gate. Do not remove the
+gate yourself.
+
+The patches are separate. A claim that landed stays if a later target changes
+or a later claim is refused, for example by a webhook or a 403. Claims also stay
+if the restore or its snapshot changes right after the claims. The next pass
+can refuse the restore or wait, while claimed Pods can take nodes.
+
+While the restore waits, its `Admitted` condition gives one of these reasons:
+
+| Reason | The restore waits for |
+| --- | --- |
+| `TargetPodPending` | A target Pod to exist, or a claimed Pod to get an IP address and a destination container ID |
+| `TargetPodUnscheduled` | A claimed Pod to be scheduled to a node, for example while the cluster lacks capacity |
+| `AgentNotReady` | The agent on each target's node to be Ready and to advertise the group protocol |
+
+The restore fails with `TargetInUse` when another `PodGroupRestore` claimed a
+target Pod, and with `Refused` when a target Pod cannot be claimed, for example
+a Pod created without the gate. A restore refused before the claim leaves every
+target as it found it. You can name its valid gated targets in a new
+`PodGroupRestore`.
 
 - Do not add an init container that waits for the Pod's peers. No member
   restores until every target's destination container exists.
