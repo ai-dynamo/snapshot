@@ -79,6 +79,9 @@ data:
     storage:
       type: "pvc"
       basePath: "/checkpoints"
+      {{- if (.Values.storage.nodeCache | default dict).enabled }}
+      nodeCacheEnabled: true
+      {{- end }}
 
     overlay:
       exclusions: {{ toYaml .Values.config.overlay.exclusions | nindent 8 }}

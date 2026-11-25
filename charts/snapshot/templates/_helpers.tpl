@@ -291,3 +291,23 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 - name: NVIDIA_DRIVER_CAPABILITIES
   value: compute,utility
 {{- end -}}
+
+{{/*
+Fixed mount path of the node cache in the agent and PageBroker containers.
+The agent and the privileged mount helper pin the same path.
+*/}}
+{{- define "snapshot.nodeCacheMountPath" -}}
+/node-cache
+{{- end -}}
+
+{{/*
+Node directory of the node cache. Fails when the cache is enabled without an
+absolute, normalized path, so a typo cannot mount an unintended directory.
+*/}}
+{{- define "snapshot.nodeCacheHostPath" -}}
+{{- $path := .Values.storage.nodeCache.path | toString -}}
+{{- if or (not (hasPrefix "/" $path)) (ne (clean $path) $path) (eq $path "/") -}}
+{{- fail (printf "storage.nodeCache.path must be an absolute path to a directory when storage.nodeCache.enabled is true, got %q" $path) -}}
+{{- end -}}
+{{- $path -}}
+{{- end -}}

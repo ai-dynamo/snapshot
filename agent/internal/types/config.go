@@ -16,6 +16,10 @@ import (
 // helper independently enforces the same path.
 const CheckpointBasePath = "/checkpoints"
 
+// NodeCacheBasePath is the fixed agent-side mount of the node cache. The
+// privileged mount helper enforces the same path.
+const NodeCacheBasePath = "/node-cache"
+
 // AgentConfig holds static checkpoint settings plus runtime fields populated at startup.
 type AgentConfig struct {
 	NodeName               string          `yaml:"-"`
@@ -84,6 +88,10 @@ func (c *AgentConfig) Validate() error {
 type StorageSpec struct {
 	Type     string `yaml:"type"`
 	BasePath string `yaml:"basePath"`
+
+	// NodeCacheEnabled turns on restores from the node cache, which is always
+	// mounted at NodeCacheBasePath.
+	NodeCacheEnabled bool `yaml:"nodeCacheEnabled"`
 }
 
 type PageBrokerSpec struct {
