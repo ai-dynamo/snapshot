@@ -304,7 +304,7 @@ func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap 
 		}
 		return ctrl.Result{}, err
 	}
-	if err = validateSourcePod(snap, pod); err != nil {
+	if err = validateSourcePod(snap.Spec.Source.PodRef, pod); err != nil {
 		if errors.Is(err, errPodSnapshotPodUnscheduled) {
 			return sr.recordPendingReason(ctx, snap, podSnapshotReasonSourcePodUnscheduled,
 				fmt.Sprintf("waiting for source pod %q to be scheduled to a node", pod.Name))
@@ -363,12 +363,13 @@ func (sr *PodSnapshotReconciler) getSourcePod(ctx context.Context, snap *snapsho
 	return pod, nil
 }
 
-// validateSourcePod requires the pod, when the PodSnapshot pins a source pod UID, to match it
+// validateSourcePod requires the pod, when the source reference pins a pod UID, to match it
 // (rejecting a same-named recreation), and to be scheduled. It returns one of two sentinels:
 // errPodSnapshotStalePodRef (terminal) or errPodSnapshotPodUnscheduled (pending). The UID check
 // comes first: a stale reference is terminal whether or not the replacement ever schedules.
-func validateSourcePod(snap *snapshotv1alpha1.PodSnapshot, pod *corev1.Pod) error {
-	if wantUID := snap.Spec.Source.PodRef.UID; wantUID != "" && pod.UID != wantUID {
+// PodGroupSnapshot admission applies the same checks to each member's source.
+func validateSourcePod(ref snapshotv1alpha1.PodReference, pod *corev1.Pod) error {
+	if wantUID := ref.UID; wantUID != "" && pod.UID != wantUID {
 		return fmt.Errorf("%w: live pod %q UID %q, want %q", errPodSnapshotStalePodRef, pod.Name, pod.UID, wantUID)
 	}
 	if pod.Spec.NodeName == "" {
