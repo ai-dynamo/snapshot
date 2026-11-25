@@ -126,14 +126,17 @@ builder also injects the deprecated `DYN_SNAPSHOT_CONTROL_DIR` alias during
 the migration window; hand-authored Pods may omit the alias.
 
 The `restore-complete` startup probe shown above is optional workload lifecycle
-policy. Set `Options.EnableStartupGate` when Kubernetes must withhold readiness
-and liveness until restore completes. Kubernetes supports only one
+policy, except on a group target (see
+[Group Restore Targets](#group-restore-targets)), which always carries it. Set
+`Options.EnableStartupGate` when Kubernetes must withhold readiness and
+liveness until restore completes. Kubernetes supports only one
 startup probe, so the builder then replaces any existing startup probe with the
 canonical restore-completion gate while preserving workload liveness and
 readiness probes. Its failure threshold allows 1,800 consecutive one-second
 failures; if restoration exceeds that budget, kubelet kills the container, and
-the restore is lost (see restart policy below). The node agent always writes
-the sentinel but does not require or inspect the optional probe.
+the restore is lost (see restart policy below). A group target's budget is
+longer: see [Group Restore Targets](#group-restore-targets). The node agent
+always writes the sentinel but does not require or inspect the optional probe.
 
 `Options.SeccompProfile` controls the localhost profile on restore destination
 containers only. The standard Snapshot Helm installation deploys
@@ -209,3 +212,54 @@ Without the proxy:
 - After a failed restore, the agent kills the container. If it starts again, it
   runs the inert command and is not restored. Delete the Pod to restore again.
 - The proxy's exit codes, 112 and 113, do not apply.
+
+## Group Restore Targets
+
+> [!NOTE]
+> Group restore is alpha. For how a group restores, see
+> [SNEP-324: Coordinated multi-Pod snapshot and restore](https://github.com/ai-dynamo/snapshot/pull/325).
+
+A group target is the restore Pod of one member of a `PodGroupRestore`. Create
+it with the `nvidia.com/restore-group` scheduling gate, which keeps it
+unscheduled until the operator claims it. A Pod created without the gate is
+never a group target. In Go, `podcontract.BuildGroupTarget` adds the gate and
+shapes the destination container:
+
+```go
+target, err := podcontract.BuildGroupTarget(
+    pod,
+    podcontract.GroupTargetRequest{DestinationContainer: destinationContainer},
+    podcontract.Options{SeccompProfile: podcontract.DefaultSeccompLocalhostProfile},
+)
+```
+
+It adds the control volume, mount, and environment, and always the
+`restore-complete` startup probe, which every group target carries. It writes
+no annotation: do not set `nvidia.com/restore-from`,
+`nvidia.com/restore-container-map`, or `nvidia.com/restore-group-uid` on a
+group target.
+
+A group target's probe checks every second and allows 86,401 consecutive
+failures. The first check can run when the container starts, leaving 86,400
+seconds before the last failure: the longest `deadlineSeconds` of a
+`PodGroupRestore`. A target's container starts only after the `PodGroupRestore`
+exists, so the probe cannot expire before the restore's deadline. The node
+agent decides the outcome and stops the workload at the deadline. The probe
+holds the container back until the agent releases it. The operator and the
+agent require `failureThreshold` to be at least
+`PodGroupMaxDeadlineSeconds + 1`. Every other field, including
+`periodSeconds: 1`, must match the restore probe.
+
+Name the destination container in the `PodGroupRestore`, in the target's
+`containerMappings`. The operator claims the Pod in one patch: it writes
+`nvidia.com/restore-group-uid` and the mapping as
+`nvidia.com/restore-container-map`, and removes the gate.
+
+- Do not add an init container that waits for the Pod's peers. No member
+  restores until every target's destination container exists.
+- A claimed Pod serves one restore only. If that restore fails, create a new
+  gated Pod.
+- On a node without the restore proxy, or whose node agent does not support pod
+  groups, the destination's own command runs. Give it an inert command, as
+  described in [Nodes Without the Restore Proxy](#nodes-without-the-restore-proxy),
+  or keep group restores off such nodes.

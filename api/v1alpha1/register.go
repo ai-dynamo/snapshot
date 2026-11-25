@@ -22,6 +22,8 @@ const (
 	KindPodSnapshot            = "PodSnapshot"
 	KindPodSnapshotContent     = "PodSnapshotContent"
 	KindPodSnapshotContentList = "PodSnapshotContentList"
+	KindPodGroupSnapshot       = "PodGroupSnapshot"
+	KindPodGroupRestore        = "PodGroupRestore"
 )
 
 func AddToScheme(s *runtime.Scheme) error {
@@ -29,6 +31,8 @@ func AddToScheme(s *runtime.Scheme) error {
 		&PodSnapshot{}, &PodSnapshotList{},
 		&PodSnapshotContent{}, &PodSnapshotContentList{},
 		&SnapshotJob{}, &SnapshotJobList{},
+		&PodGroupSnapshot{}, &PodGroupSnapshotList{},
+		&PodGroupRestore{}, &PodGroupRestoreList{},
 	)
 	metav1.AddToGroupVersion(s, SchemeGroupVersion)
 	return nil

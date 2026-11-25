@@ -31,6 +31,11 @@ const (
 	PodSnapshotConditionReady = "Ready"
 	// PodSnapshotConditionFailed is True when the checkpoint or binding failed terminally.
 	PodSnapshotConditionFailed = "Failed"
+	// PodSnapshotConditionStarted is True on a group member's PodSnapshotContent
+	// once the node agent is about to take the member's first irreversible
+	// step. The agent sets it once and never removes it; its
+	// lastTransitionTime is the member's startedAt in its PodGroupSnapshot.
+	PodSnapshotConditionStarted = "Started"
 )
 
 // IsPodSnapshotSucceeded reports whether the PodSnapshot's Ready condition is True.
@@ -59,6 +64,13 @@ type PodSnapshotSpec struct {
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=1
 	Containers []ContainerSnapshotConfig `json:"containers,omitempty"`
+
+	// PodGroup requires this snapshot to be checkpointed as a member of its
+	// PodGroupSnapshot. Omitted means a standalone checkpoint.
+	// The PodGroupSnapshot controller sets this field on the member snapshots
+	// it creates.
+	// +optional
+	PodGroup *PodGroupSnapshotMembership `json:"podGroup,omitempty"`
 }
 
 // PodSnapshotSource identifies the workload a PodSnapshot was taken from.
