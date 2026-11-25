@@ -183,6 +183,10 @@ commit-level history for each release is on its
 
 ### Fixed
 
+- Operator cleanup now honors `storage.s3.addressing: virtual` for custom S3
+  endpoints. Path-style addressing remains the default for custom endpoints.
+  See [Optional S3 Settings](docs/operate/configure-storage.md#optional-s3-settings).
+
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).

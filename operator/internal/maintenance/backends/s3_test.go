@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,11 +30,11 @@ import (
 func TestNewS3ConfigCopiesEveryField(t *testing.T) {
 	cfg := operatortypes.S3Config{
 		Bucket: "checkpoints", Prefix: "snapshots", Region: "us-east-1",
-		Endpoint: "https://s3.example.com", CredentialsPath: "/etc/creds", CABundlePath: "/etc/ca.pem",
+		Endpoint: "https://s3.example.com", Addressing: "virtual", CredentialsPath: "/etc/creds", CABundlePath: "/etc/ca.pem",
 	}
 	assert.Equal(t, S3Config{
 		Bucket: "checkpoints", Prefix: "snapshots", Region: "us-east-1",
-		Endpoint: "https://s3.example.com", CredentialsPath: "/etc/creds", CABundlePath: "/etc/ca.pem",
+		Endpoint: "https://s3.example.com", Addressing: "virtual", CredentialsPath: "/etc/creds", CABundlePath: "/etc/ca.pem",
 	}, NewS3Config(cfg))
 }
 
@@ -494,4 +495,49 @@ func TestSharedCredentialsFileProviderFailsWithoutKeys(t *testing.T) {
 
 	_, err := sharedCredentialsFileProvider(credentialsPath).Retrieve(context.Background())
 	require.Error(t, err)
+}
+
+func TestNewS3BackendAddressing(t *testing.T) {
+	for _, tc := range []struct {
+		name, endpoint, addressing string
+		wantPathStyle              bool
+	}{
+		{name: "default AWS"},
+		{name: "default custom endpoint", endpoint: "https://s3.example.com", wantPathStyle: true},
+		{name: "explicit virtual", endpoint: "https://s3.example.com", addressing: "virtual"},
+		{name: "explicit path", endpoint: "https://s3.example.com", addressing: "path", wantPathStyle: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			credentialsPath := filepath.Join(t.TempDir(), "credentials")
+			writeS3Credentials(t, credentialsPath, "FAKEACCESSKEY")
+			backend, err := NewS3Backend(context.Background(), S3Config{
+				Bucket: "checkpoints", Region: "us-east-1", CredentialsPath: credentialsPath,
+				Endpoint: tc.endpoint, Addressing: tc.addressing,
+			})
+			require.NoError(t, err)
+			client, ok := backend.client.(*s3.Client)
+			require.True(t, ok)
+			recorder := &recordS3Addressing{}
+			_, err = client.ListObjectsV2(context.Background(), &s3.ListObjectsV2Input{Bucket: aws.String("checkpoints")}, func(o *s3.Options) {
+				o.HTTPClient = recorder
+			})
+			require.NoError(t, err)
+			require.NotNil(t, recorder.request)
+			if tc.wantPathStyle {
+				assert.Equal(t, "/checkpoints", strings.TrimSuffix(recorder.request.URL.Path, "/"))
+				assert.Equal(t, "s3.example.com", recorder.request.URL.Host)
+			} else {
+				assert.Equal(t, "/", recorder.request.URL.Path)
+				assert.True(t, strings.HasPrefix(recorder.request.URL.Host, "checkpoints."), recorder.request.URL.Host)
+			}
+		})
+	}
+}
+
+// Capture the SDK's final signed request without DNS or a live S3 endpoint.
+type recordS3Addressing struct{ request *http.Request }
+
+func (r *recordS3Addressing) Do(request *http.Request) (*http.Response, error) {
+	r.request = request.Clone(request.Context())
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`))}, nil
 }
