@@ -34,6 +34,7 @@ func main() {
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
 	artifactCleanupS3CredentialsPath, artifactCleanupS3CABundlePath := bindArtifactCleanupS3Flags(flag.CommandLine)
 	cuInterposeConfig := bindCuInterposeFlags(flag.CommandLine)
+	coordinatorTLS := bindCoordinatorTLSFlags(flag.CommandLine)
 	testFailureAnnotation, err := bindTestHookFlags(flag.CommandLine)
 	if err != nil {
 		ctrl.Log.Error(err, "invalid E2E test hook configuration")
@@ -126,6 +127,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := addCoordinatorTLSIssuer(mgr, coordinatorTLS); err != nil {
+		ctrl.Log.Error(err, "unable to set up the coordinator TLS issuer")
+		os.Exit(1)
+	}
+
 	if storageCfg.S3 != nil {
 		// A direct (non-cached) client: this runs once at startup, before the
 		// manager's cache is started, and writes rather than watches.
@@ -134,12 +140,8 @@ func main() {
 			ctrl.Log.Error(err, "unable to construct client for PageBroker S3 configuration")
 			os.Exit(1)
 		}
-		labels := map[string]string{"app.kubernetes.io/part-of": "snapshot", "app.kubernetes.io/managed-by": "snapshot-operator"}
-		if *releaseName != "" {
-			labels["app.kubernetes.io/instance"] = *releaseName
-		}
 		if err := ensurePageBrokerS3Config(context.Background(), directClient,
-			*pageBrokerS3ConfigNamespace, *pageBrokerS3ConfigName, labels, *storageCfg.S3, storeID, pageBrokerS3); err != nil {
+			*pageBrokerS3ConfigNamespace, *pageBrokerS3ConfigName, *releaseName, *storageCfg.S3, storeID, pageBrokerS3); err != nil {
 			ctrl.Log.Error(err, "unable to write PageBroker S3 configuration")
 			os.Exit(1)
 		}
