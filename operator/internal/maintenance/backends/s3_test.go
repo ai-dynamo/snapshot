@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -233,7 +234,7 @@ func clearAmbientS3Credentials(t *testing.T) {
 		"AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE",
 		"AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
 		"AWS_CONTAINER_AUTHORIZATION_TOKEN", "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
-		"AWS_EC2_METADATA_DISABLED",
+		"AWS_EC2_METADATA_DISABLED", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_STS",
 	} {
 		t.Setenv(name, "")
 	}
@@ -328,6 +329,80 @@ func TestNewS3BackendRecoversFromACredentialEndpointThatDoesNotAnswer(t *testing
 		return err == nil
 	}, 30*time.Second, 100*time.Millisecond)
 	assert.Contains(t, (*requests)[len(*requests)-1].Header.Get("Authorization"), "Credential=FAKECONTAINERKEY/")
+}
+
+func TestNewS3BackendRecoversFromAnSTSThatDoesNotAnswer(t *testing.T) {
+	clearAmbientS3Credentials(t)
+	previous := s3CredentialRequestTimeout
+	s3CredentialRequestTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { s3CredentialRequestTimeout = previous })
+	server, requests := newListObjectsServer(t, httptest.NewServer)
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(tokenPath, []byte("fake-projected-token"), 0o600))
+	var silent atomic.Bool
+	silent.Store(true)
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if silent.Load() {
+			<-r.Context().Done()
+			return
+		}
+		w.Header().Set("Content-Type", "text/xml")
+		_, _ = fmt.Fprintf(w, `<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+<AssumeRoleWithWebIdentityResult>
+<Credentials><AccessKeyId>FAKESTSKEY</AccessKeyId><SecretAccessKey>fake-secret</SecretAccessKey><SessionToken>fake-session</SessionToken><Expiration>%s</Expiration></Credentials>
+<SubjectFromWebIdentityToken>fake-subject</SubjectFromWebIdentityToken>
+<AssumedRoleUser><Arn>arn:aws:sts::123456789012:assumed-role/fake/fake</Arn><AssumedRoleId>AROAFAKE:fake</AssumedRoleId></AssumedRoleUser>
+<Provider>fake</Provider><Audience>sts.amazonaws.com</Audience>
+</AssumeRoleWithWebIdentityResult>
+<ResponseMetadata><RequestId>fake-request</RequestId></ResponseMetadata>
+</AssumeRoleWithWebIdentityResponse>`, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+	}))
+	t.Cleanup(sts.Close)
+	t.Setenv("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/fake")
+	t.Setenv("AWS_WEB_IDENTITY_TOKEN_FILE", tokenPath)
+	t.Setenv("AWS_ENDPOINT_URL_STS", sts.URL)
+
+	b, err := NewS3Backend(context.Background(), S3Config{Bucket: "checkpoints", Region: "us-east-1", Endpoint: server.URL})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, err = b.Candidates(ctx, logr.Discard())
+	require.Error(t, err)
+	assert.Empty(t, *requests)
+
+	silent.Store(false)
+	require.Eventually(t, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, err := b.Candidates(ctx, logr.Discard())
+		return err == nil
+	}, 30*time.Second, 100*time.Millisecond)
+	assert.Contains(t, (*requests)[len(*requests)-1].Header.Get("Authorization"), "Credential=FAKESTSKEY/")
+}
+
+func TestNewS3BackendDoesNotBoundS3RequestsByTheCredentialTimeout(t *testing.T) {
+	previous := s3CredentialRequestTimeout
+	s3CredentialRequestTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { s3CredentialRequestTimeout = previous })
+	server, requests := newListObjectsServer(t, func(h http.Handler) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(3 * s3CredentialRequestTimeout)
+			h.ServeHTTP(w, r)
+		}))
+	})
+	credentialsPath := filepath.Join(t.TempDir(), "credentials")
+	writeS3Credentials(t, credentialsPath, "FAKEACCESSKEY")
+
+	b, err := NewS3Backend(context.Background(), S3Config{
+		Bucket: "checkpoints", Region: "us-east-1", Endpoint: server.URL, CredentialsPath: credentialsPath,
+	})
+	require.NoError(t, err)
+
+	_, err = b.Candidates(context.Background(), logr.Discard())
+	require.NoError(t, err)
+	require.Len(t, *requests, 1)
 }
 
 func TestNewS3BackendNeverUsesInstanceMetadata(t *testing.T) {

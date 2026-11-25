@@ -35,9 +35,10 @@ const (
 	s3CredentialsRefreshInterval = 5 * time.Minute
 )
 
-// s3CredentialRequestTimeout bounds one request to a container credentials
-// endpoint. The SDK shields that request from the caller's deadline, so
-// without it an endpoint that never answers would block every later cleanup.
+// s3CredentialRequestTimeout bounds one request to a credential service: a
+// container credentials endpoint or STS. The SDK shields that request from the
+// caller's deadline, so without it a service that never answers would block
+// every later cleanup. S3 requests are not bound by it.
 var s3CredentialRequestTimeout = 30 * time.Second
 
 // s3API is the subset of the S3 client S3Backend depends on.
@@ -95,17 +96,17 @@ func NewS3Backend(ctx context.Context, cfg S3Config) (*S3Backend, error) {
 			config.WithSharedCredentialsFiles([]string{}),
 			config.WithEC2IMDSClientEnableState(imds.ClientDisabled))
 	}
-	credentialHTTPClient := awshttp.NewBuildableClient()
+	s3HTTPClient := awshttp.NewBuildableClient()
 	if cfg.CABundlePath != "" {
 		httpClient, err := caBundleHTTPClient(cfg.CABundlePath)
 		if err != nil {
 			return nil, err
 		}
-		loadOptions = append(loadOptions, config.WithHTTPClient(httpClient))
-		credentialHTTPClient = httpClient
+		s3HTTPClient = httpClient
 	}
-	credentialHTTPClient = credentialHTTPClient.WithTimeout(s3CredentialRequestTimeout)
+	credentialHTTPClient := s3HTTPClient.WithTimeout(s3CredentialRequestTimeout)
 	loadOptions = append(loadOptions,
+		config.WithHTTPClient(credentialHTTPClient),
 		config.WithEndpointCredentialOptions(func(o *endpointcreds.Options) { o.HTTPClient = credentialHTTPClient }))
 	awsCfg, err := config.LoadDefaultConfig(ctx, loadOptions...)
 	if err != nil {
@@ -113,6 +114,7 @@ func NewS3Backend(ctx context.Context, cfg S3Config) (*S3Backend, error) {
 	}
 	b := &S3Backend{}
 	b.client = s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+		o.HTTPClient = s3HTTPClient
 		if cfg.Endpoint != "" {
 			o.BaseEndpoint = aws.String(cfg.Endpoint)
 			o.UsePathStyle = true
