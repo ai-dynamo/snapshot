@@ -142,6 +142,10 @@ sequenceDiagram
 The same four stages the [benchmarks](performance.md) break
 restore time into:
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:af5efd8fb82b6cd477b314677c8f67235f4bc2805e059aa9a92f1190cb3b4a1d -->
+
 1. **Agent setup.** The agent's restore queue picks up a pod on its node
    carrying `restore-from`. It preflights the `PodSnapshot`, the bound content
    and the artifact, runs the [Compatibility Gates](#compatibility-gates),
@@ -155,8 +159,7 @@ restore time into:
 2. **CRIU restore.** The agent execs `nsrestore` inside the destination's
    namespaces. It applies the rootfs diff, prepares the GPU device mounts, and
    runs the CRIU restore that reads the CRIU images and rebuilds the
-   process tree. This is a bulk read from the snapshot store and is the
-   largest stage for every model measured.
+   process tree from the selected artifact.
 3. **CUDA restore.** Checkpoint-time PIDs are remapped onto the restored ones,
    then GPU memory is restored and the processes unlocked, through PageBroker's
    GPU engine or `cuda-checkpoint` depending on how the snapshot was taken.
@@ -169,6 +172,8 @@ restore time into:
    [Lifecycle hooks](../design/lifecycle-hooks/README.md).
    The agent sets `nvidia.com/Restored=True`, and the proxy follows the restored
    process from there, forwarding signals and exiting with its code.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 A pod gets exactly one restore. On failure the agent writes `restore-failed`,
 kills the destination container, and reports the reason on the pod condition;
@@ -233,12 +238,21 @@ stale artifact. Content bound to a store also carries a backend-neutral
 changing how callers address a snapshot. See
 [SNEP-237: S3-compatible object storage](../design/237-s3-storage/README.md).
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:3b53671f9aa4fa8eb89997425e029523705668a7d13c1d9fc8c11f3e4f892626 -->
+
 PageBroker adds a memory-backed staging volume shared with the agent. By default
 CRIU dumps into staging and PageBroker publishes to the snapshot store on
-success. With a PVC, restore reads the artifact directly
-(`pageBroker.restoreMode: direct`); with S3, restore always stages the
-artifact from the bucket first. Staging is RAM, so its cap and the agent's memory
-limit have to be sized together. See [Configure Storage](../operate/configure-storage.md).
+success. When the [Node Cache](../operate/configure-storage.md#node-cache) is
+enabled and the node has a matching copy, restore reads it in place. Otherwise,
+restore reads from the snapshot store. With a PVC, restore reads the artifact
+directly by default (`pageBroker.restoreMode: direct`). With S3, PageBroker
+stages the artifact from the bucket first. Staging is RAM, so its cap and the
+agent's memory limit have to be sized together. See
+[Configure Storage](../operate/configure-storage.md).
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 Artifact lifetime follows the API object. Deleting a `PodSnapshot` cascades to
 its `PodSnapshotContent`, whose cleanup finalizer hands the artifact to the
