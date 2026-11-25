@@ -209,10 +209,10 @@ comes from a CA generated per run, published as the chart's
 `SNAPSHOT_E2E_S3_CREDENTIAL_PORT` (default 19443).
 
 `test_s3_credential_endpoint.py` runs with `SNAPSHOT_E2E_S3_CREDENTIALS=endpoint`: it
-checks the identity variables in PageBroker, takes a CPU checkpoint into the store and
-deletes it, and reads the endpoint's log for the credentials it issued to the agent and
-to the operator. It does not restore: the native reader cannot reach an endpoint behind
-a private CA yet. The `s3-credential-endpoint` job of `e2e.yaml` runs it.
+checks the identity variables in PageBroker, takes a CPU checkpoint into the store,
+restores it and deletes it, and reads the endpoint's log for the credentials it issued
+to the agent, to the restore reader and to the operator. The `s3-credential-endpoint`
+job of `e2e.yaml` runs it.
 
 ### Local Direct Mode
 

@@ -6,10 +6,10 @@
 The chart is installed with ``storage.s3.credentialEndpoint`` pointing at the
 endpoint from ``snapshot_e2e.credential_endpoint``. The test checks that the
 identity variables reach PageBroker, that a checkpoint is written to the store
-with credentials the endpoint issued to the agent, and that the operator's
-cleanup gets its own credentials the same way. Restores are not covered: the
-endpoint's certificate comes from a private CA, which the native reader cannot
-trust yet.
+and restored from it with credentials the endpoint issued to the agent, and
+that the operator's cleanup gets its own credentials the same way. The
+endpoint's certificate comes from a private CA, so the restore also covers the
+reader's trust in the chart's CA bundle for its credential request.
 
 Runs only with SNAPSHOT_E2E_S3_CREDENTIALS=endpoint.
 """
@@ -22,6 +22,9 @@ import pytest
 
 from snapshot_e2e import credential_endpoint, k8s
 from snapshot_e2e import lifecycle as snap
+
+# How the reader used on restore names itself to the endpoint.
+RESTORE_READER_CLIENT = "aws-sdk-cpp"
 
 pytestmark = [
     pytest.mark.snapshot_success,
@@ -67,7 +70,17 @@ def test_pagebroker_gets_the_endpoint_and_no_credentials_file(config: k8s.E2ECon
     assert "AWS_SHARED_CREDENTIALS_FILE" not in environment
 
 
-def test_checkpoint_and_cleanup_use_credentials_the_endpoint_issued(
+def issued_to_restore_reader(config: k8s.E2EConfig) -> bool:
+    logs = k8s.pod_logs(
+        config.namespace,
+        credential_endpoint.endpoint_pod_name(config.namespace),
+        tail_lines=None,
+        container="endpoint",
+    )
+    return f"client={RESTORE_READER_CLIENT}" in logs
+
+
+def test_checkpoint_restore_and_cleanup_use_credentials_the_endpoint_issued(
     config: k8s.E2EConfig,
     run: snap.TestRun,
 ) -> None:
@@ -89,6 +102,15 @@ def test_checkpoint_and_cleanup_use_credentials_the_endpoint_issued(
         "the checkpoint must not also be written to the checkpoint volume"
     )
     assert issued_to(config, config.release), "the endpoint issued nothing to the agent"
+
+    k8s.delete_pod(config.namespace, run.source_pod)
+    snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+    k8s.create_pod(snap.restore_pod(config=config, run=run, gpu=False, source_node=source_node))
+    snap.wait_for_restored_condition(config.namespace, run.restore_pod, "True", "RestoreSucceeded")
+    snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
+    assert issued_to_restore_reader(config), "the endpoint issued nothing to the restore reader"
+    k8s.delete_pod(config.namespace, run.restore_pod)
+    snap.wait_for_pod_deleted(config.namespace, run.restore_pod)
 
     snap.delete_podsnapshot(config.namespace, run.snapshot_name)
     snap.wait_for_custom_object_deleted(None, content["metadata"]["name"], "podsnapshotcontents")
