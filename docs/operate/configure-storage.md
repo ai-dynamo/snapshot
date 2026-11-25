@@ -149,7 +149,7 @@ PageBroker and cleanup runs in the operator:
 
 | Component | Service account | Annotations value | Access under the store's prefix |
 |-----------|-----------------|-------------------|---------------------------------|
-| PageBroker, in the agent pod | The agent's, named by `serviceAccount.name` | `serviceAccount.annotations` | Read, write and list |
+| PageBroker, in the agent pod | The agent's: the release's full name, for example `snapshot`, unless `serviceAccount.name` sets another | `serviceAccount.annotations` | Read, write and list |
 | Operator | The operator's, the agent's default name with `-operator` appended | `operator.serviceAccount.annotations` | List and delete |
 
 Bind each to an identity with that access. Platforms bind in one of two ways:
