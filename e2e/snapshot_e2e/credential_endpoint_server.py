@@ -86,7 +86,13 @@ class Handler(BaseHTTPRequestHandler):
         expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
             seconds=LIFETIME_SECONDS
         )
-        self.log_message("%s %s until %s", ISSUED, user, expiry.isoformat())
+        self.log_message(
+            "%s %s until %s client=%s",
+            ISSUED,
+            user,
+            expiry.isoformat(),
+            self.headers.get("User-Agent", "?"),
+        )
         self.reply(
             200,
             {
