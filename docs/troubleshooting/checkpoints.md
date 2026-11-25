@@ -56,6 +56,61 @@ If a `SnapshotJob` created it, create a new `SnapshotJob` with the probe fixed
 in `podSnapshotTemplate.containers` instead: the `SnapshotJob` copies its
 template into the `PodSnapshot` it creates.
 
+## A Checkpoint Fails with `RetriesExhausted`
+
+The checkpoint was retried as often as its retry limit allows and failed every
+time. The limit is `config.checkpoint.retryLimit`.
+
+Only a failure another attempt could have cleared ends under this reason. One
+that settled on its own terms keeps its own reason however many retries ran
+first, so the reason does not say how many attempts there were. The message
+does: any failure that followed at least one retry names the retries it spent
+and the last cause, as `after 2 of 2 retries: <cause>`. Treat the cause as the
+failure; the retries only say it did not clear on its own.
+
+```bash
+kubectl get podsnapshotcontent <name> -o jsonpath='{.status.conditions[?(@.type=="Failed")].message}'
+kubectl get events -n <ns> --field-selector involvedObject.name=<source-pod>
+```
+
+Each attempt a retry follows emits a `CheckpointAttemptFailed` event on the
+source pod, including the repeats of the dump, so the events show what each
+attempt hit rather than only how the checkpoint ended. The attempt that ended
+it reports under the terminal reason instead, so the last failure is not one of
+them.
+
+Whether the workload is still running is reported separately. See
+[After a Failed Checkpoint, Is the Workload Still Running?](#after-a-failed-checkpoint-is-the-workload-still-running).
+
+## A Checkpoint Fails with `ImageTooLarge`, `StagingUnavailable`, or `StoreExhausted`
+
+Three different shortages, which need different fixes:
+
+| Reason | What ran out | What to do |
+| --- | --- | --- |
+| `StagingUnavailable` | The node's staging volume was occupied when the checkpoint needed it. An image the size check could not prove too large lands here too, since that check reads a floor rather than the final size. Retried only when `config.checkpoint.retryLimit` allows one, which by default it does not | Take the checkpoint again once staging frees. If it keeps happening, stagger the checkpoints sharing that node, or raise `config.checkpoint.retryLimit` so the agent waits for them. If it keeps happening against an empty volume, treat it as `ImageTooLarge`: the image does not fit after all |
+| `ImageTooLarge` | The image cannot fit the node's staging volume, however empty it is. The message gives the shortfall in bytes | Raise `pageBroker.staging.sizeLimit`. The chart lowers a cap its writers have no room under, to the smaller of `daemonset.resources.limits.memory` and `pageBroker.resources.limits.memory` less a reserve, so raise both of those with it. See [How the Cap Is Chosen](../operate/configure-storage.md#how-the-cap-is-chosen) |
+| `StoreExhausted` | The destination store is full. No retry on this node frees room there | Free space in the store, or point the checkpoint at one with room |
+
+`ImageTooLarge` is reported two ways: refused before the dump starts, from a
+floor on what the image must write, or after a dump has run out of room
+part-written. Both name the same shortfall.
+
+Whether the workload is still running after any of these: see
+[After a Failed Checkpoint, Is the Workload Still Running?](#after-a-failed-checkpoint-is-the-workload-still-running).
+
+## After a Failed Checkpoint, Is the Workload Still Running?
+
+A failure after the workload was suspended terminates the source Pod, unless the
+agent resumes it for another attempt. The outcome is reported on that pod:
+`SourcePodResumed` when the agent put it back for another attempt,
+`SourcePodTerminated` when the checkpoint ended, and `SourcePodTerminationFailed`
+when it could not be stopped.
+
+```bash
+kubectl get events -n <ns> --field-selector involvedObject.name=<source-pod>
+```
+
 ## Checkpoint Fails at a Step
 
 ### resolving checkpoint artifact path
