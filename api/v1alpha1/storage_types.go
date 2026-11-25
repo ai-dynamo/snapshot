@@ -5,12 +5,26 @@ package v1alpha1
 
 // CheckpointStorageBinding identifies the configured store owning a content's
 // publications. It is not a transfer-engine choice or a credential reference.
+// +kubebuilder:validation:XValidation:rule="!has(self.storageClassName) || has(self.reclaimPolicy)",message="reclaimPolicy is required when storageClassName is set"
 type CheckpointStorageBinding struct {
 	// StoreID is the versioned canonical storage identity shared with PageBroker.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Pattern=`^store-v1-[0-9a-f]{64}$`
 	// +kubebuilder:validation:MaxLength=73
 	StoreID string `json:"storeID"`
+
+	// StorageClassName is the SnapshotStorageClass the content was bound
+	// through. StoreID stays the authority on where the data is; the class says
+	// how to reach it.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +optional
+	StorageClassName string `json:"storageClassName,omitempty"`
+
+	// ReclaimPolicy is copied from the class at binding. Editing the class
+	// later does not change it.
+	// +optional
+	ReclaimPolicy ReclaimPolicy `json:"reclaimPolicy,omitempty"`
 }
 
 // CheckpointStorageStatus holds confirmed publications. The store ID comes from

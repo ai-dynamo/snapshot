@@ -354,6 +354,13 @@ spec:
                     - message: metadata.annotations keys must be valid Kubernetes
                         qualified names
                       rule: '!has(self.annotations) || self.annotations.all(k, !format.qualifiedName().validate(k).hasValue())'
+                  storageClassName:
+                    description: |-
+                      StorageClassName is copied to the generated PodSnapshot: the
+                      SnapshotStorageClass that holds the snapshot. Empty selects the default
+                      class.
+                    maxLength: 63
+                    type: string
                   targetContainers:
                     default:
                     - main
