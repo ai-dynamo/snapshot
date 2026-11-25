@@ -791,6 +791,12 @@ RunDaemon(const DaemonOptions& options)
     return ExitCode::INVALID_ARGUMENTS;
   }
   model_streamer::settings::ConfigureEnvironment(model_streamer, config ? &*config : nullptr);
+  if (config) {
+    std::cerr << "S3 credentials: "
+              << (config->transfer.connection.UsesDefaultCredentialChain() ? "default credential chain"
+                                                                           : "credentials file")
+              << '\n';
+  }
 
   if (!RaiseFileDescriptorLimit())
     return ExitCode::FAILURE;
