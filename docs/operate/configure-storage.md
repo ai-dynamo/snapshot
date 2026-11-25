@@ -140,8 +140,9 @@ the volume.
 
 Leave `storage.s3.credentialsSecretRef` empty to reach the bucket without static
 keys. No Secret is mounted. PageBroker and the operator then resolve credentials
-through the default credential chain of their S3 clients, and those credentials
-refresh without a restart.
+through the default credential chain of their S3 clients. Unlike a mounted
+credentials file, which PageBroker reads once at startup, these credentials are
+renewed by the chain itself in both components, without a restart.
 
 Two identities need access to the bucket, because uploads and restores run in
 PageBroker and cleanup runs in the operator:
@@ -156,6 +157,13 @@ with an annotation on the service account, or with an association that names the
 service account and is created on the platform side. Set the annotation values
 only in the first case. The platform must inject the identity's token and
 variables into the pods; the chart does not add them.
+
+The chart applies the annotation values only to the service accounts it
+creates: the agent's with `serviceAccount.create: true`, the operator's with
+`rbac.create: true`. With either set to `false`, annotate the existing service
+account directly. The platform injects an identity when a pod is created, and
+changing an annotation alone does not restart a pod, so after adding or changing
+one restart the agent DaemonSet and the operator Deployment.
 
 Instance metadata is excluded from the chain. A workload identity that does not
 resolve therefore fails the operation and never falls back to the node's role,
@@ -180,6 +188,17 @@ When credentials do not resolve, a checkpoint fails with a storage error on the
 `nvidia.com/Restored` condition; see
 [Find the Message](../troubleshooting/reading-a-failure-message.md#find-the-message).
 The operator logs the failed cleanup request.
+
+An empty `storage.s3.credentialsSecretRef` is not an error for the chart. If a
+Secret was meant to be set and no identity is bound, the install succeeds and
+the first checkpoint fails with:
+
+```text
+PageBroker STORAGE_UNAVAILABLE: S3 checkpoint operation failed
+```
+
+Check the PageBroker container's variables with the command above: no
+`AWS_SHARED_CREDENTIALS_FILE` means no Secret is mounted.
 
 ### Change S3 Settings
 

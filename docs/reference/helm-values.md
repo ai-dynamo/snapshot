@@ -121,7 +121,7 @@ payload checksums.
 | `operator.nodeSelector` | `{}` | Node selector for the operator pod. |
 | `operator.affinity` | `{}` | Affinity rules for the operator pod. |
 | `operator.tolerations` | `[]` | Tolerations for the operator pod. |
-| `operator.serviceAccount.annotations` | `{}` | Annotations for the operator's service account, for example to bind a workload identity. |
+| `operator.serviceAccount.annotations` | `{}` | Annotations for the operator's service account, for example to bind a workload identity. Applied only with `rbac.create: true`, and a change does not restart the operator; see [Use Workload Identity for S3](../operate/configure-storage.md#use-workload-identity-for-s3). |
 
 ## Agent DaemonSet and Access
 
@@ -138,7 +138,7 @@ payload checksums.
 | `seccomp.deploy`               | `true`                                  | Install the block-iouring seccomp profile (required for CRIU; set `false` on RHCOS 9.6+).                                                 |
 | `rbac.create`                  | `true`                                  | Create agent and operator RBAC.                                                                                                           |
 | `serviceAccount.create`        | `true`                                  | Create the agent service account.                                                                                                         |
-| `serviceAccount.annotations` | `{}` | Annotations for the service account that the agent and PageBroker share, for example to bind a workload identity. |
+| `serviceAccount.annotations` | `{}` | Annotations for the service account that the agent and PageBroker share, for example to bind a workload identity. Applied only with `serviceAccount.create: true`, and a change does not restart the agent; see [Use Workload Identity for S3](../operate/configure-storage.md#use-workload-identity-for-s3). |
 
 ## Agent Config (`config.*`)
 

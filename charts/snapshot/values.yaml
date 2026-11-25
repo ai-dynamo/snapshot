@@ -137,15 +137,17 @@ storage:
     # without restarting the pod, so rotation does not require a restart as
     # long as the reading code re-reads it. The operator's S3 maintenance
     # backend already does this (operator/internal/maintenance/backends/s3.go
-    # re-reads the file every 5 minutes). PageBroker does not yet: it
-    # snapshots credentials once at startup, so this file reaching it is
+    # re-reads the file every 5 minutes). PageBroker does not yet: it reads
+    # the mounted file once at startup, so this file reaching it is
     # forward-compatible with that changing, not a rotation guarantee today.
     #
     # Empty selects workload identity: no Secret is mounted, and PageBroker and
     # the operator resolve credentials through the default credential chain
     # under their service accounts (serviceAccount.annotations and
-    # operator.serviceAccount.annotations). Those credentials refresh without a
-    # restart. Instance metadata is excluded, so the node's role is never used.
+    # operator.serviceAccount.annotations). Unlike the mounted file, these
+    # credentials are renewed by the credential chain itself, in both PageBroker
+    # and the operator, without a restart. Instance metadata is excluded, so the
+    # node's role is never used.
     credentialsSecretRef: ""
     # Key inside credentialsSecretRef holding the credentials file.
     credentialsSecretKey: credentials
