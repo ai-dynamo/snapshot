@@ -114,7 +114,9 @@ func NewS3Backend(ctx context.Context, cfg S3Config) (*S3Backend, error) {
 	}
 	b := &S3Backend{}
 	b.client = s3.NewFromConfig(awsCfg, func(o *s3.Options) {
-		o.HTTPClient = s3HTTPClient
+		if client, ok := awsCfg.HTTPClient.(*awshttp.BuildableClient); ok {
+			o.HTTPClient = client.WithTimeout(0)
+		}
 		if cfg.Endpoint != "" {
 			o.BaseEndpoint = aws.String(cfg.Endpoint)
 			o.UsePathStyle = true

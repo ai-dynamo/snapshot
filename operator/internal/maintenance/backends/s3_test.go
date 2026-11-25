@@ -234,7 +234,7 @@ func clearAmbientS3Credentials(t *testing.T) {
 		"AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE",
 		"AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
 		"AWS_CONTAINER_AUTHORIZATION_TOKEN", "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
-		"AWS_EC2_METADATA_DISABLED", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_STS",
+		"AWS_EC2_METADATA_DISABLED", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_STS", "AWS_CA_BUNDLE",
 	} {
 		t.Setenv(name, "")
 	}
@@ -441,6 +441,25 @@ func TestNewS3BackendTrustsCustomCABundle(t *testing.T) {
 	_, err = b.Candidates(context.Background(), logr.Discard())
 	require.NoError(t, err)
 	assert.Len(t, *requests, 1)
+}
+
+func TestNewS3BackendTrustsTheEnvironmentCABundleForS3(t *testing.T) {
+	server, requests := newListObjectsServer(t, httptest.NewTLSServer)
+	caBundlePath := filepath.Join(t.TempDir(), "ca.pem")
+	require.NoError(t, os.WriteFile(caBundlePath,
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600))
+	t.Setenv("AWS_CA_BUNDLE", caBundlePath)
+	credentialsPath := filepath.Join(t.TempDir(), "credentials")
+	writeS3Credentials(t, credentialsPath, "FAKEACCESSKEY")
+
+	b, err := NewS3Backend(context.Background(), S3Config{
+		Bucket: "checkpoints", Region: "us-east-1", Endpoint: server.URL, CredentialsPath: credentialsPath,
+	})
+	require.NoError(t, err)
+
+	_, err = b.Candidates(context.Background(), logr.Discard())
+	require.NoError(t, err)
+	require.Len(t, *requests, 1)
 }
 
 func TestNewS3BackendRejectsCABundleWithoutCertificates(t *testing.T) {
