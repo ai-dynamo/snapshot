@@ -197,7 +197,8 @@ and the agent restores the workload beside it. On such nodes:
   `["sleep", "infinity"]`. The source's command would start the workload from
   scratch next to the restored one. An inert command also works on nodes with
   the proxy, which replaces it. A destination command that holds `/dev/shm`
-  open no longer fails the restore, but the workload it starts still runs
+  open no longer necessarily fails the restore — the agent falls back to a
+  lazy unmount, which can itself fail — but the workload it starts still runs
   beside the restored one, so the inert command remains the recommendation.
 - Add a liveness probe that checks the workload itself, such as its API.
 
