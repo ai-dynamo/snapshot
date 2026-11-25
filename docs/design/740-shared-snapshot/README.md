@@ -399,7 +399,7 @@ status:
 ```
 
 The following example imports a snapshot that another cluster took. It selects
-the allowed namespaces by label, which is the other form of
+the allowed namespaces by label, which is the second field of
 `allowedNamespaces`.
 
 ```yaml
@@ -431,7 +431,7 @@ The following table lists the fields of `SharedSnapshot`.
 
 | Field | Description |
 | --- | --- |
-| `spec.allowedNamespaces` | Required. A struct with exactly one of two fields. `names` is a list of namespace names, and is the basic form. `selector` is a label selector on namespaces, for a set of namespaces that changes over time. Mutable. An empty selector is rejected. |
+| `spec.allowedNamespaces` | Required. A struct with two fields, of which at least one is set. `names` is a list of namespace names, and is the basic form. `selector` is a label selector on namespaces, for a set of namespaces that changes over time. When both are set, a namespace is allowed if it matches either one. Mutable. An empty selector is rejected. |
 | `spec.source` | Required, immutable. Exactly one of `podSnapshotRef` and `storage`. |
 | `spec.source.podSnapshotRef` | The namespace and name of a `PodSnapshot` in this cluster. |
 | `spec.source.storage` | `storageClassName` and `artifacts`. `storageClassName` names a `SnapshotStorageClass` of this cluster, and an empty value selects the default class, as in SNEP-248. `artifacts` has the same shape as `status.storage.artifacts` of a content. |
@@ -497,8 +497,8 @@ data is in use after the `PodSnapshot` is deleted. This is accepted. A
 user-controlled way to share is a possible later addition.
 
 **Who is allowed.** A selector in `allowedNamespaces` relies on namespace
-labels. A cluster that lets tenants label their own namespaces must use `names`
-instead. The operator checks the namespace when it binds a `PodSnapshot`, and a
+labels. A cluster that lets tenants label their own namespaces must use only
+`names`. The operator checks the namespace when it binds a `PodSnapshot`, and a
 later change to the labels or to the `SharedSnapshot` does not remove that
 binding.
 
