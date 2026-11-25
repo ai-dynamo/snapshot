@@ -452,6 +452,9 @@ jobs:
       - name: Collect diagnostics
         if: ${{ failure() && steps.selected.outputs.run == 'true' }}
         timeout-minutes: 5
+        # KUBECONFIG reaches the vCluster API, which holds the test namespace.
+        # HOST_KUBECONFIG reaches the real cluster, where vCluster syncs those
+        # Pods into HOST_NAMESPACE and the host scheduler places them.
         env:
           HOST_KUBECONFIG: ${{ steps.host.outputs.kubeconfig }}
           KUBECONFIG: ${{ env.SNAPSHOT_E2E_TARGET_KUBECONFIG }}
