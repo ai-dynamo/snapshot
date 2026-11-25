@@ -25,6 +25,8 @@ var (
 	podSnapshotContentCRD string
 	//go:embed nvidia.com_snapshotjobs.yaml
 	snapshotJobCRD string
+	//go:embed nvidia.com_snapshotstorageclasses.yaml
+	snapshotStorageClassCRD string
 )
 
 var all = mustLoadAll()
@@ -56,6 +58,10 @@ func PodSnapshotContentCRD() string {
 
 func SnapshotJobCRD() string {
 	return snapshotJobCRD
+}
+
+func SnapshotStorageClassCRD() string {
+	return snapshotStorageClassCRD
 }
 
 func All() []string {
