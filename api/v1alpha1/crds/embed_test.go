@@ -76,9 +76,10 @@ func TestChartCopyMatchesGenerated(t *testing.T) {
 
 func TestNamedAccessorsAreEmbedded(t *testing.T) {
 	for name, manifest := range map[string]string{
-		"podsnapshots.nvidia.com":        PodSnapshotCRD(),
-		"podsnapshotcontents.nvidia.com": PodSnapshotContentCRD(),
-		"snapshotjobs.nvidia.com":        SnapshotJobCRD(),
+		"podsnapshots.nvidia.com":           PodSnapshotCRD(),
+		"podsnapshotcontents.nvidia.com":    PodSnapshotContentCRD(),
+		"snapshotjobs.nvidia.com":           SnapshotJobCRD(),
+		"snapshotstorageclasses.nvidia.com": SnapshotStorageClassCRD(),
 	} {
 		if !strings.Contains(manifest, "kind: CustomResourceDefinition") {
 			t.Errorf("%s: not a CustomResourceDefinition", name)
