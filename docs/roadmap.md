@@ -15,7 +15,7 @@ for the details, discussion, and progress.
 > This roadmap states intent, not commitment. Plans change with community
 > feedback, with the schedules of the projects Snapshot works with (inference
 > engines, NVIDIA drivers), and with what we learn from real deployments. Last
-> updated: 2026-11-18.
+> updated: 2026-11-25.
 
 ## How to Read This Roadmap
 
@@ -70,26 +70,31 @@ The following items are under way.
   [#324](https://github.com/ai-dynamo/snapshot/issues/324)).
 - **Multi-node on NVLink.** Restore a model that spans nodes connected by
   multi-node NVLink. This needs NVIDIA driver support for sharing GPU memory
-  across nodes ([#611](https://github.com/ai-dynamo/snapshot/issues/611)).
+  across nodes ([#611](https://github.com/ai-dynamo/snapshot/issues/611),
+  [#759](https://github.com/ai-dynamo/snapshot/issues/759)).
 - **Retries and fallback.** A failed checkpoint or restore is retried, and a
   restore that cannot succeed falls back to a normal cold start instead of
   leaving the workload stuck
   ([#319](https://github.com/ai-dynamo/snapshot/issues/319),
   [#244](https://github.com/ai-dynamo/snapshot/issues/244),
-  [#247](https://github.com/ai-dynamo/snapshot/issues/247)).
+  [#247](https://github.com/ai-dynamo/snapshot/issues/247), design proposals
+  [#836](https://github.com/ai-dynamo/snapshot/pull/836) and [#800](https://github.com/ai-dynamo/snapshot/pull/800)).
 - **Reuse snapshots.** Restore a workload from a snapshot that already exists,
   across workloads, namespaces, and clusters, so the same model is not
   checkpointed over and over
   ([#604](https://github.com/ai-dynamo/snapshot/issues/604),
   [#740](https://github.com/ai-dynamo/snapshot/issues/740),
-  [#809](https://github.com/ai-dynamo/snapshot/pull/809)).
+  [#809](https://github.com/ai-dynamo/snapshot/pull/809), design proposal
+  [#1028](https://github.com/ai-dynamo/snapshot/pull/1028)).
 - **Stock vLLM out of the box.** Use the upstream vLLM image with no wrapper
   script or custom image
   ([#44](https://github.com/ai-dynamo/snapshot/issues/44),
   [#234](https://github.com/ai-dynamo/snapshot/issues/234); help wanted).
-- **Faster restores.** Overlap loading GPU state with the rest of the restore
-  ([#710](https://github.com/ai-dynamo/snapshot/issues/710),
-  [#943](https://github.com/ai-dynamo/snapshot/issues/943)).
+- **Faster restores.** Overlap loading GPU state with the rest of the restore,
+  and start the restore sooner ([#710](https://github.com/ai-dynamo/snapshot/issues/710),
+  [#943](https://github.com/ai-dynamo/snapshot/issues/943),
+  [#936](https://github.com/ai-dynamo/snapshot/issues/936),
+  [#946](https://github.com/ai-dynamo/snapshot/issues/946)).
 - **Faster restores with ModelExpress (vLLM).** Running replicas hand model
   weights to new replicas over the network, so a new replica restores faster
   from a smaller snapshot
@@ -104,6 +109,9 @@ The following items are under way.
   S3-compatible bucket as its snapshot store instead of the cluster default
   ([#248](https://github.com/ai-dynamo/snapshot/issues/248), design proposal
   [#889](https://github.com/ai-dynamo/snapshot/pull/889)).
+- **S3 without static keys.** Use workload identity for S3 instead of stored
+  keys ([#987](https://github.com/ai-dynamo/snapshot/issues/987),
+  [#988](https://github.com/ai-dynamo/snapshot/issues/988)).
 
 ## Q1 2027 (January to March)
 
@@ -121,6 +129,11 @@ These items are planned. Scope and order may shift as Q4 work lands.
 - **Node-local cache (phase 2).** Pre-warm nodes: copy a snapshot to selected
   nodes ahead of a scale-up, so even the first restore on those nodes is fast
   ([#644](https://github.com/ai-dynamo/snapshot/issues/644)).
+- **Node-local store.** Keep snapshots on each node's own disk, with no shared
+  store ([#1007](https://github.com/ai-dynamo/snapshot/issues/1007)).
+- **Faster checkpoints.** Take checkpoints faster ([#576](https://github.com/ai-dynamo/snapshot/issues/576),
+  [#583](https://github.com/ai-dynamo/snapshot/issues/583),
+  [#521](https://github.com/ai-dynamo/snapshot/issues/521)).
 - **Metrics.** Prometheus metrics for checkpoints and restores, so operators can
   see durations and failures
   ([#665](https://github.com/ai-dynamo/snapshot/issues/665),
@@ -172,7 +185,8 @@ yet. An issue is opened when the work is scheduled.
 - **Protected snapshots.** Signing and encryption of snapshots, and confidential
   computing ([#563](https://github.com/ai-dynamo/snapshot/issues/563)).
 - **Sandboxed runtimes.** Run snapshotted workloads under gVisor or Kata
-  Containers.
+  Containers ([#1033](https://github.com/ai-dynamo/snapshot/issues/1033) for
+  Kata Containers).
 - **Storage per workload (PVC).** The same for a workload's own PVC
   ([#248](https://github.com/ai-dynamo/snapshot/issues/248)).
 - **More storage options.** Different storage for different parts of a snapshot,
