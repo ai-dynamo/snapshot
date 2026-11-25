@@ -34,6 +34,7 @@ func main() {
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
 	artifactCleanupS3CredentialsPath, artifactCleanupS3CABundlePath := bindArtifactCleanupS3Flags(flag.CommandLine)
 	cuInterposeConfig := bindCuInterposeFlags(flag.CommandLine)
+	checkpointConfig := bindCheckpointFlags(flag.CommandLine)
 	testFailureAnnotation, err := bindTestHookFlags(flag.CommandLine)
 	if err != nil {
 		ctrl.Log.Error(err, "invalid E2E test hook configuration")
@@ -84,6 +85,10 @@ func main() {
 	}
 	if err := cuInterposeConfig.Validate(); err != nil {
 		ctrl.Log.Error(err, "invalid cuinterpose configuration")
+		os.Exit(1)
+	}
+	if err := checkpointConfig.Validate(); err != nil {
+		ctrl.Log.Error(err, "invalid checkpoint configuration")
 		os.Exit(1)
 	}
 
@@ -151,6 +156,7 @@ func main() {
 		Recorder:              mgr.GetEventRecorderFor("podsnapshot-controller"),
 		TestFailureAnnotation: *testFailureAnnotation,
 		StoreID:               captureStoreID,
+		Checkpoint:            *checkpointConfig,
 	}
 	if err := podSnapshotReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up PodSnapshot controller")
