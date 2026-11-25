@@ -21,6 +21,7 @@ import (
 	"github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/controller"
 	"github.com/ai-dynamo/snapshot/operator/internal/maintenance"
+	"github.com/ai-dynamo/snapshot/operator/internal/storageprobe"
 	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 )
 
@@ -41,6 +42,8 @@ func main() {
 	}
 	bindNewContents := flag.Bool("bind-new-contents", false,
 		"Bind new content to the configured store after all agents support artifact addressing")
+	defaultStorageClass := flag.String("default-storage-class", "default",
+		"Name of the SnapshotStorageClass that is reconciled while new contents are not bound to a store")
 	pageBrokerS3ConfigNamespace := flag.String("pagebroker-s3-config-namespace", "",
 		"Namespace of the ConfigMap PageBroker reads its S3 configuration from; defaults to POD_NAMESPACE")
 	pageBrokerS3ConfigName := flag.String("pagebroker-s3-config-name", DefaultPageBrokerS3ConfigName,
@@ -105,15 +108,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	snapshotNamespace := os.Getenv("POD_NAMESPACE")
+	cacheByObject := map[client.Object]cache.ByObject{
+		&corev1.Pod{}: {Transform: controller.TrimPodForCache},
+	}
+	if snapshotNamespace != "" {
+		namespaced := map[string]cache.Config{snapshotNamespace: {}}
+		cacheByObject[&corev1.Secret{}] = cache.ByObject{Namespaces: namespaced}
+		cacheByObject[&corev1.ConfigMap{}] = cache.ByObject{Namespaces: namespaced}
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                        scheme,
 		HealthProbeBindAddress:        ":8081",
 		LeaderElection:                true,
 		LeaderElectionID:              "snapshot-operator.nvidia.com",
 		LeaderElectionReleaseOnCancel: true,
-		Cache: cache.Options{ByObject: map[client.Object]cache.ByObject{
-			&corev1.Pod{}: {Transform: controller.TrimPodForCache},
-		}},
+		Cache:                         cache.Options{ByObject: cacheByObject},
 	})
 	if err != nil {
 		ctrl.Log.Error(err, "unable to start manager")
@@ -158,6 +169,31 @@ func main() {
 	if err := podSnapshotReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up PodSnapshot controller")
 		os.Exit(1)
+	}
+
+	if snapshotNamespace == "" {
+		ctrl.Log.Info("SnapshotStorageClass controller is disabled: POD_NAMESPACE is not set")
+	} else {
+		clusterID, err := kubeSystemUID(context.Background(), mgr.GetAPIReader())
+		if err != nil {
+			ctrl.Log.Error(err, "unable to identify the cluster")
+			os.Exit(1)
+		}
+		storageClassReconciler := &controller.SnapshotStorageClassReconciler{
+			Client:           mgr.GetClient(),
+			APIReader:        mgr.GetAPIReader(),
+			Recorder:         mgr.GetEventRecorderFor("snapshotstorageclass-controller"),
+			Prober:           storageprobe.Default{},
+			Namespace:        snapshotNamespace,
+			ClusterID:        clusterID,
+			DefaultClassName: *defaultStorageClass,
+			BindingEnabled:   *bindNewContents,
+			MountPath:        mountedClaims(storageCfg, artifactCleanupConfig.BasePath),
+		}
+		if err := storageClassReconciler.SetupWithManager(mgr); err != nil {
+			ctrl.Log.Error(err, "unable to set up SnapshotStorageClass controller")
+			os.Exit(1)
+		}
 	}
 
 	maintenanceQueue, err := maintenance.NewQueue(
