@@ -520,6 +520,27 @@ Each agent pod requests 10 CPU and 33Gi of memory in total by default, including
 the GPU engine transfer buffers. Nodes must have that allocatable capacity.
 Limits are not checked at scheduling time.
 
+#### Nodes Where CPU and GPU Share Memory
+
+On a node whose CPU and GPU share one memory pool, such as NVIDIA GB10
+(DGX Spark, 128 GB), the staging volume, PageBroker's GPU transfer buffers and
+the workload's own GPU memory all come out of the same RAM:
+
+- A checkpoint needs room in that pool for its staged CPU image while the
+  workload is still running. With GPU CustomStorage, the GPU state is written
+  to the snapshot volume directly and does not pass through staging.
+- Size the requests and limits for the node rather than keeping the defaults,
+  which assume a large multi-GPU node. On a DGX Spark serving one model of
+  about 30 GB, a 1Gi request and a 48Gi limit for the agent, 8Gi and 64Gi for
+  PageBroker, and `pageBroker.staging.sizeLimit=40Gi` checkpoint NIM
+  workloads of about 27 GiB in about 6 seconds and restore them in 6 to 8.
+- Keep `pageBroker.restoreMode` at `direct` (the default): a restore then
+  reads the CPU images from the snapshot volume instead of copying them into
+  staging.
+
+Staging on node-local disk instead of RAM is tracked in
+[#576](https://github.com/ai-dynamo/snapshot/issues/576).
+
 ### Why the Staging Volume Needs a Cap
 
 Staging is an `emptyDir` with `medium: Memory`: a tmpfs living in the node's
