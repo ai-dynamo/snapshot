@@ -65,6 +65,16 @@ spec:
               populated by the PodSnapshotReconciler (operator) at creation time and is
               immutable thereafter.
             properties:
+              checkpointRetryLimit:
+                description: |-
+                  CheckpointRetryLimit is the PodSnapshot's retry limit, copied here when the
+                  content is created.
+                  Unset means the request expressed no preference and the agent's cluster-wide
+                  default applies, which is distinct from an explicit 0.
+                format: int32
+                maximum: 10
+                minimum: 0
+                type: integer
               containers:
                 description: |-
                   Containers is the PodSnapshot's container settings, with defaults

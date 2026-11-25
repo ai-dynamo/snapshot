@@ -39,6 +39,15 @@ type PodSnapshotContentSpec struct {
 	// +optional
 	Storage *CheckpointStorageBinding `json:"storage,omitempty"`
 
+	// CheckpointRetryLimit is the PodSnapshot's retry limit, copied here when the
+	// content is created.
+	// Unset means the request expressed no preference and the agent's cluster-wide
+	// default applies, which is distinct from an explicit 0.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=10
+	CheckpointRetryLimit *int32 `json:"checkpointRetryLimit,omitempty"`
+
 	// Containers is the PodSnapshot's container settings, with defaults
 	// applied, saved at creation. Every restore of this snapshot uses them,
 	// even if the PodSnapshot or SnapshotJob that asked for it changes or is

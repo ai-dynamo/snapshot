@@ -68,10 +68,13 @@ commit-level history for each release is on its
   already `Ready` before it is not backfilled.
 - `config.checkpoint.timeoutSeconds` (default `3600`) fails a
   checkpoint that outruns it.
-- Checkpoint retries, off by default and cluster-wide.
-  `config.checkpoint.retryLimit` (default `0`) sets how many times a failed
-  checkpoint is retried beyond the first attempt, and an attempt a retry
-  follows emits a `CheckpointAttemptFailed` event on the source Pod. See
+- Checkpoint retries, off by default. `config.checkpoint.defaultRetryLimit`
+  (default `0`) sets how many times a failed checkpoint is retried beyond the
+  first attempt, and an attempt a retry follows emits a
+  `CheckpointAttemptFailed` event on the source Pod. A `PodSnapshot` sets its
+  own with `spec.checkpointRetryLimit`: unset defers to the cluster default, and
+  an explicit `0` asks for no retry. Neither may exceed 10. CRD change: deploy
+  the matching CRDs, operator and node agent together. See
   [Checkpoint retries](docs/troubleshooting/checkpoints.md#a-checkpoint-fails-with-retriesexhausted).
 - Storage shortages on a checkpoint now read distinctly, as
   `StagingUnavailable`, `ImageTooLarge`, or `StoreExhausted`. See
