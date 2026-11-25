@@ -15,7 +15,7 @@ for the details, discussion, and progress.
 > This roadmap states intent, not commitment. Plans change with community
 > feedback, with the schedules of the projects Snapshot works with (inference
 > engines, NVIDIA drivers), and with what we learn from real deployments. Last
-> updated: 2026-11-18.
+> updated: 2026-11-25.
 
 ## How to Read This Roadmap
 
@@ -172,7 +172,8 @@ yet. An issue is opened when the work is scheduled.
 - **Protected snapshots.** Signing and encryption of snapshots, and confidential
   computing ([#563](https://github.com/ai-dynamo/snapshot/issues/563)).
 - **Sandboxed runtimes.** Run snapshotted workloads under gVisor or Kata
-  Containers.
+  Containers ([#1033](https://github.com/ai-dynamo/snapshot/issues/1033) for
+  Kata Containers).
 - **Storage per workload (PVC).** The same for a workload's own PVC
   ([#248](https://github.com/ai-dynamo/snapshot/issues/248)).
 - **More storage options.** Different storage for different parts of a snapshot,
