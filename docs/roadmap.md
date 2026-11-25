@@ -131,6 +131,9 @@ These items are planned. Scope and order may shift as Q4 work lands.
   ([#644](https://github.com/ai-dynamo/snapshot/issues/644)).
 - **Node-local store.** Keep snapshots on each node's own disk, with no shared
   store ([#1007](https://github.com/ai-dynamo/snapshot/issues/1007)).
+- **Faster checkpoints.** Take checkpoints faster ([#576](https://github.com/ai-dynamo/snapshot/issues/576),
+  [#583](https://github.com/ai-dynamo/snapshot/issues/583),
+  [#521](https://github.com/ai-dynamo/snapshot/issues/521)).
 - **Metrics.** Prometheus metrics for checkpoints and restores, so operators can
   see durations and failures
   ([#665](https://github.com/ai-dynamo/snapshot/issues/665),
@@ -156,11 +159,6 @@ as Q1 progresses.
   hardware-assisted decompression where available
   ([#573](https://github.com/ai-dynamo/snapshot/issues/573),
   [#938](https://github.com/ai-dynamo/snapshot/issues/938)).
-- **Faster checkpoints.** Take checkpoints faster ([#576](https://github.com/ai-dynamo/snapshot/issues/576),
-  [#583](https://github.com/ai-dynamo/snapshot/issues/583),
-  [#521](https://github.com/ai-dynamo/snapshot/issues/521)).
-- **Checkpoint after a restore.** Checkpoint a workload that was itself restored
-  ([#447](https://github.com/ai-dynamo/snapshot/issues/447)).
 - **llm-d built in.** Restored replicas work with the llm-d router and
   autoscaler without custom glue
   ([#992](https://github.com/ai-dynamo/snapshot/issues/992)).
