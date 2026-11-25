@@ -70,26 +70,33 @@ The following items are under way.
   [#324](https://github.com/ai-dynamo/snapshot/issues/324)).
 - **Multi-node on NVLink.** Restore a model that spans nodes connected by
   multi-node NVLink. This needs NVIDIA driver support for sharing GPU memory
-  across nodes ([#611](https://github.com/ai-dynamo/snapshot/issues/611)).
+  across nodes, and restored processes rejoining their IMEX channel
+  ([#611](https://github.com/ai-dynamo/snapshot/issues/611),
+  [#759](https://github.com/ai-dynamo/snapshot/issues/759)).
 - **Retries and fallback.** A failed checkpoint or restore is retried, and a
   restore that cannot succeed falls back to a normal cold start instead of
   leaving the workload stuck
   ([#319](https://github.com/ai-dynamo/snapshot/issues/319),
   [#244](https://github.com/ai-dynamo/snapshot/issues/244),
-  [#247](https://github.com/ai-dynamo/snapshot/issues/247)).
+  [#247](https://github.com/ai-dynamo/snapshot/issues/247), design proposals
+  [#836](https://github.com/ai-dynamo/snapshot/pull/836) and [#800](https://github.com/ai-dynamo/snapshot/pull/800)).
 - **Reuse snapshots.** Restore a workload from a snapshot that already exists,
   across workloads, namespaces, and clusters, so the same model is not
   checkpointed over and over
   ([#604](https://github.com/ai-dynamo/snapshot/issues/604),
   [#740](https://github.com/ai-dynamo/snapshot/issues/740),
-  [#809](https://github.com/ai-dynamo/snapshot/pull/809)).
+  [#809](https://github.com/ai-dynamo/snapshot/pull/809), design proposal
+  [#1028](https://github.com/ai-dynamo/snapshot/pull/1028)).
 - **Stock vLLM out of the box.** Use the upstream vLLM image with no wrapper
   script or custom image
   ([#44](https://github.com/ai-dynamo/snapshot/issues/44),
   [#234](https://github.com/ai-dynamo/snapshot/issues/234); help wanted).
-- **Faster restores.** Overlap loading GPU state with the rest of the restore
-  ([#710](https://github.com/ai-dynamo/snapshot/issues/710),
-  [#943](https://github.com/ai-dynamo/snapshot/issues/943)).
+- **Faster restores.** Overlap loading GPU state with the rest of the restore,
+  and start a restore without waiting for the Pod IP or for memory to be
+  prepared ([#710](https://github.com/ai-dynamo/snapshot/issues/710),
+  [#943](https://github.com/ai-dynamo/snapshot/issues/943),
+  [#936](https://github.com/ai-dynamo/snapshot/issues/936),
+  [#946](https://github.com/ai-dynamo/snapshot/issues/946)).
 - **Faster restores with ModelExpress (vLLM).** Running replicas hand model
   weights to new replicas over the network, so a new replica restores faster
   from a smaller snapshot
@@ -104,6 +111,14 @@ The following items are under way.
   S3-compatible bucket as its snapshot store instead of the cluster default
   ([#248](https://github.com/ai-dynamo/snapshot/issues/248), design proposal
   [#889](https://github.com/ai-dynamo/snapshot/pull/889)).
+- **S3 credentials without static keys.** Reach an S3-compatible store with the
+  cluster's workload identity, such as EKS IRSA and Pod Identity, or with
+  short-lived credentials, instead of long-lived keys in a Secret
+  ([#987](https://github.com/ai-dynamo/snapshot/issues/987),
+  [#988](https://github.com/ai-dynamo/snapshot/issues/988),
+  [#1015](https://github.com/ai-dynamo/snapshot/pull/1015),
+  [#1016](https://github.com/ai-dynamo/snapshot/pull/1016),
+  [#1017](https://github.com/ai-dynamo/snapshot/pull/1017)).
 
 ## Q1 2027 (January to March)
 
@@ -121,6 +136,9 @@ These items are planned. Scope and order may shift as Q4 work lands.
 - **Node-local cache (phase 2).** Pre-warm nodes: copy a snapshot to selected
   nodes ahead of a scale-up, so even the first restore on those nodes is fast
   ([#644](https://github.com/ai-dynamo/snapshot/issues/644)).
+- **Node-local store.** Let each node keep its snapshots on its own disk, with
+  no shared store, and restore on the node that holds the snapshot
+  ([#1007](https://github.com/ai-dynamo/snapshot/issues/1007)).
 - **Metrics.** Prometheus metrics for checkpoints and restores, so operators can
   see durations and failures
   ([#665](https://github.com/ai-dynamo/snapshot/issues/665),
@@ -146,6 +164,13 @@ as Q1 progresses.
   hardware-assisted decompression where available
   ([#573](https://github.com/ai-dynamo/snapshot/issues/573),
   [#938](https://github.com/ai-dynamo/snapshot/issues/938)).
+- **Faster checkpoints.** Take a checkpoint faster, and without the agent's
+  memory limit capping how large a checkpoint can be
+  ([#576](https://github.com/ai-dynamo/snapshot/issues/576),
+  [#583](https://github.com/ai-dynamo/snapshot/issues/583),
+  [#521](https://github.com/ai-dynamo/snapshot/issues/521)).
+- **Checkpoint again after a restore.** Take a new snapshot from a workload that
+  was itself restored ([#447](https://github.com/ai-dynamo/snapshot/issues/447)).
 - **llm-d built in.** Restored replicas work with the llm-d router and
   autoscaler without custom glue
   ([#992](https://github.com/ai-dynamo/snapshot/issues/992)).
