@@ -271,6 +271,11 @@ def test_timings_summary_lists_each_phase(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert "| **Total** |" in text
 
 
+# Every install turns retry on, so an upgrade reapplying the install's overrides
+# carries it too.
+RETRY_LIMIT = f"config.checkpoint.defaultRetryLimit={configs.setup.E2E_CHECKPOINT_RETRY_LIMIT}"
+
+
 def test_upgrade_reapplies_the_install_helm_overrides(env: pytest.MonkeyPatch) -> None:
     env.setenv("SNAPSHOT_E2E_HELM_SET", "image.agent.pullPolicy=IfNotPresent\nruntime.storageDir=/var/lib/k3s")
     calls = []
@@ -279,7 +284,7 @@ def test_upgrade_reapplies_the_install_helm_overrides(env: pytest.MonkeyPatch) -
 
     configs.get("full").apply(UpgradeContext(config=config, settings=UpgradeSettings.from_env()))
 
-    assert calls[0]["helm_overrides"] == ["image.agent.pullPolicy=IfNotPresent", "runtime.storageDir=/var/lib/k3s"]
+    assert calls[0]["helm_overrides"] == [RETRY_LIMIT, "image.agent.pullPolicy=IfNotPresent", "runtime.storageDir=/var/lib/k3s"]
 
 
 def test_upgrade_keeps_the_vcluster_to_its_own_pods(env: pytest.MonkeyPatch) -> None:
@@ -294,6 +299,7 @@ def test_upgrade_keeps_the_vcluster_to_its_own_pods(env: pytest.MonkeyPatch) -> 
 
     assert calls[0]["helm_overrides"] == [
         "daemonset.nriHostNamespace=snapshot-e2e-upg",
+        RETRY_LIMIT,
         "image.agent.pullPolicy=IfNotPresent",
     ]
 

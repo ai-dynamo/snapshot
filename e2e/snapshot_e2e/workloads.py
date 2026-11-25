@@ -95,6 +95,7 @@ def source_pod(
     memory_limit: str | None = None,
     handle_sigterm: bool = False,
     hooks_server: bool = False,
+    anon_ballast_mb: int | None = None,
 ) -> dict[str, Any]:
     metadata = {
         "name": run.source_pod,
@@ -105,7 +106,13 @@ def source_pod(
     spec = base_pod_spec(
         config,
         run,
-        source_command(run.image, gpu, handle_sigterm=handle_sigterm, hooks_server=hooks_server),
+        source_command(
+            run.image,
+            gpu,
+            handle_sigterm=handle_sigterm,
+            hooks_server=hooks_server,
+            anon_ballast_mb=anon_ballast_mb,
+        ),
         gpu,
         memory_limit,
     )
@@ -413,7 +420,53 @@ def same_node_affinity(node: str) -> dict[str, Any]:
     }
 
 
-def source_command(image: str, gpu: bool, *, handle_sigterm: bool = False, hooks_server: bool = False) -> str:
+# Written by the ballast once its pages are touched. The source waits for it
+# before it reports ready, so a dump cannot start against a tree still growing.
+BALLAST_READY = f"{STATE_DIR}/ballast-held"
+
+# ANON_BALLAST holds megabytes of anonymous memory in the checkpointed tree, so
+# a test knows roughly how large the CRIU image will be. Perl because the
+# workload image has it and has no Python; the pages are touched, since a
+# reservation CRIU never dumps would defeat the point. Substituted rather than
+# formatted, because the snippet is full of Perl braces. It runs in the
+# background and is never reaped, so it is part of the tree the dump walks.
+ANON_BALLAST = """perl -e '
+  my $mb = $ARGV[0];
+  my @held = map { "x" x (1024 * 1024) } 1 .. $mb;
+  print "[source] holding ${mb}MiB\\n";
+  open(my $marker, ">", $ARGV[1]) or die "$!";
+  print $marker "held\\n";
+  close $marker;
+  sleep while 1;
+' __BALLAST_MB__ __BALLAST_READY__ &
+ballast_pid=$!
+ballast_deadline=$(( $(date +%s) + 120 ))
+until [ -f __BALLAST_READY__ ]; do
+  # A background job that dies takes set -e with it nowhere, so the wait has to
+  # notice on its own: without this the container hangs and the test that was
+  # waiting on it times out saying nothing about why.
+  if ! kill -0 "$ballast_pid" 2>/dev/null; then
+    echo "[source] ballast exited before it held its pages" >&2
+    exit 1
+  fi
+  if [ "$(date +%s)" -ge "$ballast_deadline" ]; then
+    echo "[source] ballast did not hold its pages in time" >&2
+    exit 1
+  fi
+  sleep 0.2
+done
+echo "[source] ballast held"
+"""
+
+
+def source_command(
+    image: str,
+    gpu: bool,
+    *,
+    handle_sigterm: bool = False,
+    hooks_server: bool = False,
+    anon_ballast_mb: int | None = None,
+) -> str:
     # handle_sigterm makes the CPU loop exit with SIGTERM_EXIT on SIGTERM. Off
     # by default, so every other test keeps a workload that only SIGKILL ends.
     if handle_sigterm and gpu:
@@ -425,10 +478,17 @@ def source_command(image: str, gpu: bool, *, handle_sigterm: bool = False, hooks
         if gpu:
             raise ValueError("the lifecycle hooks server runs only in the CPU source")
         server = HOOKS_SERVER
+    ballast = ""
+    if anon_ballast_mb:
+        if gpu:
+            raise ValueError("only the CPU source carries anonymous ballast")
+        ballast = ANON_BALLAST.replace("__BALLAST_MB__", str(anon_ballast_mb)).replace(
+            "__BALLAST_READY__", BALLAST_READY
+        )
     return f"""set -euo pipefail
 echo "[source] image={image}"
 mkdir -p {STATE_DIR}
-{on_sigterm}{server}{state_loop}
+{on_sigterm}{ballast}{server}{state_loop}
 """
 
 
