@@ -26,13 +26,19 @@ The namespaced binding for one container's snapshot; consumed by restore.
 
 `spec`:
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:d96b4ef04bb8d1dc31a34be0f0dbfecfc180df9f9bb4dddcd21cf0a82eae16b0 -->
+
 | Field                      | Type     | Required | Description                                                                                                         |
 |----------------------------|----------|----------|---------------------------------------------------------------------------------------------------------------------|
 | `source.podRef.name`       | string   | yes      | Name of the source pod, in the same namespace.                                                                      |
 | `source.podRef.uid`        | string   | no       | UID of the source pod, so the agent dumps that exact pod and not a same-named recreation.                           |
 | `source.podRef.containers` | []string | yes      | Container(s) to checkpoint. Exactly one in `v1alpha1`; each must be a DNS label.                                    |
-| `checkpointRetryLimit`     | int32    | no       | Times a failed checkpoint may be retried, over and above the first attempt, to a maximum of 10. Unset defers to `config.checkpoint.defaultRetryLimit`; an explicit `0` asks for no retry and is not the same as unset. |
+| `checkpointRetryLimit`     | int32    | no       | Number of retries after the first attempt, from 0 to 10. Set `0` to allow one attempt with no retries. Omit the field to use [the Helm default](helm-values.md#agent-config-config). |
 | `containers`               | []ContainerSnapshotConfig | no       | Settings for a checkpointed container, by `name`. At most one entry. See [Container settings](#container-settings). |
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 `status`:
 
@@ -86,15 +92,21 @@ one declarative object.
 
 `spec`:
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:9a7539208f59dad42d2ad1494d838d1d01c44161f2327e83b97cd980f03ede2e -->
+
 | Field                                  | Type            | Required | Default    | Description                                                                                                                                                                             |
 |----------------------------------------|-----------------|----------|------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `podTemplate`                          | PodTemplateSpec | yes      | —          | The workload to run and checkpoint. The controller injects the snapshot contract (control volume, readiness probe, seccomp); image, command, GPU resources, and sidecars are the caller's. |
 | `podSnapshotTemplate.targetContainers` | []string        | no       | `["main"]` | Container(s) to checkpoint. Exactly one in `v1alpha1`; each must name a container present in `podTemplate`.                                                                             |
-| `podSnapshotTemplate.checkpointRetryLimit` | int32 | no       | —          | Copied to the generated `PodSnapshot`: times a failed checkpoint may be retried, to a maximum of 10. Unset defers to `config.checkpoint.defaultRetryLimit`.                                                        |
+| `podSnapshotTemplate.checkpointRetryLimit` | int32 | no       | —          | Copied to [`PodSnapshot.spec.checkpointRetryLimit`](#podsnapshot), with the same range and handling of zero and omitted values. |
 | `podSnapshotTemplate.containers`       | []ContainerSnapshotConfig | no       | —          | [Container settings](#container-settings), copied to the generated `PodSnapshot`. Each `name` must be in `targetContainers`.                                                            |
 | `activeDeadlineSeconds`                | int64           | no       | `3600`     | Total time allowed for scheduling, quiesce, and dump; applied to the batch/v1 Job.                                                                                                      |
 | `nonTargetArtifacts.containers`        | []string        | no       | —          | Non-target containers that write artifacts to the snapshot volume. Must be nonempty if `nonTargetArtifacts` is set.                                                               |
 | `nonTargetArtifacts.onFailure`         | string          | no       | `Retain`   | `Retain` keeps a failed attempt's artifacts. `Cleanup` lets the operator delete them once all writers have stopped.                                                                     |
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 `podSnapshotTemplate` itself is required; its fields are optional. The object's
 `metadata.name` must be at most 63 characters (it is used as a label value).

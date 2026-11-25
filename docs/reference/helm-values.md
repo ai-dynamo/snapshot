@@ -142,10 +142,24 @@ payload checksums.
 
 `config.*` renders into the agent ConfigMap.
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:b00cf63cebd691a5b345a544c035397816d3df1edd96db43b7f02ea0cf506d27 -->
+
 - `config.overlay.exclusions` - Rootfs-diff tar exclusions. Default: `/proc`, `/sys`, `/dev`, `*/.cache/huggingface`, `*/__pycache__`, `*.pyc`. A file the checkpointed processes hold open or mapped at dump time is archived even when an exclusion matches it, so CRIU can reopen it. Other excluded files are not restored; the workload must recreate them if needed.
 - `config.checkpoint.timeoutSeconds` - Maximum seconds for a checkpoint before the agent marks it failed. Default `3600`.
-- `config.checkpoint.defaultRetryLimit` - Times a failed checkpoint may be retried, beyond the first attempt. Default `0`, which keeps retry off. It applies to a request that asks for no particular number; a `PodSnapshot` sets its own with `spec.checkpointRetryLimit`. It is a default, not a ceiling: a request may ask for more, including when this is `0`. Both are capped at 10, since each fresh attempt suspends the workload again. The agent refuses to start on a value outside 0 to 10, and the chart's schema rejects one at install. `config.checkpoint.timeoutSeconds` above covers every attempt together, and a fresh attempt waits 5 seconds, doubling to at most 60, before it starts, so a large limit ends at that deadline, as `CheckpointTimeout`, rather than with `RetriesExhausted`. See [A Checkpoint Fails with `RetriesExhausted`](../troubleshooting/checkpoints.md#a-checkpoint-fails-with-retriesexhausted).
+- `config.checkpoint.defaultRetryLimit` - Default number of retries after the
+  first attempt, from 0 to 10. The default is `0`. A
+  [`PodSnapshot`](api.md#podsnapshot) or [`SnapshotJob`](api.md#snapshotjob) can
+  set its own limit, including `0`. Helm rejects values outside this range,
+  and the agent rejects them at startup. The checkpoint timeout covers all
+  attempts, including waits between them. The wait before a fresh attempt
+  starts at 5 seconds and doubles up to 60 seconds. If the deadline passes
+  during the wait, the agent reports `CheckpointTimeout`. See
+  [A Checkpoint Fails with `RetriesExhausted`](../troubleshooting/checkpoints.md#a-checkpoint-fails-with-retriesexhausted).
 - `config.restore.timeoutSeconds` - Maximum seconds for a restore before the agent marks it failed. Default `7200`.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 `config.criu.*` - CRIU options:
 
