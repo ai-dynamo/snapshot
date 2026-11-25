@@ -183,6 +183,13 @@ commit-level history for each release is on its
 
 ### Fixed
 
+- Restore no longer fails when the destination container's `/dev/shm` is held
+  open. On nodes without the restore proxy, a destination container running its
+  own command can pin the mount — an inference server creating POSIX shared
+  memory at startup, for example. Restore now falls back to a lazy unmount: the
+  mountpoint frees immediately for CRIU's fresh tmpfs, and the kernel reclaims
+  the detached mount when its last reference closes.
+
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).

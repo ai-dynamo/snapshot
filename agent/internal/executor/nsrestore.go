@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
@@ -183,8 +182,8 @@ func executeRestore(
 	}()
 
 	// Unmount placeholder's /dev/shm so CRIU can recreate tmpfs with checkpointed content
-	if err := syscall.Unmount("/dev/shm", 0); err != nil {
-		return nil, 0, nil, failStep(StepRestoreCRIU, fmt.Errorf("failed to unmount /dev/shm before restore: %w", err))
+	if err := unmountShmForCRIU(realShmUnmountOps, log); err != nil {
+		return nil, 0, nil, failStep(StepRestoreCRIU, err)
 	}
 
 	if err := snapshotruntime.RemountProcSys(true); err != nil {
@@ -369,6 +368,43 @@ func restoreCustomStorage(ctx context.Context, opts RestoreOptions, capturedPIDs
 		return err
 	}
 	logGPUResult(log, result)
+	return nil
+}
+
+// shmUnmountOps holds the unmount call used to free /dev/shm, so tests can
+// substitute it.
+type shmUnmountOps struct {
+	unmount func(path string, flags int) error
+}
+
+var realShmUnmountOps = shmUnmountOps{
+	unmount: unix.Unmount,
+}
+
+// unmountShmForCRIU frees /dev/shm so CRIU can mount a fresh tmpfs there and
+// fill it with the checkpointed content. The placeholder's tmpfs can be busy:
+// on nodes without the restore proxy the destination container runs its own
+// command, and a cold-started workload holding POSIX shm objects pins the
+// mount. A lazy unmount frees the mountpoint immediately — CRIU mounts over
+// the now-empty path — while the kernel reaps the detached tmpfs when its last
+// reference closes; the only processes still holding it are the cold-started
+// ones the restored tree replaces. Any other unmount failure, or a failed lazy
+// unmount, is fatal: CRIU has nowhere to put the checkpointed tmpfs.
+func unmountShmForCRIU(ops shmUnmountOps, log logr.Logger) error {
+	const shmPath = "/dev/shm"
+	err := ops.unmount(shmPath, 0)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, unix.EBUSY) {
+		return fmt.Errorf("failed to unmount %s before restore: %w", shmPath, err)
+	}
+	log.Info("Unmount of /dev/shm failed with EBUSY; falling back to lazy unmount",
+		"path", shmPath, "error", err)
+	if lazyErr := ops.unmount(shmPath, unix.MNT_DETACH); lazyErr != nil {
+		return fmt.Errorf("failed to unmount %s before restore: mount busy (%v) and lazy unmount failed: %w",
+			shmPath, err, lazyErr)
+	}
 	return nil
 }
 
