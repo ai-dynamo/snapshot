@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: operator snapshot store RBAC
+templates:
+  - templates/operator-snapshot-store-rbac.yaml
+release:
+  name: snapshot
+tests:
+  - it: reads credentials and CA bundles only in the release namespace
+    documentSelector:
+      path: kind
+      value: Role
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: NAMESPACE
+      - equal:
+          path: rules
+          value:
+            - apiGroups: [""]
+              resources: ["secrets", "configmaps"]
+              verbs: ["get", "list", "watch"]
+
+  - it: binds that Role to the operator service account
+    documentSelector:
+      path: kind
+      value: RoleBinding
+    asserts:
+      - equal:
+          path: roleRef.name
+          value: snapshot-operator-snapshot-stores
+      - equal:
+          path: subjects[0].kind
+          value: ServiceAccount
+
+  - it: renders nothing when RBAC is not created
+    set:
+      rbac.create: false
+    asserts:
+      - hasDocuments:
+          count: 0
