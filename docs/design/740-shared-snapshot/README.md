@@ -29,7 +29,6 @@ SPDX-License-Identifier: Apache-2.0
   - [Dependencies](#dependencies)
   - [Upgrade and Version Skew](#upgrade-and-version-skew)
   - [Test Plan](#test-plan)
-  - [Graduation Criteria](#graduation-criteria)
 - [Alternatives](#alternatives)
 <!-- /toc -->
 
@@ -78,7 +77,6 @@ like the one it tested.
    after the source namespace or its `PodSnapshot` is deleted.
 6. The snapshot's data is stored once, and is removed when its last user in the
    cluster is gone.
-7. `PodSnapshotContent` stays an internal object that only the operator creates.
 
 ### Non-Goals
 
@@ -139,9 +137,10 @@ A `SharedSnapshot` names its snapshot in one of two ways:
   for it.
 
 In both cases a user in an allowed namespace creates a `PodSnapshot` whose
-source is the `SharedSnapshot`. The operator checks the namespace once, binds
-the `PodSnapshot` to the content, and marks it `Ready`. From then on the
-`PodSnapshot` behaves like one that checkpointed a pod.
+source is the `SharedSnapshot`, and not a pod to checkpoint as today. The
+operator checks the namespace once, binds the `PodSnapshot` to the content, and
+marks it `Ready`. From then on the `PodSnapshot` behaves like one that
+checkpointed a pod.
 
 Every `PodSnapshot` bound to a content is an equal user of it. No `PodSnapshot`
 owns the snapshot. The operator deletes the content, and with it the artifact,
@@ -156,9 +155,9 @@ write them again, and every namespace restores the same way.
 #### Story 1: Several Namespaces Restore One Snapshot
 
 The platform team checkpoints a model server in the `training` namespace. The
-serving teams work in namespaces labeled `team: serving`. An admin creates a
-`SharedSnapshot` that refers to the `PodSnapshot` in `training` and selects
-namespaces by that label. Each serving team creates a `PodSnapshot` in its own
+serving teams work in the `serving-a` and `serving-b` namespaces. An admin
+creates a `SharedSnapshot` that refers to the `PodSnapshot` in `training` and
+lists the two namespaces. Each serving team creates a `PodSnapshot` in its own
 namespace that names the `SharedSnapshot`, and starts restore Pods from it. The
 platform team later deletes the `training` namespace. The serving teams keep
 restoring.
@@ -178,9 +177,6 @@ a restore in the development cluster.
 - **The source namespace has no say.** An admin can share a namespace's snapshot
   without that namespace's consent, and the data can outlive the `PodSnapshot`
   that took it. This is a deliberate choice, see [Security](#security).
-- **A snapshot is process memory.** It carries the secrets and tokens the source
-  process held. A process restored in another namespace holds them too. The
-  mitigation is that only an admin can share, see [Security](#security).
 - **`PodSnapshot` and `PodSnapshotContent` are no longer one to one.** The
   operator and the agent both assume one `PodSnapshot` for each content today.
   The affected code is listed in
@@ -191,16 +187,13 @@ a restore in the development cluster.
 - **Access is checked once.** Removing a namespace from a `SharedSnapshot`, or
   deleting the `SharedSnapshot`, does not affect a `PodSnapshot` that is already
   bound. An admin removes that access by deleting the `PodSnapshot`.
-- **An import is not verified when it is created.** The operator cannot read the
-  snapshot store, so it accepts the location as written. A wrong location is
-  found only when a Pod restores.
 - **Cluster sharing depends on SNEP-248.** Without its ownership marker and
   retain setting, the maintenance of one cluster deletes the data of another.
   Import is implemented after SNEP-248.
 - **Component versions can differ between clusters.** An artifact written by one
-  release is read by another. The artifact manifest has no schema version today.
-  The supported version range for an import is an open question, see
-  [Dependencies](#dependencies).
+  release is read by another, as in a restore after an upgrade in one cluster.
+  The importing cluster must run the same Snapshot release as the cluster that
+  took the snapshot, or a newer one.
 
 ## Design Details
 
@@ -218,7 +211,7 @@ The operator binds it in these steps:
    so.
 4. Check that the content named in `SharedSnapshot.status.contentName` is
    `Ready` and is not being deleted.
-5. Add the `PodSnapshot` to `status.boundSnapshots` of the content.
+5. Add the `PodSnapshot` to `status.boundPodSnapshots` of the content.
 6. Set `status.boundSnapshotContentName` on the `PodSnapshot`.
 
 The operator writes the content before the `PodSnapshot`. If it stops between
@@ -227,13 +220,13 @@ leave a bound `PodSnapshot` that the content does not list, and its restore
 would be refused.
 
 A `PodSnapshot` that checkpoints a pod is bound the same way as today, and the
-operator also adds it to `status.boundSnapshots` of the content it creates.
+operator also adds it to `status.boundPodSnapshots` of the content it creates.
 
 ### Which PodSnapshots a Content Lists
 
-`status.boundSnapshots` is the record of which `PodSnapshot` objects can restore
-from a content. The operator is the only writer. It lists a `PodSnapshot` only
-when one of these holds:
+`status.boundPodSnapshots` is the record of which `PodSnapshot` objects can
+restore from a content. The operator is the only writer. It lists a
+`PodSnapshot` only when one of these holds:
 
 - **It took the checkpoint.** It matches `spec.snapshotRef` of the content by
   namespace, name, and UID.
@@ -253,9 +246,12 @@ at that time.
 
 The list is flat. The `PodSnapshot` that took the checkpoint is one entry like
 any other. `spec.snapshotRef` of the content keeps recording which `PodSnapshot`
-asked for the checkpoint, and the agent still uses its namespace to find the
-source pod. It is a record of the past and can name a `PodSnapshot` that no
-longer exists.
+asked for the checkpoint. It is a record of the past and can name a
+`PodSnapshot` that no longer exists. No component uses it to decide who can
+restore from the content, who is bound to it, or when it is deleted. Those
+decisions read the two lists. The one remaining reader is the agent during a
+checkpoint, which takes the namespace of the source pod from it. That value is
+fixed when the content is created and stays correct.
 
 ### Sharing a Snapshot Within a Cluster
 
@@ -282,25 +278,34 @@ it names.
 ### Importing a Snapshot From Another Cluster
 
 A `SharedSnapshot` with `source.storage` describes an artifact that the cluster
-has no object for. The admin copies the store identity and the artifact handles
-from the content in the cluster that took the snapshot
-(`spec.storage.storeID` and `status.storage.artifacts`). The operator:
+has no object for. The admin names the store with a `SnapshotStorageClass` of
+this cluster, as defined by SNEP-248, that points at the location the snapshot
+was written to. The admin copies the artifact handles from
+`status.storage.artifacts` of the content in the cluster that took the snapshot.
+The operator:
 
-1. Checks that the store is one the cluster is configured with. If it is not,
-   the `SharedSnapshot` is not `Ready` and names the reason.
+1. Reads the named `SnapshotStorageClass` and takes the store identity from its
+   status. If the class does not exist or is not `Ready`, the `SharedSnapshot`
+   is not `Ready` and names the reason.
 2. Looks for a content that already refers to the same store and handles. If
    one exists, it uses that content.
 3. Otherwise creates a content with `spec.storage` and `spec.containers`, and
-   without `spec.snapshotRef` and `spec.source`. The name of the content is
+   without `spec.snapshotRef` and `spec.source`. `spec.storage` records the
+   class and its store identity, as for any content. The name of the content is
    derived from the store identity and the handles, so that two imports of the
    same artifact resolve to one content.
-4. Writes `status.storage` with the handles, adds the `SharedSnapshot` to
-   `status.sharedSnapshots`, and marks the content `Ready`.
-5. Records the content in `SharedSnapshot.status.contentName` and marks the
-   `SharedSnapshot` `Ready`.
+4. Writes `status.storage` with the handles and adds the `SharedSnapshot` to
+   `status.sharedSnapshots`.
+5. Checks, through the store access of the `SnapshotStorageClass`, that the
+   manifest of each artifact exists in the store. If one is missing, the content
+   and the `SharedSnapshot` are not `Ready` and name the reason. The operator
+   checks again with backoff.
+6. Marks the content `Ready`, records it in `SharedSnapshot.status.contentName`,
+   and marks the `SharedSnapshot` `Ready`.
 
-`Ready` on an imported content means that the operator accepted the reference.
-It does not mean that the operator read the artifact.
+`Ready` on an imported content means that the operator found the manifest of
+each artifact in the store. It does not mean that the artifact can be restored
+on a given node. The compatibility checks run at restore, as for any snapshot.
 
 An imported content has no source pod and no node. The agent does not
 checkpoint for it. A content that the operator created for a `SharedSnapshot`
@@ -321,8 +326,8 @@ content it is bound to. Two checks change:
 
 - **The back-link.** The operator and the agent check today that
   `spec.snapshotRef` of the content equals the `PodSnapshot`. They check instead
-  that `status.boundSnapshots` lists the `PodSnapshot` by namespace, name, and
-  UID.
+  that `status.boundPodSnapshots` lists the `PodSnapshot` by namespace, name,
+  and UID.
 - **The artifact identity.** The agent checks today that the content UID
   recorded in the artifact manifest equals the UID of the content. A shared
   content is the one that took the checkpoint, and the check is unchanged. An
@@ -339,19 +344,17 @@ the checkpoint. An imported content carries `SharedSnapshot.spec.containers`.
 
 ### Lifetime and Deletion
 
-The operator deletes a content when both `status.boundSnapshots` and
+The operator deletes a content when both `status.boundPodSnapshots` and
 `status.sharedSnapshots` are empty. Deleting the content deletes the artifact
 through the existing cleanup finalizer.
 
 - **Deleting a `PodSnapshot`.** The operator removes it from
-  `status.boundSnapshots`. If both lists are then empty, the operator deletes
+  `status.boundPodSnapshots`. If both lists are then empty, the operator deletes
   the content and waits until it is gone, as today. Otherwise the `PodSnapshot`
   is released at once.
 - **Deleting a `SharedSnapshot`.** A finalizer on the `SharedSnapshot` removes
   it from `status.sharedSnapshots`. If both lists are then empty, the operator
   deletes the content.
-- **Narrowing a `SharedSnapshot`.** Nothing is deleted. New `PodSnapshot`
-  objects in the removed namespaces are refused.
 
 A `SharedSnapshot` keeps its content alive without any `PodSnapshot`. A snapshot
 that was shared stays available after the `PodSnapshot` that took it is deleted,
@@ -371,10 +374,33 @@ come from SNEP-248, see [Dependencies](#dependencies).
 
 ### API
 
-All field names in this section are proposals. `SharedSnapshot` is a new
-cluster-scoped kind in the `nvidia.com/v1alpha1` group.
+`SharedSnapshot` is a new cluster-scoped kind in the `nvidia.com/v1alpha1`
+group.
 
 The following example shares a snapshot that exists in the cluster.
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: SharedSnapshot
+metadata:
+  name: llama-stable
+spec:
+  allowedNamespaces:
+    names: [serving-a, serving-b]
+  source:
+    podSnapshotRef:
+      namespace: training
+      name: llama
+status:
+  contentName: podsnapshotcontent-0a1b2c3d
+  conditions:
+  - type: Ready
+    status: "True"
+```
+
+The following example imports a snapshot that another cluster took. It selects
+the allowed namespaces by label, which is the other form of
+`allowedNamespaces`.
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -387,29 +413,8 @@ spec:
       matchLabels:
         team: serving
   source:
-    podSnapshotRef:
-      namespace: training
-      name: llama
-status:
-  contentName: podsnapshotcontent-0a1b2c3d
-  conditions:
-  - type: Ready
-    status: "True"
-```
-
-The following example imports a snapshot that another cluster took.
-
-```yaml
-apiVersion: nvidia.com/v1alpha1
-kind: SharedSnapshot
-metadata:
-  name: llama-stable
-spec:
-  allowedNamespaces:
-    names: [serving-a, serving-b]
-  source:
     storage:
-      storeID: store-v1-<hash>
+      storageClassName: shared-store
       artifacts:
       - containerName: main
         artifactHandle: <handle>
@@ -426,10 +431,10 @@ The following table lists the fields of `SharedSnapshot`.
 
 | Field | Description |
 | --- | --- |
-| `spec.allowedNamespaces` | Required. A struct with exactly one of `names`, a list of namespace names, and `selector`, a label selector on namespaces. Mutable. An empty selector is rejected. |
+| `spec.allowedNamespaces` | Required. A struct with exactly one of two fields. `names` is a list of namespace names, and is the basic form. `selector` is a label selector on namespaces, for a set of namespaces that changes over time. Mutable. An empty selector is rejected. |
 | `spec.source` | Required, immutable. Exactly one of `podSnapshotRef` and `storage`. |
 | `spec.source.podSnapshotRef` | The namespace and name of a `PodSnapshot` in this cluster. |
-| `spec.source.storage` | `storeID` and `artifacts`, with the same shape as `spec.storage` and `status.storage.artifacts` of a content. |
+| `spec.source.storage` | `storageClassName` and `artifacts`. `storageClassName` names a `SnapshotStorageClass` of this cluster, and an empty value selects the default class, as in SNEP-248. `artifacts` has the same shape as `status.storage.artifacts` of a content. |
 | `spec.containers` | Optional, immutable, only with `source.storage`. The container settings a restore applies, with the same shape as `PodSnapshot.spec.containers`. |
 | `status.contentName` | The content this object resolves to. Written by the operator. |
 | `status.conditions` | `Ready`. |
@@ -458,9 +463,10 @@ A `PodSnapshot` with `sharedSnapshotRef` cannot set `spec.containers`. The
 - `spec.snapshotRef` and `spec.source` become optional. A validation rule
   requires both for a checkpoint, and neither for an import. An import requires
   `spec.storage`.
-- `status.boundSnapshots` is a new list of `{namespace, name, uid}`, keyed by
+- `status.boundPodSnapshots` is a new list of `{namespace, name, uid}`, keyed by
   `uid`, with at most 64 entries.
-- `status.sharedSnapshots` is a new list of `{name, uid}`, keyed by `uid`.
+- `status.sharedSnapshots` is a new list of `{name, uid}`, keyed by `uid`, with
+  at most 64 entries.
 - The validation rules that read `spec.source.podRef.containers` are adjusted
   for a content that has no source pod.
 - The print columns that show `spec.snapshotRef` are revisited, since a content
@@ -469,11 +475,9 @@ A `PodSnapshot` with `sharedSnapshotRef` cannot set `spec.containers`. The
 The `spec` of a content stays immutable, and only the operator creates a
 content. The restore Pod contract and its annotations do not change.
 
-**Open question:** does `spec.source.storage` name a store by `storeID`, or by
-the storage class of SNEP-248? This is decided against the final SNEP-248 API.
-
-**Open question:** are `status.boundSnapshots` and `status.sharedSnapshots` two
-lists, or one list whose entries carry a kind?
+The two lists are separate fields and not one list with a kind on each entry.
+Their entries have different shapes, and each list has its own rule for adding
+and removing an entry.
 
 ### Security
 
@@ -510,9 +514,9 @@ agents act on any content that has a source pod, and keeping creation with the
 operator means that the permission to share is not a permission to start a
 checkpoint on a node.
 
-**The store is not chosen by the admin.** An import is accepted only for a store
-the cluster is already configured with. A `SharedSnapshot` cannot point the
-operator or the agent at another location.
+**The store is not chosen freely.** An import names a `SnapshotStorageClass`
+that exists in the cluster. A `SharedSnapshot` cannot point the operator or the
+agent at a location that the cluster is not configured with.
 
 **What a content reveals.** A content lists the namespace and name of every
 `PodSnapshot` bound to it. The chart grants access to contents only to the
@@ -525,24 +529,25 @@ Updates to one content are serialized, and concurrent ones retry. This is the
 only new cost on the restore path, and it is paid when a `PodSnapshot` is
 created, not when a Pod restores.
 
-`status.boundSnapshots` grows with the number of `PodSnapshot` objects that use
-a snapshot. An entry holds a namespace, a name, and a UID. The list holds at
+`status.boundPodSnapshots` grows with the number of `PodSnapshot` objects that
+use a snapshot. An entry holds a namespace, a name, and a UID. The list holds at
 most 64 entries, which bounds the size of the content and the cost of its
 validation rules. A `PodSnapshot` that would be the 65th stays not `Ready`, with
 a reason that says the snapshot has reached its limit, and binds when an entry
-is removed. Raising the limit later is a compatible change.
+is removed. `status.sharedSnapshots` has the same limit of 64 entries, and a
+`SharedSnapshot` over the limit stays not `Ready` in the same way. Raising
+either limit later is a compatible change.
 
 ### Monitoring
 
-The following status conditions and Events report the state of the feature. The
-reason names are proposals.
+The following status conditions and Events report the state of the feature.
 
 | Object | Signal |
 | --- | --- |
-| `SharedSnapshot` | `Ready` is `False` while the named `PodSnapshot` is not ready, when the store is not one the cluster is configured with, or when its container settings differ from the content it resolves to. |
+| `SharedSnapshot` | `Ready` is `False` while the named `PodSnapshot` is not ready, when the named `SnapshotStorageClass` does not exist or is not ready, when an artifact is not found in the store, when its container settings differ from the content it resolves to, or when the snapshot has reached its limit of `SharedSnapshot` objects. |
 | `PodSnapshot` | `Ready` is `False` with a reason that says the namespace is not allowed, the `SharedSnapshot` does not exist, the `SharedSnapshot` is not ready, or the snapshot has reached its limit of bound `PodSnapshot` objects. |
 | `PodSnapshot` | An Event when it is bound through a `SharedSnapshot`, naming the `SharedSnapshot`. |
-| `PodSnapshotContent` | `status.boundSnapshots` and `status.sharedSnapshots` show who uses the snapshot. |
+| `PodSnapshotContent` | `status.boundPodSnapshots` and `status.sharedSnapshots` show who uses the snapshot. |
 
 This proposal adds no metrics.
 
@@ -550,28 +555,25 @@ This proposal adds no metrics.
 
 **SNEP-248, `SnapshotStorageClass`.** Importing a snapshot depends on
 [SNEP-248](https://github.com/ai-dynamo/snapshot/pull/889), which is under
-review. This proposal relies on three things it describes:
+review. This proposal uses three things from it:
 
-- A cluster can be configured with more than one store.
-- Each artifact directory records the cluster that created it, and the orphan
-  sweep of a cluster removes only its own directories. Without this, a cluster
-  that imports a snapshot deletes it at the next sweep.
-- A retain setting keeps the data of a snapshot after its content is deleted.
-
-This proposal adds no switch for cleanup. An admin who shares a snapshot between
-clusters uses the retain setting of SNEP-248 in the cluster that took the
-snapshot, so that deleting the last `PodSnapshot` there does not remove data
-that another cluster uses. A `SharedSnapshot` is needed only in the cluster that
-imports.
+- `SnapshotStorageClass`, which an import names as its store.
+- The record of the creating cluster on each artifact directory, so that a
+  cluster deletes and sweeps only its own data.
+- The retain setting. An admin sets it in the cluster that took the snapshot, so
+  that deleting the last `PodSnapshot` there keeps data that another cluster
+  uses. This proposal adds no switch of its own for cleanup.
 
 Sharing within a cluster does not depend on SNEP-248.
 
-**Open question:** which combinations of agent and PageBroker releases can
-restore an artifact that another release wrote?
+**Snapshot release of the importing cluster.** An import follows the same rule
+as a restore after an upgrade in one cluster. The importing cluster must run the
+same Snapshot release as the cluster that took the snapshot, or a newer one.
+Importing into an older release is not supported.
 
 ### Upgrade and Version Skew
 
-A content created before this change has no `status.boundSnapshots`. The
+A content created before this change has no `status.boundPodSnapshots`. The
 operator fills it on the first reconcile from `spec.snapshotRef`. Until then the
 back-link check accepts `spec.snapshotRef`.
 
@@ -584,8 +586,8 @@ The following code assumes one `PodSnapshot` for each content and changes:
 
 | Component | Code | Change |
 | --- | --- | --- |
-| Operator | `verifyContentBacklink` | Check `status.boundSnapshots`. |
-| Agent | Restore preflight | Check `status.boundSnapshots`. |
+| Operator | `verifyContentBacklink` | Check `status.boundPodSnapshots`. |
+| Agent | Restore preflight | Check `status.boundPodSnapshots`. |
 | Operator | Mapping of content events to `PodSnapshot` | Enqueue every listed `PodSnapshot`. |
 | Operator | `handleDelete` of `PodSnapshot` | Delete the content only for the last user. |
 | Agent | Checkpoint path | Skip a content with no source pod. |
@@ -603,7 +605,7 @@ binding that arrives while the last user is removed.
 **Integration.** Operator tests cover binding through a `SharedSnapshot`,
 refusal for a namespace that is not allowed, narrowing a `SharedSnapshot` with a
 bound `PodSnapshot`, several `SharedSnapshot` objects on one content, and the
-fill of `status.boundSnapshots` for a content created before the change.
+fill of `status.boundPodSnapshots` for a content created before the change.
 
 **End to end.** The following scenarios run in a cluster:
 
@@ -614,12 +616,6 @@ fill of `status.boundSnapshots` for a content created before the change.
   is removed from the store.
 - A snapshot is imported and restored. This scenario needs the store behavior of
   SNEP-248 and is added with the import work.
-
-### Graduation Criteria
-
-This feature is alpha, like the rest of the `v1alpha1` API. Sharing within a
-cluster is delivered first. Import follows SNEP-248. This proposal defines no
-criteria for later stages.
 
 ## Alternatives
 
