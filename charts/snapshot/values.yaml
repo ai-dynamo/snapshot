@@ -151,9 +151,9 @@ storage:
     credentialsSecretRef: ""
     # Key inside credentialsSecretRef holding the credentials file.
     credentialsSecretKey: credentials
-    # Bucket addressing PageBroker uses against the endpoint: "virtual"
-    # (bucket.endpoint/key, PageBroker's default when empty) or "path"
-    # (endpoint/bucket/key), which most self-hosted S3-compatible stores need.
+    # Bucket addressing used by PageBroker and operator cleanup: "virtual"
+    # (bucket.endpoint/key) or "path" (endpoint/bucket/key). When empty,
+    # PageBroker defaults to virtual and operator cleanup uses path for custom endpoints.
     addressing: ""
     # Accept a plain-http endpoint. PageBroker refuses one otherwise.
     allowHttp: false

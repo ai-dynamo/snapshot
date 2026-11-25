@@ -73,6 +73,7 @@ func main() {
 			Prefix:          storageCfg.S3.Prefix,
 			Region:          storageCfg.S3.Region,
 			Endpoint:        storageCfg.S3.Endpoint,
+			Addressing:      pageBrokerS3.Addressing,
 			CredentialsPath: *artifactCleanupS3CredentialsPath,
 			CABundlePath:    *artifactCleanupS3CABundlePath,
 		}

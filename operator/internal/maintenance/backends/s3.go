@@ -53,6 +53,7 @@ type S3Config struct {
 	Prefix          string
 	Region          string
 	Endpoint        string
+	Addressing      string
 	CredentialsPath string
 	CABundlePath    string
 }
@@ -64,6 +65,7 @@ func NewS3Config(cfg operatortypes.S3Config) S3Config {
 		Prefix:          cfg.Prefix,
 		Region:          cfg.Region,
 		Endpoint:        cfg.Endpoint,
+		Addressing:      cfg.Addressing,
 		CredentialsPath: cfg.CredentialsPath,
 		CABundlePath:    cfg.CABundlePath,
 	}
@@ -119,7 +121,7 @@ func NewS3Backend(ctx context.Context, cfg S3Config) (*S3Backend, error) {
 		}
 		if cfg.Endpoint != "" {
 			o.BaseEndpoint = aws.String(cfg.Endpoint)
-			o.UsePathStyle = true
+			o.UsePathStyle = cfg.Addressing != "virtual"
 		}
 	})
 	b.bucket = cfg.Bucket

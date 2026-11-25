@@ -14,6 +14,7 @@ type S3Config struct {
 	Prefix          string
 	Region          string
 	Endpoint        string
+	Addressing      string
 	CredentialsPath string
 	CABundlePath    string
 }
