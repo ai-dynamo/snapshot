@@ -169,6 +169,9 @@ depends on the platform:
   for the Kubernetes API. This cannot be combined with
   `storage.s3.credentialsSecretRef`
 
+Use one of the two. If the platform also injects an identity into these pods,
+PageBroker and the operator use it and ignore the credential endpoint.
+
 The endpoint must implement the container-credentials protocol of the S3
 clients: a `GET` request that carries the token as the `Authorization` header,
 answered with JSON credentials and their expiry.
