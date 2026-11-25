@@ -323,14 +323,22 @@ func (w *NodeController) runCheckpoint(
 				terminalReason(attempt.failure, spent, budget), recordedCause(err, spent, budget))
 		}
 
-		spent++
-		w.reportAttemptFailed(ctx, logger, pod, attempt.failure.reason, spent, budget, err)
 		select {
 		case <-captureCtx.Done():
-			w.endSource(ctx, logger, pod, containerPID, sourceLive)
-			return w.failCheckpoint(ctx, logger, content, pod, attempt.failure.reason, err)
-		case <-time.After(attemptRetryDelay(spent)):
+		case <-time.After(attemptRetryDelay(spent + 1)):
 		}
+		// Count the retry only after the wait. If the deadline passes first, the
+		// attempt never runs. Checked after the select, not inside it: when both
+		// cases are ready, select picks at random. Time ran out, so that is the
+		// reason. The last attempt's would point at the wrong cause.
+		if captureCtx.Err() != nil {
+			w.endSource(ctx, logger, pod, containerPID, sourceLive)
+			return w.failCheckpoint(ctx, logger, content, pod, reasonCheckpointTimeout,
+				fmt.Errorf("deadline passed before retry %d of %d could start; last attempt: %w",
+					spent+1, budget, err))
+		}
+		spent++
+		w.reportAttemptFailed(ctx, logger, pod, attempt.failure.reason, spent, budget, err)
 	}
 }
 
