@@ -1016,3 +1016,14 @@ func TestCaptureCheckpointReportsEachRepeat(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigureCheckpointPassesFreezeTimeout(t *testing.T) {
+	for _, timeout := range []*uint32{nil, proto.Uint32(300)} {
+		cfg := &types.AgentConfig{Checkpoint: types.CheckpointSpec{FreezeTimeoutSeconds: timeout}}
+		opts, _, err := configureCheckpoint(logr.Discard(),
+			&types.CheckpointContainerSnapshot{PID: 42, RootFS: "/", NetNSInode: 7},
+			CheckpointRequest{ContentUID: "content", ContainerName: "main"}, cfg, t.TempDir(), false)
+		require.NoError(t, err)
+		require.Equal(t, timeout, opts.Timeout)
+	}
+}

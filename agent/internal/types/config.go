@@ -121,6 +121,9 @@ const maxTimeoutSeconds = int64(math.MaxInt64) / int64(time.Second)
 
 // CheckpointSpec holds settings for the CRIU dump.
 type CheckpointSpec struct {
+	// FreezeTimeoutSeconds bounds freezing the process tree; nil uses CRIU's default.
+	FreezeTimeoutSeconds *uint32 `yaml:"freezeTimeoutSeconds"`
+
 	// A pointer so absent and zero are distinguishable: a config predating this field omits it,
 	// as does one still spelling it checkpointTimeoutSeconds, and an agent upgraded ahead of its
 	// ConfigMap has to start — with the guard on.
@@ -155,6 +158,9 @@ func (c *CheckpointSpec) CheckpointTimeout() time.Duration {
 }
 
 func (c *CheckpointSpec) Validate() error {
+	if c.FreezeTimeoutSeconds != nil && *c.FreezeTimeoutSeconds == 0 {
+		return &ConfigError{Field: "checkpoint.freezeTimeoutSeconds", Message: "checkpoint.freezeTimeoutSeconds must be greater than zero"}
+	}
 	// Bounded the same as the spec fields, so the cluster default cannot hand a
 	// request more attempts than the request could have asked for itself.
 	if c.DefaultRetryLimit != nil && (*c.DefaultRetryLimit < 0 || *c.DefaultRetryLimit > snapshotv1alpha1.MaxCheckpointRetryLimit) {

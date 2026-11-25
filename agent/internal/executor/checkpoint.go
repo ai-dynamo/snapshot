@@ -493,6 +493,7 @@ func configureCheckpoint(
 	if err != nil {
 		return nil, nil, err
 	}
+	criuOpts.Timeout = cfg.Checkpoint.FreezeTimeoutSeconds
 	podEnvironment := req.Pod
 	podEnvironment.ImageID = state.ImageID
 	overlay := cfg.Overlay
