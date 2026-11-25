@@ -85,3 +85,34 @@ tests:
               - snapshotjobs.nvidia.com
               - snapshotstorageclasses.nvidia.com
             verbs: ["get", "patch"]
+
+  - it: lets the operator reconcile classes and name the cluster
+    documentSelector:
+      path: kind
+      value: ClusterRole
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["nvidia.com"]
+            resources: ["snapshotstorageclasses"]
+            verbs: ["get", "list", "watch", "update", "patch"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["nvidia.com"]
+            resources: ["snapshotstorageclasses/status"]
+            verbs: ["get", "update", "patch"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["nvidia.com"]
+            resources: ["snapshotstorageclasses/finalizers"]
+            verbs: ["update"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["namespaces"]
+            resourceNames: ["kube-system"]
+            verbs: ["get"]
