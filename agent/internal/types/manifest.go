@@ -246,9 +246,9 @@ func WriteManifest(checkpointDir string, data *CheckpointManifest) error {
 	return nil
 }
 
-// readRegularFile reads path only when it is a regular file: it does not
+// safeReadRegularFile reads path only when it is a regular file: it does not
 // follow a symbolic link and does not block on a named pipe.
-func readRegularFile(path string) ([]byte, error) {
+func safeReadRegularFile(path string) ([]byte, error) {
 	file, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
@@ -268,7 +268,7 @@ func readRegularFile(path string) ([]byte, error) {
 func ReadManifest(checkpointDir string) (*CheckpointManifest, error) {
 	manifestPath := filepath.Join(checkpointDir, manifestFilename)
 
-	content, err := readRegularFile(manifestPath)
+	content, err := safeReadRegularFile(manifestPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint manifest: %w", err)
 	}

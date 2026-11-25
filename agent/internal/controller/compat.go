@@ -142,8 +142,9 @@ func (w *NodeController) preflightCompatibility(
 	return nil
 }
 
-// preflightManifest reads the checkpoint manifest this gate compares against,
-// branching on how the artifact resolves: a local path for legacy content, or
+// preflightManifest returns the checkpoint manifest this gate compares against,
+// branching on how the artifact resolves: the manifest already parsed during
+// source selection for a node cache copy, a local path for legacy content, or
 // a PageBroker metadata fetch (the same one the restore path itself uses) for
 // bound content. The second return value names where it looked, for the
 // unreadable-manifest log and event.
