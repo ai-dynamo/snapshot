@@ -208,7 +208,8 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 {{- end -}}
 
 {{/* Directory the S3 credentials Secret (storage.s3.credentialsSecretRef) is
-     mounted at, shared by the PageBroker and operator containers. */}}
+     mounted at, shared by the PageBroker and operator containers. Nothing is
+     mounted when the Secret is not set. */}}
 {{- define "snapshot.s3CredentialsMountDir" -}}/etc/snapshot-s3-credentials{{- end -}}
 
 {{/* Directory and file the S3 CA bundle (storage.s3.caBundleConfigMapRef) is

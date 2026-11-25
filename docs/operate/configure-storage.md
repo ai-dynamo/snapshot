@@ -106,7 +106,13 @@ With `storage.type: s3`, set these values:
 - `storage.s3.endpoint` - S3-compatible endpoint
 - `storage.s3.region` - Bucket region
 - `storage.s3.bucket` - Bucket that holds the snapshots
-- `storage.s3.credentialsSecretRef` - Secret that holds the credentials file
+
+Credentials come from one of two places:
+
+- `storage.s3.credentialsSecretRef` - Secret that holds a credentials file with
+  static keys
+- No Secret - the workload identity of the Snapshot pods; see
+  [Use Workload Identity for S3](#use-workload-identity-for-s3)
 
 See [Helm Chart Values](../reference/helm-values.md#storage) for all S3 values,
 including the key prefix and the credentials key.
@@ -129,6 +135,70 @@ When `pageBroker.s3.limits.stagingBytes` is omitted, the chart fills it from the
 staging volume cap, so PageBroker refuses a staged restore the volume cannot
 hold instead of filling it. An explicit `stagingBytes` is not checked against
 the volume.
+
+### Use Workload Identity for S3
+
+Leave `storage.s3.credentialsSecretRef` empty to reach the bucket without static
+keys. No Secret is mounted. PageBroker and the operator then resolve credentials
+through the default credential chain of their S3 clients. Unlike a mounted
+credentials file, which PageBroker reads once at startup, these credentials are
+renewed by the chain itself in both components, without a restart.
+
+Two identities need access to the bucket, because uploads and restores run in
+PageBroker and cleanup runs in the operator:
+
+| Component | Service account | Annotations value | Access under the store's prefix |
+|-----------|-----------------|-------------------|---------------------------------|
+| PageBroker, in the agent pod | The agent's: the release's full name, for example `snapshot`, unless `serviceAccount.name` sets another | `serviceAccount.annotations` | Read, write and list |
+| Operator | The operator's, the agent's default name with `-operator` appended | `operator.serviceAccount.annotations` | List and delete |
+
+Bind each to an identity with that access. Platforms bind in one of two ways:
+with an annotation on the service account, or with an association that names the
+service account and is created on the platform side. Set the annotation values
+only in the first case. The platform must inject the identity's token and
+variables into the pods; the chart does not add them.
+
+The chart applies the annotation values only to the service accounts it
+creates: the agent's with `serviceAccount.create: true`, the operator's with
+`rbac.create: true`. With either set to `false`, annotate the existing service
+account directly. The platform injects an identity when a pod is created, and
+changing an annotation alone does not restart a pod, so after adding or changing
+one restart the agent DaemonSet and the operator Deployment.
+
+Instance metadata is excluded from the chain. A workload identity that does not
+resolve therefore fails the operation and never falls back to the node's role,
+which every pod on the node shares.
+
+With `storage.s3.caBundleConfigMapRef` set, PageBroker and the operator trust
+only that bundle, for the store and for the service that issues the credentials.
+The bundle must therefore also contain the CA of the token or credential
+service. When that service uses a private CA, uploads and cleanup work. Restores
+do not: they cannot reach a token or credential service behind a private CA yet.
+
+To check it, list the variables your platform injected into the PageBroker
+container, then take a snapshot:
+
+```bash
+kubectl get pod <agent-pod> -n <snapshot-ns> \
+  -o jsonpath='{range .spec.containers[?(@.name=="pagebroker")].env[*]}{.name}{"\n"}{end}'
+```
+
+When credentials do not resolve, a checkpoint fails with a storage error on the
+`PodSnapshotContent`, and a restore fails on the restore pod's
+`nvidia.com/Restored` condition; see
+[Find the Message](../troubleshooting/reading-a-failure-message.md#find-the-message).
+The operator logs the failed cleanup request.
+
+An empty `storage.s3.credentialsSecretRef` is not an error for the chart. If a
+Secret was meant to be set and no identity is bound, the install succeeds and
+the first checkpoint fails with:
+
+```text
+PageBroker STORAGE_UNAVAILABLE: S3 checkpoint operation failed
+```
+
+Check the PageBroker container's variables with the command above: no
+`AWS_SHARED_CREDENTIALS_FILE` means no Secret is mounted.
 
 ### Change S3 Settings
 

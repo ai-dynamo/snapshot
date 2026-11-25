@@ -50,6 +50,14 @@ commit-level history for each release is on its
   node agent together. See
   [Lifecycle hooks](docs/reference/workload-contract.md#lifecycle-hooks).
 
+- S3 stores work without static keys. With `storage.s3.credentialsSecretRef`
+  empty, PageBroker and the operator use the workload identity of their service
+  accounts, and credentials refresh without a restart. Instance metadata is
+  excluded, so the node's role is never used.
+  `operator.serviceAccount.annotations` is new. Nothing changes when a Secret is
+  set. See
+  [Use Workload Identity for S3](docs/operate/configure-storage.md#use-workload-identity-for-s3).
+
 - S3 restore tuning accepts
   `pageBroker.transferEngine.modelStreamer.restoreBatchBytes` to control batch
   and shared admission bytes. The default remains 10 GB; restart PageBroker

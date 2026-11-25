@@ -12,9 +12,6 @@ kind: ConfigMap
 {{- if and .Values.operator.bindNewContents (eq .Values.storage.type "pvc") (not .Values.pageBroker.artifactAddressing) }}
 {{- fail "operator.bindNewContents requires pageBroker.artifactAddressing and a completed compatible agent rollout" }}
 {{- end }}
-{{- if and (eq .Values.storage.type "s3") (not .Values.storage.s3.credentialsSecretRef) }}
-{{- fail "storage.s3.credentialsSecretRef is required when storage.type=s3" }}
-{{- end }}
 {{- if and (eq .Values.storage.type "s3") (not .Values.operator.bindNewContents) }}
 {{- fail "storage.type=s3 requires operator.bindNewContents: S3 has no legacy local-path checkpoint mode" }}
 {{- end }}
