@@ -163,12 +163,24 @@ exists, container creation fails, and kubelet retries with a backoff of up to 5
 minutes.
 
 Probes belong to the workload. Kubernetes runs liveness and readiness probes
-from container start, while the restore is still running and nothing in the
-container answers them yet. A liveness probe that fails during that time kills
-the container and loses the restore. Either set `Options.EnableStartupGate`,
-which holds liveness and readiness back until `restore-complete` exists, or
-give liveness probes an `initialDelaySeconds` or `failureThreshold` that covers
-the longest restore you expect.
+from container start, while the restore is still running. A liveness probe
+that fails during that time kills the container and loses the restore. A
+readiness probe on the workload's own API can also pass too early: once CRIU
+has restored the process, its HTTP server may answer while the GPU state is
+still being restored, and requests then wait until the restore completes
+(about 3 seconds for a vLLM restore on DGX Spark). Either set
+`Options.EnableStartupGate`, which holds liveness and readiness back until
+`restore-complete` exists, or, for Pods built without the builder, gate
+readiness on the condition the node agent sets:
+
+```yaml
+spec:
+  readinessGates:
+    - conditionType: nvidia.com/Restored
+```
+
+Without either, give liveness probes an `initialDelaySeconds` or
+`failureThreshold` that covers the longest restore you expect.
 
 Restore Pods are expected to use `restartPolicy: Never`. A Pod gets one restore:
 a container that starts again in the same Pod finds that restore already used,
