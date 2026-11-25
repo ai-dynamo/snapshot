@@ -66,3 +66,22 @@ tests:
     asserts:
       - notExists:
           path: metadata.annotations
+
+  - it: lets the CRD installer read and patch every Snapshot CRD
+    documentSelector:
+      path: kind
+      value: ClusterRole
+    set:
+      crdUpgrade.enabled: true
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["apiextensions.k8s.io"]
+            resources: ["customresourcedefinitions"]
+            resourceNames:
+              - podsnapshots.nvidia.com
+              - podsnapshotcontents.nvidia.com
+              - snapshotjobs.nvidia.com
+              - snapshotstorageclasses.nvidia.com
+            verbs: ["get", "patch"]

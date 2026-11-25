@@ -1,0 +1,265 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: snapshotstorageclasses.nvidia.com
+spec:
+  group: nvidia.com
+  names:
+    kind: SnapshotStorageClass
+    listKind: SnapshotStorageClassList
+    plural: snapshotstorageclasses
+    singular: snapshotstorageclass
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - description: Ready condition
+      jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - description: Reclaim policy
+      jsonPath: .spec.reclaimPolicy
+      name: Reclaim
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: SnapshotStorageClass is the cluster-scoped description of one
+          snapshot store.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              SnapshotStorageClassSpec describes one snapshot store. Exactly one store
+              block is set, and the block that is set names the kind of store.
+            properties:
+              pvc:
+                description: |-
+                  PVC selects a claim in the Snapshot namespace that the chart already
+                  mounts.
+                properties:
+                  basePath:
+                    description: |-
+                      BasePath is the directory in the claim that holds the snapshots. The
+                      default, "/", is the whole claim.
+                    maxLength: 1024
+                    type: string
+                  claimName:
+                    description: ClaimName is the claim that holds the snapshots.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - claimName
+                type: object
+                x-kubernetes-validations:
+                - message: claimName and basePath are immutable
+                  rule: 'self.claimName == oldSelf.claimName && (has(self.basePath)
+                    ? self.basePath : '''') == (has(oldSelf.basePath) ? oldSelf.basePath
+                    : '''')'
+                - message: basePath must not contain an artifacts or .. segment
+                  rule: '!has(self.basePath) || !self.basePath.split(''/'').exists(p,
+                    p == ''artifacts'' || p == ''..'')'
+              reclaimPolicy:
+                default: Delete
+                description: |-
+                  ReclaimPolicy is copied to content bound through this class. An edit
+                  applies to content bound afterwards.
+                enum:
+                - Delete
+                - Retain
+                type: string
+              s3:
+                description: S3 selects an S3-compatible bucket.
+                properties:
+                  addressing:
+                    description: Addressing selects virtual-hosted or path-style bucket
+                      addressing.
+                    enum:
+                    - virtual
+                    - path
+                    type: string
+                  allowHttp:
+                    description: AllowHTTP accepts a plain-http endpoint. For local
+                      testing only.
+                    type: boolean
+                  bucket:
+                    description: Bucket holds the snapshots.
+                    maxLength: 63
+                    minLength: 1
+                    type: string
+                  caBundleConfigMapRef:
+                    description: |-
+                      CABundleConfigMapRef selects a ConfigMap in the Snapshot namespace that
+                      holds the CA bundle for the endpoint.
+                    properties:
+                      key:
+                        default: ca.crt
+                        description: Key in the ConfigMap's data.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      name:
+                        description: Name of the ConfigMap.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  credentialsSecretRef:
+                    description: |-
+                      CredentialsSecretRef selects a Secret in the Snapshot namespace that
+                      holds a shared-credentials file. Omitted, the workload identity of the
+                      Snapshot pods is used.
+                    properties:
+                      key:
+                        default: credentials
+                        description: Key in the Secret's data.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      name:
+                        description: Name of the Secret.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  endpoint:
+                    description: Endpoint is the S3-compatible service URL.
+                    maxLength: 2048
+                    minLength: 1
+                    type: string
+                  prefix:
+                    description: Prefix is the key prefix in the bucket that holds
+                      the snapshots.
+                    maxLength: 1024
+                    type: string
+                  region:
+                    description: Region is the bucket's region.
+                    maxLength: 64
+                    minLength: 1
+                    type: string
+                required:
+                - bucket
+                - endpoint
+                - region
+                type: object
+                x-kubernetes-validations:
+                - message: endpoint, region, bucket and prefix are immutable
+                  rule: 'self.endpoint == oldSelf.endpoint && self.region == oldSelf.region
+                    && self.bucket == oldSelf.bucket && (has(self.prefix) ? self.prefix
+                    : '''') == (has(oldSelf.prefix) ? oldSelf.prefix : '''')'
+                - message: prefix must not contain an artifacts or .. segment
+                  rule: '!has(self.prefix) || !self.prefix.split(''/'').exists(p,
+                    p == ''artifacts'' || p == ''..'')'
+            type: object
+            x-kubernetes-validations:
+            - message: exactly one of pvc or s3 must be set
+              rule: has(self.pvc) != has(self.s3)
+            - message: the store block cannot change between pvc and s3
+              rule: has(self.pvc) == has(oldSelf.pvc)
+          status:
+            description: SnapshotStorageClassStatus is the observed state of a SnapshotStorageClass.
+            properties:
+              conditions:
+                description: |-
+                  Conditions reflect the latest observations of the class. The Ready
+                  condition says whether the store can be used.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              storeID:
+                description: StoreID is derived from the store's location fields.
+                maxLength: 73
+                pattern: ^store-v1-[0-9a-f]{64}$
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: name must be at most 63 characters
+          rule: size(self.metadata.name) <= 63
+    served: true
+    storage: true
+    subresources:
+      status: {}
