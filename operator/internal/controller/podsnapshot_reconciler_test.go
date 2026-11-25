@@ -1090,3 +1090,25 @@ func TestSnapshotReconciler_CascadeDeleteRequeuesUntilContentGone(t *testing.T) 
 		assert.True(t, apierrors.IsNotFound(err))
 	}
 }
+
+func TestSnapshotReconcilerBuildContentCopiesPodGroup(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		membership *snapshotv1alpha1.PodGroupSnapshotMembership
+	}{
+		{name: "standalone"},
+		{name: "member", membership: &snapshotv1alpha1.PodGroupSnapshotMembership{ObjectIdentity: snapshotv1alpha1.ObjectIdentity{Name: "group", UID: "group-uid"}, MemberID: "worker-0"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snap := makeSnapshotForReconcile()
+			snap.Spec.PodGroup = tc.membership
+			r := makeSnapshotReconciler(snapshotReconcilerScheme())
+			content := r.buildPodSnapshotContent(snap, "content", scheduledPod())
+			assert.Equal(t, tc.membership, content.Spec.PodGroup)
+			if tc.membership != nil {
+				content.Spec.PodGroup.MemberID = "other"
+				assert.Equal(t, "worker-0", tc.membership.MemberID)
+			}
+		})
+	}
+}

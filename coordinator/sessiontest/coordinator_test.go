@@ -6,6 +6,7 @@ package sessiontest
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -178,6 +179,86 @@ func requireNoGrace(t *testing.T, h *harness) {
 	t.Helper()
 	require.Never(t, func() bool { return h.clock.Armed(server.DefaultGrace) > 0 }, pending, 5*time.Millisecond,
 		"no grace period may start")
+}
+
+// TestCoordinatorFailUncommitted covers the host failing a session before the
+// commit, once its group resource's deletion starts or a member fails:
+// members that have not all passed the admitted barrier learn the reason, and
+// members past it carry on.
+func TestCoordinatorFailUncommitted(t *testing.T) {
+	h := newHarness(t)
+	ctx := within(t)
+
+	t.Run("before the admitted barrier completes, every member learns the reason", func(t *testing.T) {
+		ses := h.session(t, 2)
+		sessions := ses.connectAll(t)
+		wait := barrier(ctx, sessions[0], session.BarrierAdmitted)
+		awaitKey(t, ses.raw(t, 1), session.BarrierKey(session.BarrierAdmitted, ses.spec.Members[0].ID))
+		require.NoError(t, h.srv.FailUncommitted(ctx, ses.spec.UID, session.ReasonCancelled))
+		require.ErrorIs(t, <-wait, &session.AbortError{Reason: session.ReasonCancelled})
+		for _, s := range sessions {
+			awaitDone(t, s)
+			require.ErrorIs(t, s.Err(), &session.AbortError{Reason: session.ReasonCancelled})
+		}
+		assert.Equal(t, "failed "+session.ReasonCancelled, ses.awaitOutcome(t))
+	})
+
+	t.Run("once it has completed, the session stays open", func(t *testing.T) {
+		ses := h.session(t, 2)
+		sessions := ses.connectAll(t)
+		waits := []<-chan error{
+			barrier(ctx, sessions[0], session.BarrierAdmitted), barrier(ctx, sessions[1], session.BarrierAdmitted),
+		}
+		for _, wait := range waits {
+			require.NoError(t, <-wait)
+		}
+		require.NoError(t, h.srv.FailUncommitted(ctx, ses.spec.UID, "PodIPChanged"))
+		requireOpen(t, sessions[0], "a committed session must stay open")
+		for _, s := range sessions {
+			require.NoError(t, s.Leave(ctx))
+		}
+		assert.Equal(t, "closed", ses.awaitOutcome(t))
+	})
+}
+
+func TestFailUncommittedRacesTheCommit(t *testing.T) {
+	for round := range 300 {
+		if !t.Run(fmt.Sprint(round), func(t *testing.T) {
+			// Each trial owns its coordinator, so file-store teardown cannot
+			// overlap a later trial's creation.
+			h := newHarness(t)
+			ctx := within(t)
+			ses := h.session(t, 2)
+			t.Cleanup(func() { require.NoError(t, h.srv.Remove(ctx, ses.spec.UID)) })
+			members := ses.connectAll(t)
+			first := barrier(ctx, members[0], session.BarrierAdmitted)
+			awaitKey(t, ses.raw(t, 1), session.BarrierKey(session.BarrierAdmitted, ses.spec.Members[0].ID))
+			start := make(chan struct{})
+			failed, last := make(chan error, 1), make(chan error, 1)
+			go func() {
+				<-start
+				failed <- h.srv.FailUncommitted(ctx, ses.spec.UID, session.ReasonRefused)
+			}()
+			go func() {
+				<-start
+				last <- members[1].Barrier(ctx, session.BarrierAdmitted)
+			}()
+			close(start)
+			require.NoError(t, <-failed)
+			outcomes := []error{<-first, <-last}
+			ended, _ := h.srv.Ended(ses.spec.UID)
+			for _, err := range outcomes {
+				if ended {
+					require.ErrorIs(t, err, &session.AbortError{Reason: session.ReasonRefused},
+						"a member must not pass the barrier of a session that ended Refused")
+				} else {
+					require.NoError(t, err, "the commit keeps the session open")
+				}
+			}
+		}) {
+			return
+		}
+	}
 }
 
 // TestShutdown covers shutting down: every open session fails with
