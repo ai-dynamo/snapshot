@@ -69,6 +69,12 @@ type PodSnapshotSpec struct {
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=1
 	Containers []ContainerSnapshotConfig `json:"containers,omitempty"`
+
+	// StorageClassName selects the SnapshotStorageClass that holds the
+	// snapshot. Empty selects the default class.
+	// +kubebuilder:validation:MaxLength=63
+	// +optional
+	StorageClassName string `json:"storageClassName,omitempty"`
 }
 
 // PodSnapshotSource identifies the workload a PodSnapshot was taken from.
