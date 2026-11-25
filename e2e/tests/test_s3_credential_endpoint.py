@@ -83,7 +83,9 @@ def test_checkpoint_and_cleanup_use_credentials_the_endpoint_issued(
     assert pod_snapshot["status"]["boundSnapshotContentName"] == content["metadata"]["name"]
     artifacts = content["status"]["storage"]["artifacts"]
     assert [artifact["containerName"] for artifact in artifacts] == [snap.CONTAINER]
-    assert not snap.artifact_root_exists(config, source_node, content["metadata"]["uid"]), (
+    assert not snap.artifact_root_on_checkpoint_volume(
+        config, source_node, content["metadata"]["uid"]
+    ), (
         "the checkpoint must not also be written to the checkpoint volume"
     )
     assert issued_to(config, config.release), "the endpoint issued nothing to the agent"

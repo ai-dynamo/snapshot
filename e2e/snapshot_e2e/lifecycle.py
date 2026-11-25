@@ -53,6 +53,11 @@ PROGRESS_INTERVAL_SECONDS = 30
 TERMINAL_POD_PHASES = {"Failed", "Succeeded"}
 AGENT_CHECKPOINT_DIR = "/checkpoints"
 AGENT_CONTAINER = "agent"
+PAGEBROKER_CONTAINER = "pagebroker"
+RCLONE = "/usr/local/bin/rclone"
+# A directory the agent and PageBroker containers share. PageBroker has rclone
+# and the store's credentials but no shell; the agent has a shell but neither.
+STORE_SCRATCH_DIR = "/pagebroker/e2e-store"
 # /proc in the restored container. Tests point it elsewhere.
 PROC_ROOT = "/proc"
 
@@ -967,6 +972,10 @@ def wait_for_restore_past_the_gate(
 def checkpoint_artifact_manifest(
     config: k8s.E2EConfig, node: str, content_uid: str
 ) -> str:
+    if stored_in_s3():
+        return _read_stored_files(
+            config, node, content_uid, ["manifest.yaml"], "cat manifest.yaml"
+        )
     return k8s.exec_payload(
         config.namespace,
         checkpoint_agent_pod(config, node),
@@ -996,13 +1005,21 @@ def record_cpu_feature(
         raise AssertionError(f"checkpoint {content_uid} recorded no CPU features")
     item = lines[key + 1]
     lines.insert(key + 1, f"{item[: len(item) - len(item.lstrip())]}- {feature}\n")
-    k8s.exec_command(
-        config.namespace,
-        checkpoint_agent_pod(config, node),
-        f"printf '%s' {shlex.quote(''.join(lines))} > "
-        f"{checkpoint_artifact_path(content_uid)}/manifest.yaml",
-        container=AGENT_CONTAINER,
-    )
+    if stored_in_s3():
+        _write_stored_file(
+            config,
+            node,
+            f"{_stored_artifact_data(content_uid)}/manifest.yaml",
+            "".join(lines),
+        )
+    else:
+        k8s.exec_command(
+            config.namespace,
+            checkpoint_agent_pod(config, node),
+            f"printf '%s' {shlex.quote(''.join(lines))} > "
+            f"{checkpoint_artifact_path(content_uid)}/manifest.yaml",
+            container=AGENT_CONTAINER,
+        )
     recorded = checkpoint_manifest(config, node, content_uid)["host"]["cpuFeatures"]
     if feature not in recorded:
         raise AssertionError(f"checkpoint {content_uid} still records {recorded!r}")
@@ -1078,6 +1095,12 @@ def visible_gpus(namespace: str, pod: str) -> list[dict[str, str]]:
 def checkpoint_artifact_listing(
     config: k8s.E2EConfig, node: str, content_uid: str
 ) -> str:
+    if stored_in_s3():
+        files = _stored_files(config, node, _stored_artifact_data(content_uid))
+        rootfs = _read_stored_files(
+            config, node, content_uid, ["rootfs-diff.tar"], "tar -tf rootfs-diff.tar | sort"
+        )
+        return "".join(f"./{name}\n" for name in sorted(files)) + rootfs
     return k8s.exec_command(
         config.namespace,
         checkpoint_agent_pod(config, node),
@@ -1094,6 +1117,10 @@ def checkpoint_rootfs_file(
     content_uid: str,
     path: str,
 ) -> str:
+    if stored_in_s3():
+        return _read_stored_files(
+            config, node, content_uid, ["rootfs-diff.tar"], f"tar -xOf rootfs-diff.tar {path}"
+        )
     return k8s.exec_command(
         config.namespace,
         checkpoint_agent_pod(config, node),
@@ -1117,6 +1144,11 @@ def corrupt_checkpoint_image(
     and an unreadable one are different failures, and the unreadable one is the
     one a half-written or bit-rotted artifact produces.
     """
+    if stored_in_s3():
+        _write_stored_file(
+            config, node, f"{_stored_artifact_data(content_uid)}/{image}", "not-a-criu-image"
+        )
+        return
     k8s.exec_command(
         config.namespace,
         checkpoint_agent_pod(config, node),
@@ -1136,7 +1168,122 @@ def checkpoint_artifact_root(content_uid: str) -> str:
     return shlex.quote(f"{AGENT_CHECKPOINT_DIR}/artifacts/{content_uid}")
 
 
+def stored_in_s3() -> bool:
+    """Whether the install under test keeps checkpoints in an S3 store."""
+    return os.environ.get("SNAPSHOT_E2E_STORAGE") == "s3"
+
+
+def _store_remote(config: k8s.E2EConfig, key: str) -> list[str]:
+    """rclone arguments naming a key in the install's S3 store.
+
+    Read from the configuration PageBroker itself runs on, so the helpers look
+    where the product writes. Credentials come from the PageBroker container's
+    environment, whichever way the install supplies them.
+    """
+    data = client.CoreV1Api().read_namespaced_config_map(
+        f"{config.release}-pagebroker-storage-config", config.namespace
+    ).data
+    store = json.loads(data["pagebroker-s3-config.json"])
+    options = [
+        "provider=Other",
+        "env_auth=true",
+        "no_check_bucket=true",
+        f"region={store['region']}",
+        f"endpoint='{store['endpoint']}'",
+        f"force_path_style={'true' if store.get('addressing') == 'path' else 'false'}",
+    ]
+    path = "/".join(part for part in (store["bucket"], store.get("prefix", ""), key) if part)
+    arguments = [f":s3,{','.join(options)}:{path}"]
+    if store.get("caFile"):
+        arguments += ["--ca-cert", store["caFile"]]
+    return arguments
+
+
+def _rclone(config: k8s.E2EConfig, node: str, arguments: list[str]) -> str:
+    output = k8s.exec_argv(
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        [RCLONE, "--quiet", "--retries", "1", *arguments],
+        container=PAGEBROKER_CONTAINER,
+    )
+    if "directory not found" in output:
+        return ""
+    if "ERROR" in output or "CRITICAL" in output or "Failed to" in output:
+        raise AssertionError(f"rclone {arguments[0]} failed: {output}")
+    return output
+
+
+def _stored_artifact_root(content_uid: str) -> str:
+    return f"artifacts/{content_uid}"
+
+
+def _stored_artifact_data(content_uid: str) -> str:
+    return f"{_stored_artifact_root(content_uid)}/containers/{CONTAINER}/data"
+
+
+def _stored_files(
+    config: k8s.E2EConfig, node: str, key: str, *, recursive: bool = False
+) -> list[str]:
+    arguments = ["lsf", "--files-only", *_store_remote(config, key)]
+    if recursive:
+        arguments.append("--recursive")
+    return _rclone(config, node, arguments).split()
+
+
+def _read_stored_files(
+    config: k8s.E2EConfig,
+    node: str,
+    content_uid: str,
+    names: list[str],
+    command: str,
+) -> str:
+    """Run a shell command over files of a stored artifact.
+
+    PageBroker copies the named files into the shared scratch directory and the
+    agent container runs the command there, then removes the copy.
+    """
+    scratch = shlex.quote(f"{STORE_SCRATCH_DIR}/{uuid.uuid4().hex}")
+    arguments = ["copy", *_store_remote(config, _stored_artifact_data(content_uid)), scratch]
+    for name in names:
+        arguments += ["--include", name]
+    _rclone(config, node, arguments)
+    return k8s.exec_payload(
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        f"cd {scratch} && {command}; status=$?; rm -rf {scratch}; exit $status",
+        container=AGENT_CONTAINER,
+    )
+
+
+def _write_stored_file(config: k8s.E2EConfig, node: str, key: str, text: str) -> None:
+    scratch = shlex.quote(f"{STORE_SCRATCH_DIR}/{uuid.uuid4().hex}")
+    agent = checkpoint_agent_pod(config, node)
+    k8s.exec_command(
+        config.namespace,
+        agent,
+        f"mkdir -p {STORE_SCRATCH_DIR} && printf '%s' {shlex.quote(text)} > {scratch}",
+        container=AGENT_CONTAINER,
+    )
+    try:
+        _rclone(config, node, ["copyto", scratch, *_store_remote(config, key)])
+    finally:
+        k8s.exec_command(
+            config.namespace, agent, f"rm -f {scratch}", container=AGENT_CONTAINER
+        )
+
+
 def artifact_root_exists(config: k8s.E2EConfig, node: str, content_uid: str) -> bool:
+    """Whether the store holds anything under the artifact root."""
+    if stored_in_s3():
+        return bool(
+            _stored_files(config, node, _stored_artifact_root(content_uid), recursive=True)
+        )
+    return artifact_root_on_checkpoint_volume(config, node, content_uid)
+
+
+def artifact_root_on_checkpoint_volume(
+    config: k8s.E2EConfig, node: str, content_uid: str
+) -> bool:
     marker = "__snapshot_artifact_root_exists__"
     output = k8s.exec_command(
         config.namespace,
@@ -1165,6 +1312,11 @@ def create_artifact_staging_file(
     node: str,
     content_uid: str,
 ) -> None:
+    if stored_in_s3():
+        _write_stored_file(
+            config, node, f"{_stored_artifact_root(content_uid)}/.tmp/partial", "orphan"
+        )
+        return
     k8s.exec_command(
         config.namespace,
         checkpoint_agent_pod(config, node),

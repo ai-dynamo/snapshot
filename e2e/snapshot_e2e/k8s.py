@@ -343,6 +343,27 @@ def exec_command(
     )
 
 
+def exec_argv(
+    namespace: str,
+    pod: str,
+    argv: list[str],
+    *,
+    container: str | None = None,
+) -> str:
+    """Run a program directly, for a container that has no shell."""
+    return stream(
+        client.CoreV1Api().connect_get_namespaced_pod_exec,
+        pod,
+        namespace,
+        command=argv,
+        container=container,
+        stderr=True,
+        stdin=False,
+        stdout=True,
+        tty=False,
+    )
+
+
 PAYLOAD_MARKER = "e2e-payload-follows"
 
 
