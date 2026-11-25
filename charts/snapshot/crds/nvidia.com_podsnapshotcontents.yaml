@@ -357,6 +357,22 @@ spec:
                   content; the producer will start writing it with artifact-flow integration.
                   Like the rest of spec it cannot be added, removed or changed after creation.
                 properties:
+                  reclaimPolicy:
+                    description: |-
+                      ReclaimPolicy is copied from the class at binding. Editing the class
+                      later does not change it.
+                    enum:
+                    - Delete
+                    - Retain
+                    type: string
+                  storageClassName:
+                    description: |-
+                      StorageClassName is the SnapshotStorageClass the content was bound
+                      through. StoreID stays the authority on where the data is; the class says
+                      how to reach it.
+                    maxLength: 63
+                    minLength: 1
+                    type: string
                   storeID:
                     description: StoreID is the versioned canonical storage identity
                       shared with PageBroker.
@@ -366,6 +382,9 @@ spec:
                 required:
                 - storeID
                 type: object
+                x-kubernetes-validations:
+                - message: reclaimPolicy is required when storageClassName is set
+                  rule: '!has(self.storageClassName) || has(self.reclaimPolicy)'
             required:
             - snapshotRef
             - source
