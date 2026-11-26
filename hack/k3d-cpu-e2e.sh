@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Create a single-node k3d cluster that Snapshot's CPU e2e suite can run
-# against, on any linux/amd64 Docker host (including a GitHub-hosted runner).
+# against, on any linux/amd64 or linux/arm64 Docker host (including a
+# GitHub-hosted runner and Docker Desktop on a Mac).
 #
 # This only prepares the cluster. Installing Snapshot stays in the shared
 # installer (e2e/snapshot_e2e/infra/setup.py) so the CPU and GPU paths agree on

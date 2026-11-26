@@ -46,16 +46,21 @@ log() {
   echo "[$(date +%H:%M:%S)] $*"
 }
 
-require_linux_amd64_docker() {
+# Sets IMAGE_PLATFORM to the platform of the Docker daemon. The k3d node runs
+# on that daemon, so the images are built for it rather than for the Makefile's
+# default, linux/amd64: Docker Desktop on an Apple Silicon Mac is linux/arm64.
+require_supported_docker() {
   local os arch
   os="$(docker version --format '{{.Server.Os}}')"
   arch="$(docker version --format '{{.Server.Arch}}')"
-  # The suite builds the agent for linux/amd64 by default, and the k3d node runs
-  # on the same daemon, so the daemon has to match.
-  if [[ "${os}/${arch}" != "linux/amd64" ]]; then
-    echo "the CPU e2e suite needs a linux/amd64 Docker daemon, found ${os}/${arch}" >&2
+  case "${os}/${arch}" in
+  linux/amd64 | linux/arm64) ;;
+  *)
+    echo "the CPU e2e suite needs a linux/amd64 or linux/arm64 Docker daemon, found ${os}/${arch}" >&2
     exit 1
-  fi
+    ;;
+  esac
+  IMAGE_PLATFORM="${os}/${arch}"
 }
 
 require_push_capable_builder() {
@@ -92,7 +97,7 @@ cleanup() {
   hack/k3d-cpu-e2e.sh cluster-down
 }
 
-require_linux_amd64_docker
+require_supported_docker
 
 # Registered before anything is created: the registry comes up first and
 # cluster-down removes both, and each tolerates there being nothing to delete.
@@ -111,7 +116,7 @@ if [[ "${SKIP_BUILD}" != "true" ]]; then
       build_args+=" --build-arg GO_BUILD_TAGS=snapshot_e2e"
     fi
     make "docker-build-${component}" REGISTRY="${IMAGE_REGISTRY}" TAGS="${IMAGE_TAG}" \
-      DOCKER_BUILD_ARGS="${build_args}"
+      AGENT_PLATFORM="${IMAGE_PLATFORM}" DOCKER_BUILD_ARGS="${build_args}"
   done
 else
   # Skipping the builds means relying on what a previous run pushed, and the
