@@ -186,6 +186,11 @@ commit-level history for each release is on its
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
+- A checkpoint of a Pod that sets `shareProcessNamespace: true` now fails with
+  `ProcessNamespaceShared` before the agent suspends the workload, and the
+  source Pod keeps running. It failed in the CRIU dump with `Can't dump a pid
+  namespace without the process init`, and the agent then ended the source Pod.
+  See [Workload Contract](docs/reference/workload-contract.md#pod-requirements).
 
 ### Deprecated
 

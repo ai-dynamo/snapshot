@@ -14,6 +14,10 @@ Snapshot currently focuses on inference cold-start; further use cases are on the
   calls (e.g. Datadog GPU monitoring). CUDA calls may fail or hang after
   restore, with undefined results. Disable such interception for workloads
   that will be snapshotted.
+- A source Pod cannot share a process namespace. The agent fails the checkpoint
+  of a Pod that sets `shareProcessNamespace: true` and leaves the workload
+  running. See
+  [Workload Contract](../reference/workload-contract.md#pod-requirements).
 - The restore proxy needs a container runtime with NRI v0.10 or newer, enabled:
   containerd 2.2 or newer. The node agent uses NRI to make the proxy PID 1 in
   restore containers. On a node without NRI, or with an older runtime, the
