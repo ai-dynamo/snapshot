@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -54,6 +55,10 @@ func runCheckpoint(args []string) error {
 	timeout := flags.Duration("timeout", 45*time.Minute, "Maximum time to wait for checkpoint completion")
 
 	if err := flags.Parse(args); err != nil {
+		// The flag set has already printed the usage for --help.
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	if len(flags.Args()) != 0 {
@@ -102,6 +107,10 @@ func runRestore(args []string) error {
 	snapshotName := flags.String("snapshot", "", "Required. PodSnapshot name in the restore pod namespace")
 
 	if err := flags.Parse(args); err != nil {
+		// The flag set has already printed the usage for --help.
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	if len(flags.Args()) != 0 {
