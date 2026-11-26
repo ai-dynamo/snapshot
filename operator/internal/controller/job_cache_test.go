@@ -4,15 +4,18 @@
 package controller
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
@@ -79,18 +82,50 @@ func TestTrimJobForCacheTrimsJobsNoSnapshotJobControls(t *testing.T) {
 	}
 }
 
-func TestTrimJobForCacheKeepsSourceJobs(t *testing.T) {
-	sj := minimalSnapshotJob()
-	job, err := buildSourceJob(sj)
-	require.NoError(t, err)
-	// The same call createSourceJob makes, so the kept Jobs are the ones the
-	// operator creates.
-	require.NoError(t, controllerutil.SetControllerReference(sj, job, snapshotJobReconcilerScheme()))
-	job.ManagedFields = []metav1.ManagedFieldsEntry{{Manager: "manager"}}
-	job.Status = batchv1.JobStatus{
-		Active:     1,
-		Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}},
+func TestTrimJobForCacheKeepsJobsASnapshotJobControls(t *testing.T) {
+	controlledBy := func(apiVersion string) metav1.OwnerReference {
+		return metav1.OwnerReference{
+			APIVersion: apiVersion, Kind: snapshotJobKind, Name: "warm-worker", UID: "sj-uid", Controller: ptr.To(true),
+		}
 	}
+	for _, tc := range []struct {
+		name   string
+		owners []metav1.OwnerReference
+	}{
+		{"controlled by a SnapshotJob", []metav1.OwnerReference{controlledBy(snapshotv1alpha1.GroupVersion.String())}},
+		// A Job keeps the owner reference it was created with, so a Job that an
+		// earlier API version of SnapshotJob created must still be kept.
+		{"controlled by a SnapshotJob of another API version", []metav1.OwnerReference{
+			controlledBy(snapshotv1alpha1.GroupVersion.Group + "/v1"),
+		}},
+		{"SnapshotJob controller listed after another owner", []metav1.OwnerReference{
+			{APIVersion: "v1", Kind: "ConfigMap", Name: "settings", UID: "cm-uid"},
+			controlledBy(snapshotv1alpha1.GroupVersion.String()),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			job := jobForCacheTest(tc.owners...)
+			want := job.DeepCopy()
+			want.ManagedFields = nil
+
+			out, err := TrimJobForCache(job)
+			require.NoError(t, err)
+			assert.Equal(t, want, out.(*batchv1.Job))
+		})
+	}
+}
+
+// The reconciler creates the source Job here, so the owner reference under
+// test is the one createSourceJob writes.
+func TestTrimJobForCacheKeepsTheSourceJobTheOperatorCreates(t *testing.T) {
+	sj := minimalSnapshotJob()
+	r := makeSnapshotJobReconciler(snapshotJobReconcilerScheme(), sj)
+	_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	job := getSourceJob(t, r.Client, sj)
+	require.NotEmpty(t, job.Spec.Template.Spec.Containers)
+	job.ManagedFields = []metav1.ManagedFieldsEntry{{Manager: "manager"}}
 	want := job.DeepCopy()
 	want.ManagedFields = nil
 
@@ -99,23 +134,60 @@ func TestTrimJobForCacheKeepsSourceJobs(t *testing.T) {
 	assert.Equal(t, want, out.(*batchv1.Job))
 }
 
-// The name-conflict decision is the one cached read of a Job that no
-// SnapshotJob controls, so a trimmed Job must still produce it.
-func TestTrimJobForCacheKeepsTheSourceJobClassification(t *testing.T) {
+// trimJobsOnRead sends every Job a reconciler reads through TrimJobForCache,
+// as the manager's cache does before a controller sees the Job.
+func trimJobsOnRead() interceptor.Funcs {
+	return interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+		if err := c.Get(ctx, key, obj, opts...); err != nil {
+			return err
+		}
+		_, err := TrimJobForCache(obj)
+		return err
+	}}
+}
+
+func snapshotJobFailedReason(t *testing.T, r *SnapshotJobReconciler, sj *snapshotv1alpha1.SnapshotJob) string {
+	t.Helper()
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed)
+	require.Equal(t, metav1.ConditionTrue, failed.Status)
+	return failed.Reason
+}
+
+// A SnapshotJob reads the spec of its own source Job to accept it and the
+// status to follow it, so both must come back from the trimmed cache.
+func TestSnapshotJobReconcileFollowsItsSourceJobThroughTheTrimmedCache(t *testing.T) {
+	ctx := context.Background()
 	sj := minimalSnapshotJob()
+	r := makeSnapshotJobReconcilerWithInterceptor(snapshotJobReconcilerScheme(), trimJobsOnRead(), sj)
+	_, err := r.Reconcile(ctx, reconcileRequest(sj))
+	require.NoError(t, err)
 
-	foreign, err := TrimJobForCache(jobForCacheTest())
-	require.NoError(t, err)
-	failure := classifyExistingSourceJob(sj, foreign.(*batchv1.Job))
-	require.NotNil(t, failure)
-	assert.Equal(t, snapshotv1alpha1.ReasonJobNameConflict, failure.reason)
+	// The Job controller reports that the deadline passed.
+	job := getSourceJob(t, r.Client, sj)
+	setJobFailureCondition(job, batchv1.JobFailed, batchv1.JobReasonDeadlineExceeded, "Job was active longer than specified deadline")
+	require.NoError(t, r.Status().Update(ctx, job))
 
-	owned, err := buildSourceJob(sj)
+	_, err = r.Reconcile(ctx, reconcileRequest(sj))
 	require.NoError(t, err)
-	require.NoError(t, controllerutil.SetControllerReference(sj, owned, snapshotJobReconcilerScheme()))
-	trimmed, err := TrimJobForCache(owned)
+	assert.Equal(t, snapshotv1alpha1.ReasonDeadlineExceeded, snapshotJobFailedReason(t, r, sj))
+}
+
+// The name-conflict decision is the one cached read of a Job that no
+// SnapshotJob controls, so it must not need the spec or status of that Job.
+func TestSnapshotJobReconcileReportsANameConflictThroughTheTrimmedCache(t *testing.T) {
+	sj := minimalSnapshotJob()
+	foreign := jobForCacheTest()
+	// The fake client stores neither a deletion timestamp without a finalizer
+	// nor a managedFields entry without an operation.
+	foreign.DeletionTimestamp, foreign.ManagedFields = nil, nil
+	r := makeSnapshotJobReconcilerWithInterceptor(snapshotJobReconcilerScheme(), trimJobsOnRead(), sj, foreign)
+
+	_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
 	require.NoError(t, err)
-	assert.Nil(t, classifyExistingSourceJob(sj, trimmed.(*batchv1.Job)))
+	assert.Equal(t, snapshotv1alpha1.ReasonJobNameConflict, snapshotJobFailedReason(t, r, sj))
 }
 
 func TestTrimJobForCacheLeavesOtherObjects(t *testing.T) {

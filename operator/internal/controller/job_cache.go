@@ -31,6 +31,10 @@ func TrimJobForCache(obj any) (any, error) {
 	return job, nil
 }
 
+// controlledBySnapshotJob applies the test the Owns watch applies to route a
+// Job to the SnapshotJob controller: the kind and group of the controller owner
+// reference. The version is not compared, because a Job keeps the reference it
+// was created with when the SnapshotJob API version changes.
 func controlledBySnapshotJob(job *batchv1.Job) bool {
 	owner := metav1.GetControllerOfNoCopy(job)
 	if owner == nil || owner.Kind != snapshotJobKind {
