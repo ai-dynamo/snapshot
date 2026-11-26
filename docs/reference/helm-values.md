@@ -120,7 +120,7 @@ payload checksums.
 
 | Value | Default | Description |
 |-------|---------|-------------|
-| `operator.resources` | 50m CPU / 64Mi request, 500m CPU / 256Mi limit | CPU and memory requests/limits for the operator manager. |
+| `operator.resources` | 50m CPU / 64Mi request, 500m CPU / 256Mi limit | CPU and memory requests/limits for the operator manager. The manager sets its Go memory limit to 90% of `limits.memory`, when set. |
 | `operator.nodeSelector` | `{}` | Node selector for the operator pod. |
 | `operator.affinity` | `{}` | Affinity rules for the operator pod. |
 | `operator.tolerations` | `[]` | Tolerations for the operator pod. |

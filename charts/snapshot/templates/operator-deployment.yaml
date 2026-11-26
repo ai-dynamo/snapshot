@@ -109,8 +109,17 @@ spec:
             - {{ printf "--artifact-cleanup-s3-ca-bundle-path=%s" (include "snapshot.s3CABundlePath" .) | quote }}
             {{- end }}
             {{- end }}
-          {{- if or .Values.operator.testFailCaptureSourceAnnotation (include "snapshot.s3CredentialEndpointEnabled" .) }}
+          {{- if or ((.Values.operator.resources).limits).memory .Values.operator.testFailCaptureSourceAnnotation (include "snapshot.s3CredentialEndpointEnabled" .) }}
           env:
+            {{- if ((.Values.operator.resources).limits).memory }}
+            # The manager sets its Go memory limit below the container limit.
+            # Without a limit this would be the node's allocatable memory, so
+            # it is left out and the manager leaves Go unchanged.
+            - name: SNAPSHOT_OPERATOR_MEMORY_LIMIT_BYTES
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
+            {{- end }}
             {{- if .Values.operator.testFailCaptureSourceAnnotation }}
             - name: SNAPSHOT_E2E_TEST_FAIL_CAPTURE_SOURCE_ANNOTATION
               value: {{ .Values.operator.testFailCaptureSourceAnnotation | quote }}
