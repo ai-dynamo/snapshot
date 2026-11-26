@@ -101,9 +101,9 @@ commit-level history for each release is on its
   `example.com/pool DoesNotExist` keeps the agent off those nodes. An install
   that sets none is unchanged. See
   [Agent DaemonSet and Access](docs/reference/helm-values.md#agent-daemonset-and-access).
-- `seccomp.sourcePodProfile` sets the seccomp profile that a SnapshotJob source
-  Pod gets, and `""` sets none. The default, `profiles/block-iouring.json`, is
-  unchanged. On OpenShift the default needs an SCC that allows it (#1002). See
+- `seccomp.applyToSourcePods=false` stops a SnapshotJob source Pod from getting
+  the block-iouring seccomp profile. The default, `true`, is unchanged. On
+  OpenShift the profile needs an SCC that allows it (#1002). See
   [Install on OpenShift](docs/get-started/installation.md#install-on-openshift).
 
 ### Changed

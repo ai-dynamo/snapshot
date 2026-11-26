@@ -5,23 +5,15 @@ suite: SnapshotJob source Pod seccomp profile
 templates:
   - templates/operator-deployment.yaml
 tests:
-  - it: defaults to the block-iouring profile
+  - it: sets the block-iouring profile on source Pods by default
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
           content: "--source-pod-seccomp-profile=profiles/block-iouring.json"
 
-  - it: passes a custom profile to the operator
-    set:
-      seccomp.sourcePodProfile: profiles/custom.json
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].args
-          content: "--source-pod-seccomp-profile=profiles/custom.json"
-
   - it: passes an empty profile so the operator sets none
     set:
-      seccomp.sourcePodProfile: ""
+      seccomp.applyToSourcePods: false
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args

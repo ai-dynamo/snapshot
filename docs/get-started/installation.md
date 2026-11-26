@@ -125,7 +125,7 @@ values. These kernels already block io_uring, and source Pods get the cluster
 default profile instead.
 
 - `seccomp.deploy=false`
-- `seccomp.sourcePodProfile=""`
+- `seccomp.applyToSourcePods=false`
 
 To keep the profile on older nodes, create an SCC that allows it. This command
 copies `restricted-v2` and adds the profile:
