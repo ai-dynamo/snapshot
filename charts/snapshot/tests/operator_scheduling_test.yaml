@@ -46,3 +46,13 @@ tests:
       - equal:
           path: spec.template.spec.tolerations[0].effect
           value: NoSchedule
+
+  - it: tells the operator its namespace
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace

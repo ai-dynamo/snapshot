@@ -84,20 +84,59 @@ type S3Backend struct {
 // from that chain, so a workload identity that does not resolve fails instead
 // of falling back to the node's role.
 func NewS3Backend(ctx context.Context, cfg S3Config) (*S3Backend, error) {
+	client, err := NewS3Client(ctx, S3ClientConfig{
+		Region:          cfg.Region,
+		Endpoint:        cfg.Endpoint,
+		PathStyle:       cfg.Endpoint != "",
+		CredentialsPath: cfg.CredentialsPath,
+		CABundlePath:    cfg.CABundlePath,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &S3Backend{client: client, bucket: cfg.Bucket, artifactsPrefix: s3ArtifactsPrefix(cfg.Prefix)}, nil
+}
+
+// S3ClientConfig describes how to reach one S3-compatible service. Credentials
+// come from Credentials, else from the file at CredentialsPath, else from the
+// default credential chain without instance metadata. The CA bundle comes from
+// CABundlePEM, else from the file at CABundlePath, else from system trust.
+type S3ClientConfig struct {
+	Region          string
+	Endpoint        string
+	PathStyle       bool
+	Credentials     aws.CredentialsProvider
+	CredentialsPath string
+	CABundlePath    string
+	CABundlePEM     []byte
+}
+
+// NewS3Client builds an S3 client from cfg.
+func NewS3Client(ctx context.Context, cfg S3ClientConfig) (*s3.Client, error) {
 	loadOptions := []func(*config.LoadOptions) error{
 		config.WithRegion(cfg.Region),
 		config.WithSharedConfigFiles([]string{}),
 	}
-	if cfg.CredentialsPath != "" {
+	switch {
+	case cfg.Credentials != nil:
+		loadOptions = append(loadOptions, config.WithCredentialsProvider(aws.NewCredentialsCache(cfg.Credentials)))
+	case cfg.CredentialsPath != "":
 		loadOptions = append(loadOptions,
 			config.WithCredentialsProvider(aws.NewCredentialsCache(sharedCredentialsFileProvider(cfg.CredentialsPath))))
-	} else {
+	default:
 		loadOptions = append(loadOptions,
 			config.WithSharedCredentialsFiles([]string{}),
 			config.WithEC2IMDSClientEnableState(imds.ClientDisabled))
 	}
 	s3HTTPClient := awshttp.NewBuildableClient()
-	if cfg.CABundlePath != "" {
+	switch {
+	case len(cfg.CABundlePEM) > 0:
+		httpClient, err := caPoolHTTPClient(cfg.CABundlePEM, "the CA bundle")
+		if err != nil {
+			return nil, err
+		}
+		s3HTTPClient = httpClient
+	case cfg.CABundlePath != "":
 		httpClient, err := caBundleHTTPClient(cfg.CABundlePath)
 		if err != nil {
 			return nil, err
@@ -112,19 +151,15 @@ func NewS3Backend(ctx context.Context, cfg S3Config) (*S3Backend, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load S3 client config: %w", err)
 	}
-	b := &S3Backend{}
-	b.client = s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+	return s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		if client, ok := awsCfg.HTTPClient.(*awshttp.BuildableClient); ok {
 			o.HTTPClient = client.WithTimeout(0)
 		}
 		if cfg.Endpoint != "" {
 			o.BaseEndpoint = aws.String(cfg.Endpoint)
-			o.UsePathStyle = true
 		}
-	})
-	b.bucket = cfg.Bucket
-	b.artifactsPrefix = s3ArtifactsPrefix(cfg.Prefix)
-	return b, nil
+		o.UsePathStyle = cfg.PathStyle
+	}), nil
 }
 
 // s3ArtifactsPrefix mirrors PageBroker's key layout (see SNEP-237); do not change independently.
@@ -158,9 +193,13 @@ func caBundleHTTPClient(caBundlePath string) (*awshttp.BuildableClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read CA bundle %q: %w", caBundlePath, err)
 	}
+	return caPoolHTTPClient(pem, fmt.Sprintf("CA bundle %q", caBundlePath))
+}
+
+func caPoolHTTPClient(pem []byte, label string) (*awshttp.BuildableClient, error) {
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("CA bundle %q contains no usable certificates", caBundlePath)
+		return nil, fmt.Errorf("%s contains no usable certificates", label)
 	}
 	return awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
 		if tr.TLSClientConfig == nil {
