@@ -12,10 +12,38 @@ import (
 	"testing"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
+	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ai-dynamo/snapshot/api/compat"
 )
+
+func TestReadManifestRejectsAManifestThatIsNotARegularFile(t *testing.T) {
+	t.Run("symbolic link", func(t *testing.T) {
+		dir, targetDir := t.TempDir(), t.TempDir()
+		if err := WriteManifest(targetDir, &CheckpointManifest{
+			Artifact: ArtifactManifest{ContentUID: "content-uid", ContainerName: "main"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(targetDir, manifestFilename), filepath.Join(dir, manifestFilename)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadManifest(dir); err == nil {
+			t.Fatal("ReadManifest accepted a symbolic link")
+		}
+	})
+
+	t.Run("named pipe", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := unix.Mkfifo(filepath.Join(dir, manifestFilename), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadManifest(dir); err == nil {
+			t.Fatal("ReadManifest accepted a named pipe")
+		}
+	})
+}
 
 func TestManifestRoundTrip(t *testing.T) {
 	dir := t.TempDir()

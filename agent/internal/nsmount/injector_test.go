@@ -109,11 +109,17 @@ func TestRoleMountsUseFixedPathsAndPolicies(t *testing.T) {
 	if _, err := nsm.MountCuInterpose(context.Background(), bundle); err != nil {
 		t.Fatalf("MountCuInterpose: %v", err)
 	}
+	// A published copy in the node cache is a checkpoint source too.
+	nodeCacheCopy := NodeCacheArtifactsSrc + "/content-uid/containers/main"
+	if _, err := nsm.MountArtifact(context.Background(), bundle, nodeCacheCopy); err != nil {
+		t.Fatalf("MountArtifact(%q): %v", nodeCacheCopy, err)
+	}
 
 	want := []mountCall{
 		{role: "bundle", pid: testPID},
 		{role: "checkpoint", src: "/checkpoints/artifacts/content-uid/containers/main"},
 		{role: "snapshot-cuda"},
+		{role: "checkpoint", src: nodeCacheCopy},
 	}
 	if len(m.calls) != len(want) {
 		t.Fatalf("got %d calls, want %d", len(m.calls), len(want))
@@ -133,6 +139,12 @@ func TestRoleMountsUseFixedPathsAndPolicies(t *testing.T) {
 
 func TestMountArtifactRejectsUnsafeSourceBeforeHelper(t *testing.T) {
 	for _, source := range []string{
+		// Only published copies are mountable, never the cache or its root.
+		"/node-cache",
+		"/node-cache/artifacts",
+		"/node-cache/unpublished/abc",
+		"/node-cache/artifacts-other/abc",
+		"/node-cache/artifacts/../unpublished",
 		"/etc",
 		"/proc",
 		"/checkpoints-other/abc",

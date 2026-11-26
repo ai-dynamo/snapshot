@@ -51,6 +51,11 @@ K3S_IMAGE="${SNAPSHOT_E2E_K3S_IMAGE:-docker.io/rancher/k3s:v1.34.12-k3s1}"
 HOST_CHECKPOINTS="${SNAPSHOT_E2E_CHECKPOINT_HOST:-${RUNNER_TEMP:-/tmp}/snapshot-checkpoints}"
 NODE_CHECKPOINTS="${SNAPSHOT_E2E_CHECKPOINT_NODE:-/checkpoints-data}"
 
+# The node cache directory (storage.nodeCache), bind-mounted from the host
+# like the checkpoints. The tests place and remove the copies.
+NODE_CACHE_HOST_DIR="${SNAPSHOT_E2E_NODE_CACHE_HOST:-${RUNNER_TEMP:-/tmp}/snapshot-node-cache}"
+NODE_CACHE_NODE_DIR="${SNAPSHOT_E2E_NODE_CACHE_NODE:-/node-cache-data}"
+
 # Deliberately not falling back to KUBECONFIG: this file is overwritten with the
 # new cluster's credentials, and a developer whose KUBECONFIG points at a real
 # cluster would lose it.
@@ -82,7 +87,7 @@ environment:
   SNAPSHOT_E2E_K3D_REGISTRY       registry name (default: snapshot-registry)
   SNAPSHOT_E2E_K3D_REGISTRY_PORT  host port for it (default: 5000)
   SNAPSHOT_E2E_PVC_SIZE, SNAPSHOT_E2E_STORAGE_CLASS,
-  SNAPSHOT_E2E_CHECKPOINT_HOST
+  SNAPSHOT_E2E_CHECKPOINT_HOST, SNAPSHOT_E2E_NODE_CACHE_HOST
 EOF
   exit 2
 }
@@ -204,7 +209,8 @@ create_cluster() {
     --kubeconfig-switch-context=false \
     --k3s-arg '--disable=traefik@server:0' \
     ${registry_args[@]+"${registry_args[@]}"} \
-    --volume "${HOST_CHECKPOINTS}:${NODE_CHECKPOINTS}@server:0"
+    --volume "${HOST_CHECKPOINTS}:${NODE_CHECKPOINTS}@server:0" \
+    --volume "${NODE_CACHE_HOST_DIR}:${NODE_CACHE_NODE_DIR}@server:0"
 
   mkdir -p "$(dirname "${KUBECONFIG_OUT}")"
   k3d kubeconfig get "${CLUSTER_NAME}" >"${KUBECONFIG_OUT}"
@@ -271,6 +277,8 @@ pageBroker.resources.requests.cpu=200m
 pageBroker.resources.requests.memory=256Mi
 pageBroker.resources.limits.cpu=2
 pageBroker.resources.limits.memory=2Gi
+storage.nodeCache.enabled=true
+storage.nodeCache.path=${NODE_CACHE_NODE_DIR}
 EOF
 }
 
@@ -289,6 +297,7 @@ cluster_up() {
   # provisioner does for the volumes it hands out.
   mkdir -p "${HOST_CHECKPOINTS}"
   chmod 1777 "${HOST_CHECKPOINTS}"
+  mkdir -p "${NODE_CACHE_HOST_DIR}"
   create_cluster
   export KUBECONFIG="${KUBECONFIG_OUT}"
 
