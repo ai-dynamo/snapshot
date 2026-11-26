@@ -74,6 +74,14 @@ var finalCodes = map[pagebroker.Failure_Code]bool{
 	pagebroker.Failure_INVALID_REQUEST:      true,
 }
 
+// snapshotUnusableCodes are the final codes that name the snapshot. The others
+// name this node's access or configuration, or the request.
+var snapshotUnusableCodes = map[pagebroker.Failure_Code]bool{
+	pagebroker.Failure_ARTIFACT_NOT_FOUND:   true,
+	pagebroker.Failure_ARTIFACT_CORRUPT:     true,
+	pagebroker.Failure_UNSUPPORTED_ARTIFACT: true,
+}
+
 func failureCode(err error) pagebroker.Failure_Code {
 	var failure *pagebroker.FailureError
 	if errors.As(err, &failure) {
@@ -154,15 +162,38 @@ func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, recor
 	case retryInPlace:
 		backoff := restoreRetryBackoff(record.Attempt)
 		record.RetryAt = now.Add(backoff)
+		record.LastFailure = failureSummary(failure)
 		op.storeAttempts(record)
 		op.reportFailedAttempt(ctx, record, failure, fmt.Sprintf(recoveryRetryInPlace, backoff))
 		return errRetryScheduled
 	case retriesExhausted:
 		op.reportFailedAttempt(ctx, record, failure, recoveryNoRetriesLeft)
-		return op.failRestore(ctx, op.retriesExhausted(ctx, record, left.attempts > 0, err))
+		err = op.failRestore(ctx, op.retriesExhausted(ctx, record, left.attempts > 0, err))
 	default:
 		op.reportFailedAttempt(ctx, record, failure, recoveryNotRetried+whyNotRetried(failure, restoreCtx.Err()))
-		return op.failRestore(ctx, err)
+		err = op.failRestore(ctx, err)
+	}
+	op.recordLastFailure(record, failure)
+	return err
+}
+
+// recordLastFailure saves the failure that ended the restore for the retry
+// status. A restore without retries keeps no record.
+func (op *restoreOperation) recordLastFailure(record *podcontract.ContainerRetryStatus, f *executor.RestoreFailure) {
+	if record.RetryLimit == 0 {
+		return
+	}
+	record.LastFailure = failureSummary(f)
+	op.storeAttempts(record)
+}
+
+// failureSummary is a failed attempt as the retry status annotation reports
+// it. The cause comes from beneath the step, which the summary names apart.
+func failureSummary(f *executor.RestoreFailure) *podcontract.FailureSummary {
+	return &podcontract.FailureSummary{
+		Step:             string(f.Step),
+		Cause:            truncateUTF8(f.Cause.Error(), podcontract.FailureCauseMaxBytes),
+		SnapshotUnusable: snapshotUnusableCodes[failureCode(f.Cause)],
 	}
 }
 
