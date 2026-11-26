@@ -264,9 +264,11 @@ at that time.
 A rebuild is the one case in which a binding does not survive a change to its
 `SharedSnapshot`. A `PodSnapshot` whose namespace was removed, or whose
 `SharedSnapshot` was deleted, after it was bound is not listed again. It
-becomes not `Ready` until its namespace is allowed again. The status of a
-content is lost only in rare cases, for example when a cluster is restored from
-a backup, and the rebuild then refuses access instead of granting it.
+becomes not `Ready` until its namespace is allowed again. The content and its
+data are kept while that `PodSnapshot` exists, see
+[Lifetime and Deletion](#lifetime-and-deletion). The status of a content is
+lost only in rare cases, for example when a cluster is restored from a backup,
+and the rebuild then refuses access instead of granting it.
 
 The list is flat. The `PodSnapshot` that took the checkpoint is one entry like
 any other. `spec.snapshotRef` of the content keeps recording which `PodSnapshot`
@@ -312,20 +314,20 @@ The operator:
    status. If the class does not exist or is not `Ready`, the `SharedSnapshot`
    is not `Ready` and names the reason.
 2. Looks for a content that already refers to the same store and handles. If
-   one exists, it uses that content.
-3. Otherwise creates a content with `spec.storage` and `spec.containers`, and
-   without `spec.snapshotRef` and `spec.source`. `spec.storage` records the
-   class and its store identity, as for any content. The name of the content is
-   derived from the store identity and the handles, so that two imports of the
+   one exists, it uses that content. Otherwise it derives the name of a new
+   content from the store identity and the handles, so that two imports of the
    same artifact resolve to one content.
-4. Writes `status.storage` with the handles and adds the `SharedSnapshot` to
+3. Records the name of the content in `SharedSnapshot.status.contentName`.
+4. Creates the content if it is new, with `spec.storage` and
+   `spec.containers`, and without `spec.snapshotRef` and `spec.source`.
+   `spec.storage` records the class and its store identity, as for any content.
+5. Writes `status.storage` with the handles and adds the `SharedSnapshot` to
    `status.sharedSnapshots`.
-5. Checks, through the store access of the `SnapshotStorageClass`, that the
+6. Checks, through the store access of the `SnapshotStorageClass`, that the
    manifest of each artifact exists in the store. If one is missing, the content
    and the `SharedSnapshot` are not `Ready` and name the reason. The operator
    checks again with backoff.
-6. Marks the content `Ready`, records it in `SharedSnapshot.status.contentName`,
-   and marks the `SharedSnapshot` `Ready`.
+7. Marks the content `Ready` and marks the `SharedSnapshot` `Ready`.
 
 `Ready` on an imported content means that the operator found the manifest of
 each artifact in the store. It does not mean that the artifact can be restored
@@ -334,6 +336,11 @@ on a given node. The compatibility checks run at restore, as for any snapshot.
 An imported content has no source pod and no node. The agent does not
 checkpoint for it. A content that the operator created for a `SharedSnapshot`
 is not released before that `SharedSnapshot` is recorded on it.
+
+The operator records the name on the `SharedSnapshot` before it creates the
+content. If the `SharedSnapshot` is deleted before the content records it, its
+finalizer still finds the content by that name. The finalizer then deletes the
+content if it has no other user, so no content is left without a user.
 
 If a second `SharedSnapshot` imports an artifact that already has a content, it
 uses that content only when its `containers` equal those saved on the content.
@@ -398,6 +405,15 @@ deletes only if both are still empty. Stored lists that are empty are never a
 reason to delete on their own. A content whose status was lost, or one that was
 created before this change, is therefore not deleted while a `PodSnapshot` or a
 `SharedSnapshot` still uses it.
+
+A rebuild can leave out a `PodSnapshot` that is still bound, because its
+`SharedSnapshot` was deleted or narrowed after it was bound. The operator
+therefore also checks `status.boundSnapshotContentName` of every `PodSnapshot`
+before it deletes a content. It does not delete the content while a
+`PodSnapshot` that is not being deleted names it there. The content and its
+data stay until that `PodSnapshot` is deleted, or until its namespace is
+allowed again and it is listed. This reference only blocks the delete. It does
+not add the `PodSnapshot` to the list, and a restore from it is still refused.
 
 A `SharedSnapshot` keeps its content alive without any `PodSnapshot`. A snapshot
 that was shared stays available after the `PodSnapshot` that took it is deleted,
@@ -549,7 +565,9 @@ binding.
 **The binding cannot be forged.** A restore requires that the content lists the
 `PodSnapshot`. Only the operator writes that list, and it decides from the
 immutable `spec` of the `PodSnapshot` and from the `SharedSnapshot`. Writing the
-`status` of a `PodSnapshot` does not grant access. The agent can write the
+`status` of a `PodSnapshot` does not grant access. It can only keep a content
+from being deleted, see [Lifetime and Deletion](#lifetime-and-deletion). The
+chart grants that write only to the operator. The agent can write the
 status of a content today, to record a checkpoint. It does not write the two
 lists.
 
@@ -645,7 +663,9 @@ variant and for the forbidden combinations. The rule that decides whether a
 status and one in a namespace that is not allowed. The release rule is tested
 for each order of removing `PodSnapshot` and `SharedSnapshot` objects, for a
 binding that arrives while the last user is removed, and for a content whose
-status is lost while one user is deleted and another remains.
+status is lost while one user is deleted and another remains. It is also
+tested for a bound `PodSnapshot` that the rebuild does not list, and for an
+import whose `SharedSnapshot` is deleted before the content records it.
 
 **Integration.** Operator tests cover binding through a `SharedSnapshot`,
 refusal for a namespace that is not allowed, narrowing a `SharedSnapshot` with a
