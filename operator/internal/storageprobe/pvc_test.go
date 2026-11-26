@@ -51,9 +51,11 @@ func TestPVCCheckNamesTheStepThatFailed(t *testing.T) {
 
 func TestPVCCheckFailsOnAMountThatIsNotThere(t *testing.T) {
 	err := Default{}.Check(t.Context(), Target{
-		ClusterID: "c", PVC: &PVC{MountPath: filepath.Join(t.TempDir(), "missing", "deeper", "still"), BasePath: "/"},
+		ClusterID: "c", PVC: &PVC{MountPath: filepath.Join(t.TempDir(), "missing"), BasePath: "/"},
 	})
-	require.NoError(t, err, "MkdirAll creates the directories under a writable parent")
+	var missing *Failure
+	require.ErrorAs(t, err, &missing)
+	assert.Equal(t, StepWrite, missing.Step)
 
 	readOnly := t.TempDir()
 	require.NoError(t, os.Chmod(readOnly, 0o500))
@@ -81,4 +83,35 @@ func TestPVCCheckStopsOnACancelledContext(t *testing.T) {
 func TestCheckRequiresExactlyOneStore(t *testing.T) {
 	assert.Error(t, Default{}.Check(t.Context(), Target{ClusterID: "c"}))
 	assert.Error(t, Default{}.Check(t.Context(), Target{ClusterID: "c", PVC: &PVC{}, S3: &S3{}}))
+}
+
+func TestPVCCheckDoesNotFollowASymlinkOutOfTheClaim(t *testing.T) {
+	mount := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside")
+	require.NoError(t, os.WriteFile(outside, []byte("untouched"), 0o644))
+	artifacts := filepath.Join(mount, "artifacts")
+	require.NoError(t, os.MkdirAll(artifacts, 0o755))
+	require.NoError(t, os.Symlink(outside, filepath.Join(artifacts, accessCheckName("c"))))
+
+	err := Default{}.Check(t.Context(), Target{ClusterID: "c", PVC: &PVC{MountPath: mount, BasePath: "/"}})
+
+	var failure *Failure
+	require.ErrorAs(t, err, &failure)
+	assert.Equal(t, StepWrite, failure.Step)
+	got, err := os.ReadFile(outside)
+	require.NoError(t, err)
+	assert.Equal(t, "untouched", string(got))
+}
+
+func TestPVCCheckDoesNotFollowASymlinkedDirectoryOutOfTheClaim(t *testing.T) {
+	mount := t.TempDir()
+	outside := t.TempDir()
+	require.NoError(t, os.Symlink(outside, filepath.Join(mount, "artifacts")))
+
+	err := Default{}.Check(t.Context(), Target{ClusterID: "c", PVC: &PVC{MountPath: mount, BasePath: "/"}})
+
+	require.Error(t, err)
+	entries, err := os.ReadDir(outside)
+	require.NoError(t, err)
+	assert.Empty(t, entries)
 }
