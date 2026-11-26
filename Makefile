@@ -153,7 +153,8 @@ linux-test:
 	$(MAKE) -C agent cuinterpose-test
 
 # Build, spin up a k3d cluster, install Snapshot, and run the CPU e2e suite.
-# Needs a linux/amd64 Docker daemon; CI runs the same sequence in e2e-cpu.yaml.
+# Needs a linux/amd64 or linux/arm64 Docker daemon; CI runs the same sequence
+# in e2e-cpu.yaml.
 cpu-e2e:
 	@bash hack/cpu-e2e.sh
 

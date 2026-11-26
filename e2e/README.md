@@ -117,8 +117,8 @@ Those values also turn on the node cache (`storage.nodeCache`), with a node
 directory the script bind-mounts into the cluster. The node cache tests place
 and remove their copies there, and skip on an install without the setting.
 
-`make cpu-e2e` runs the whole sequence on a linux/amd64 Docker host — build,
-cluster, install, tests — and deletes the cluster afterwards:
+`make cpu-e2e` runs the whole sequence on a linux/amd64 or linux/arm64 Docker
+host — build, cluster, install, tests — and deletes the cluster afterwards:
 
 ```bash
 make cpu-e2e                                     # the whole thing
@@ -133,8 +133,9 @@ deletes it along with the cluster. A skip-build run leaves it up in turn, so you
 can iterate on one set of images; `k3d registry delete k3d-snapshot-registry`
 discards them.
 
-The suite builds the agent for linux/amd64 and needs an amd64 Docker daemon, so
-it does not work on an Apple Silicon Mac.
+The suite builds the images for the platform of the Docker daemon, so it also
+runs with Docker Desktop on an Apple Silicon Mac. It has not been run on a
+native Linux arm64 host, and CI runs it on linux/amd64 only.
 
 When running the stages separately against the k3d helper cluster, also export
 `SNAPSHOT_E2E_MODE=direct` and `SNAPSHOT_E2E_CPU_ONLY=true` for installation,
