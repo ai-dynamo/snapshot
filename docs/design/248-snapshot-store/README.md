@@ -45,7 +45,7 @@ default store from today's `storage.*` values, so existing installations keep wo
 ## Motivation
 
 Teams already own storage and prefer it over the cluster-wide default: it is faster, closer to the
-source Pod, or inside their own security boundary. Today the only way to use it is a separate
+source Pod, or paid for and administered by the team. Today the only way to use it is a separate
 Snapshot installation. SNEP-237 left room for this: content records a `storeID` digest, and "a
 storage CRD" was to add a reference beside it. This proposal is that CRD.
 
@@ -119,10 +119,21 @@ overwrites a store. The default moves by changing the value; bound content keeps
 
 ### User Stories
 
-- A team has a nearby high-bandwidth S3-compatible store. The administrator creates a `fast-s3`
-  store; the team's `SnapshotJob` names it; others default.
+- Two teams share a cluster. Team A trains large models and owns an S3-compatible store in the same
+  data center as its GPUs, with more bandwidth than the cluster's default store; its checkpoints
+  upload faster there and its restores do not compete with other teams' traffic. Team B runs small
+  jobs and is happy with the default. The administrator creates a `fast-s3` store with team A's
+  bucket and credentials. Team A's `SnapshotJob` sets `snapshotStoreName: fast-s3`; team B's jobs
+  set nothing and land on the default. Each team restores from where it captured. Any namespace may
+  name `fast-s3`; what keeps team B off it is convention, not RBAC, see
+  [Security](#security).
+- A platform team retires an old bucket. It creates a store for the new one, points
+  `storage.defaultStoreName` at it and upgrades; new snapshots go to the new bucket, old ones stay
+  readable where they are. It deletes the old store once its last snapshot is gone; the protection
+  finalizer holds it until then.
 - Two clusters keep their snapshots in one bucket. Each administrator creates a store that points at
-  it.
+  it; every content directory records the cluster that created it, so one cluster's cleanup never
+  touches the other's.
 
 ### Limitations, Risks, and Mitigations
 
@@ -143,6 +154,7 @@ overwrites a store. The default moves by changing the value; bound content keeps
 | Nested stores | One store's location is a parent of another's, in this cluster or another. | Allowed, because each store keeps its snapshots under its own `artifacts/`: a sweep looks only there and deletes only orphans named by a UUID, and deleting content removes only its own recorded handles. The API rejects a location inside another store's `artifacts/`. |
 | Old agent, new store | During a rolling upgrade an agent that predates this proposal receives content bound to a non-default store. | It passes its startup store to PageBroker, whose `storeID` does not match the content's; PageBroker returns `STORE_MISMATCH` and the checkpoint fails before any I/O. That agent treats the failure as final: the `PodSnapshot` fails with `BrokerRejected` and is not retried, so it needs a new attempt after the node upgrades. Create non-default stores only after every node runs the new agent. |
 | Restore from several S3 stores | The native restore engine holds one session per PageBroker process, fixed to one endpoint, one region and one set of credentials, and reads its CA bundle and addressing mode once at start. | Restores whose stores share the endpoint, region and credentials run in parallel; a restore that differs in any of them waits until the others drain, then PageBroker replaces the session. A long restore delays the others, and a waiting transaction can expire. An S3 store whose CA bundle or addressing mode differs from PageBroker's startup values cannot restore. Parallel restore across sessions is a follow-up; see [Agent and PageBroker](#agent-and-pagebroker). |
+| Any namespace may use a store | A store is cluster-scoped and any `PodSnapshot` may name it, so a team's store is not reserved for that team: another namespace can capture into it and restore from it. | Intended for this release: a store is usable by every namespace, like a `StorageClass`, and RBAC on naming a store is a non-goal. Workloads never see the store's credentials. An optional namespace allow-list on the store can be added later without breaking the API. |
 | Default misconfigured | `storage.defaultStoreName` names a store that does not exist, is not Ready or is being deleted, and unnamed `PodSnapshot`s fail. | The default is one configured name, so two defaults cannot exist. An unnamed `PodSnapshot` fails with the same reasons as a named one and retries until the store is usable. The operator reports a missing default at start, and a Warning event flags a terminating one; see [Default store](#default-store). |
 
 ## Design Details
@@ -179,32 +191,68 @@ type SnapshotStoreSpec struct {
 }
 
 // A claim in the namespace Snapshot is installed in. It must be mounted into
-// the operator and every node agent. An absent and an empty basePath or prefix
-// compare as equal, so an update that drops the empty field is not taken for a
-// location change.
-// +kubebuilder:validation:XValidation:rule="self.claimName == oldSelf.claimName && self.?basePath.orValue('') == oldSelf.?basePath.orValue('')",message="claimName and basePath are immutable"
-// +kubebuilder:validation:XValidation:rule="!has(self.basePath) || !self.basePath.split('/').exists(p, p == 'artifacts' || p == '..')",message="basePath must not contain an artifacts or .. segment"
+// the operator and every node agent.
+// +kubebuilder:validation:XValidation:rule="self.claimName == oldSelf.claimName && self.basePath == oldSelf.basePath",message="claimName and basePath are immutable"
+// +kubebuilder:validation:XValidation:rule="!self.basePath.split('/').exists(p, p == 'artifacts' || p == '..')",message="basePath must not contain an artifacts or .. segment"
 type PVCStoreSpec struct {
+    // +kubebuilder:validation:MinLength=1
+    // +kubebuilder:validation:MaxLength=253
     ClaimName string `json:"claimName"`
-    BasePath  string `json:"basePath,omitempty"` // Default "/", the whole claim.
+    // A directory inside the claim; "/" is the whole claim.
+    // +kubebuilder:default="/"
+    // +kubebuilder:validation:MaxLength=4096
+    // +kubebuilder:validation:Pattern=`^/`
+    BasePath string `json:"basePath,omitempty"`
 }
 
 // Endpoint, Region, Bucket and Prefix are storeID inputs; the rest are access
-// settings and stay editable.
+// settings and stay editable. An absent and an empty prefix compare as equal,
+// so an update that drops the empty field is not taken for a location change.
 // +kubebuilder:validation:XValidation:rule="self.endpoint == oldSelf.endpoint && self.region == oldSelf.region && self.bucket == oldSelf.bucket && self.?prefix.orValue('') == oldSelf.?prefix.orValue('')",message="endpoint, region, bucket and prefix are immutable"
 // +kubebuilder:validation:XValidation:rule="!has(self.prefix) || !self.prefix.split('/').exists(p, p == 'artifacts' || p == '..')",message="prefix must not contain an artifacts or .. segment"
+// +kubebuilder:validation:XValidation:rule="self.?allowHTTP.orValue(false) || !self.endpoint.startsWith('http://')",message="allowHTTP is required for an http:// endpoint"
 type S3StoreSpec struct {
+    // An absolute http(s) URL with no path, query, fragment or userinfo.
+    // +kubebuilder:validation:MaxLength=2048
+    // +kubebuilder:validation:Pattern=`^https?://[^/?#@]+$`
     Endpoint string `json:"endpoint"`
-    Region   string `json:"region"`
-    Bucket   string `json:"bucket"`
-    Prefix   string `json:"prefix,omitempty"`
+    // +kubebuilder:validation:MinLength=1
+    // +kubebuilder:validation:MaxLength=255
+    Region string `json:"region"`
+    // +kubebuilder:validation:MinLength=3
+    // +kubebuilder:validation:MaxLength=63
+    // +kubebuilder:validation:Pattern=`^[a-z0-9][a-z0-9.-]*[a-z0-9]$`
+    Bucket string `json:"bucket"`
+    // A relative key prefix; empty is the bucket root.
+    // +kubebuilder:validation:MaxLength=1024
+    // +kubebuilder:validation:Pattern=`^[^/].*$|^$`
+    Prefix string `json:"prefix,omitempty"`
     // A Secret in the Snapshot namespace holding a shared-credentials file.
-    // The key defaults to "credentials". Omitted: workload identity is used.
-    CredentialsSecretRef *corev1.SecretKeySelector `json:"credentialsSecretRef,omitempty"`
-    Addressing string `json:"addressing,omitempty"` // virtual or path.
-    AllowHTTP  bool   `json:"allowHttp,omitempty"`
-    // The key defaults to "ca.crt".
-    CABundleConfigMapRef *corev1.ConfigMapKeySelector `json:"caBundleConfigMapRef,omitempty"`
+    // Omitted: workload identity is used.
+    CredentialsSecretRef *SecretKeyRef `json:"credentialsSecretRef,omitempty"`
+    // +kubebuilder:validation:Enum=virtual;path
+    Addressing string `json:"addressing,omitempty"`
+    // Required for an http:// endpoint; PageBroker refuses plain http otherwise.
+    AllowHTTP bool `json:"allowHTTP,omitempty"`
+    CABundleConfigMapRef *ConfigMapKeyRef `json:"caBundleConfigMapRef,omitempty"`
+}
+
+// SecretKeyRef names a key in a Secret in the Snapshot namespace.
+type SecretKeyRef struct {
+    // +kubebuilder:validation:MinLength=1
+    // +kubebuilder:validation:MaxLength=253
+    Name string `json:"name"`
+    // +kubebuilder:default=credentials
+    Key string `json:"key,omitempty"`
+}
+
+// ConfigMapKeyRef names a key in a ConfigMap in the Snapshot namespace.
+type ConfigMapKeyRef struct {
+    // +kubebuilder:validation:MinLength=1
+    // +kubebuilder:validation:MaxLength=253
+    Name string `json:"name"`
+    // +kubebuilder:default=ca.crt
+    Key string `json:"key,omitempty"`
 }
 
 type SnapshotStoreStatus struct {
@@ -213,25 +261,41 @@ type SnapshotStoreStatus struct {
 }
 ```
 
+The schema carries the limits that `api/storage` enforces, so a location it would refuse is refused
+at creation instead of frozen in an immutable field. What a pattern cannot express, such as a bucket
+name that is a dotted IP address, fails normalization in the operator and sets `Ready=False` with
+reason `InvalidLocation`. The Secret and ConfigMap references are small own types rather than
+`corev1.SecretKeySelector`: that type requires `key`, so a default is impossible, and its `optional`
+field has no meaning here.
+
 `Ready` carries the reasons `BasePathNotAllowed`, `ClaimNotMounted`, `CredentialsUnavailable`,
-`DuplicateStore`, `StoreUnreachable` and `Terminating`.
+`DuplicateStore`, `InvalidLocation`, `StoreUnreachable` and `Terminating`.
 
 #### Request and content fields
 
 `PodSnapshot` (`spec`) and the `SnapshotJob` template (`spec.podSnapshotTemplate`) gain an optional
-`snapshotStoreName`; empty selects the default store. `PodSnapshotContent.spec.storage` gains the
-store name beside the digest, which stays the authority on *where*; the name says *how to reach it*.
-It also gains `reclaimPolicy`, copied from the store at binding and immutable, so editing the store
-later never changes what happens to existing content. The store always has a policy (it defaults to
-`Delete`), so every binding sets one. Content bound before `SnapshotStore` existed has neither field
-and is never rewritten, because the content `spec` is immutable. Its store is found by matching its
-`storeID` against the stores, and its empty policy means `Delete`, as today.
+`snapshotStoreName`; empty selects the default store.
+
+`PodSnapshotContent.spec.storage` has the type `CheckpointStorageBinding`. Today it has one field,
+`storeID`, the digest of the location, required and immutable; that stays. This proposal adds two
+fields to it. `snapshotStoreName` says how to reach the location the digest identifies; the digest
+stays the authority on *where*. `reclaimPolicy` is copied from the store at binding and is
+immutable, so editing the store later never changes what happens to existing content. The store
+always has a policy (it defaults to `Delete`), so every binding sets one. Content bound before
+`SnapshotStore` existed has neither field and is never rewritten, because the content `spec` is
+immutable. Its store is found by matching its `storeID` against the stores, and its empty policy
+means `Delete`, as today.
 
 ```go
 // PodSnapshotContentSpec.Storage; immutable once set.
 // +kubebuilder:validation:XValidation:rule="!has(self.snapshotStoreName) || has(self.reclaimPolicy)",message="reclaimPolicy is required when snapshotStoreName is set"
 type CheckpointStorageBinding struct {
-    StoreID           string        `json:"storeID,omitempty"`
+    // +kubebuilder:validation:Required
+    // +kubebuilder:validation:Pattern=`^store-v1-[0-9a-f]{64}$`
+    // +kubebuilder:validation:MaxLength=73
+    StoreID           string        `json:"storeID"`
+    // +kubebuilder:validation:MinLength=1
+    // +kubebuilder:validation:MaxLength=63
     SnapshotStoreName string        `json:"snapshotStoreName,omitempty"`
     ReclaimPolicy     ReclaimPolicy `json:"reclaimPolicy,omitempty"`
 }
@@ -240,9 +304,10 @@ type CheckpointStorageBinding struct {
 #### Resolution
 
 1. The `SnapshotJob` reconciler resolves the template's store before it starts the source Pod, so a
-   long run is not spent on a snapshot that cannot be bound. A missing or terminating store sets
-   `InvalidSpec`, which is terminal. A not-Ready store is a wait: the job reports
-   `StoreNotReady`, launches no pod, and continues when the store becomes Ready.
+   long run is not spent on a snapshot that cannot be bound. A terminating store sets `InvalidSpec`,
+   which is terminal, because that store will not come back. A missing or not-Ready store is a
+   wait: the job reports `StoreNotFound` or `StoreNotReady`, launches no pod, and continues when the
+   store appears or becomes Ready, so a store and a job applied together succeed in either order.
 2. The `PodSnapshot` reconciler reads `spec.snapshotStoreName`, or the default store name from the
    operator's configuration when it is empty.
 3. At binding it requires `Ready=True` and no deletion timestamp, else it sets `Ready=False` on the
@@ -255,8 +320,10 @@ type CheckpointStorageBinding struct {
    the snapshot with `StoreTerminating`.
 5. The store reconciler's `nvidia.com/snapshotstore-protection` finalizer is removed only when the
    store is terminating and no content names it in `spec.storage.snapshotStoreName` or, with no
-   store name, carries its `storeID`. The check is a live list on the spec fields; the label is
-   editable and only serves queries.
+   store name, carries its `storeID` and resolves to this store. Content with no store name
+   protects only the store that `backendForContent` selects for it, so a store refused as
+   `DuplicateStore` can be deleted while the store that serves the content stays protected. The
+   check is a live list on the spec fields; the label is editable and only serves queries.
 
 #### Default store
 
@@ -275,6 +342,11 @@ the store carries no default field and nothing has to arbitrate between stores.
   `StoreTerminating` while content references the store, and `StoreNotFound` after.
   The operator creates the default store only when the cluster has no store at all, so a deleted
   default is not brought back while another store exists.
+- **Values changed after the first start.** Editing `storage.*` and upgrading restarts the
+  operator but changes no store, where today it switched the store. At start the operator compares
+  those values with the default store and, when they differ, logs it and emits a Warning event
+  `StoreValuesDiffer` on the store, naming the field that differs and the way to switch: create a
+  store and point `storage.defaultStoreName` at it.
 
 #### Store uniqueness
 
@@ -391,6 +463,12 @@ copy. From an S3 store the restore is always staged, because S3 has no other rea
 bound snapshot is restored only through staging, on a PVC too, so the direct restore of a bound
 snapshot on a PVC is new work that this proposal depends on; see [Dependencies](#dependencies).
 
+Non-target artifacts, the files a non-target container writes under
+`non-target-artifacts/<SnapshotJob UID>`, are not snapshot data and do not follow the store. They
+stay on the default claim at `/checkpoints`, which the operator and every agent mount, and the
+operator keeps cleaning them there whatever store the job names. The value that names that claim is
+in [Configuration](#configuration).
+
 S3 payload restores do not use that client. They go through the native restore engine, which holds
 one session per PageBroker process and reads its CA bundle and addressing mode once at start. A
 session is fixed to one endpoint, one region and one set of credentials for its whole life. Restores
@@ -442,8 +520,12 @@ content's `reclaimPolicy: Retain`, `delete-content` writes `artifacts/<uid>/.ret
 with the cluster ID, the store name, the `storeID` and the time, then removes the finalizer and
 emits `SnapshotsRetained` with the handle; it deletes nothing. The file stands on its own, so
 nothing else has to be read to know the directory is kept and where it came from. Under `Delete` it
-removes only the handles recorded on the content, and skips, with a Warning event, a directory
-whose `.origin` names another cluster.
+reads `.retained` first and, when the file exists, keeps the directory and emits `SnapshotsRetained`
+as under `Retain`; the file means the same thing whichever path finds it. An administrator can
+therefore keep a snapshot by creating the file by hand, which is the way to protect content bound
+before this proposal, whose empty policy means `Delete`; its presence is what counts, the fields are
+informational. Otherwise `Delete` removes only the handles recorded on the content, and skips, with
+a Warning event, a directory whose `.origin` names another cluster.
 
 Sweeps run per store and never cross stores. A sweep looks only inside `<location>/artifacts/` and
 deletes a directory only when all of these hold: its name is a UUID, the `PodSnapshotContent` UID
@@ -460,9 +542,15 @@ not change it.
 
 - **Who may create a store.** Cluster-level RBAC, like `StorageClass`; naming one needs only write
   access to `PodSnapshot` or `SnapshotJob`. Creating a store says any `PodSnapshot` may use it.
+- **Operator.** New rules, none of which it holds today: `get`/`list`/`watch` on Secrets and
+  ConfigMaps in the Snapshot namespace, with a metadata-only watch so no contents are cached; `get`
+  and `update` on the agent's Role in that namespace, to maintain its `resourceNames`, which
+  Kubernetes allows because the operator holds the permissions it grants; `get` on the `kube-system`
+  namespace, for the cluster ID; and full access to `snapshotstores` and their status.
 - **Credentials.** Secrets live in the Snapshot namespace, replacing today's S3 file mounts, under a
-  namespaced Role: `get`/`list`/`watch` for the operator, `get` for the agent, and no caching of
-  contents. The operator maintains the agent's Role so its `resourceNames` list only the Secrets and
+  namespaced Role: `get` for the agent, and no caching of contents in either process. A store is not
+  reserved for a namespace; see the risk row. The operator maintains the agent's Role so its
+  `resourceNames` list only the Secrets and
   ConfigMaps that stores reference; every node can still read every store's credentials. An empty
   `resourceNames` list allows every object of the kind, so when no store references a Secret the
   operator removes the Secret rule from the Role, and likewise the ConfigMap rule. The agent's
@@ -501,8 +589,10 @@ claim. The chart refuses the name `artifacts`, which would hide the default stor
 also refuses a list that contains `storage.pvc.name`, because one claim name would then map to two
 paths. A store on `storage.pvc.name` must use the whole claim; see
 [Store uniqueness](#store-uniqueness).
-`storage.pvc.name`, the single claim at `/checkpoints`, is deprecated: `claimNames` replaces it, and
-once it is removed `/checkpoints` holds only the listed claims' mounts. The chart writes the same
+`storage.pvc.name`, the single claim at `/checkpoints`, is deprecated as a store location:
+`claimNames` replaces it for stores. It still names the claim that holds non-target artifacts, and
+a dedicated value takes that over before it is removed; once it is removed `/checkpoints` holds
+only the listed claims' mounts. The chart writes the same
 name-to-path mapping into the agent's `config.yaml` and the names into the operator's
 `--pvc-claim-names` flag, so a store's `claimName` always resolves to the directory that was
 mounted. The claims must already exist in the Snapshot namespace and be mountable on every agent
@@ -538,10 +628,11 @@ between; their removal is planned separately.
 Every other `storage.*` value keeps its meaning and feeds the default store: `storage.type` selects
 the `pvc` or `s3` block; `s3.endpoint`, `region`, `bucket`, `prefix`, `addressing`, `allowHttp`,
 `credentialsSecretRef`, `credentialsSecretKey`, `caBundleConfigMapRef` and `caBundleConfigMapKey`
-become the store's `s3` fields; `pvc.name` becomes `claimName`, with the store `basePath` at the
-claim root. `pvc.basePath` stays the container mount path, and `pvc.create`, `size` and
-`storageClass` still only provision the claim. An empty `s3.credentialsSecretRef` gives a default
-store with no Secret. What changes is delivery: the chart no longer mounts the S3 Secret, which is
+become the store's `s3` fields, with `allowHttp` landing in `allowHTTP`; `pvc.name` becomes
+`claimName`, with the store `basePath` at the claim root. `pvc.basePath` stays the container mount
+path, and `pvc.create`, `size` and `storageClass` still only provision the claim. An empty
+`s3.credentialsSecretRef` gives a default store with no Secret. What changes is delivery: the chart
+no longer mounts the S3 Secret, which is
 read through the API and passed per transaction. The CA ConfigMap stays mounted in PageBroker,
 because the native restore engine reads its CA bundle and addressing mode once at start.
 
@@ -552,7 +643,8 @@ the default store under that name. That covers a fresh install and the first upg
 exists it does nothing, so it does not recreate a deleted store or revert an edit while another
 store remains. A cluster whose last store was deleted has no store again, so the next
 operator start creates the default store; that is intended. Later changes to the `storage.*` values
-do not change an existing store; to switch, create a new store and point `storage.defaultStoreName`
+do not change an existing store, and the operator warns when they differ from the default store; see
+[Default store](#default-store). To switch, create a new store and point `storage.defaultStoreName`
 at it.
 
 A `SnapshotStore` is the only way to define a store. The operator builds its backend registry from
@@ -576,6 +668,9 @@ run with the previous values:
 3. Content with no `spec.storage`, bound before SNEP-237, keeps the legacy path-addressed flow and
    is never assigned a store.
 4. `PodSnapshot`s and `SnapshotJob`s without `snapshotStoreName` resolve to the default store.
+5. Content bound before the upgrade has no `reclaimPolicy`, which means `Delete`. To keep such a
+   snapshot when its content is deleted, create `artifacts/<content UID>/.retained` in its store;
+   both deletion and sweeps honor it.
 
 Create stores other than the default only after the agent rollout finishes. An agent from the
 previous release knows one store, and a checkpoint it receives for another store fails for good.
@@ -596,8 +691,10 @@ other stores are not touched.
 - `SnapshotStore` status: `storeID` and `Ready` with the reasons above. A refused store names
   the other in its condition and in a Warning event once per transition; only the later store is
   marked.
-- Events: `SnapshotsRetained` under `Retain`; `StoreTerminating` on the store while
-  references remain, with count; a Warning on a terminating default.
+- Events: `SnapshotsRetained` under `Retain`, or under `Delete` when `.retained` exists;
+  `StoreTerminating` on the store while references remain, with count; a Warning on a terminating
+  default; `StoreValuesDiffer` on the default store when the operator's storage values no longer
+  match it.
 - Metrics: `snapshot_store_ready{store}`, `snapshot_store_bound_contents{store}`;
   maintenance metrics gain it.
 
@@ -615,8 +712,9 @@ other stores are not touched.
 ### Test Plan
 
 - **API:** CEL rejects two store blocks, none, a move between blocks, a location change, a name over
-  63 characters, or an `artifacts` path segment; an update that drops an empty `prefix` or
-  `basePath` is accepted.
+  63 characters, an `artifacts` path segment, an `http://` endpoint without `allowHTTP`, an
+  `addressing` value outside the enum, and each `api/storage` limit; an update that drops an empty
+  `prefix` is accepted, and `basePath` defaults to `/`; a reference without `key` gets the default.
 - **Operator:** Ready/NotReady for each reason; digest detection, including two stores created at
   once; the access check, run inside `artifacts/`, including credentials that can write but not
   read, list or delete; nested stores are accepted; a Ready store goes `Ready=False` when its Secret
@@ -624,8 +722,10 @@ other stores are not touched.
   with binding off the default store is created and a request that names another store fails with
   `StoreNotReady`; `.origin` is written at binding and for content bound earlier; default
   resolution from the configured name, with the named store missing, and after the name changes; the
-  default store is created only when no store exists; terminating store, finalizer, `Retain`,
-  registry rebuild; the agent's Role lists only referenced Secrets and ConfigMaps, and has no Secret
+  default store is created only when no store exists, and `StoreValuesDiffer` fires when the values
+  move; a job that names a missing store waits and proceeds when the store appears; terminating
+  store, finalizer, `Retain`, registry rebuild; a `DuplicateStore` store is deletable while legacy
+  content exists; the agent's Role lists only referenced Secrets and ConfigMaps, and has no Secret
   rule when no store references one.
 - **Chart:** changing only `storage.defaultStoreName` changes the operator's pod template and leaves
   the agent DaemonSet's unchanged; a listed claim that is missing or not bound fails the upgrade,
@@ -640,8 +740,9 @@ other stores are not touched.
   mismatch, or a claim with no mount.
 - **Maintenance:** a sweep looks only inside `artifacts/` and deletes only UUID-named orphans whose
   `.origin` names this cluster, on S3 and on a PVC. Directories with another cluster's `.origin`,
-  with none, or with `.retained` survive. Deleting content skips a directory that names another
-  cluster. A nested store's data survives its parent's sweep.
+  with none, or with `.retained` survive. Deleting content under `Delete` keeps a directory with
+  `.retained` and skips a directory that names another cluster. A nested store's data survives its
+  parent's sweep.
 - **PageBroker:** per-request `StorageBackend`, client cache, two stores live; credentials from the
   request are not written to disk or a transaction record; restores from stores that differ in
   endpoint, region or credentials queue and run in turn; stores that share them restore in parallel;
