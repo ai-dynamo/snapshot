@@ -191,9 +191,9 @@ commit-level history for each release is on its
 - The operator manager sets its Go memory limit to 90% of
   `operator.resources.limits.memory`. Before, its heap could grow to twice the
   live data and pass the limit. The kernel then killed the manager in a loop,
-  although its data fit. A manager whose data needs more than the new limit is
-  still OOM-killed. An operator with no memory limit is unchanged. No action on
-  upgrade.
+  although its data fit. The kernel still kills a manager whose data does not
+  fit. An operator with no memory limit is unchanged. No action on upgrade.
+  See [Helm Chart Values](docs/reference/helm-values.md#operator).
 
 ### Deprecated
 
