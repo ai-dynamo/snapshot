@@ -82,8 +82,9 @@ def delete_source(ctx: UpgradeContext, state: ScenarioState) -> None:
     lifecycle.wait_for_pod_deleted(ctx.config.namespace, state.run.source_pod)
 
 
-# The first release whose agent restores through the restore proxy.
-RESTORE_PROXY_RELEASE = (0, 2)
+# The first release whose agent restores through the restore proxy. The 0.2
+# releases ship the proxy binary, but nothing there makes it PID 1.
+RESTORE_PROXY_RELEASE = (0, 3)
 
 
 def has_feature(agent_tag: str, release: tuple[int, int]) -> bool:
