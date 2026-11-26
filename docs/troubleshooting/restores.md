@@ -299,7 +299,11 @@ CRIU restore, and reads the restored process table. For a CRIU failure the
 cause is the last error CRIU logged and the agent log holds the key lines of
 `restore.log`. The other causes name the operation that failed, such as
 `failed to unmount /dev/shm before restore`, and `restore.log` has nothing on
-them.
+them. A busy `/dev/shm` is not one of those causes: the agent falls back to a
+lazy unmount and continues, and the agent log marks that with `Unmount of
+/dev/shm failed with EBUSY; falling back to lazy unmount`. When that error
+message does appear, the plain unmount failed for a reason other than the
+mount being busy, or the lazy unmount failed too.
 
 **Likely causes:**
 
