@@ -364,8 +364,23 @@ jobs:
           helm package ./charts/snapshot \
             --version "${VERSION#v}" \
             --app-version "${VERSION}"
-          helm push "./${CHART}" "oci://${REGISTRY}" > helm-push.log 2>&1 \
-            || { cat helm-push.log; exit 1; }
+          # helm pushes the manifest by digest and then reads it back to tag
+          # it. GHCR sometimes answers that read with "not found" for a
+          # manifest it has just accepted, which fails the push and leaves a
+          # build with images but no chart. Pushing the same tarball again
+          # finds the blobs and the manifest in place and only repeats the tag.
+          for attempt in 1 2 3; do
+            if helm push "./${CHART}" "oci://${REGISTRY}" > helm-push.log 2>&1; then
+              break
+            fi
+            cat helm-push.log
+            if [ "${attempt}" -eq 3 ]; then
+              echo "::error::Could not push ${CHART} after 3 attempts."
+              exit 1
+            fi
+            echo "::notice::Retrying the chart push ($((attempt + 1))/3) in $((attempt * 10)) seconds."
+            sleep "$((attempt * 10))"
+          done
           cat helm-push.log
           DIGEST="$(awk '/^Digest: /{print $2}' helm-push.log)"
           case "${DIGEST}" in
