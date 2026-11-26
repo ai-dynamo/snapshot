@@ -6,6 +6,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"syscall"
 	"testing"
@@ -568,6 +569,33 @@ func TestRunCheckpointDoesNotRetryAfterTheCommitFailed(t *testing.T) {
 		"main", "cid", 4242, false, string(content.UID), t.TempDir()))
 
 	assert.Equal(t, 1, attempts, "a commit failure leaves no source for a second attempt")
+}
+
+// PageBroker's client gives up on a commit nobody answers after a retry deadline
+// of its own, far inside the checkpoint's. Recording that as CheckpointTimeout
+// sends an operator to raise a timeout the checkpoint never reached.
+func TestRunCheckpointDoesNotReportAnInnerDeadlineAsItsTimeout(t *testing.T) {
+	content := makeWorkOrder("content-a", "node-a", "a")
+	w := makeNodeController(t, &fakeCheckpointer{}, content)
+	w.config.Checkpoint.TimeoutSeconds = ptr.To(3600)
+	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		// How executorCheckpoint presents a commit that ran out its client's retries.
+		return nil, fmt.Errorf("checkpoint: %w", &executor.StepError{
+			Step: executor.StepCommitCheckpoint,
+			Err:  context.DeadlineExceeded,
+		})
+	}
+
+	require.NoError(t, w.runCheckpoint(context.Background(), content, makeSourcePod(),
+		"main", "cid", 4242, false, string(content.UID), t.TempDir()))
+
+	cond := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions,
+		snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, reasonCheckpointFailed, cond.Reason,
+		"the checkpoint had an hour left, so it did not time out")
+	assert.Contains(t, cond.Message, "while committing PageBroker checkpoint", "the step that gave up")
+	assert.Empty(t, eventsForReason(w.clientset.(*fake.Clientset), reasonCheckpointTimeout))
 }
 
 // An attempt whose abort failed may still hold its transaction. Retrying would
