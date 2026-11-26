@@ -26,7 +26,7 @@ var (
 	//go:embed nvidia.com_snapshotjobs.yaml
 	snapshotJobCRD string
 	//go:embed nvidia.com_snapshotstores.yaml
-	snapshotStorageClassCRD string
+	snapshotStoreCRD string
 )
 
 var all = mustLoadAll()
@@ -61,7 +61,7 @@ func SnapshotJobCRD() string {
 }
 
 func SnapshotStoreCRD() string {
-	return snapshotStorageClassCRD
+	return snapshotStoreCRD
 }
 
 func All() []string {
