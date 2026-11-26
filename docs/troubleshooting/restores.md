@@ -261,8 +261,12 @@ Compare the restore pod's volumes with the source pod's.
 ### applying rootfs diff
 
 nsrestore extracts the rootfs diff saved at checkpoint over the
-placeholder's root filesystem, so files the workload wrote or changed are back
-before CRIU recreates the process. The cause carries tar's first message.
+placeholder's root filesystem, so files the workload created are back before
+CRIU recreates the process. A file the placeholder already has, such as a file
+from the image that the workload changed, keeps the placeholder's content. The
+exception is a file a checkpointed process holds open or mapped: nsrestore
+replaces it with the snapshot's copy, which CRIU reopens. The cause carries
+tar's first message.
 
 **Likely causes:**
 

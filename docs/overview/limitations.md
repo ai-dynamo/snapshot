@@ -20,6 +20,11 @@ Snapshot currently focuses on inference cold-start; further use cases are on the
   agent restores without the proxy: restore Pods need an inert command there,
   and the container does not follow the restored workload. See
   [Nodes Without the Restore Proxy](../reference/restore-pod-contract.md#nodes-without-the-restore-proxy).
+- A restore brings back the files the workload created in its container's
+  filesystem. It does not bring back the workload's changes to files the
+  restore container already has, such as files from the image, unless a
+  checkpointed process holds the file open or mapped. Keep state that must
+  survive a restore in files the workload creates, or on a volume.
 - A Pod gets one restore. If a restored container starts again, for example
   under `restartPolicy: Always` after the restored process exits, it ends in
   `CrashLoopBackOff`. Delete the Pod to restore again. Retrying a restore in

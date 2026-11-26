@@ -152,7 +152,7 @@ func executeRestore(
 	timings = &nsrestorePhaseTimings{}
 
 	overlayStart := time.Now()
-	if err := snapshotruntime.ApplyRootfsDiff(opts.CheckpointPath, "/", opts.BundleDir, log); err != nil {
+	if err := snapshotruntime.ApplyRootfsDiff(opts.CheckpointPath, "/", opts.BundleDir, referencedFiles(opts.CheckpointPath, log), log); err != nil {
 		return nil, 0, nil, failStep(StepApplyRootfsDiff, fmt.Errorf("rootfs diff failed: %w", err))
 	}
 	if err := snapshotruntime.ApplyDeletedFiles(opts.CheckpointPath, "/", log); err != nil {
@@ -342,6 +342,18 @@ func executeRestore(
 	// Retain aliases only once CUDA restore and unlock have also succeeded.
 	gpuMountsCommitted = true
 	return timings, restoredPID, nil, nil
+}
+
+// referencedFiles lists the files CRIU reopens by path, so the rootfs diff can
+// replace the ones the placeholder already has. Without the list the rootfs
+// diff leaves them all as they are, which a restore can still survive.
+func referencedFiles(checkpointPath string, log logr.Logger) []string {
+	referenced, err := criu.ReadReferencedPaths(checkpointPath)
+	if err != nil {
+		log.Error(err, "Cannot read the files the snapshot references; the rootfs diff leaves existing files as they are")
+		return nil
+	}
+	return referenced
 }
 
 func restoreCustomStorage(ctx context.Context, opts RestoreOptions, capturedPIDs, restorePIDs []int, log logr.Logger) error {
