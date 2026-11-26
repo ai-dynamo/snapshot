@@ -40,6 +40,25 @@ there, runs the environment check, then runs the snapshot lifecycle tests.
 The workflow resolves the latest published Snapshot operator/agent image tag and
 passes it through `SNAPSHOT_E2E_SNAPSHOT_TAG`.
 
+The GPU suites share one host cluster, and each installs a Snapshot agent on
+every GPU node. Before a GPU, framework, or upgrade suite creates its vCluster,
+`snapshot_e2e.infra.suite_slot` creates the suite's host namespace and waits
+for a suite slot. Up to six suites run at once, in the order their host
+namespaces were created. A suite that finds no slot in 175 minutes fails with a
+`No suite slot` error that names the suites holding the slots. A suite that
+cannot list the host namespaces runs without a slot and warns
+`Running without a suite slot`.
+
+To see the suites in line, oldest first, run this against the host cluster:
+
+```bash
+kubectl get namespaces -l snapshot-e2e=true --sort-by=.metadata.creationTimestamp
+```
+
+A suite frees its slot when its cleanup deletes its host namespace, even when
+the suite fails or is cancelled. A run that loses its runner keeps its slot
+until a later suite deletes host namespaces older than 12 hours.
+
 ### Pull requests
 
 Pull requests are tested by `e2e-pr.yaml` on their copy-pr-bot mirror branch
@@ -53,7 +72,11 @@ branched from `main`. If it does, the CPU suite runs while the operator, agent,
 and pagebroker images are built from the mirrored commit and pushed to GHCR as
 `v0.0.0-pull-request-<number>-g<sha8>`. The GPU suite in `e2e.yaml` and the
 framework suites in `e2e-frameworks.yaml` run only once both succeed, and
-install those images rather than main's. Each suite receives the digests the
+install those images rather than main's. They install them under a tag that
+the `Verify candidate images` job adds for each run attempt,
+`v0.0.0-pull-request-<number>-g<sha8>-<run_id>-<run_attempt>`. A re-run pushes
+new images under the per-commit tag, and a node that resolved that tag in an
+earlier attempt can keep returning the earlier images. Each suite receives the
 build recorded in `SNAPSHOT_E2E_IMAGE_DIGESTS`, a JSON object keyed `operator`,
 `agent`, and `pagebroker`. With it set, `setup.py` uses `imagePullPolicy: Always` and verifies the running content against the recorded image's platform manifest. Registry mirrors and provenance-only differences do not cause a mismatch. Registry reads allow three attempts for transient failures; different content or a failed lookup fails setup.
 

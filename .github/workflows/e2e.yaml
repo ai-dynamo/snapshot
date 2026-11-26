@@ -45,7 +45,8 @@ jobs:
   e2e:
     name: Run Snapshot e2e tests in vCluster
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: 60
+    # The suite's own 60 minutes plus waiting for a suite slot.
+    timeout-minutes: 245
     env:
       HOST_NAMESPACE: snapshot-e2e-${{ github.run_id }}-${{ github.run_attempt }}
       VCLUSTER_NAME: snapshot-e2e-${{ github.run_id }}-${{ github.run_attempt }}
@@ -102,6 +103,36 @@ jobs:
         id: host
         run: |
           echo "kubeconfig=${KUBECONFIG:-}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install Python tooling (ARM64)
+        if: ${{ runner.arch == 'ARM64' }}
+        timeout-minutes: 3
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.10.11"
+          checksum: "23003df007937dd607409c8ddf010baa82bad2673e60e254632ca5b04edcce13"
+          enable-cache: "false"
+          download-from-astral-mirror: "false"
+
+      - name: Install Python tooling (X64)
+        if: ${{ runner.arch == 'X64' }}
+        timeout-minutes: 3
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.10.11"
+          checksum: "5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583"
+          enable-cache: "false"
+          download-from-astral-mirror: "false"
+
+      - name: Cleanup stale e2e namespaces
+        timeout-minutes: 8
+        uses: ./.github/actions/cleanup-stale-e2e-namespaces
+
+      - name: Wait for a GPU suite slot
+        timeout-minutes: 180
+        env:
+          KUBECONFIG: ${{ steps.host.outputs.kubeconfig }}
+        run: uv run --locked --project e2e python -m snapshot_e2e.infra.suite_slot
 
       - name: Create vCluster target
         timeout-minutes: 30
