@@ -43,7 +43,7 @@ with direct I/O, and the memory-backed staging volume accepts direct I/O from
 kernel 6.6. Check with `kubectl get nodes -o wide`. On an older kernel, a
 checkpoint fails at
 [checkpointing GPU state](../troubleshooting/checkpoints.md#checkpointing-gpu-state)
-with `create GPU data file: Invalid argument`, and a restore fails at
+with `create GPU data file: Invalid argument`. A restore on such a node fails at
 [restoring CUDA state](../troubleshooting/restores.md#restoring-cuda-state)
 with `open GPU data file: Invalid argument`.
 
