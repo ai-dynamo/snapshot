@@ -96,6 +96,22 @@ jobs:
           cache-dependency-path: |
             **/go.sum
             go.work.sum
+      # The tools make check installs into GOPATH/bin. Without this step it
+      # compiles them from source on every run, almost half of its time: the
+      # Go cache above has one key for every Go job, and the build job, which
+      # finishes first, is the one that saves it.
+      #
+      # hack/tools.mk pins the tools, so its hash is the key. No restore-keys:
+      # a run must never start from binaries built for other pins. The one
+      # binary pinned elsewhere is protoc-gen-go, in agent/go.mod: make
+      # reinstalls it when go.mod is newer, which it is after every checkout.
+      #
+      # A pull request saves only to the scope of its own ref, which main and
+      # other pull requests cannot read.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/bin
+          key: make-check-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/tools.mk') }}
       - run: make check
 
   # Cluster-free e2e checks: benchmark serialization, workload scripts, and

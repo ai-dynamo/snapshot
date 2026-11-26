@@ -233,6 +233,39 @@ def test_framework_workflow_checks_repository_before_using_gpu_cluster() -> None
     assert "if" not in framework_jobs["e2e"]
 
 
+def test_make_check_jobs_share_one_cache_of_the_pinned_tools() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    # hashFiles of a missing file is empty: the key would never change again.
+    assert (repository_root / "hack/tools.mk").is_file()
+    tools_cache = {
+        "path": "~/go/bin",
+        "key": "make-check-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hack/tools.mk') }}",
+    }
+
+    sharing = {}
+    for workflow in sorted((repository_root / ".github/workflows").glob("*.y*ml")):
+        for name, job in yaml.safe_load(workflow.read_text())["jobs"].items():
+            steps = job.get("steps", [])
+            runs = [step.get("run", "").split() for step in steps]
+            paths = [str(step.get("with", {}).get("path", "")) for step in steps]
+            caches = [index for index, path in enumerate(paths) if "go/bin" in path]
+            where = f"{workflow.name}: {name}"
+            # Only the plain gate: a job that installs fewer tools, or other versions
+            # of them, would save an entry that the rest then restore.
+            assert bool(caches) == (["make", "check"] in runs), where
+            if not caches:
+                continue
+            cache = steps[caches[0]]
+            assert len(caches) == 1 and caches[0] < runs.index(["make", "check"]), where
+            assert cache["uses"].startswith("actions/cache@"), where
+            # Only path and key: restore-keys would restore binaries built from other pins.
+            assert cache["with"] == tools_cache, where
+            sharing[where] = (job["runs-on"], cache["uses"])
+
+    # One runner image and one action version, or the jobs stop reading one entry.
+    assert len(set(sharing.values())) == 1, sharing
+
+
 def test_validate_result_preserves_unknown_fields() -> None:
     result = _result(extra={"futureField": {"answer": 42}})
     result["startedAt"] = "2026-08-25T04:02:03+03:00"
