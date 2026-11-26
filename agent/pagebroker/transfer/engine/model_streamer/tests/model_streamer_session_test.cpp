@@ -154,6 +154,12 @@ class ModelStreamerRestoreTestPeer {
     return !restore.pending_.empty() && std::all_of(restore.pending_.begin(), restore.pending_.end(),
         [](const auto& entry) { return entry->admission.load() == ModelStreamerRestore::Admission::Cancelled; });
   }
+  static bool PendingEmptyOrWithdrawn(ModelStreamerRestore& restore)
+  {
+    std::lock_guard lock(restore.pending_mutex_);
+    return std::all_of(restore.pending_.begin(), restore.pending_.end(),
+        [](const auto& entry) { return entry->admission.load() == ModelStreamerRestore::Admission::Cancelled; });
+  }
   static void ExpectQueueAllocationFailure(ModelStreamerRestore& restore, bool retain = false)
   {
     // Fill the real deque until push_back must allocate. The worker must be
@@ -2180,12 +2186,13 @@ TEST_P(PipelineCapacityTest, WithdrawsAllPendingSiblingsBeforeActiveDrain)
     state.hold_producer = false;
     state.changed.notify_all();
   }
+  // The worker may remove cancelled entries before the caller withdraws them.
   const auto deadline = std::chrono::steady_clock::now() + 5s;
-  while (slots > 1 && !ModelStreamerRestoreTestPeer::AllPendingWithdrawn(restore) &&
+  while (slots > 1 && !ModelStreamerRestoreTestPeer::PendingEmptyOrWithdrawn(restore) &&
          std::chrono::steady_clock::now() < deadline)
     std::this_thread::yield();
   if (slots > 1) {
-    EXPECT_TRUE(ModelStreamerRestoreTestPeer::AllPendingWithdrawn(restore));
+    EXPECT_TRUE(ModelStreamerRestoreTestPeer::PendingEmptyOrWithdrawn(restore));
   }
   EXPECT_EQ(result.wait_for(0ms), std::future_status::timeout);
   EXPECT_TRUE(HasMapping(root_ / "withdraw/0"));
@@ -2512,8 +2519,10 @@ TEST_F(ModelStreamerSessionTest, PipelinePendingFrontCancellationReleasesTailsDu
   {
     std::unique_lock lock(state.mutex);
     EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.allocation_entered == 4; }));
-    EXPECT_TRUE(ModelStreamerRestoreTestPeer::HasOnlyUnclaimedPending(restore, 2));
   }
+  // The worker dequeues the active batch only after its submission was counted.
+  EXPECT_TRUE(ModelStreamerRestoreTestPeer::WaitForPending(restore, 2));
+  EXPECT_TRUE(ModelStreamerRestoreTestPeer::HasOnlyUnclaimedPending(restore, 2));
   active_stop.Cancel();
   EXPECT_TRUE(WaitForEnd());
   pending_stop.Cancel();
