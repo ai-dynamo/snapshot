@@ -322,8 +322,8 @@ spec:
                 type: object
               storageClassName:
                 description: |-
-                  StorageClassName selects the SnapshotStorageClass that holds the
-                  snapshot. Empty selects the default class.
+                  StorageClassName is the SnapshotStorageClass that holds the snapshot.
+                  Empty means the default class.
                 maxLength: 63
                 type: string
             required:

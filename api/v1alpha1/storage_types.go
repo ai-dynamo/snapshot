@@ -14,15 +14,14 @@ type CheckpointStorageBinding struct {
 	StoreID string `json:"storeID"`
 
 	// StorageClassName is the SnapshotStorageClass the content was bound
-	// through. StoreID stays the authority on where the data is; the class says
-	// how to reach it.
+	// through. StoreID says where the data is; the class says how to reach it.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +optional
 	StorageClassName string `json:"storageClassName,omitempty"`
 
-	// ReclaimPolicy is copied from the class at binding. Editing the class
-	// later does not change it.
+	// ReclaimPolicy is copied from the class when the content is bound. It does
+	// not change afterwards.
 	// +optional
 	ReclaimPolicy ReclaimPolicy `json:"reclaimPolicy,omitempty"`
 }

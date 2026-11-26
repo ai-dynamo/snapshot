@@ -19,23 +19,22 @@ const (
 	ReclaimPolicyRetain ReclaimPolicy = "Retain"
 )
 
-// SnapshotStorageClassSpec describes one snapshot store. Exactly one store
-// block is set, and the block that is set names the kind of store.
+// SnapshotStorageClassSpec describes one snapshot store. Set exactly one of pvc
+// or s3.
 // +kubebuilder:validation:XValidation:rule="has(self.pvc) != has(self.s3)",message="exactly one of pvc or s3 must be set"
 // +kubebuilder:validation:XValidation:rule="has(self.pvc) == has(oldSelf.pvc)",message="the store block cannot change between pvc and s3"
 type SnapshotStorageClassSpec struct {
-	// ReclaimPolicy is copied to content bound through this class. An edit
-	// applies to content bound afterwards.
+	// ReclaimPolicy is copied to content bound through this class. A change
+	// affects content bound afterwards.
 	// +kubebuilder:default=Delete
 	// +optional
 	ReclaimPolicy ReclaimPolicy `json:"reclaimPolicy,omitempty"`
 
-	// PVC selects a claim in the Snapshot namespace that the chart already
-	// mounts.
+	// PVC stores snapshots in a claim in the Snapshot namespace.
 	// +optional
 	PVC *PVCStoreSpec `json:"pvc,omitempty"`
 
-	// S3 selects an S3-compatible bucket.
+	// S3 stores snapshots in an S3-compatible bucket.
 	// +optional
 	S3 *S3StoreSpec `json:"s3,omitempty"`
 }
@@ -43,9 +42,8 @@ type SnapshotStorageClassSpec struct {
 // +kubebuilder:validation:XValidation:rule="self.claimName == oldSelf.claimName && (has(self.basePath) ? self.basePath : '') == (has(oldSelf.basePath) ? oldSelf.basePath : '')",message="claimName and basePath are immutable"
 // +kubebuilder:validation:XValidation:rule="!has(self.basePath) || !self.basePath.split('/').exists(p, p == 'artifacts' || p == '..')",message="basePath must not contain an artifacts or .. segment"
 
-// PVCStoreSpec names a claim and a directory in it. An absent and an empty
-// basePath compare as equal, so an update that drops the empty field is not
-// taken for a location change.
+// PVCStoreSpec is a claim and a directory in it. An absent and an empty
+// basePath are the same.
 type PVCStoreSpec struct {
 	// ClaimName is the claim that holds the snapshots.
 	// +kubebuilder:validation:Required
@@ -63,9 +61,8 @@ type PVCStoreSpec struct {
 // +kubebuilder:validation:XValidation:rule="self.endpoint == oldSelf.endpoint && self.region == oldSelf.region && self.bucket == oldSelf.bucket && (has(self.prefix) ? self.prefix : '') == (has(oldSelf.prefix) ? oldSelf.prefix : '')",message="endpoint, region, bucket and prefix are immutable"
 // +kubebuilder:validation:XValidation:rule="!has(self.prefix) || !self.prefix.split('/').exists(p, p == 'artifacts' || p == '..')",message="prefix must not contain an artifacts or .. segment"
 
-// S3StoreSpec names a bucket and how to reach it. Endpoint, Region, Bucket and
-// Prefix identify the store and are immutable; the rest are access settings
-// and stay editable.
+// S3StoreSpec is a bucket and how to reach it. Endpoint, region, bucket and
+// prefix identify the store and cannot change; the other fields can.
 type S3StoreSpec struct {
 	// Endpoint is the S3-compatible service URL.
 	// +kubebuilder:validation:Required
@@ -90,8 +87,8 @@ type S3StoreSpec struct {
 	// +optional
 	Prefix string `json:"prefix,omitempty"`
 
-	// CredentialsSecretRef selects a Secret in the Snapshot namespace that
-	// holds a shared-credentials file. Omitted, the workload identity of the
+	// CredentialsSecretRef is a Secret in the Snapshot namespace that holds a
+	// shared-credentials file. Without it, the workload identity of the
 	// Snapshot pods is used.
 	// +optional
 	CredentialsSecretRef *SecretKeyReference `json:"credentialsSecretRef,omitempty"`
@@ -105,8 +102,8 @@ type S3StoreSpec struct {
 	// +optional
 	AllowHTTP bool `json:"allowHttp,omitempty"`
 
-	// CABundleConfigMapRef selects a ConfigMap in the Snapshot namespace that
-	// holds the CA bundle for the endpoint.
+	// CABundleConfigMapRef is a ConfigMap in the Snapshot namespace that holds
+	// the CA bundle for the endpoint.
 	// +optional
 	CABundleConfigMapRef *ConfigMapKeyReference `json:"caBundleConfigMapRef,omitempty"`
 }
@@ -145,14 +142,14 @@ type ConfigMapKeyReference struct {
 
 // SnapshotStorageClassStatus is the observed state of a SnapshotStorageClass.
 type SnapshotStorageClassStatus struct {
-	// StoreID is derived from the store's location fields.
+	// StoreID identifies the store. It is derived from the location fields.
 	// +kubebuilder:validation:Pattern=`^store-v1-[0-9a-f]{64}$`
 	// +kubebuilder:validation:MaxLength=73
 	// +optional
 	StoreID string `json:"storeID,omitempty"`
 
-	// Conditions reflect the latest observations of the class. The Ready
-	// condition says whether the store can be used.
+	// Conditions report the state of the class. Ready says whether the store
+	// can be used.
 	// +optional
 	// +listType=map
 	// +listMapKey=type

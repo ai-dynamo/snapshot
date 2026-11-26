@@ -359,8 +359,8 @@ spec:
                 properties:
                   reclaimPolicy:
                     description: |-
-                      ReclaimPolicy is copied from the class at binding. Editing the class
-                      later does not change it.
+                      ReclaimPolicy is copied from the class when the content is bound. It does
+                      not change afterwards.
                     enum:
                     - Delete
                     - Retain
@@ -368,8 +368,7 @@ spec:
                   storageClassName:
                     description: |-
                       StorageClassName is the SnapshotStorageClass the content was bound
-                      through. StoreID stays the authority on where the data is; the class says
-                      how to reach it.
+                      through. StoreID says where the data is; the class says how to reach it.
                     maxLength: 63
                     minLength: 1
                     type: string
