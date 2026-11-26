@@ -153,6 +153,15 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 		logger.V(1).Info("Another work order owns this source pod", "pod", pod.Name, "owner", chosen)
 		return nil
 	}
+	// The order that chose this work order can change under a running capture: creation times
+	// have one-second resolution, so a work order created later in the same second can sort
+	// first, and a deleted owner leaves the order while its dump still runs. The claim keeps the
+	// pod with the work order that is acting on it until that reconcile ends.
+	if holder, held := w.capturingPods.LoadOrStore(pod.UID, content.Name); held {
+		logger.V(1).Info("Another work order is capturing this source pod", "pod", pod.Name, "owner", holder)
+		return nil
+	}
+	defer w.capturingPods.Delete(pod.UID)
 
 	if handled, err := w.failCheckpointOnContainerExit(ctx, content, pod); handled {
 		return err

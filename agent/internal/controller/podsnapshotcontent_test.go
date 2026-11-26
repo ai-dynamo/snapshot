@@ -667,6 +667,86 @@ func TestReconcileCapture_OlderWorkOrderOwnsTheSourcePod(t *testing.T) {
 	assert.Empty(t, getContent(t, w, newer.Name).Status.Conditions)
 }
 
+// TestReconcileCapture_RunningCaptureKeepsItsSourcePod pins one capture per pod while a dump runs.
+// The oldest-first order can change under it, and the work order that then sorts first must wait:
+// a second dump of a source that is being dumped fails both and ends the workload.
+func TestReconcileCapture_RunningCaptureKeepsItsSourcePod(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// arrive changes the cached work orders while the first capture runs.
+		arrive func(t *testing.T, w *NodeController, capturing, newcomer *snapshotv1alpha1.PodSnapshotContent)
+	}{
+		{
+			// Creation times have one-second resolution, so the tie falls to the name.
+			name: "a work order created later in the same second sorts first",
+			arrive: func(*testing.T, *NodeController, *snapshotv1alpha1.PodSnapshotContent, *snapshotv1alpha1.PodSnapshotContent) {
+			},
+		},
+		{
+			name: "the capturing work order is deleted",
+			arrive: func(t *testing.T, w *NodeController, capturing, newcomer *snapshotv1alpha1.PodSnapshotContent) {
+				newcomer.CreationTimestamp = metav1.Unix(2000, 0)
+				deleting := capturing.DeepCopy()
+				deleting.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
+				deleting.Finalizers = []string{"test"}
+				require.NoError(t, w.contentIndexer.Update(mustUnstructured(t, deleting)))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capturing := makeWorkOrder("podsnapshotcontent-b", "node-a", "b")
+			capturing.CreationTimestamp = metav1.Unix(1000, 0)
+			pod := makeSourcePod()
+			w := makeNodeController(t, &fakeCheckpointer{}, capturing, pod)
+			w.runtime = &fakeRuntime{resolveContainerPID: 7}
+
+			var mu sync.Mutex
+			var dumped []string
+			dumping := make(chan struct{})
+			finish := make(chan struct{})
+			w.checkpointFn = func(_ context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+				mu.Lock()
+				dumped = append(dumped, params.ContentUID)
+				first := len(dumped) == 1
+				mu.Unlock()
+				if first {
+					close(dumping)
+					<-finish
+				}
+				return nil, nil
+			}
+			dumps := func() []string {
+				mu.Lock()
+				defer mu.Unlock()
+				return append([]string(nil), dumped...)
+			}
+
+			done := make(chan error, 1)
+			go func() { done <- w.reconcileCapture(context.Background(), capturing.Name) }()
+			<-dumping
+
+			newcomer := makeWorkOrder("podsnapshotcontent-a", "node-a", "a")
+			newcomer.CreationTimestamp = capturing.CreationTimestamp
+			tc.arrive(t, w, capturing, newcomer)
+			require.NoError(t, w.client.Create(context.Background(), newcomer))
+			require.NoError(t, w.contentIndexer.Add(mustUnstructured(t, newcomer)))
+
+			require.NoError(t, w.reconcileCapture(context.Background(), newcomer.Name))
+
+			assert.Equal(t, []string{string(capturing.UID)}, dumps(),
+				"a work order must not dump a source that another work order is dumping")
+			assert.Empty(t, getContent(t, w, newcomer.Name).Status.Conditions)
+
+			close(finish)
+			require.NoError(t, <-done)
+
+			// The pod is free again once the capture that held it has ended.
+			require.NoError(t, w.reconcileCapture(context.Background(), newcomer.Name))
+			assert.Equal(t, []string{string(capturing.UID), string(newcomer.UID)}, dumps())
+		})
+	}
+}
+
 func TestReconcileCapture_ReadyContentIsNoOp(t *testing.T) {
 	ready := makeWorkOrder("podsnapshotcontent-ready", "node-a", "abc")
 	meta.SetStatusCondition(&ready.Status.Conditions, metav1.Condition{

@@ -189,6 +189,12 @@ commit-level history for each release is on its
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 
+- A checkpoint no longer starts on a source Pod while another checkpoint of that
+  Pod runs. Two `PodSnapshot` objects of one Pod that were created in the same
+  second could dump the Pod together. The same occurred when the first
+  `PodSnapshot` was deleted during its dump. Both checkpoints failed and the
+  workload ended.
+
 ### Deprecated
 
 - `SNAPSHOT_RESTORE_STANDBY` (`podcontract.RestoreStandbyModeEnv`): restore
