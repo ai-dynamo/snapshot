@@ -43,8 +43,8 @@ the `SharedSnapshot` and restores from it the same way as from any other
 the cluster and a snapshot taken in another cluster that uses the same snapshot
 store.
 
-In this document, an admin is anyone who holds the permission to create a
-`SharedSnapshot`. Each cluster decides who holds it.
+In this document, an admin is anyone who holds the permission to create or
+change a `SharedSnapshot`. Each cluster decides who holds it.
 
 ## Motivation
 
@@ -148,7 +148,9 @@ checkpointed a pod.
 
 Every `PodSnapshot` bound to a content is an equal user of it. No `PodSnapshot`
 owns the snapshot. The operator deletes the content, and with it the artifact,
-when no `PodSnapshot` and no `SharedSnapshot` uses it.
+when no `PodSnapshot` and no `SharedSnapshot` uses it. Deleting an imported
+content removes no data. That data stays under the rules of SNEP-248, see
+[Dependencies](#dependencies).
 
 A restore from a shared snapshot uses the container settings saved with the
 snapshot, such as `lifecycle.postRestore`. A user in another namespace does not
@@ -360,7 +362,11 @@ content it is bound to. Two checks change:
   guards against a restore from data that belongs to another content. A shared
   content is the one that took the checkpoint, and the check is unchanged. An
   imported content has a different UID than the one in the manifest, and the
-  agent skips this check for it.
+  agent skips this comparison for it. It still checks the container name in the
+  manifest. For an import, the identity of the artifact is the store and the
+  artifact handle. The agent passes both to PageBroker, as for any content.
+  PageBroker refuses a handle from another store, and a publication that does
+  not match its handle. These existing checks apply to an import unchanged.
 
 The compatibility checks read the artifact manifest and do not change. A restore
 in another cluster is refused on an incompatible node for the same reasons as in
@@ -383,6 +389,15 @@ through the existing cleanup finalizer.
 - **Deleting a `SharedSnapshot`.** A finalizer on the `SharedSnapshot` removes
   it from `status.sharedSnapshots`. If both lists are then empty, the operator
   deletes the content.
+
+The operator deletes a content only in these two cases, when one of its users
+is deleted. Before it deletes, it builds both lists again from the objects in
+the cluster, with the rules in
+[Which PodSnapshots a Content Lists](#which-podsnapshots-a-content-lists), and
+deletes only if both are still empty. Stored lists that are empty are never a
+reason to delete on their own. A content whose status was lost, or one that was
+created before this change, is therefore not deleted while a `PodSnapshot` or a
+`SharedSnapshot` still uses it.
 
 A `SharedSnapshot` keeps its content alive without any `PodSnapshot`. A snapshot
 that was shared stays available after the `PodSnapshot` that took it is deleted,
@@ -628,8 +643,9 @@ The following code assumes one `PodSnapshot` for each content and changes:
 variant and for the forbidden combinations. The rule that decides whether a
 `PodSnapshot` is listed is table-tested, including a `PodSnapshot` with a forged
 status and one in a namespace that is not allowed. The release rule is tested
-for each order of removing `PodSnapshot` and `SharedSnapshot` objects, and for a
-binding that arrives while the last user is removed.
+for each order of removing `PodSnapshot` and `SharedSnapshot` objects, for a
+binding that arrives while the last user is removed, and for a content whose
+status is lost while one user is deleted and another remains.
 
 **Integration.** Operator tests cover binding through a `SharedSnapshot`,
 refusal for a namespace that is not allowed, narrowing a `SharedSnapshot` with a
