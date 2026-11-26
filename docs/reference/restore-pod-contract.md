@@ -150,10 +150,14 @@ container is created. That needs NRI v0.10 or newer, enabled in the container
 runtime: containerd 2.2 or newer. The proxy is the container's PID 1. It waits
 for the restore, then follows the restored process: it forwards signals to it,
 and exits with its exit code, so the container ends when the restored workload
-does. If the proxy is not PID 1, the agent fails the restore. Keep the source's
-command in restore Pods; it never runs. Other containers in the Pod, such as
-sidecars, are left alone. Nodes whose runtime cannot run the proxy restore
-without it; see [Nodes Without the Restore Proxy](#nodes-without-the-restore-proxy).
+does. The proxy forwards every signal it can catch, including a stop signal
+other than `SIGTERM` that the image or the Pod sets. It does not forward
+`SIGCHLD`, `SIGURG`, `SIGPIPE`, `SIGPROF`, or signals 32 to 34, which include
+`SIGRTMIN` in glibc. If the proxy is not PID 1, the agent fails the restore.
+Keep the source's command in restore Pods; it never runs. Other containers in
+the Pod, such as sidecars, are left alone. Nodes whose runtime cannot run the
+proxy restore without it; see
+[Nodes Without the Restore Proxy](#nodes-without-the-restore-proxy).
 
 The plugin decides which containers get the proxy when each container is
 created. Without `restore-container-map`, it reads the PodSnapshot that

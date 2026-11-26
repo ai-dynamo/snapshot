@@ -6,6 +6,7 @@ package restoreproxy
 import (
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -206,6 +207,61 @@ func TestRunPrefersRestoreFailedOverSignal(t *testing.T) {
 	r.signals <- syscall.SIGTERM
 
 	assert.Equal(t, podcontract.RestoreNotRepeatableExitCode, r.exitCode(t), "restore-failed must win over the signal, not exit with 143")
+}
+
+// Run forwards whatever arrives on its channel, so what reaches the workload
+// is decided by the subscription: a signal missing from ForwardedSignals is
+// dropped before Run sees it.
+func TestForwardedSignals(t *testing.T) {
+	subscribe := func(t *testing.T) <-chan os.Signal {
+		t.Helper()
+		signals := make(chan os.Signal, 256)
+		signal.Notify(signals, ForwardedSignals...)
+		t.Cleanup(func() { signal.Stop(signals) })
+		return signals
+	}
+
+	t.Run("a stop signal other than SIGTERM is delivered", func(t *testing.T) {
+		signals := subscribe(t)
+
+		// The official httpd image stops with SIGWINCH.
+		require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGWINCH))
+
+		timeout := time.After(5 * time.Second)
+		for {
+			select {
+			case got := <-signals:
+				if got == syscall.SIGWINCH {
+					return
+				}
+			case <-timeout:
+				t.Fatal("SIGWINCH sent to the process did not reach the subscription")
+			}
+		}
+	})
+
+	t.Run("signals about the proxy itself are left out", func(t *testing.T) {
+		signals := subscribe(t)
+
+		// A child's exit raises SIGCHLD, and the Go runtime preempts busy
+		// goroutines with SIGURG.
+		require.NoError(t, exec.Command("true").Run())
+		busyUntil := time.Now().Add(300 * time.Millisecond)
+		for range 4 {
+			go func() {
+				for time.Now().Before(busyUntil) {
+				}
+			}()
+		}
+		time.Sleep(time.Until(busyUntil) + 50*time.Millisecond)
+
+		var got []os.Signal
+		for len(signals) > 0 {
+			got = append(got, <-signals)
+		}
+		assert.NotContains(t, got, os.Signal(syscall.SIGCHLD))
+		assert.NotContains(t, got, os.Signal(syscall.SIGURG))
+	})
 }
 
 func TestRunProxyErrors(t *testing.T) {

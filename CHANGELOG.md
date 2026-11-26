@@ -186,6 +186,12 @@ commit-level history for each release is on its
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
+- The restore proxy forwards every signal it can catch to the restored process,
+  not only `SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`, `SIGUSR1`, and `SIGUSR2`.
+  A restored workload now receives another stop signal, such as the `SIGWINCH`
+  of the `httpd` image, when its Pod is deleted. Before, it was killed at the
+  end of the grace period. See
+  [Restore Pod Contract](docs/reference/restore-pod-contract.md).
 
 ### Deprecated
 
