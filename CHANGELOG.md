@@ -34,6 +34,12 @@ commit-level history for each release is on its
 
 ### Added
 
+- Node cache: with `storage.nodeCache.enabled`, a restore reads a checkpoint
+  copy from a directory on its node's local disk, and reads the snapshot store
+  when the node holds none. An administrator places and removes the copies.
+  Off by default. Deploy the matching agent and PageBroker images together. See
+  [Node Cache](docs/operate/configure-storage.md#node-cache).
+
 - Lifecycle hooks: `PodSnapshot.spec.containers` and
   `SnapshotJob.spec.podSnapshotTemplate.containers` can set a
   `checkpointReadinessProbe`, which decides when to checkpoint instead of the
@@ -43,6 +49,14 @@ commit-level history for each release is on its
   settings for every restore. CRD change: deploy the matching CRDs, operator and
   node agent together. See
   [Lifecycle hooks](docs/reference/workload-contract.md#lifecycle-hooks).
+
+- S3 stores work without static keys. With `storage.s3.credentialsSecretRef`
+  empty, PageBroker and the operator use the workload identity of their service
+  accounts, and credentials refresh without a restart. Instance metadata is
+  excluded, so the node's role is never used.
+  `operator.serviceAccount.annotations` is new. Nothing changes when a Secret is
+  set. See
+  [Use Workload Identity for S3](docs/operate/configure-storage.md#use-workload-identity-for-s3).
 
 - S3 restore tuning accepts
   `pageBroker.transferEngine.modelStreamer.restoreBatchBytes` to control batch
@@ -62,6 +76,19 @@ commit-level history for each release is on its
   already `Ready` before it is not backfilled.
 - `config.checkpoint.timeoutSeconds` (default `3600`) fails a
   checkpoint that outruns it.
+- Checkpoint retries, off by default. `config.checkpoint.defaultRetryLimit`
+  (default `0`) sets how many times a failed checkpoint is retried beyond the
+  first attempt, and an attempt a retry follows emits a
+  `CheckpointAttemptFailed` event on the source Pod. A `PodSnapshot` sets its
+  own with `spec.checkpointRetryLimit`: unset defers to the cluster default, and
+  an explicit `0` asks for no retry. Neither may exceed 10. CRD change: deploy
+  the matching CRDs, operator and node agent together. See
+  [Checkpoint retries](docs/troubleshooting/checkpoints.md#a-checkpoint-fails-with-retriesexhausted).
+- Storage shortages on a checkpoint now read distinctly, as
+  `StagingUnavailable`, `ImageTooLarge`, or `StoreExhausted`. See
+  [Storage shortages](docs/troubleshooting/checkpoints.md#a-checkpoint-fails-with-imagetoolarge-stagingunavailable-or-storeexhausted).
+- A failed CRIU dump records the CRIU version that produced it, which the agent
+  also logs at startup.
 - S3 connection and transfer settings for `storage.type: s3`:
   `storage.s3.addressing`, `storage.s3.allowHttp`, a CA bundle
   (`storage.s3.caBundleConfigMapRef`), `pageBroker.s3.limits` and
@@ -153,6 +180,12 @@ commit-level history for each release is on its
   namespace rather than the restore container's (#593), so lookups by PID,
   such as UCX shared-memory endpoints (#802), work after a restore. Only
   checkpoints taken after the upgrade get it; take older ones again.
+
+### Fixed
+
+- GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
+  values used by the NVIDIA device plugin's `volume-mounts` strategy. See
+  [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 
 ### Deprecated
 

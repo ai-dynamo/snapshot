@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "tests/credential_environment.hpp"
 #include "tests/temporary_directory.hpp"
 
 namespace snapshot::pagebroker {
@@ -44,42 +45,15 @@ SmallLimits()
   return limits;
 }
 
-// These tests run serially; restore the process environment after each case.
-class CredentialEnvironment {
- public:
-  CredentialEnvironment()
-  {
-    for (const auto* name :
-         {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_SHARED_CREDENTIALS_FILE",
-          "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_CA_BUNDLE"}) {
-      const auto* value = std::getenv(name);
-      saved_.push_back({name, value ? std::optional<std::string>(value) : std::nullopt});
-      unsetenv(name);
-    }
-  }
-  ~CredentialEnvironment()
-  {
-    for (const auto& [name, value] : saved_) {
-      if (value)
-        setenv(name.c_str(), value->c_str(), 1);
-      else
-        unsetenv(name.c_str());
-    }
-  }
-
- private:
-  std::vector<std::pair<std::string, std::optional<std::string>>> saved_;
-};
-
-TEST(S3ClientTest, RequiresResolvedCredentialsEvenWhenEnvironmentIsAvailable)
+TEST(S3ClientTest, AcceptsStaticCredentialsAndTheDefaultCredentialChain)
 {
-  CredentialEnvironment environment;
-  setenv("AWS_ACCESS_KEY_ID", "fake-key", 1);
-  setenv("AWS_SECRET_ACCESS_KEY", "fake-secret", 1);
-  EXPECT_THROW(S3Client({}, SmallLimits()), std::invalid_argument);
-  const auto connection = OfflineConnection();
-  unsetenv("AWS_ACCESS_KEY_ID");
-  unsetenv("AWS_SECRET_ACCESS_KEY");
+  test::CredentialEnvironment environment;
+  EXPECT_NO_THROW(S3Client(OfflineConnection(), SmallLimits()));
+  auto connection = OfflineConnection();
+  connection.access_key_id.clear();
+  connection.secret_access_key.clear();
+  connection.session_token.clear();
+  EXPECT_TRUE(connection.UsesDefaultCredentialChain());
   EXPECT_NO_THROW(S3Client(connection, SmallLimits()));
 }
 
