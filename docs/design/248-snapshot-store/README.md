@@ -596,9 +596,15 @@ shared by every session. An S3 store that differs in either could checkpoint
 but never restore. The operator refuses such a store. The operator reads the
 startup settings from its storage configuration file, which holds the same
 values that PageBroker starts with. The operator compares them with the
-store's `addressing` and `caBundleConfigMapRef`, and sets `Ready=False` with
-`RestoreSettingsMismatch`. The condition names the setting and the value that
-PageBroker runs with. The check is part of every reconcile, so a store becomes
+store's `addressing` and the bytes of the CA bundle that its ConfigMap holds,
+and sets `Ready=False` with `RestoreSettingsMismatch`. The operator compares
+bundle bytes and not references, so two ConfigMaps with the same bundle
+match, and an edit of the store's ConfigMap is detected on the next
+reconcile. The operator reads the startup bundle when it starts, which is the
+bundle that PageBroker holds, because both restart on the same upgrade. An
+edit of the startup ConfigMap itself takes effect only after a restart of
+both, as today. The condition names the setting and the value that PageBroker
+runs with. The check is part of every reconcile, so a store becomes
 Ready after a restart that changes the settings. In an installation whose
 default store is a PVC, PageBroker starts with no S3 settings. That means
 virtual addressing and the system roots. An S3 store in such an installation
@@ -678,7 +684,12 @@ orphan. Leftovers from before the upgrade therefore have no `.origin`. They
 are never swept, and they need a one-time manual cleanup. Directories that
 this release writes always have the marker, including a directory that a late
 publication recreates after cleanup, because PageBroker writes the marker
-before the data. Content whose store is gone keeps its finalizer and gets
+before the data. One window remains: a sweep can delete the directory between
+the marker check of PageBroker and its first object write. The result is one
+directory without a marker, which needs the same manual cleanup as a
+pre-upgrade leftover. The active-operation tracking that SNEP-237 plans as its
+second stage closes that window, because cleanup then waits for in-flight
+publications. Content whose store is gone keeps its finalizer and gets
 `StoreInactive`. SNEP-237 defines that
 [handling](../237-s3-storage/README.md#limitations-risks-and-mitigations), and
 this proposal does not change it.
