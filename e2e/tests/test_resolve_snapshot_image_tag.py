@@ -22,7 +22,7 @@ def resolver(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    for name in ("GITHUB_OUTPUT", "GITHUB_ENV", "SNAPSHOT_E2E_SNAPSHOT_TAG", "GH_TOKEN"):
+    for name in ("GITHUB_OUTPUT", "GITHUB_ENV", "GITHUB_STEP_SUMMARY", "SNAPSHOT_E2E_SNAPSHOT_TAG", "GH_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     return module
 
