@@ -37,6 +37,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -44,6 +45,8 @@ import urllib.request
 GITHUB_API_VERSION = "2022-11-28"
 PAGE_SIZE = 100
 POLL_INTERVAL_SECONDS = 30
+FETCH_ATTEMPTS = 4
+FETCH_RETRY_SECONDS = 5
 ORG = "ai-dynamo"
 REPOSITORY = f"{ORG}/snapshot"
 PACKAGES = ("snapshot/operator", "snapshot/agent", "snapshot/pagebroker")
@@ -89,6 +92,27 @@ def branch_dev_tag(ref: str, sha: str) -> str:
     return f"v0.0.0-{slug}-g{sha[:8]}"
 
 
+def fetch_json(url: str, headers: dict[str, str]) -> list[dict]:
+    # GitHub now and then answers a listing with a 5xx, and one 502 used to end
+    # the run before it tested anything. A 5xx says nothing about the request,
+    # so it is asked again; a 4xx does (a bad token, an unknown package) and
+    # fails at once.
+    attempt = 0
+    while True:
+        attempt += 1
+        request = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            if exc.code < 500 or attempt == FETCH_ATTEMPTS:
+                raise
+            exc.close()
+            delay = FETCH_RETRY_SECONDS * attempt
+            print(f"{url} answered HTTP {exc.code}; retrying in {delay}s", file=sys.stderr)
+            time.sleep(delay)
+
+
 _VERSIONS_CACHE: dict[str, list[dict]] = {}
 
 
@@ -108,9 +132,7 @@ def package_versions(package: str, headers: dict[str, str]) -> list[dict]:
             f"https://api.github.com/orgs/{ORG}/packages/container/"
             f"{encoded}/versions?per_page={PAGE_SIZE}&page={page}"
         )
-        request = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(request, timeout=30) as response:
-            page_versions = json.load(response)
+        page_versions = fetch_json(url, headers)
         if not page_versions:
             break
         versions.extend(page_versions)
@@ -176,9 +198,7 @@ def release_tags(headers: dict[str, str]) -> list[str]:
     while True:
         page += 1
         url = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page={PAGE_SIZE}&page={page}"
-        request = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(request, timeout=30) as response:
-            releases = json.load(response)
+        releases = fetch_json(url, headers)
         if not releases:
             break
         tags.extend(r["tag_name"] for r in releases if not r.get("draft") and not r.get("prerelease"))
