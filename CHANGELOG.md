@@ -186,6 +186,10 @@ commit-level history for each release is on its
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
+- GPU discovery no longer fails with `container does not list allocated GPUs`
+  on a GPU that the NVIDIA device plugin shares by time-slicing. The failure
+  affected checkpoints and restores where the plugin uses the `volume-mounts`
+  strategy.
 
 ### Deprecated
 
