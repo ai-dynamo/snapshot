@@ -7,7 +7,10 @@ package main
 
 import (
 	"context"
+	"errors"
+	"net/url"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -17,9 +20,13 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
@@ -229,4 +236,134 @@ func TestWaitForPodSnapshotContextDeadline(t *testing.T) {
 
 	_, err := waitForPodSnapshot(ctx, crClient, "default", "snap-pending")
 	require.Error(t, err)
+}
+
+func unansweredRequest() error {
+	return &url.Error{Op: "Get", URL: "https://kubernetes.example/api", Err: syscall.ECONNREFUSED}
+}
+
+func readyPodSnapshot(name string) *nvidiacomv1alpha1.PodSnapshot {
+	return &nvidiacomv1alpha1.PodSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec: nvidiacomv1alpha1.PodSnapshotSpec{
+			Source: nvidiacomv1alpha1.PodSnapshotSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "pod-1"}},
+		},
+		Status: nvidiacomv1alpha1.PodSnapshotStatus{
+			Conditions: []metav1.Condition{{
+				Type: "Ready", Status: metav1.ConditionTrue, Reason: "Captured", LastTransitionTime: metav1.Now(),
+			}},
+		},
+	}
+}
+
+// podSnapshotClient fails the first failures Get calls with err, then answers.
+func podSnapshotClient(t *testing.T, snap *nvidiacomv1alpha1.PodSnapshot, failures int, err error) (client.Client, *int) {
+	t.Helper()
+	calls := 0
+	crClient := crfake.NewClientBuilder().WithScheme(snapshotScheme(t)).WithObjects(snap).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				calls++
+				if calls <= failures {
+					return err
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+	return crClient, &calls
+}
+
+func TestRetriedAPIErrorsRetry(t *testing.T) {
+	pods := schema.GroupResource{Resource: "pods"}
+	for _, tc := range []struct {
+		name  string
+		err   error
+		retry bool
+	}{
+		{"connection refused", unansweredRequest(), true},
+		{"request deadline", context.DeadlineExceeded, true},
+		{"service unavailable", apierrors.NewServiceUnavailable("starting"), true},
+		{"internal error", apierrors.NewInternalError(errors.New("etcd leader changed")), true},
+		{"too many requests", apierrors.NewTooManyRequests("slow down", 1), true},
+		{"server timeout", apierrors.NewServerTimeout(pods, "list", 1), true},
+		{"forbidden", apierrors.NewForbidden(pods, "", errors.New("no access")), false},
+		{"unauthorized", apierrors.NewUnauthorized("token expired"), false},
+		{"bad request", apierrors.NewBadRequest("malformed"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var retried retriedAPIErrors
+			assert.Equal(t, tc.retry, retried.retry(context.Background(), tc.err))
+		})
+	}
+}
+
+// An answer that ends the wait is the error to report, without the outage before it.
+func TestRetriedAPIErrorsDropOutageOnRefusal(t *testing.T) {
+	var retried retriedAPIErrors
+	require.True(t, retried.retry(context.Background(), unansweredRequest()))
+
+	forbidden := apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "", errors.New("no access"))
+	require.False(t, retried.retry(context.Background(), forbidden))
+	assert.Equal(t, forbidden, retried.describe(forbidden))
+}
+
+func TestWaitForPodSnapshotOutlastsUnansweredRequest(t *testing.T) {
+	crClient, calls := podSnapshotClient(t, readyPodSnapshot("snap-1"), 1, unansweredRequest())
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := waitForPodSnapshot(ctx, crClient, "default", "snap-1")
+	require.NoError(t, err)
+	assert.True(t, nvidiacomv1alpha1.IsPodSnapshotSucceeded(result))
+	assert.Equal(t, 2, *calls)
+}
+
+func TestWaitForPodSnapshotTimeoutNamesLastAPIError(t *testing.T) {
+	crClient, _ := podSnapshotClient(t, readyPodSnapshot("snap-1"), 1000, unansweredRequest())
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	_, err := waitForPodSnapshot(ctx, crClient, "default", "snap-1")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Contains(t, err.Error(), "connection refused")
+}
+
+// A refusal is an answer: waiting cannot change it, so the wait must end at once.
+func TestWaitForPodSnapshotStopsOnForbidden(t *testing.T) {
+	forbidden := apierrors.NewForbidden(schema.GroupResource{Group: "nvidia.com", Resource: "podsnapshots"}, "snap-1", errors.New("no access"))
+	crClient, calls := podSnapshotClient(t, readyPodSnapshot("snap-1"), 1000, forbidden)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err := waitForPodSnapshot(ctx, crClient, "default", "snap-1")
+	require.True(t, apierrors.IsForbidden(err), "got %v", err)
+	assert.Equal(t, 1, *calls)
+}
+
+func TestWaitForSourcePodOutlastsUnansweredRequest(t *testing.T) {
+	controllerTrue := true
+	jobUID := types.UID("job-uid-3")
+	clientset := k8sfake.NewClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "my-job-pod", Namespace: "default",
+			Labels:          map[string]string{"batch.kubernetes.io/job-name": "my-job"},
+			OwnerReferences: []metav1.OwnerReference{{UID: jobUID, Controller: &controllerTrue}},
+		},
+		Spec: corev1.PodSpec{NodeName: "node-a", Containers: []corev1.Container{{Name: "main", Image: "test"}}},
+	})
+	calls := 0
+	clientset.PrependReactor("list", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		calls++
+		if calls == 1 {
+			return true, nil, unansweredRequest()
+		}
+		return false, nil, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pod, err := waitForSourcePod(ctx, clientset, "default", "my-job", jobUID)
+	require.NoError(t, err)
+	assert.Equal(t, "my-job-pod", pod.Name)
+	assert.Equal(t, 2, calls)
 }
