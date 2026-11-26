@@ -43,9 +43,15 @@ passes it through `SNAPSHOT_E2E_SNAPSHOT_TAG`.
 The GPU suites share one host cluster, and each installs a Snapshot agent on
 every GPU node. Before a GPU, framework, or upgrade suite creates its vCluster,
 `snapshot_e2e.infra.suite_slot` creates the suite's host namespace and waits
-for a suite slot. Up to six suites run at once, in the order their host
-namespaces were created. A suite that finds no slot in 175 minutes fails with a
-`No suite slot` error that names the suites holding the slots. A suite that
+for a suite slot. Suites start in the order their host namespaces were created.
+The slot count is how many suites fit in the room other workloads leave on the
+tightest GPU node and in the free GPUs on the nodes the suite's workloads can
+use. Once two or more fit, one is kept as headroom. When the count cannot be
+worked out, because the nodes or Pods cannot be read, no GPU node qualifies, or
+a request cannot be parsed, the suite keeps its last count, or uses 6 slots if
+it has none yet. A suite waiting for a slot logs how the count was worked out.
+A suite that finds no slot in 175 minutes fails with a `No suite slot` error
+that names the suites holding the slots. A suite that
 cannot list the host namespaces runs without a slot and warns
 `Running without a suite slot`.
 
