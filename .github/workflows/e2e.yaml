@@ -124,6 +124,10 @@ jobs:
           enable-cache: "false"
           download-from-astral-mirror: "false"
 
+      - name: Cleanup stale e2e namespaces
+        timeout-minutes: 8
+        uses: ./.github/actions/cleanup-stale-e2e-namespaces
+
       - name: Wait for a GPU suite slot
         timeout-minutes: 180
         env:

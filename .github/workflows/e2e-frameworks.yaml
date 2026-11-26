@@ -176,40 +176,10 @@ jobs:
         run: |
           echo "kubeconfig=${KUBECONFIG:-}" >> "${GITHUB_OUTPUT}"
 
-      - name: Install vCluster CLI
-        if: ${{ steps.selected.outputs.run == 'true' }}
-        timeout-minutes: 3
-        uses: ./.github/actions/install-vcluster-cli
-
       - name: Cleanup stale e2e namespaces
         if: ${{ steps.selected.outputs.run == 'true' }}
-        timeout-minutes: 5
-        run: |
-          set -euo pipefail
-
-          cutoff_epoch="$(date -u -d '12 hours ago' +%s)"
-          kubectl get ns -l snapshot-e2e=true \
-            -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}' |
-          while IFS=$'\t' read -r namespace created_at; do
-            if [[ -z "${namespace}" ]]; then
-              continue
-            fi
-            if [[ "${namespace}" == "${HOST_NAMESPACE}" ]]; then
-              echo "Keeping current namespace ${namespace}"
-              continue
-            fi
-
-            created_epoch="$(date -u -d "${created_at}" +%s)"
-            if (( created_epoch >= cutoff_epoch )); then
-              echo "Keeping recent namespace ${namespace} created at ${created_at}"
-              continue
-            fi
-
-            echo "Deleting stale Snapshot e2e namespace ${namespace} created at ${created_at}"
-            helm uninstall vcluster-hpm -n "${namespace}" || true
-            vcluster delete "${namespace}" --namespace "${namespace}" || true
-            kubectl delete namespace "${namespace}" --ignore-not-found --wait=false || true
-          done
+        timeout-minutes: 8
+        uses: ./.github/actions/cleanup-stale-e2e-namespaces
 
       - name: Install Python tooling (ARM64)
         if: ${{ steps.selected.outputs.run == 'true' && runner.arch == 'ARM64' }}
