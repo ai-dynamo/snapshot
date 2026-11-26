@@ -603,9 +603,9 @@ func (sr *PodSnapshotReconciler) handleDelete(ctx context.Context, snap *snapsho
 // none: the one its status records, else the one captureFromSourcePod created without recording
 // it. Left alone, an unrecorded content is a work order with no owner: the node agent still
 // checkpoints the source pod for it, and nothing deletes it or its artifact. The API server is
-// read because the cache may not hold a content created a moment ago. A content of another owner
-// at this name, which fails the PodSnapshot with ContentConflict, is not this PodSnapshot's to
-// delete.
+// read because the cache may not hold a content created a moment ago. A content at this name
+// with another back reference is the ContentConflict case: captureFromSourcePod did not create
+// it, so it stays.
 func (sr *PodSnapshotReconciler) cascadeContentName(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot) (string, error) {
 	if bound := ptr.Deref(snap.Status.BoundPodSnapshotContentName, ""); bound != "" {
 		return bound, nil
