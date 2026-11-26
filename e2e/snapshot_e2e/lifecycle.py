@@ -18,6 +18,7 @@ from kubernetes import client
 from kubernetes.client import ApiException
 
 from snapshot_e2e import k8s
+from snapshot_e2e.infra.setup import snapshot_chart_fullname
 from snapshot_e2e.workloads import CHECKPOINT_DIR
 from snapshot_e2e.workloads import CHECKPOINT_READY
 from snapshot_e2e.workloads import CONTAINER
@@ -1181,7 +1182,7 @@ def _store_remote(config: k8s.E2EConfig, key: str) -> list[str]:
     environment, whichever way the install supplies them.
     """
     data = client.CoreV1Api().read_namespaced_config_map(
-        f"{config.release}-pagebroker-storage-config", config.namespace
+        f"{snapshot_chart_fullname(config.release)}-pagebroker-storage-config", config.namespace
     ).data
     store = json.loads(data["pagebroker-s3-config.json"])
     options = [
@@ -1200,17 +1201,17 @@ def _store_remote(config: k8s.E2EConfig, key: str) -> list[str]:
 
 
 def _rclone(config: k8s.E2EConfig, node: str, arguments: list[str]) -> str:
-    output = k8s.exec_argv(
-        config.namespace,
-        checkpoint_agent_pod(config, node),
-        [RCLONE, "--quiet", "--retries", "1", *arguments],
-        container=PAGEBROKER_CONTAINER,
-    )
-    if "directory not found" in output:
-        return ""
-    if "ERROR" in output or "CRITICAL" in output or "Failed to" in output:
-        raise AssertionError(f"rclone {arguments[0]} failed: {output}")
-    return output
+    try:
+        return k8s.exec_argv(
+            config.namespace,
+            checkpoint_agent_pod(config, node),
+            [RCLONE, "--quiet", "--retries", "1", *arguments],
+            container=PAGEBROKER_CONTAINER,
+        )
+    except k8s.ExecFailed as exc:
+        if "directory not found" in exc.output:
+            return ""
+        raise AssertionError(f"rclone {arguments[0]} failed: {exc.output}") from exc
 
 
 def _stored_artifact_root(content_uid: str) -> str:
