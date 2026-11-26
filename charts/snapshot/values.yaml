@@ -122,6 +122,12 @@ storage:
     # Fixed container-local PVC mount path, not a store identity input. Artifacts
     # use the claim root (/); the privileged helper enforces this local mount.
     basePath: /checkpoints
+    # Claims that PVC SnapshotStore objects may name, besides `name`.
+    # Each must exist and be bound in the release namespace, and is mounted at
+    # /checkpoints/.claims/<claimName> in the operator, the agent and
+    # PageBroker. The list is the whole set: an upgrade repeats the claims it
+    # keeps.
+    claimNames: []
 
   # S3-compatible object storage (when type=s3). Requires a Snapshot release
   # newer than v0.2.0; see docs/get-started/prerequisites.md. Endpoint, region,

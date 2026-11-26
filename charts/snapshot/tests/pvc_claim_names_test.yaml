@@ -1,0 +1,192 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: listed PVC claims
+templates:
+  - templates/daemonset.yaml
+  - templates/operator-deployment.yaml
+  - templates/configmap.yaml
+release:
+  name: snapshot
+  namespace: snapshot-system
+tests:
+  - it: adds nothing when no claim is listed
+    template: templates/operator-deployment.yaml
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --pvc-claim-names=
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 2
+
+  - it: mounts each listed claim in the operator and names them in its flag
+    template: templates/operator-deployment.yaml
+    set:
+      storage.pvc.claimNames: [team-a, team-b]
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --pvc-claim-names=team-a,team-b
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: claim-96c2886c51d1dfb4
+            persistentVolumeClaim:
+              claimName: team-a
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: claim-96c2886c51d1dfb4
+            mountPath: /checkpoints/.claims/team-a
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: claim-e618ceaa77728baa
+            mountPath: /checkpoints/.claims/team-b
+
+  - it: mounts each listed claim in the agent and PageBroker containers
+    template: templates/daemonset.yaml
+    set:
+      storage.pvc.claimNames: [team-a]
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: claim-96c2886c51d1dfb4
+            persistentVolumeClaim:
+              claimName: team-a
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
+          content:
+            name: claim-96c2886c51d1dfb4
+            mountPath: /checkpoints/.claims/team-a
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            name: claim-96c2886c51d1dfb4
+            mountPath: /checkpoints/.claims/team-a
+
+  - it: mounts listed claims with an S3 default store
+    template: templates/daemonset.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: region-1
+      storage.s3.bucket: snapshots
+      operator.bindNewContents: true
+      storage.pvc.claimNames: [snapshot-pvc]
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            name: claim-2224d7930a6646ab
+            mountPath: /checkpoints/.claims/snapshot-pvc
+
+  - it: writes the claim names into the agent configuration
+    template: templates/configmap.yaml
+    set:
+      storage.pvc.claimNames: [team-a, team-b]
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'claimNames:\n\s+- "team-a"\n\s+- "team-b"'
+
+  - it: leaves the claim names out when no claim is listed
+    template: templates/configmap.yaml
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: claimNames
+
+  - it: refuses the claim that is already mounted at /checkpoints
+    template: templates/configmap.yaml
+    set:
+      storage.pvc.claimNames: [snapshot-pvc]
+    asserts:
+      - failedTemplate:
+          errorPattern: cannot contain storage.pvc.name
+
+  - it: refuses a name that is not a valid claim name
+    template: templates/configmap.yaml
+    set:
+      storage.pvc.claimNames: [Team/A]
+    asserts:
+      - failedTemplate: {}
+
+  - it: refuses a repeated name
+    template: templates/configmap.yaml
+    set:
+      storage.pvc.claimNames: [team-a, team-a]
+    asserts:
+      - failedTemplate: {}
+
+  - it: refuses a listed claim that does not exist
+    template: templates/configmap.yaml
+    kubernetesProvider:
+      scheme:
+        "v1/PersistentVolumeClaim":
+          gvr:
+            version: v1
+            resource: persistentvolumeclaims
+          namespaced: true
+      objects:
+        - apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: team-a
+            namespace: snapshot-system
+          status:
+            phase: Bound
+    set:
+      storage.pvc.claimNames: [team-a, team-b]
+    asserts:
+      - failedTemplate:
+          errorPattern: claim "team-b" does not exist in namespace "snapshot-system"
+
+  - it: refuses a listed claim that is not bound
+    template: templates/configmap.yaml
+    kubernetesProvider:
+      scheme:
+        "v1/PersistentVolumeClaim":
+          gvr:
+            version: v1
+            resource: persistentvolumeclaims
+          namespaced: true
+      objects:
+        - apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: team-a
+            namespace: snapshot-system
+          status:
+            phase: Pending
+    set:
+      storage.pvc.claimNames: [team-a]
+    asserts:
+      - failedTemplate:
+          errorPattern: claim "team-a" in namespace "snapshot-system" is not bound
+
+  - it: accepts listed claims that exist and are bound
+    template: templates/configmap.yaml
+    kubernetesProvider:
+      scheme:
+        "v1/PersistentVolumeClaim":
+          gvr:
+            version: v1
+            resource: persistentvolumeclaims
+          namespaced: true
+      objects:
+        - apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: team-a
+            namespace: snapshot-system
+          status:
+            phase: Bound
+    set:
+      storage.pvc.claimNames: [team-a]
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '- "team-a"'

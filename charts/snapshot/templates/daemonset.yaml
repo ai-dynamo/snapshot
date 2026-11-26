@@ -142,6 +142,10 @@ spec:
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath }}
             {{- end }}
+            {{- range .Values.storage.pvc.claimNames }}
+            - name: {{ include "snapshot.pvcClaimVolumeName" . }}
+              mountPath: {{ include "snapshot.pvcClaimMountPath" (dict "root" $ "claimName" .) | quote }}
+            {{- end }}
             {{- if (.Values.storage.nodeCache | default dict).enabled }}
             # Checkpoint copies an administrator placed on this node. Read only:
             # Snapshot never writes to or removes from the node cache.
@@ -261,6 +265,10 @@ spec:
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath }}
             {{- end }}
+            {{- range .Values.storage.pvc.claimNames }}
+            - name: {{ include "snapshot.pvcClaimVolumeName" . }}
+              mountPath: {{ include "snapshot.pvcClaimMountPath" (dict "root" $ "claimName" .) | quote }}
+            {{- end }}
             {{- if (.Values.storage.nodeCache | default dict).enabled }}
             - name: node-cache
               mountPath: {{ include "snapshot.nodeCacheMountPath" . }}
@@ -328,6 +336,11 @@ spec:
         - name: checkpoints
           persistentVolumeClaim:
             claimName: {{ .Values.storage.pvc.name }}
+        {{- end }}
+        {{- range .Values.storage.pvc.claimNames }}
+        - name: {{ include "snapshot.pvcClaimVolumeName" . }}
+          persistentVolumeClaim:
+            claimName: {{ . | quote }}
         {{- end }}
         {{- if (.Values.storage.nodeCache | default dict).enabled }}
         # By default a node without the directory gets an empty one, so its

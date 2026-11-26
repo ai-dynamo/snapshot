@@ -22,6 +22,7 @@ kind: ConfigMap
 {{- fail "config.restore.restoreTimeoutSeconds was renamed to config.restore.timeoutSeconds" }}
 {{- end }}
 {{- include "snapshot.validateS3Settings" . }}
+{{- include "snapshot.validatePVCClaimNames" . }}
 metadata:
   name: {{ include "snapshot.fullname" . }}-config
   namespace: {{ .Release.Namespace }}
@@ -99,6 +100,14 @@ data:
       basePath: "/checkpoints"
       {{- if (.Values.storage.nodeCache | default dict).enabled }}
       nodeCacheEnabled: true
+      {{- end }}
+      {{- with .Values.storage.pvc.claimNames }}
+      # Claims mounted below .claims in the base path, each in a directory of
+      # its name.
+      claimNames:
+        {{- range . }}
+        - {{ . | quote }}
+        {{- end }}
       {{- end }}
 
     overlay:
