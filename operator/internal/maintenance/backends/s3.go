@@ -223,8 +223,9 @@ func (b *S3Backend) deleteObjects(ctx context.Context, objects []s3types.Object)
 
 // withContentMD5 makes one call send Content-MD5 in place of the SDK's CRC32
 // checksum. The S3 API reference requires Content-MD5 on a multi-object
-// delete, and some S3-compatible stores accept no other checksum there. It is
-// the option the SDK maintainers publish for that case, unchanged:
+// delete, and an S3-compatible store that enforces the rule rejects the CRC32
+// request with MissingContentMD5. It is the option the SDK maintainers publish
+// for that case, unchanged:
 // https://github.com/aws/aws-sdk-go-v2/discussions/2960. Its removals go by
 // step name and drop their errors (DeleteObjects has no trailer step), so a
 // step the SDK renames would put the CRC32 header back.
