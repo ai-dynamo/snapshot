@@ -86,8 +86,16 @@ func main() {
 		ctrl.Log.Error(err, "invalid cuinterpose configuration")
 		os.Exit(1)
 	}
+	goMemoryLimit, err := setMemoryLimit(os.Getenv(memoryLimitEnv))
+	if err != nil {
+		ctrl.Log.Error(err, "invalid memory limit configuration")
+		os.Exit(1)
+	}
 
 	ctrl.Log.Info("starting snapshot operator", "version", version)
+	if goMemoryLimit > 0 {
+		ctrl.Log.Info("configured Go memory limit", "bytes", goMemoryLimit)
+	}
 	if storeID != "" {
 		ctrl.Log.Info("configured storage store", "storeID", storeID)
 	}

@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: snapshot operator memory limit
+templates:
+  - templates/operator-deployment.yaml
+tests:
+  # The manager sets its Go memory limit below the limit it reads here.
+  - it: gives the manager the container memory limit
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "manager")].resources.limits.memory
+          value: 256Mi
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "manager")].env
+          content:
+            name: SNAPSHOT_OPERATOR_MEMORY_LIMIT_BYTES
+            valueFrom:
+              resourceFieldRef:
+                resource: limits.memory
+      # Only the manager's, and no GOMEMLIMIT beside it.
+      - notExists:
+          path: spec.template.spec.initContainers[?(@.name == "crd-installer")].env[?(@.name == "SNAPSHOT_OPERATOR_MEMORY_LIMIT_BYTES")]
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "manager")].env[?(@.name == "GOMEMLIMIT")]
+
+  # The kubelet turns every form into bytes, so the reference is the same.
+  - it: gives the manager a limit in decimal units
+    set:
+      operator.resources.limits.memory: 1G
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "manager")].env
+          content:
+            name: SNAPSHOT_OPERATOR_MEMORY_LIMIT_BYTES
+            valueFrom:
+              resourceFieldRef:
+                resource: limits.memory
+
+  - it: gives the manager a limit in plain bytes
+    set:
+      operator.resources.limits.memory: 268435456
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "manager")].env
+          content:
+            name: SNAPSHOT_OPERATOR_MEMORY_LIMIT_BYTES
+            valueFrom:
+              resourceFieldRef:
+                resource: limits.memory
+
+  # Without a limit the reference would be the node's allocatable memory.
+  - it: leaves Go memory policy alone without a memory limit
+    set:
+      operator.resources.limits.memory: null
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "manager")].resources.limits.memory
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "manager")].env
+
+  - it: leaves Go memory policy alone without resource limits
+    set:
+      operator.resources.limits: null
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "manager")].env
+
+  - it: leaves Go memory policy alone without resources
+    set:
+      operator.resources: null
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "manager")].resources
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "manager")].env
+
+  - it: keeps the other variables next to the memory limit
+    set:
+      operator.testFailCaptureSourceAnnotation: example.com/fail-capture
+      storage.type: s3
+      storage.s3.bucket: snapshots
+      storage.s3.region: us-east-1
+      storage.s3.credentialEndpoint.url: https://credentials.example.com/v1
+      storage.s3.credentialEndpoint.tokenAudience: credentials.example.com
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "manager")].env
+          value:
+            - name: SNAPSHOT_OPERATOR_MEMORY_LIMIT_BYTES
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
+            - name: SNAPSHOT_E2E_TEST_FAIL_CAPTURE_SOURCE_ANNOTATION
+              value: example.com/fail-capture
+            - name: AWS_CONTAINER_CREDENTIALS_FULL_URI
+              value: https://credentials.example.com/v1
+            - name: AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE
+              value: /var/run/secrets/snapshot/s3-identity/token
+
+  - it: keeps the other variables without a memory limit
+    set:
+      operator.resources.limits.memory: null
+      operator.testFailCaptureSourceAnnotation: example.com/fail-capture
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "manager")].env
+          value:
+            - name: SNAPSHOT_E2E_TEST_FAIL_CAPTURE_SOURCE_ANNOTATION
+              value: example.com/fail-capture

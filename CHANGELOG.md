@@ -188,6 +188,12 @@ commit-level history for each release is on its
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
+- The operator manager sets its Go memory limit to 90% of
+  `operator.resources.limits.memory`. Before, its heap could grow to twice the
+  live data and pass the limit. The kernel then killed the manager in a loop,
+  although its data fit. A manager whose data needs more than the new limit is
+  still OOM-killed. An operator with no memory limit is unchanged. No action on
+  upgrade.
 
 ### Deprecated
 
