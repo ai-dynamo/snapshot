@@ -9,15 +9,27 @@ This guide checkpoints a pod and restores it on a local cluster that has one
 node and no GPU. The pod runs a counter. The restored pod continues the count
 from the checkpoint.
 
-Use it to see the checkpoint and restore flow before you have a GPU cluster. It
-does not checkpoint GPU memory. For a GPU workload, see
-[Quickstart: Checkpoint and Restore One Pod](quickstart.md).
+Use it to see the checkpoint and restore flow before you have a GPU cluster.
+The cluster is for a trial only. It does not meet the
+[Prerequisites](prerequisites.md) of a Snapshot installation. This guide does
+not checkpoint GPU memory, and it does not restore on another node. For a GPU
+workload, see [Quickstart: Checkpoint and Restore One Pod](quickstart.md).
 
 ## Prerequisites
 
-- Docker on Linux or macOS, with about 20 GB of free disk space for the images.
-- [k3d](https://k3d.io), which runs a Kubernetes cluster in Docker.
+You need the following on your machine:
+
+- Docker on Linux or macOS, on x86_64 or arm64, with about 20 GB of free disk
+  space for the images and 2 GB of memory for the cluster. A Linux host needs
+  the kernel version in [Prerequisites](prerequisites.md).
+- [k3d](https://k3d.io) v5.8.3 or newer, which runs a Kubernetes cluster in
+  Docker.
 - `kubectl` and the [Helm](https://helm.sh/docs/intro/install) CLI.
+
+The commands on this page were run on macOS on Apple silicon, with Docker
+Desktop. They were not run on Linux. On Linux x86_64, the Snapshot CPU
+end-to-end tests checkpoint and restore pods on a k3d cluster with the same
+Kubernetes version.
 
 ## 1. Create the Cluster
 
@@ -27,9 +39,9 @@ Create a cluster with one node:
 k3d cluster create snapshot-demo --image rancher/k3s:v1.34.12-k3s1
 ```
 
-The `--image` option selects a Kubernetes version that Snapshot supports. The
-k3d default can be older. k3d also points `kubectl` and `helm` at the new
-cluster.
+The `--image` option sets the Kubernetes version of the cluster. Without it,
+the version depends on your k3d release, and the default of k3d v5.8.3 is too
+old for Snapshot. k3d also points `kubectl` and `helm` at the new cluster.
 
 ## 2. Install Snapshot
 
@@ -82,8 +94,8 @@ The values adapt the chart to this cluster:
 | `daemonset.nodeSelector`, `daemonset.runtimeClassName` | By default, the node agent runs only on GPU nodes, with the NVIDIA container runtime. This node has neither. |
 | `daemonset.resources.requests.cpu`, `pageBroker.resources.requests.*` | The default requests are for a GPU node: 10 CPU and 33Gi of memory. |
 
-The first rollout pulls the node agent image, about 6 GB, which can take
-several minutes. Wait for the node agent:
+The first rollout pulls the node agent image, about 6 GB, which can take 10
+minutes or more. Wait for the node agent:
 
 ```bash
 kubectl rollout status daemonset/snapshot-agent \
@@ -201,6 +213,9 @@ k3d cluster delete snapshot-demo
 
 ## Next Steps
 
-- [Quickstart: Checkpoint and Restore One Pod](quickstart.md) - Checkpoint and restore a vLLM replica on a GPU cluster
-- [Workload Contract](../reference/workload-contract.md) - What a workload does to be ready for a checkpoint and to resume after a restore
-- [Restore Pod Contract](../reference/restore-pod-contract.md) - What a restore pod must carry
+- [Quickstart: Checkpoint and Restore One Pod](quickstart.md) - Checkpoint and
+  restore a vLLM replica on a GPU cluster
+- [Workload Contract](../reference/workload-contract.md) - What a workload does
+  to be ready for a checkpoint and to resume after a restore
+- [Restore Pod Contract](../reference/restore-pod-contract.md) - What a restore
+  pod must carry
