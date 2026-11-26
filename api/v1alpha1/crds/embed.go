@@ -25,7 +25,7 @@ var (
 	podSnapshotContentCRD string
 	//go:embed nvidia.com_snapshotjobs.yaml
 	snapshotJobCRD string
-	//go:embed nvidia.com_snapshotstorageclasses.yaml
+	//go:embed nvidia.com_snapshotstores.yaml
 	snapshotStorageClassCRD string
 )
 
@@ -60,7 +60,7 @@ func SnapshotJobCRD() string {
 	return snapshotJobCRD
 }
 
-func SnapshotStorageClassCRD() string {
+func SnapshotStoreCRD() string {
 	return snapshotStorageClassCRD
 }
 

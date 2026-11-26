@@ -36,7 +36,7 @@ func TestSchemeRegistersSnapshotKinds(t *testing.T) {
 	}
 	for _, kind := range []string{
 		"PodSnapshot", "PodSnapshotList", "PodSnapshotContent", "PodSnapshotContentList",
-		"SnapshotStorageClass", "SnapshotStorageClassList",
+		"SnapshotStore", "SnapshotStoreList",
 	} {
 		if !scheme.Recognizes(GroupVersion.WithKind(kind)) {
 			t.Errorf("scheme does not recognize kind %q in %s", kind, GroupVersion.String())

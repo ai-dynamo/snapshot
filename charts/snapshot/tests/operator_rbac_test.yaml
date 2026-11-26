@@ -83,5 +83,5 @@ tests:
               - podsnapshots.nvidia.com
               - podsnapshotcontents.nvidia.com
               - snapshotjobs.nvidia.com
-              - snapshotstorageclasses.nvidia.com
+              - snapshotstores.nvidia.com
             verbs: ["get", "patch"]

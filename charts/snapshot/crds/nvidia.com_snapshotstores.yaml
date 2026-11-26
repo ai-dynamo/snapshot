@@ -4,14 +4,14 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.19.0
-  name: snapshotstorageclasses.nvidia.com
+  name: snapshotstores.nvidia.com
 spec:
   group: nvidia.com
   names:
-    kind: SnapshotStorageClass
-    listKind: SnapshotStorageClassList
-    plural: snapshotstorageclasses
-    singular: snapshotstorageclass
+    kind: SnapshotStore
+    listKind: SnapshotStoreList
+    plural: snapshotstores
+    singular: snapshotstore
   scope: Cluster
   versions:
   - additionalPrinterColumns:
@@ -29,8 +29,8 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: SnapshotStorageClass is the cluster-scoped description of one
-          snapshot store.
+        description: SnapshotStore is the cluster-scoped description of one snapshot
+          store.
         properties:
           apiVersion:
             description: |-
@@ -51,38 +51,38 @@ spec:
             type: object
           spec:
             description: |-
-              SnapshotStorageClassSpec describes one snapshot store. Set exactly one of pvc
-              or s3.
+              SnapshotStoreSpec describes one snapshot store. Set exactly one of pvc or
+              s3.
             properties:
               pvc:
                 description: PVC stores snapshots in a claim in the Snapshot namespace.
                 properties:
-                  basePath:
-                    description: |-
-                      BasePath is the directory in the claim that holds the snapshots. The
-                      default, "/", is the whole claim.
-                    maxLength: 1024
-                    type: string
                   claimName:
                     description: ClaimName is the claim that holds the snapshots.
                     maxLength: 253
                     minLength: 1
                     type: string
+                  subPath:
+                    default: /
+                    description: |-
+                      SubPath is the directory in the claim that holds the snapshots. The
+                      default, "/", is the whole claim.
+                    maxLength: 4096
+                    pattern: ^/
+                    type: string
                 required:
                 - claimName
                 type: object
                 x-kubernetes-validations:
-                - message: claimName and basePath are immutable
-                  rule: 'self.claimName == oldSelf.claimName && (has(self.basePath)
-                    ? self.basePath : '''') == (has(oldSelf.basePath) ? oldSelf.basePath
-                    : '''')'
-                - message: basePath must not contain an artifacts or .. segment
-                  rule: '!has(self.basePath) || !self.basePath.split(''/'').exists(p,
-                    p == ''artifacts'' || p == ''..'')'
+                - message: claimName and subPath are immutable
+                  rule: self.claimName == oldSelf.claimName && self.subPath == oldSelf.subPath
+                - message: subPath must not contain an artifacts, .claims or .. segment
+                  rule: '!self.subPath.split(''/'').exists(p, p == ''artifacts'' ||
+                    p == ''.claims'' || p == ''..'')'
               reclaimPolicy:
                 default: Delete
                 description: |-
-                  ReclaimPolicy is copied to content bound through this class. A change
+                  ReclaimPolicy is copied to content bound to this store. A change
                   affects content bound afterwards.
                 enum:
                 - Delete
@@ -98,14 +98,18 @@ spec:
                     - virtual
                     - path
                     type: string
-                  allowHttp:
-                    description: AllowHTTP accepts a plain-http endpoint. For local
-                      testing only.
+                  allowHTTP:
+                    description: |-
+                      AllowHTTP accepts a plain-http endpoint. It is required for an http://
+                      endpoint. For local testing only.
                     type: boolean
                   bucket:
-                    description: Bucket holds the snapshots.
+                    description: |-
+                      Bucket holds the snapshots. It is a DNS-style name: lowercase letters,
+                      digits, dots and hyphens.
                     maxLength: 63
-                    minLength: 1
+                    minLength: 3
+                    pattern: ^[a-z0-9][a-z0-9.-]*[a-z0-9]$
                     type: string
                   caBundleConfigMapRef:
                     description: |-
@@ -147,18 +151,23 @@ spec:
                     - name
                     type: object
                   endpoint:
-                    description: Endpoint is the S3-compatible service URL.
+                    description: |-
+                      Endpoint is the S3-compatible service URL: an absolute http(s) URL with
+                      no path, query, fragment or userinfo.
                     maxLength: 2048
                     minLength: 1
+                    pattern: ^https?://[^/?#@]+$
                     type: string
                   prefix:
-                    description: Prefix is the key prefix in the bucket that holds
-                      the snapshots.
+                    description: |-
+                      Prefix is the key prefix in the bucket that holds the snapshots. It is
+                      relative; empty is the bucket root.
                     maxLength: 1024
+                    pattern: ^[^/].*$|^$
                     type: string
                   region:
                     description: Region is the bucket's region.
-                    maxLength: 64
+                    maxLength: 255
                     minLength: 1
                     type: string
                 required:
@@ -171,9 +180,11 @@ spec:
                   rule: 'self.endpoint == oldSelf.endpoint && self.region == oldSelf.region
                     && self.bucket == oldSelf.bucket && (has(self.prefix) ? self.prefix
                     : '''') == (has(oldSelf.prefix) ? oldSelf.prefix : '''')'
-                - message: prefix must not contain an artifacts or .. segment
+                - message: prefix must not contain an artifacts, .claims or .. segment
                   rule: '!has(self.prefix) || !self.prefix.split(''/'').exists(p,
-                    p == ''artifacts'' || p == ''..'')'
+                    p == ''artifacts'' || p == ''.claims'' || p == ''..'')'
+                - message: allowHTTP is required for an http:// endpoint
+                  rule: '(has(self.allowHTTP) ? self.allowHTTP : false) || !self.endpoint.startsWith(''http://'')'
             type: object
             x-kubernetes-validations:
             - message: exactly one of pvc or s3 must be set
@@ -181,11 +192,11 @@ spec:
             - message: the store block cannot change between pvc and s3
               rule: has(self.pvc) == has(oldSelf.pvc)
           status:
-            description: SnapshotStorageClassStatus is the observed state of a SnapshotStorageClass.
+            description: SnapshotStoreStatus is the observed state of a SnapshotStore.
             properties:
               conditions:
                 description: |-
-                  Conditions report the state of the class. Ready says whether the store
+                  Conditions report the state of the store. Ready says whether the store
                   can be used.
                 items:
                   description: Condition contains details for one aspect of the current
