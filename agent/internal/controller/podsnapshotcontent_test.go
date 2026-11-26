@@ -331,6 +331,25 @@ func TestReconcileCapture_PromotesPodAndCaptures(t *testing.T) {
 	))
 }
 
+// A failed dump ends the source, and the dump of a Pod that shares its process namespace always fails.
+func TestReconcileCapture_SharedProcessNamespaceFailsBeforeTheCheckpoint(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	pod := makeSourcePod()
+	pod.Spec.ShareProcessNamespace = ptr.To(true)
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
+
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
+
+	assert.False(t, fc.wasCalled(), "the workload must not be suspended for a checkpoint that cannot succeed")
+	assert.Empty(t, getPod(t, w, "inference", "worker-0").Labels[snapshotv1alpha1.CaptureEligibleLabel])
+	cond := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "ProcessNamespaceShared", cond.Reason)
+	assert.Equal(t, `source pod "worker-0" sets shareProcessNamespace: a Pod that shares its process namespace cannot be checkpointed`, cond.Message)
+}
+
 func TestReconcileCapture_DeletingContentDoesNotLabelPod(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	now := metav1.Now()

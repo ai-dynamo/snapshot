@@ -187,6 +187,10 @@ fields are:
   is safe to checkpoint. With one, the probe decides when to checkpoint, and the
   pod keeps its own readiness probe; see [Lifecycle Hooks](#lifecycle-hooks).
 
+Do not set `shareProcessNamespace: true` on the source pod. The agent fails the
+checkpoint of such a pod with the reason `ProcessNamespaceShared`, before it
+suspends the workload.
+
 Restore pods carry different requirements: the `nvidia.com/restore-from`
 annotation, the source's command (Snapshot replaces it with its restore proxy),
 `restartPolicy: Never`, and the optional startup gate.

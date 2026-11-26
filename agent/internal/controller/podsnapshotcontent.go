@@ -163,6 +163,13 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 		return err
 	}
 
+	// CRIU cannot dump a container whose first process is not PID 1 of its PID namespace, and a
+	// failed dump ends the source, so this fails before anything is suspended.
+	if pod.Spec.ShareProcessNamespace != nil && *pod.Spec.ShareProcessNamespace {
+		return w.setSnapshotContentFailed(ctx, content, "ProcessNamespaceShared", fmt.Errorf(
+			"source pod %q sets shareProcessNamespace: a Pod that shares its process namespace cannot be checkpointed", pod.Name))
+	}
+
 	// Check the opt-in before labeling the source and waiting for readiness, so a misconfigured
 	// Pod fails without waiting for its workload to become ready.
 	cuInterposeRequested, err := preflightCuInterpose(pod, containerName)
