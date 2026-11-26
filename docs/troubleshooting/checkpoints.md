@@ -177,24 +177,6 @@ answer before the checkpoint becomes destructive.
 - The delivery mount is writable
 - The coordinator is not running
 
-### admitting the pod group
-
-For a member of a pod group, the agent publishes the Pod's IP, then waits for
-every other member's and for every member to accept. The cuInterpose coordinator
-of every Pod that runs one inspects as its Pod's relay in the group, and the
-lowest-ranked relay checks the group's topology. Nothing has changed in any
-workload yet, so the attempt ends as `Refused` and every member is left as
-Snapshot found it. A member that fails at any step fails the attempt for every
-other member. Each of them then fails at the step it was waiting in, with the
-reason the first member gave, such as `Refused` or `MemberFailed`.
-
-**Likely causes:**
-
-- The Pod has no IP yet
-- Another member refused first
-- The attempt's deadline passed before every member arrived
-- The cuInterpose relay refused the group's topology, for example memory one Pod imports that no member exported, which its error names
-
 ### staging CUDA job file
 
 For a driver-managed GPU checkpoint, the agent copies the CUDA checkpoint job
@@ -214,6 +196,49 @@ The agent builds CRIU's dump options from the inspected container and writes
 
 - A mount layout CRIU options cannot express
 - A staging directory that is not writable
+
+### admitting the pod group
+
+For a member of a pod group, the agent publishes the Pod's IP, then waits for
+every other member's and for every member to accept. The cuInterpose coordinator
+of every Pod that runs one inspects as its Pod's relay in the group, and the
+lowest-ranked relay checks the group's topology. Nothing has changed in any
+workload yet, so the attempt ends as `Refused` and every member is left as
+Snapshot found it. A member that fails at any step fails the attempt for every
+other member. Each of them then fails at the step it was waiting in, with the
+reason the first member gave, such as `Refused` or `MemberFailed`. From the
+attempt's deadline on, the attempt ends as `DeadlineExceeded` instead, whichever
+member failed.
+
+**Likely causes:**
+
+- The Pod has no IP yet
+- The Pod's IP is not IPv4 (`is not an IPv4 address`), which a pod group needs
+- The cuInterpose relay refused the group's topology, for example memory one Pod imports that no member exported. Its error follows `inspect cuinterpose:`
+- The agent and its cuInterpose come from different builds, so the relays' leader wrote no `inspect.fabric-peers` record at all (`recorded no inspect.fabric-peers`). A record that lists no peers is valid and does not cause this. Use the agent image's own cuInterpose
+- Another member refused first (`Refused`), and its agent's log carries the step
+- A member never arrived, for example one whose `checkpointReadinessProbe` never passed, so the attempt's deadline passed (`DeadlineExceeded`)
+
+```bash
+kubectl get pod <source-pod> -n <ns> -o jsonpath='{.status.podIP}'
+```
+
+### recording that the member started
+
+Once every member of a pod group has accepted, the attempt commits, and the
+agent sets the `Started` condition on the member's `PodSnapshotContent` before
+it changes the source. If it cannot, the member fails the attempt with
+`MemberFailed`, and its own source is left as Snapshot found it. Other members
+that had already started fail with it.
+
+**Likely causes:**
+
+- The API server was unreachable or refused the status write
+- The `PodSnapshotContent` was deleted or already failed
+
+```bash
+kubectl logs $agent -n <snapshot-ns> -c agent | grep -i 'pod group'
+```
 
 ### checkpointing GPU state
 
@@ -238,8 +263,8 @@ ends first. The source has stopped by then.
 
 **Likely causes:**
 
-- Another member failed, and its agent's log carries the step
-- The attempt's deadline passed
+- Another member failed (`MemberFailed`), and its agent's log carries the step
+- The attempt's deadline passed (`DeadlineExceeded`)
 - The coordinator was lost (`CoordinatorLost`)
 
 ```bash
