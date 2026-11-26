@@ -203,13 +203,15 @@ Check the PageBroker container's variables with the command above: no
 ### Change S3 Settings
 
 PageBroker reads the S3 settings once at startup, so changing one restarts
-PageBroker on each node, and it can fail to start briefly until the operator has
-rewritten its configuration. See
-[PageBroker Does Not Start After an S3 Settings Change](../troubleshooting/agent.md#pagebroker-does-not-start-after-an-s3-settings-change).
+PageBroker on each node. A PageBroker that starts before the operator has
+rewritten its configuration runs with the previous configuration.
 
-After changing the endpoint, bucket, region or prefix, restart the agent
-DaemonSet once the operator pod is Ready, so PageBroker reads the operator's
-current configuration. PageBroker does not re-read it while running.
+After changing the endpoint, bucket, region, prefix, `storage.s3.addressing`,
+the CA bundle, or `pageBroker.s3.limits`, restart the agent DaemonSet once the
+operator pod is Ready. PageBroker then reads the operator's current
+configuration, which it does not re-read while running. If PageBroker does not
+start, see
+[PageBroker Does Not Start After an S3 Settings Change](../troubleshooting/agent.md#pagebroker-does-not-start-after-an-s3-settings-change).
 
 ## Node Cache
 
