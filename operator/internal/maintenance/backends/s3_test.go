@@ -5,6 +5,8 @@ package backends
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -222,6 +225,40 @@ func TestNewS3BackendReachesEndpointWithoutCABundle(t *testing.T) {
 	require.Len(t, *requests, 1)
 	assert.Equal(t, "artifacts/", (*requests)[0].URL.Query().Get("prefix"))
 	assert.Contains(t, (*requests)[0].Header.Get("Authorization"), "Credential=FAKEACCESSKEY/")
+}
+
+func TestS3BackendDeleteSendsContentMD5AsItsOnlyChecksum(t *testing.T) {
+	var deleteBody []byte
+	var deleteHeader http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if r.Method == http.MethodPost {
+			deleteHeader = r.Header.Clone()
+			deleteBody, _ = io.ReadAll(r.Body)
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><DeleteResult></DeleteResult>`))
+			return
+		}
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><IsTruncated>false</IsTruncated>` +
+			`<Contents><Key>artifacts/uid-1/containers/main/manifest.yaml</Key></Contents></ListBucketResult>`))
+	}))
+	t.Cleanup(server.Close)
+	credentialsPath := filepath.Join(t.TempDir(), "credentials")
+	writeS3Credentials(t, credentialsPath, "FAKEACCESSKEY")
+
+	b, err := NewS3Backend(context.Background(), S3Config{
+		Bucket: "checkpoints", Region: "us-east-1", Endpoint: server.URL, CredentialsPath: credentialsPath,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, b.Delete(context.Background(), "uid-1"))
+	require.NotEmpty(t, deleteBody)
+	sum := md5.Sum(deleteBody)
+	assert.Equal(t, base64.StdEncoding.EncodeToString(sum[:]), deleteHeader.Get("Content-Md5"))
+	// withContentMD5 removes the SDK's checksum steps by name. If an SDK update
+	// renames one, its header comes back next to Content-MD5.
+	for name := range deleteHeader {
+		assert.NotContains(t, strings.ToLower(name), "checksum", "the request must carry Content-MD5 and no SDK checksum header")
+	}
 }
 
 // clearAmbientS3Credentials removes every credential source the default chain

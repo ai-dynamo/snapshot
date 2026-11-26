@@ -21,6 +21,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/go-logr/logr"
 
 	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
@@ -208,7 +210,7 @@ func (b *S3Backend) deleteObjects(ctx context.Context, objects []s3types.Object)
 		out, err := b.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
 			Bucket: aws.String(b.bucket),
 			Delete: &s3types.Delete{Objects: batch, Quiet: aws.Bool(true)},
-		})
+		}, withContentMD5)
 		if err != nil {
 			return fmt.Errorf("delete objects: %w", err)
 		}
@@ -217,6 +219,25 @@ func (b *S3Backend) deleteObjects(ctx context.Context, objects []s3types.Object)
 		}
 	}
 	return nil
+}
+
+// withContentMD5 makes one call send Content-MD5 in place of the SDK's CRC32
+// checksum. The S3 API reference requires Content-MD5 on a multi-object
+// delete, and an S3-compatible store that enforces the rule rejects the CRC32
+// request with MissingContentMD5. It is the option the SDK maintainers publish
+// for that case, unchanged:
+// https://github.com/aws/aws-sdk-go-v2/discussions/2960. Its removals go by
+// step name and drop their errors (DeleteObjects has no trailer step), so a
+// step the SDK renames would put the CRC32 header back.
+// TestS3BackendDeleteSendsContentMD5AsItsOnlyChecksum fails when that happens.
+func withContentMD5(o *s3.Options) {
+	o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
+		_, _ = stack.Initialize.Remove("AWSChecksum:SetupInputContext")
+		_, _ = stack.Build.Remove("AWSChecksum:RequestMetricsTracking")
+		_, _ = stack.Finalize.Remove("AWSChecksum:ComputeInputPayloadChecksum")
+		_, _ = stack.Finalize.Remove("addInputChecksumTrailer")
+		return smithyhttp.AddContentChecksumMiddleware(stack)
+	})
 }
 
 // Candidates lists content UIDs with artifacts under the store's prefix.
