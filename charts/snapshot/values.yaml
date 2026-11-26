@@ -102,6 +102,12 @@ storage:
   # pvc and s3 are implemented today.
   type: pvc
 
+  # The SnapshotStorageClass that requests naming no class use. The operator
+  # creates it from the values below when the cluster has no class at all, and
+  # otherwise leaves it alone. To move the default, create the new class, change
+  # this value and run helm upgrade; only the operator restarts.
+  defaultClassName: default
+
   # PVC configuration (when type=pvc)
   pvc:
     # Create a new PVC (set to false if using existing PVC)

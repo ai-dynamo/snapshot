@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: default storage class
+templates:
+  - templates/operator-deployment.yaml
+  - templates/configmap.yaml
+release:
+  name: snapshot
+tests:
+  - it: names the default class for the operator
+    template: templates/operator-deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --default-storage-class=default
+
+  - it: passes a different default class name on
+    template: templates/operator-deployment.yaml
+    set:
+      storage.defaultClassName: gold
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --default-storage-class=gold
+
+  - it: refuses a default class name that is not a valid object name
+    template: templates/operator-deployment.yaml
+    set:
+      storage.defaultClassName: Not_Valid
+    asserts:
+      - failedTemplate: {}
+
+  - it: leaves the S3 access section out when no access setting is given
+    template: templates/configmap.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: region-1
+      storage.s3.bucket: snapshots
+      operator.bindNewContents: true
+    asserts:
+      - notMatchRegex:
+          path: data["storage.yaml"]
+          pattern: s3Access
+
+  - it: gives the default class the access settings of the S3 store
+    template: templates/configmap.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: region-1
+      storage.s3.bucket: snapshots
+      storage.s3.credentialsSecretRef: s3-credentials
+      storage.s3.credentialsSecretKey: creds
+      storage.s3.caBundleConfigMapRef: s3-ca
+      storage.s3.addressing: path
+      storage.s3.allowHttp: true
+      operator.bindNewContents: true
+    asserts:
+      - matchRegex:
+          path: data["storage.yaml"]
+          pattern: 's3Access:\n  credentialsSecretRef:\n    name: "s3-credentials"\n    key: "creds"\n  addressing: "path"\n  allowHttp: true\n  caBundleConfigMapRef:\n    name: "s3-ca"\n    key: "ca.crt"'
+
+  - it: has no S3 access section for a PVC store
+    template: templates/configmap.yaml
+    asserts:
+      - notMatchRegex:
+          path: data["storage.yaml"]
+          pattern: s3Access
