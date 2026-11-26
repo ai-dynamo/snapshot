@@ -53,7 +53,7 @@ const (
 
 // SnapshotStoreReconciler sets the store ID and the Ready condition of
 // each store. A store is Ready when its location is valid, no earlier store
-// names the same store, and a test object can be written, read, listed and
+// has the same location, and a test object can be written, read, listed and
 // deleted there. A finalizer keeps a store while content uses it.
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotstores,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotstores/status,verbs=get;update;patch
@@ -146,7 +146,7 @@ func (r *SnapshotStoreReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	if duplicateOf != "" {
 		return r.fail(ctx, store, storeID, ReasonDuplicateStore,
-			fmt.Sprintf("store %q, created earlier, names the same store", duplicateOf), false)
+			fmt.Sprintf("store %q, created earlier, has the same location", duplicateOf), false)
 	}
 
 	reason, message := r.checkStore(ctx, store)
@@ -220,11 +220,11 @@ func (r *SnapshotStoreReconciler) checkStore(ctx context.Context,
 		if !ok {
 			return ReasonClaimNotMounted, fmt.Sprintf("claim %q is not mounted by the operator", store.Spec.PVC.ClaimName)
 		}
-		basePath := store.Spec.PVC.BasePath
-		if basePath == "" {
-			basePath = storage.PVCRoot
+		subPath := store.Spec.PVC.SubPath
+		if subPath == "" {
+			subPath = storage.PVCRoot
 		}
-		target.PVC = &storageprobe.PVC{MountPath: mount, BasePath: basePath}
+		target.PVC = &storageprobe.PVC{MountPath: mount, BasePath: subPath}
 	case store.Spec.S3 != nil:
 		s3Spec := store.Spec.S3
 		target.S3 = &storageprobe.S3{
@@ -510,11 +510,11 @@ func (r *SnapshotStoreReconciler) checkTimeout() time.Duration {
 func storeIDOf(store *snapshotv1alpha1.SnapshotStore, namespace string) (string, error) {
 	switch {
 	case store.Spec.PVC != nil && store.Spec.S3 == nil:
-		basePath := store.Spec.PVC.BasePath
-		if basePath == "" {
-			basePath = storage.PVCRoot
+		subPath := store.Spec.PVC.SubPath
+		if subPath == "" {
+			subPath = storage.PVCRoot
 		}
-		return storage.PVC{Namespace: namespace, ClaimName: store.Spec.PVC.ClaimName, BasePath: basePath}.StoreID()
+		return storage.PVC{Namespace: namespace, ClaimName: store.Spec.PVC.ClaimName, BasePath: subPath}.StoreID()
 	case store.Spec.S3 != nil && store.Spec.PVC == nil:
 		return storage.S3{
 			Endpoint: store.Spec.S3.Endpoint, Region: store.Spec.S3.Region,

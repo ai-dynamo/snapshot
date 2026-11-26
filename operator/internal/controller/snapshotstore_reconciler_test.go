@@ -96,7 +96,7 @@ func pvcStoreObject(name string, created time.Time) *snapshotv1alpha1.SnapshotSt
 		ObjectMeta: metav1.ObjectMeta{Name: name, CreationTimestamp: metav1.NewTime(created), Generation: 1},
 		Spec: snapshotv1alpha1.SnapshotStoreSpec{
 			ReclaimPolicy: snapshotv1alpha1.ReclaimPolicyDelete,
-			PVC:           &snapshotv1alpha1.PVCStoreSpec{ClaimName: "snapshot-pvc", BasePath: "/team-a"},
+			PVC:           &snapshotv1alpha1.PVCStoreSpec{ClaimName: "snapshot-pvc", SubPath: "/team-a"},
 		},
 	}
 }
@@ -135,9 +135,9 @@ func TestStoreBecomesReadyAndRecordsItsStoreID(t *testing.T) {
 	assert.Equal(t, &storageprobe.PVC{MountPath: "/checkpoints", BasePath: "/team-a"}, f.prober.targets[0].PVC)
 }
 
-func TestStoreWithoutABasePathUsesTheWholeClaim(t *testing.T) {
+func TestStoreWithoutASubPathUsesTheWholeClaim(t *testing.T) {
 	store := pvcStoreObject("default", baseTime)
-	store.Spec.PVC.BasePath = ""
+	store.Spec.PVC.SubPath = ""
 	f := newStoreFixture(t, store)
 
 	f.reconcile(t, "default")
