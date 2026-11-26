@@ -46,18 +46,10 @@ func TestNewContentBindingIsAnExplicitRolloutStep(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, storeID)
 
-	// An operator-first upgrade can read store identity for cleanup without issuing bound captures to old agents.
-	captureStoreID, err := newContentStoreID(storeID, false)
-	require.NoError(t, err)
-	assert.Empty(t, captureStoreID)
-
-	// Activate only after the compatible agent/PageBroker rollout has completed.
-	captureStoreID, err = newContentStoreID(storeID, true)
-	require.NoError(t, err)
-	assert.Equal(t, storeID, captureStoreID)
-
-	_, err = newContentStoreID("", true)
-	require.ErrorContains(t, err, "requires snapshot-storage-config")
+	require.NoError(t, validateContentBinding(storeID, false))
+	require.NoError(t, validateContentBinding(storeID, true))
+	require.NoError(t, validateContentBinding("", false))
+	require.ErrorContains(t, validateContentBinding("", true), "requires snapshot-storage-config")
 }
 
 func TestConfiguredStoreIDPreservesLegacyStartup(t *testing.T) {
@@ -180,4 +172,37 @@ func TestConfiguredStoreIDMissingFileDoesNotFallBackToLegacy(t *testing.T) {
 	id, err := storeIDFromPath(filepath.Join(t.TempDir(), "missing.yaml"))
 	require.ErrorIs(t, err, os.ErrNotExist)
 	assert.Empty(t, id)
+}
+
+func TestStorageConfigDecodesTheS3AccessSettingsForTheDefaultStore(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "storage.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(s3StorageYAML+`s3Access:
+  credentialsSecretRef:
+    name: s3-credentials
+    key: creds
+  addressing: path
+  allowHttp: true
+  caBundleConfigMapRef:
+    name: s3-ca
+    key: ca.crt
+`), 0o600))
+
+	cfg, err := loadStorageConfig(configPath)
+
+	require.NoError(t, err)
+	require.NotNil(t, cfg.S3Access)
+	assert.Equal(t, "s3-credentials", cfg.S3Access.CredentialsSecretRef.Name)
+	assert.Equal(t, "creds", cfg.S3Access.CredentialsSecretRef.Key)
+	assert.Equal(t, "path", cfg.S3Access.Addressing)
+	assert.True(t, cfg.S3Access.AllowHTTP)
+	assert.Equal(t, "s3-ca", cfg.S3Access.CABundleConfigMapRef.Name)
+}
+
+func TestStorageConfigStillRejectsUnknownFields(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "storage.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(s3StorageYAML+"s3Access:\n  unknown: true\n"), 0o600))
+
+	_, err := loadStorageConfig(configPath)
+
+	require.Error(t, err)
 }

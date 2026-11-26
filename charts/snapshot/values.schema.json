@@ -3,6 +3,17 @@
   "$comment": "SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\nSPDX-License-Identifier: Apache-2.0",
   "type": "object",
   "properties": {
+    "storage": {
+      "type": "object",
+      "properties": {
+        "defaultStoreName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        }
+      }
+    },
     "config": {
       "type": "object",
       "properties": {

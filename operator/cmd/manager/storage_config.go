@@ -30,15 +30,13 @@ func mustStorageConfig(configPath string) (storage.Config, string) {
 	return cfg, storeID
 }
 
-// Store identity remains available to maintenance while new captures stay legacy during rollout.
-func newContentStoreID(storeID string, enabled bool) (string, error) {
-	if !enabled {
-		return "", nil
+// validateContentBinding requires a configured store when binding is on,
+// because the default store is made from it.
+func validateContentBinding(storeID string, enabled bool) error {
+	if enabled && storeID == "" {
+		return fmt.Errorf("bind-new-contents requires snapshot-storage-config")
 	}
-	if storeID == "" {
-		return "", fmt.Errorf("bind-new-contents requires snapshot-storage-config")
-	}
-	return storeID, nil
+	return nil
 }
 
 // loadStorageConfig reads and decodes the chart-rendered storage.yaml.

@@ -229,9 +229,10 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
      misattribute their errors to the including template. Includes the
      rendered stagingSizeLimit, not just pageBroker.staging.sizeLimit: the
      default stagingBytes is derived from it together with both containers'
-     memory limits, so a change to either limit must also roll both. */}}
+     memory limits, so a change to either limit must also roll both. The default
+     store name is left out because only the operator reads it. */}}
 {{- define "snapshot.operatorConfigChecksum" -}}
-{{- toYaml (dict "storage" .Values.storage "pageBrokerS3" .Values.pageBroker.s3 "modelStreamer" .Values.pageBroker.transferEngine.modelStreamer "stagingSizeLimit" (include "snapshot.stagingSizeLimit" .)) | sha256sum -}}
+{{- toYaml (dict "storage" (omit .Values.storage "defaultStoreName") "pageBrokerS3" .Values.pageBroker.s3 "modelStreamer" .Values.pageBroker.transferEngine.modelStreamer "stagingSizeLimit" (include "snapshot.stagingSizeLimit" .)) | sha256sum -}}
 {{- end -}}
 {{- define "snapshot.modelStreamerConfigPath" -}}{{ include "snapshot.modelStreamerMountDir" . }}/model-streamer.json{{- end -}}
 

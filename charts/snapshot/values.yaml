@@ -102,6 +102,12 @@ storage:
   # pvc and s3 are implemented today.
   type: pvc
 
+  # The SnapshotStore used by requests that name none. The operator
+  # creates it from the values below when the cluster has no store, and does
+  # nothing once a store exists. To move the default, create the new store,
+  # change this value and run helm upgrade. Only the operator restarts.
+  defaultStoreName: default
+
   # PVC configuration (when type=pvc)
   pvc:
     # Create a new PVC (set to false if using existing PVC)

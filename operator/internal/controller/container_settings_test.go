@@ -62,14 +62,14 @@ func TestSnapshotReconciler_BuildPodSnapshotContentSavesContainerSettings(t *tes
 	snap.Spec.Source.PodRef.Containers = []string{"main"}
 	snap.Spec.Containers = containerSettings("main")
 
-	content := r.buildPodSnapshotContent(snap, "content-x", scheduledPod())
+	content := r.buildPodSnapshotContent(snap, "content-x", scheduledPod(), nil)
 	assert.Equal(t, snap.Spec.Containers, content.Spec.Containers)
 	content.Spec.Containers[0].Lifecycle.PostRestore.HTTPPost.Port = intstr.FromInt32(9000)
 	assert.Equal(t, intstr.FromInt32(8000), snap.Spec.Containers[0].Lifecycle.PostRestore.HTTPPost.Port,
 		"the content gets its own copy")
 
 	snap.Spec.Containers = nil
-	assert.Nil(t, r.buildPodSnapshotContent(snap, "content-x", scheduledPod()).Spec.Containers)
+	assert.Nil(t, r.buildPodSnapshotContent(snap, "content-x", scheduledPod(), nil).Spec.Containers)
 }
 
 func TestSnapshotReconciler_SavesContainerSettingsInTheContent(t *testing.T) {

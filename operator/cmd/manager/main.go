@@ -54,8 +54,7 @@ func main() {
 		"Path to the PageBroker-only S3 settings (addressing, CA file, HTTP permission, limits) merged into the configuration ConfigMap")
 	flag.Parse()
 	storageCfg, storeID := mustStorageConfig(*storageConfigPath)
-	captureStoreID, err := newContentStoreID(storeID, *bindNewContents)
-	if err != nil {
+	if err := validateContentBinding(storeID, *bindNewContents); err != nil {
 		ctrl.Log.Error(err, "invalid content binding configuration")
 		os.Exit(1)
 	}
@@ -164,13 +163,23 @@ func main() {
 		NonCacheReadClient:    mgr.GetAPIReader(),
 		Recorder:              mgr.GetEventRecorderFor("podsnapshot-controller"),
 		TestFailureAnnotation: *testFailureAnnotation,
-		StoreID:               captureStoreID,
+		BindNewContents:       *bindNewContents,
+		DefaultStoreName:      *defaultSnapshotStore,
 	}
 	if err := podSnapshotReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up PodSnapshot controller")
 		os.Exit(1)
 	}
 
+	if err := mgr.Add(&controller.DefaultSnapshotStoreCreator{
+		Client: mgr.GetClient(),
+		Reader: mgr.GetAPIReader(),
+		Name:   *defaultSnapshotStore,
+		Config: storageCfg,
+	}); err != nil {
+		ctrl.Log.Error(err, "unable to set up the default SnapshotStore")
+		os.Exit(1)
+	}
 	if snapshotNamespace == "" {
 		ctrl.Log.Info("SnapshotStore controller is disabled: POD_NAMESPACE is not set")
 	} else {
@@ -222,6 +231,8 @@ func main() {
 		NonCacheReadClient:   mgr.GetAPIReader(),
 		Recorder:             mgr.GetEventRecorderFor("snapshotjob-controller"),
 		CuInterposeContainer: *cuInterposeConfig,
+		BindNewContents:      *bindNewContents,
+		DefaultStoreName:     *defaultSnapshotStore,
 	}
 	if err := snapshotJobReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up SnapshotJob controller")

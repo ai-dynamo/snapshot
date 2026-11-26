@@ -20,9 +20,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/yaml"
@@ -60,8 +62,9 @@ func TestSnapshotStoreControllerAgainstAnAPIServer(t *testing.T) {
 	require.NoError(t, cl.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "snapshot"}}))
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme:  scheme,
-		Metrics: metricsserver.Options{BindAddress: "0"},
+		Scheme:     scheme,
+		Metrics:    metricsserver.Options{BindAddress: "0"},
+		Controller: ctrlconfig.Controller{SkipNameValidation: ptr.To(true)},
 		Cache: cache.Options{ByObject: map[client.Object]cache.ByObject{
 			&corev1.Secret{}:    {Namespaces: map[string]cache.Config{"snapshot": {}}},
 			&corev1.ConfigMap{}: {Namespaces: map[string]cache.Config{"snapshot": {}}},
