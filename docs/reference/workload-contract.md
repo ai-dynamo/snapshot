@@ -282,8 +282,8 @@ custom image still has to meet these:
   cannot reopen after restore, for example `HF_HUB_DISABLE_XET=1`, and loading
   models from a local cache with `HF_HUB_OFFLINE=1`.
 - **All device mappings must be restorable.** Turn off transports CRIU cannot
-  restore, for example TensorRT-LLM's `TLLM_NCCL_SYMMETRIC_ZERO_COPY=0` and
-  `UCX_TLS=tcp,self`.
+  restore, for example by keeping TensorRT-LLM's MPI communication on TCP with
+  `OMPI_MCA_pml=ob1` and `OMPI_MCA_btl=tcp,self`.
 - **`spawn`, not `fork`.** Multiprocess engines start workers with `spawn` (for
   example `VLLM_WORKER_MULTIPROC_METHOD=spawn`). This is a CUDA limitation:
   forking a process that already holds a CUDA context produces a child with an
