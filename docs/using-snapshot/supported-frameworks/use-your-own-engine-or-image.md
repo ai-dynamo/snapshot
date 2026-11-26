@@ -19,6 +19,11 @@ Where to go next:
   [Packaging Methods](../../reference/workload-contract.md#packaging-methods).
   You can keep the runtime image unmodified and mount a small program from a
   ConfigMap, or bake the program into your own image.
+- To checkpoint an engine that runs from its stock image and command, with no
+  program of yours in the container, see
+  [Lifecycle Hooks](../../reference/workload-contract.md#lifecycle-hooks). The
+  engine's own signals, such as a health endpoint, tell Snapshot when to
+  checkpoint.
 - To add support for an engine that this section does not cover, see
   [Support a New Inference Server](../../reference/workload-contract.md#support-a-new-inference-server).
   The [vLLM](vllm.md), [SGLang](sglang.md) and

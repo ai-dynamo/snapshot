@@ -150,6 +150,24 @@ own signals in the `PodSnapshot`'s
   a POST with an empty body, that tells the workload it may resume. It replaces
   step 9's wait on `restore-complete`.
 
+An engine that already exposes such signals needs no program of yours in the
+container. In a `SnapshotJob`, these settings checkpoint the `main` container
+once its health endpoint has returned a 2xx twice in a row:
+
+```yaml
+spec:
+  podSnapshotTemplate:
+    targetContainers:
+      - main
+    containers:
+      - name: main
+        checkpointReadinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          successThreshold: 2
+```
+
 A workload that uses them:
 
 - **MUST** have a shell in the image for a file hook: `/bin/sh`,
@@ -300,6 +318,10 @@ custom image still has to meet these:
   the command, or a framework that implements these steps natively, is equally
   valid, provided the running container satisfies this contract and the runtime
   compatibility constraints above.
+- **Stock image and command.** An engine that exposes its own signals, such
+  as a health endpoint that succeeds once the model is loaded, runs unchanged.
+  Name the signals with [Lifecycle Hooks](#lifecycle-hooks). The pod
+  requirements and the runtime compatibility constraints above still apply.
 
 ## Support a New Inference Server
 
@@ -316,8 +338,10 @@ restores it with no Snapshot-side change. To bring one:
    `SNAPSHOT_CONTROL_DIR`, clear then write `ready-for-snapshot` once quiesced,
    wait on `restore-complete`, and
    write a `<framework>-restore-ready` sentinel once the API is serving.
+   An engine that exposes its own signals can name them with
+   [Lifecycle Hooks](#lifecycle-hooks) instead.
 3. **Meet the requirements in [Runtime Compatibility](#runtime-compatibility)
-   and [Pod Requirements](#pod-requirements)**, then package it by either
+   and [Pod Requirements](#pod-requirements)**, then package it by any
    method above.
 
 Nothing about the engine's identity is special to Snapshot; satisfying the
