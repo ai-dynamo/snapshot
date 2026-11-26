@@ -191,7 +191,8 @@ commit-level history for each release is on its
   the Pod ran, and held back every later checkpoint of that Pod. With
   `nvidia.com/snapshot-multi-gpu: enabled`, or a `checkpointReadinessProbe` on a
   named port, it already failed, as `CuInterposeMisconfigured` or
-  `InvalidCheckpointReadinessProbe`, and now reports this reason too. See
+  `InvalidCheckpointReadinessProbe`, and now fails as `InvalidTargetContainer`
+  instead. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#a-checkpoint-fails-with-invalidtargetcontainer).
 
 ### Deprecated
