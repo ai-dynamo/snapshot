@@ -92,6 +92,9 @@ definition (CRD).
   for layers.
 - Namespaced stores, per-namespace quotas, or role-based access control (RBAC)
   on who can name a store.
+- A read-only store, for restore only. An optional access mode on the store
+  can be added later without a breaking change. That feature belongs with
+  [SNEP-740](../740-shared-snapshot/README.md).
 - Changes to the `storeID` encoding, the publications, or the artifact layout
   of SNEP-237. The only additions are two small files beside a content's
   snapshots.
@@ -436,9 +439,11 @@ the snapshots of another store. Between clusters, a location can be shared.
   operator refuses the later store by `creationTimestamp`. A tie is possible,
   because the timestamp has second precision. The configured default store
   wins a tie, then the name decides. Two stores created at the same time
-  therefore get the same answer in any reconcile order. Bindings play no part
-  in the decision. A store refused as `DuplicateStore` takes no new bindings,
-  and the content that it already has keeps its backend; see
+  therefore get the same answer in any reconcile order. Two stores can both be
+  Ready for a moment while the cache is stale. Content bound in that moment
+  stays on its store, and the next reconcile refuses the later store. Bindings
+  play no part in the decision. A store refused as `DuplicateStore` takes no
+  new bindings, and the content that it already has keeps its backend; see
   [Maintenance](#maintenance).
 - **Access.** Before `Ready`, the operator writes a test object at the
   location, reads it back, finds it in a listing, and deletes it. Those are
@@ -848,7 +853,10 @@ work after a `helm upgrade` with the previous values:
    `creationTimestamp` goes to the default, so the default is never the store
    refused as `DuplicateStore`. Content that matches no store keeps the
    [`StoreInactive` handling](../237-s3-storage/README.md#limitations-risks-and-mitigations)
-   of SNEP-237.
+   of SNEP-237. If a store is created before the operator seeds the default,
+   the operator does not seed it. To recover, create a store with the same
+   `storage.*` location under any name. Legacy content resolves to that store
+   by digest.
 3. Content with no `spec.storage`, bound before SNEP-237, keeps the legacy
    path-addressed flow and is never assigned a store.
 4. `PodSnapshot`s and `SnapshotJob`s without `snapshotStoreName` resolve to the
