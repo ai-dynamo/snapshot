@@ -45,3 +45,24 @@ tests:
             resources: ["configmaps"]
             resourceNames: ["snapshot-pagebroker-storage-config"]
             verbs: ["get", "update"]
+
+  - it: annotates the operator service account
+    documentSelector:
+      path: kind
+      value: ServiceAccount
+    set:
+      operator.serviceAccount.annotations:
+        example.com/role: snapshot-operator
+    asserts:
+      - equal:
+          path: metadata.annotations
+          value:
+            example.com/role: snapshot-operator
+
+  - it: leaves the operator service account without annotations by default
+    documentSelector:
+      path: kind
+      value: ServiceAccount
+    asserts:
+      - notExists:
+          path: metadata.annotations

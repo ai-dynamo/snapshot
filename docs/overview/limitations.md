@@ -1,12 +1,13 @@
 # Limitations and Known Issues
 
 Snapshot currently focuses on inference cold-start; further use cases are on the
-roadmap.
+[roadmap](../roadmap.md).
 
 ## Current Limitations
 
 - Linux nodes on x86_64 or arm64.
-- Workloads, including multi-GPU workloads, must run on a single node. Multi-node is on the roadmap.
+- Workloads, including multi-GPU workloads, must run on a single node.
+  Multi-node is on the [roadmap](../roadmap.md).
 - vGPU is not supported.
 - Runs only on NVIDIA GPUs supported by the required CUDA driver.
 - The checkpointed workload must not have tools that intercept `libcuda.so`
@@ -22,7 +23,7 @@ roadmap.
 - A Pod gets one restore. If a restored container starts again, for example
   under `restartPolicy: Always` after the restored process exits, it ends in
   `CrashLoopBackOff`. Delete the Pod to restore again. Retrying a restore in
-  the same Pod is on the roadmap.
+  the same Pod is on the [roadmap](../roadmap.md).
 - Several Snapshot installations whose clusters share nodes, such as vCluster
   tenants, work only when each sets `daemonset.nriHostNamespace` to its own host
   namespace. An installation with it empty acts on every restore Pod on its
@@ -30,6 +31,9 @@ roadmap.
 - [Lifecycle Hooks](../reference/workload-contract.md#lifecycle-hooks) support a
   file or plain HTTP, without authentication or redirects. File hooks need
   a shell in the image.
+- An S3 store that uses [workload identity](../operate/configure-storage.md#use-workload-identity-for-s3)
+  supports a token or credential service behind a private CA for uploads and
+  cleanup only. Restores cannot reach such a service.
 
 ## GPU Device Selection and Restore Paths
 

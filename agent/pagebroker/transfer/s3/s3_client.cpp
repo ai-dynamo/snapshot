@@ -16,6 +16,7 @@
 #include <cerrno>
 #include <charconv>
 #include <climits>
+#include <cstdlib>
 #include <iterator>
 #include <limits>
 #include <nlohmann/json.hpp>
@@ -87,6 +88,8 @@ constexpr char kReadCommand[] = "cat";
 constexpr char kRemoteTypeEnv[] = "RCLONE_CONFIG_PAGEBROKER_TYPE=s3";
 constexpr char kRemoteProviderEnv[] = "RCLONE_CONFIG_PAGEBROKER_PROVIDER=AWS";
 constexpr char kExplicitAuthEnv[] = "RCLONE_CONFIG_PAGEBROKER_ENV_AUTH=false";
+constexpr char kEnvironmentAuthEnv[] = "RCLONE_CONFIG_PAGEBROKER_ENV_AUTH=true";
+constexpr char kSslCertFileEnv[] = "SSL_CERT_FILE";
 constexpr char kRemoteAccessKeyEnv[] = "RCLONE_CONFIG_PAGEBROKER_ACCESS_KEY_ID=";
 constexpr char kRemoteSecretKeyEnv[] = "RCLONE_CONFIG_PAGEBROKER_SECRET_ACCESS_KEY=";
 constexpr char kRemoteTokenEnv[] = "RCLONE_CONFIG_PAGEBROKER_SESSION_TOKEN=";
@@ -368,6 +371,27 @@ WaitForRclone(Child& child, int output, int diagnostics, std::size_t output_limi
   return output_bytes;
 }
 
+// rclone loads credentials before it applies its own region and --ca-cert, so
+// the token exchange takes both from the environment. The container credentials
+// provider ignores AWS_CA_BUNDLE and uses default trust, hence SSL_CERT_FILE.
+void
+AppendIdentityEnvironment(const S3Connection& connection, std::vector<std::string>& environment)
+{
+  const auto entry = [](const char* name, const std::string& value) { return std::string(name) + '=' + value; };
+  environment.push_back(kEnvironmentAuthEnv);
+  for (const auto* name : kWorkloadIdentityVariables) {
+    const auto* value = std::getenv(name);
+    if (value != nullptr && *value != '\0')
+      environment.push_back(entry(name, value));
+  }
+  if (const auto region = TokenExchangeRegion(connection); !region.empty())
+    environment.push_back(entry(kAwsRegionEnv, region));
+  if (!connection.ca_file.empty()) {
+    environment.push_back(entry(kAwsCaBundleEnv, connection.ca_file));
+    environment.push_back(entry(kSslCertFileEnv, connection.ca_file));
+  }
+}
+
 } // namespace
 
 void
@@ -461,22 +485,24 @@ S3Client::S3Client(S3Connection connection, S3Limits limits) : limits_(limits)
 {
   connection.Validate();
   limits_.Validate();
-  if (connection.access_key_id.empty())
-    throw std::invalid_argument("rclone requires resolved startup S3 credentials");
   if (!connection.ca_file.empty() && !std::filesystem::is_regular_file(connection.ca_file))
     throw std::invalid_argument("S3 CA certificate file does not exist");
-  // The child receives only the startup snapshot, never ambient credential sources.
+  // Instance metadata and the shared files stay off for both credential sources,
+  // so a broken workload identity fails instead of falling back to the node's role.
   environment_ = {kRemoteTypeEnv,
                   kRemoteProviderEnv,
-                  kExplicitAuthEnv,
-                  kRemoteAccessKeyEnv + connection.access_key_id,
-                  kRemoteSecretKeyEnv + connection.secret_access_key,
-                  kRemoteTokenEnv + connection.session_token,
                   kRemoteRegionEnv + connection.region,
                   kRemoteEndpointEnv + connection.endpoint,
                   kDisableImdsEnv,
                   kDisableAwsConfigEnv,
                   kDisableAwsFileEnv};
+  if (connection.UsesDefaultCredentialChain())
+    AppendIdentityEnvironment(connection, environment_);
+  else
+    environment_.insert(environment_.end(), {std::string(kExplicitAuthEnv),
+                                             kRemoteAccessKeyEnv + connection.access_key_id,
+                                             kRemoteSecretKeyEnv + connection.secret_access_key,
+                                             kRemoteTokenEnv + connection.session_token});
   arguments_.assign(std::begin(kCommonArguments), std::end(kCommonArguments));
   const std::string part_bytes = std::to_string(limits.part_size) + kBytesSuffix;
   arguments_.insert(arguments_.end(),
