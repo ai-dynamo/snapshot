@@ -343,6 +343,57 @@ def exec_command(
     )
 
 
+EXEC_ARGV_TIMEOUT_SECONDS = 600
+
+
+class ExecFailed(RuntimeError):
+    def __init__(self, program: str, returncode: int, output: str) -> None:
+        super().__init__(f"{program} exited with status {returncode}: {output}")
+        self.returncode = returncode
+        self.output = output
+
+
+def exec_argv(
+    namespace: str,
+    pod: str,
+    argv: list[str],
+    *,
+    container: str | None = None,
+    timeout: float = EXEC_ARGV_TIMEOUT_SECONDS,
+) -> str:
+    """Run a program directly, for a container that has no shell.
+
+    Returns its output once it exits. Raises ExecFailed on a non-zero exit
+    status and TimeoutError when it is still running after timeout seconds.
+    """
+    session = stream(
+        client.CoreV1Api().connect_get_namespaced_pod_exec,
+        pod,
+        namespace,
+        command=argv,
+        container=container,
+        stderr=True,
+        stdin=False,
+        stdout=True,
+        tty=False,
+        _preload_content=False,
+    )
+    try:
+        session.run_forever(timeout=timeout)
+        if session.is_open():
+            raise TimeoutError(f"{argv[0]} in {namespace}/{pod} ran longer than {timeout:.0f}s")
+        try:
+            returncode = session.returncode
+        except (KeyError, IndexError, TypeError, ValueError):
+            returncode = -1
+        output = session.read_all()
+    finally:
+        session.close()
+    if returncode != 0:
+        raise ExecFailed(argv[0], returncode, output)
+    return output
+
+
 PAYLOAD_MARKER = "e2e-payload-follows"
 
 

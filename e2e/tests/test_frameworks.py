@@ -217,7 +217,7 @@ def test_framework_checkpoint_restore_serves_inference(
             assert re.fullmatch(r"store-v1-[0-9a-f]{64}", content["spec"]["storage"]["storeID"])
             artifacts = content["status"]["storage"]["artifacts"]
             assert [artifact["containerName"] for artifact in artifacts] == [frameworks.CONTAINER]
-            assert not snap.artifact_root_exists(
+            assert not snap.artifact_root_on_checkpoint_volume(
                 config, source_node, content["metadata"]["uid"]
             ), "the checkpoint must not also be written to the checkpoint volume"
 
