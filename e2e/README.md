@@ -311,9 +311,9 @@ and checks that their operator and agent images and chart are published. It
 prints a JSON list of `{tag, chart_version}` and drops the version under test:
 
 ```bash
-# Latest release
+# Latest published release
 python3 hack/resolve-snapshot-image-tag.py --from ""
-# Newest patch release of each of the last 3 minor versions
+# Newest published patch release of each of the last 3 minor versions
 python3 hack/resolve-snapshot-image-tag.py --from-minor-versions 3
 # Specific release tags and main commits
 python3 hack/resolve-snapshot-image-tag.py --from v0.1.0,1a2b3c4d
@@ -321,6 +321,12 @@ python3 hack/resolve-snapshot-image-tag.py --from v0.1.0,1a2b3c4d
 
 Only main and release-branch commits are published, so a feature-branch commit
 cannot be used. Set `GH_TOKEN` to avoid GitHub API rate limits.
+
+A version you name with `--from` must be published, or the script fails. When
+the script picks the releases itself, it passes over a release that has no
+images or chart in GHCR and prints a warning. It then takes the next patch
+release down in the same minor version, and leaves out a minor version that has
+no published release.
 
 ## Upgrade Tests
 
@@ -391,7 +397,8 @@ and upgrades to the version under test.
 The versions to upgrade from are the newest patch release of each of the last
 `UPGRADE_FROM_MINOR_VERSIONS` (3) minor versions, prereleases excluded. With
 fewer minor versions, the newest patch release of each existing minor version
-is tested.
+is tested. The run passes over a release that has no images or chart in GHCR.
+See [Installing a Published Version](#installing-a-published-version).
 
 | Trigger | Profile | Configs | Skipping |
 | --- | --- | --- | --- |

@@ -26,6 +26,11 @@ JSON list of {tag, chart_version}, verified to be published for the operator
 and agent images and the chart, and drop the version under test itself. The
 pagebroker image is not required: it is only deployed when enabled, and
 releases before it existed never published one.
+
+A release named with --from must be published. A release the resolver picks
+itself can be a release page with nothing in GHCR behind it, when its publish
+run failed; that one is passed over, with a warning, for the next patch release
+down in the same minor version.
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 
 
 GITHUB_API_VERSION = "2022-11-28"
@@ -187,16 +193,41 @@ def release_tags(headers: dict[str, str]) -> list[str]:
     return tags
 
 
-def latest_minor_releases(tags: list[str], count: int) -> list[str]:
-    newest: dict[tuple[int, int], tuple[int, int, int]] = {}
+def warn_unpublished_release(tag: str, missing: list[str]) -> None:
+    message = (
+        f"{tag} is released but not published for: {', '.join(missing)}. "
+        "Trying the next patch release down in the same minor version instead."
+    )
+    # stdout carries the JSON list; the runner reads commands from stderr too.
+    print(f"::warning title=Release {tag} is not published::{message}", file=sys.stderr)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as handle:
+            handle.write(f"> **Release `{tag}` is not published.** {message}\n")
+
+
+def latest_minor_releases(
+    tags: list[str],
+    count: int,
+    missing_packages: Callable[[str], list[str]] | None = None,
+) -> list[str]:
+    patches: dict[tuple[int, int], set[int]] = {}
     for tag in tags:
         match = RELEASE_TAG.match(tag)
         if not match:
             continue
-        version = (int(match[1]), int(match[2]), int(match[3]))
-        if version > newest.get(version[:2], (-1, -1, -1)):
-            newest[version[:2]] = version
-    return [f"v{major}.{minor}.{patch}" for major, minor, patch in sorted(newest.values(), reverse=True)[:count]]
+        patches.setdefault((int(match[1]), int(match[2])), set()).add(int(match[3]))
+
+    selected = []
+    for major, minor in sorted(patches, reverse=True)[:count]:
+        for patch in sorted(patches[(major, minor)], reverse=True):
+            tag = f"v{major}.{minor}.{patch}"
+            missing = missing_packages(tag) if missing_packages else []
+            if not missing:
+                selected.append(tag)
+                break
+            warn_unpublished_release(tag, missing)
+    return selected
 
 
 def expand_commit(prefix: str) -> str:
@@ -228,15 +259,20 @@ def chart_version(tag: str) -> str:
     return tag.removeprefix("v")
 
 
+def missing_upgrade_from_packages(tag: str, headers: dict[str, str]) -> list[str]:
+    missing = [package for package in UPGRADE_FROM_PACKAGES if not package_has_tag(package, tag, headers)]
+    if not package_has_tag(CHART_PACKAGE, chart_version(tag), headers):
+        missing.append(CHART_PACKAGE)
+    return missing
+
+
 def resolve_from(tags: list[str], to_tag: str, headers: dict[str, str]) -> list[dict[str, str]]:
     resolved = []
     for tag in dict.fromkeys(tags):
         if tag == to_tag:
             print(f"Skipping {tag}: it is the version under test", file=sys.stderr)
             continue
-        missing = [package for package in UPGRADE_FROM_PACKAGES if not package_has_tag(package, tag, headers)]
-        if not package_has_tag(CHART_PACKAGE, chart_version(tag), headers):
-            missing.append(CHART_PACKAGE)
+        missing = missing_upgrade_from_packages(tag, headers)
         if missing:
             hint = (
                 " push-artifacts publishes only main and release-branch commits."
@@ -257,7 +293,9 @@ def upgrade_from_tags(args: argparse.Namespace, headers: dict[str, str]) -> list
     count = 1 if args.from_minor_versions is None else args.from_minor_versions
     if count < 1:
         raise ResolveError("--from-minor-versions must be at least 1")
-    tags = latest_minor_releases(release_tags(headers), count)
+    tags = latest_minor_releases(
+        release_tags(headers), count, lambda tag: missing_upgrade_from_packages(tag, headers)
+    )
     if not tags:
         raise ResolveError(f"{REPOSITORY} has no published release to upgrade from")
     return tags
@@ -305,14 +343,14 @@ def main() -> int:
         metavar="REFS",
         help=(
             "comma-separated version tags or commit hashes to upgrade from; "
-            "empty means the latest release"
+            "empty means the latest published release"
         ),
     )
     mode.add_argument(
         "--from-minor-versions",
         type=int,
         metavar="N",
-        help="upgrade from the newest patch release of each of the last N minor versions",
+        help="upgrade from the newest published patch release of each of the last N minor versions",
     )
     parser.add_argument(
         "--wait-seconds",

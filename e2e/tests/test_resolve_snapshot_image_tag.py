@@ -22,7 +22,7 @@ def resolver(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    for name in ("GITHUB_OUTPUT", "GITHUB_ENV", "SNAPSHOT_E2E_SNAPSHOT_TAG", "GH_TOKEN"):
+    for name in ("GITHUB_OUTPUT", "GITHUB_ENV", "GITHUB_STEP_SUMMARY", "SNAPSHOT_E2E_SNAPSHOT_TAG", "GH_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     return module
 
@@ -78,6 +78,30 @@ def test_latest_minor_releases_ignores_non_release_tags(resolver: ModuleType) ->
     tags = ["v0.2.0-rc.1", "v0.0.0-g1a2b3c4d", "operator/v0.1.0", "v0.1.0"]
 
     assert resolver.latest_minor_releases(tags, 3) == ["v0.1.0"]
+
+
+def test_latest_minor_releases_passes_over_an_unpublished_release(
+    resolver: ModuleType, capsys: pytest.CaptureFixture[str]
+) -> None:
+    tags = ["v0.3.0", "v0.2.1", "v0.1.1", "v0.2.0", "v0.1.0"]
+    unpublished = {"v0.2.1": ["snapshot/operator", "snapshot/snapshot"]}
+
+    assert resolver.latest_minor_releases(tags, 3, lambda tag: unpublished.get(tag, [])) == [
+        "v0.3.0",
+        "v0.2.0",
+        "v0.1.1",
+    ]
+    assert (
+        "::warning title=Release v0.2.1 is not published::v0.2.1 is released but not published for: "
+        "snapshot/operator, snapshot/snapshot."
+    ) in capsys.readouterr().err
+
+
+def test_latest_minor_releases_leaves_out_a_minor_with_nothing_published(resolver: ModuleType) -> None:
+    tags = ["v0.3.0", "v0.2.1", "v0.2.0", "v0.1.0"]
+    unpublished = {"v0.2.1": ["snapshot/agent"], "v0.2.0": ["snapshot/agent"]}
+
+    assert resolver.latest_minor_releases(tags, 2, lambda tag: unpublished.get(tag, [])) == ["v0.3.0"]
 
 
 @pytest.mark.parametrize(
@@ -173,6 +197,40 @@ def test_from_minor_versions_lists_each_minor(
     assert run_main(monkeypatch, resolver, "--from-minor-versions", "2") == 0
 
     assert [entry["tag"] for entry in json.loads(capsys.readouterr().out)] == ["v0.3.0", "v0.2.1"]
+
+
+def test_from_minor_versions_upgrades_from_the_newest_published_patch(
+    resolver: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    summary = tmp_path / "summary"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setattr(
+        resolver, "release_tags", lambda headers: ["v0.3.0", "v0.2.1", "v0.1.1", "v0.2.0", "v0.1.0"]
+    )
+    publish(monkeypatch, resolver, published_everywhere("v0.3.0", "v0.1.1", "v0.2.0", "v0.1.0"))
+
+    assert run_main(monkeypatch, resolver, "--from-minor-versions", "3", "--to", "v0.0.0-g1a2b3c4d") == 0
+
+    captured = capsys.readouterr()
+    assert [entry["tag"] for entry in json.loads(captured.out)] == ["v0.3.0", "v0.2.0", "v0.1.1"]
+    assert "::warning title=Release v0.2.1 is not published::" in captured.err
+    assert "snapshot/operator, snapshot/agent, snapshot/snapshot" in captured.err
+    assert "Release `v0.2.1` is not published" in summary.read_text(encoding="utf-8")
+
+
+def test_from_fails_on_a_named_release_that_is_not_published(
+    resolver: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    publish(monkeypatch, resolver, published_everywhere("v0.2.0"))
+
+    assert run_main(monkeypatch, resolver, "--from", "v0.2.1", "--to", "v0.0.0-g1a2b3c4d") == 1
+
+    assert "v0.2.1 is not published for: snapshot/operator, snapshot/agent, snapshot/snapshot." in capsys.readouterr().err
 
 
 def test_from_fails_without_any_release(
