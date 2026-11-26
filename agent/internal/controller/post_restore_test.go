@@ -22,8 +22,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
@@ -401,11 +401,9 @@ func TestRestoreSourceEventOnlyWhenRestoreStarts(t *testing.T) {
 
 			require.NoError(t, h.run(tc.recovering))
 
-			events, err := h.w.clientset.CoreV1().Events(h.pod.Namespace).List(context.Background(), metav1.ListOptions{})
-			require.NoError(t, err)
 			var messages []string
-			for _, event := range events.Items {
-				if event.InvolvedObject.UID == h.pod.UID && event.Reason == restoreSourceSelectedReason {
+			for _, event := range eventsForReason(h.w.clientset.(*fake.Clientset), restoreSourceSelectedReason) {
+				if event.InvolvedObject.UID == h.pod.UID {
 					messages = append(messages, event.Message)
 				}
 			}
