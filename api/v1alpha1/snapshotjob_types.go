@@ -76,7 +76,9 @@ const (
 	ReasonJobNameConflict = "JobNameConflict"
 	ReasonJobDeleted      = "JobDeleted"
 	// ReasonInvalidSpec covers spec-level validation failures caught before
-	// building the source Job, for objects that bypassed CEL admission.
+	// building the source Job, for objects that bypassed CEL admission, and a
+	// source Job the API server rejects as invalid, such as a pod template
+	// that the SnapshotJob schema admits but Pod validation refuses.
 	ReasonInvalidSpec = "InvalidSpec"
 )
 

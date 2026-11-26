@@ -20,8 +20,11 @@ import (
 )
 
 // createSourceJob sets ownership and creates the desired source Job. An
-// AlreadyExists response can be a cache race, so it is re-read and classified;
-// other API failures remain retryable.
+// AlreadyExists response can be a cache race, so it is re-read and classified.
+// An Invalid response is terminal: the Job is built from the immutable spec, so
+// the API server would refuse every retry the same way, and with no Job there
+// is no activeDeadlineSeconds to end the wait. Other API failures remain
+// retryable.
 func (r *SnapshotJobReconciler) createSourceJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, desiredJob *batchv1.Job) (snapshotJobObservation, ctrl.Result, error) {
 	if err := controllerutil.SetControllerReference(sj, desiredJob, r.Scheme()); err != nil {
 		return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("set owner reference on source Job %q: %w", sj.Name, err)
@@ -29,6 +32,10 @@ func (r *SnapshotJobReconciler) createSourceJob(ctx context.Context, sj *snapsho
 	if err := r.Create(ctx, desiredJob); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return r.observeExistingSourceJob(ctx, sj)
+		}
+		if apierrors.IsInvalid(err) {
+			return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, fmt.Errorf(
+				"the API server rejected the source Job, whose spec.template is built from spec.podTemplate: %w", err)), ctrl.Result{}, nil
 		}
 		r.Recorder.Event(sj, corev1.EventTypeWarning, "SourceJobCreateFailed", err.Error())
 		return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("create source Job %q: %w", sj.Name, err)

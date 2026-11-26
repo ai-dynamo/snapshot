@@ -18,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -224,6 +225,66 @@ func TestSnapshotJobReconcileInvalidNonTargetContainersCreatesNoJob(t *testing.T
 			assert.Equal(t, snapshotv1alpha1.ReasonInvalidSpec, condition.Reason)
 		})
 	}
+}
+
+// rejectSourceJobCreate makes every source Job create fail with rejection, the
+// way the API server refuses a Job the fake client would accept.
+func rejectSourceJobCreate(creates *int, rejection error) interceptor.Funcs {
+	return interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+		if _, ok := obj.(*batchv1.Job); ok {
+			*creates++
+			return rejection
+		}
+		return c.Create(ctx, obj, opts...)
+	}}
+}
+
+func TestSnapshotJobReconcileSourceJobRejectedAsInvalidIsTerminal(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	// What the API server answers for a pod template the SnapshotJob CRD admits
+	// but core validation refuses: a volumeMount naming no volume.
+	rejection := apierrors.NewInvalid(batchv1.SchemeGroupVersion.WithKind("Job").GroupKind(), sj.Name, field.ErrorList{
+		field.NotFound(field.NewPath("spec", "template", "spec", "containers").Index(0).Child("volumeMounts").Index(0).Child("name"), "model-cache"),
+	})
+	jobCreates := 0
+	r := makeSnapshotJobReconcilerWithInterceptor(s, rejectSourceJobCreate(&jobCreates, rejection), sj)
+
+	_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err, "the spec is immutable, so a Job the API server calls invalid can never be created: retrying would loop forever")
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed, "the rejection must be visible in status, not only in an event")
+	assert.Equal(t, metav1.ConditionTrue, failed.Status)
+	assert.Equal(t, snapshotv1alpha1.ReasonInvalidSpec, failed.Reason)
+	assert.Contains(t, failed.Message, `volumeMounts[0].name: Not found: "model-cache"`,
+		"the condition must carry the API server's field error so the caller knows what to fix")
+	assert.NotNil(t, updated.Status.CompletedAt)
+	assert.Empty(t, updated.Status.SourceJobUID, "no Job was created, so none may be recorded")
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+	assert.Equal(t, 1, jobCreates, "a terminal SnapshotJob must not try to create the Job again")
+}
+
+func TestSnapshotJobReconcileSourceJobCreateErrorRetries(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	// A refusal that can clear without a new spec, such as a quota or a missing
+	// permission, must stay retryable.
+	rejection := apierrors.NewForbidden(batchv1.Resource("jobs"), sj.Name, errors.New("exceeded quota"))
+	jobCreates := 0
+	r := makeSnapshotJobReconcilerWithInterceptor(s, rejectSourceJobCreate(&jobCreates, rejection), sj)
+
+	_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.Error(t, err, "a create error that is not a validation rejection must be returned so controller-runtime requeues with backoff")
+	assert.Equal(t, 1, jobCreates)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.Empty(t, updated.Status.Conditions, "no status should be written on a retryable create error")
 }
 
 func TestSnapshotJobReconcilePropagatesJobGetError(t *testing.T) {
