@@ -441,11 +441,36 @@ func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *snapshotv1alpha1.
 // bindContent records the one-time binding of the created/adopted PodSnapshotContent. Mirroring the
 // content's status is the bound path's job (mirrorBoundContent), driven by the content watch.
 func (sr *PodSnapshotReconciler) bindContent(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, contentName string) (ctrl.Result, error) {
+	key, uid := client.ObjectKeyFromObject(snap), snap.UID
 	snap.Status.BoundPodSnapshotContentName = ptr.To(contentName)
 	if err := sr.Status().Update(ctx, snap); err != nil {
+		if gone, goneErr := sr.podSnapshotGone(ctx, key, uid); goneErr == nil && gone {
+			// No later reconcile cascades for a PodSnapshot that no longer exists, so the content
+			// would stay behind as a work order with no owner.
+			content := &snapshotv1alpha1.PodSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: contentName}}
+			if err := sr.Delete(ctx, content); err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("delete PodSnapshotContent %q of a deleted PodSnapshot: %w", contentName, err)
+			}
+			return ctrl.Result{}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("record bound PodSnapshotContent %q: %w", contentName, err)
 	}
 	return ctrl.Result{}, nil
+}
+
+// podSnapshotGone reports, from the API server, that the PodSnapshot no longer exists: it was
+// deleted, or its name now belongs to a new object. handleDelete never runs for it. A delete that
+// reaches the API server while the finalizer is being added removes the object at once, and a
+// reconcile that read it from the cache a moment earlier still creates its content.
+func (sr *PodSnapshotReconciler) podSnapshotGone(ctx context.Context, key client.ObjectKey, uid types.UID) (bool, error) {
+	live := &snapshotv1alpha1.PodSnapshot{}
+	if err := sr.NonCacheReadClient.Get(ctx, key, live); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	return live.UID != uid, nil
 }
 
 // propagateStatus mirrors the bound PodSnapshotContent's status onto the PodSnapshot, defaulting to a
@@ -540,12 +565,17 @@ func (sr *PodSnapshotReconciler) handleDelete(ctx context.Context, snap *snapsho
 	// status.BoundPodSnapshotContentName is the authoritative record of the content we created;
 	// cascade-delete keys off it (we do NOT reconstruct the name from the PodSnapshot UID, because
 	// a future bring-your-own-content mode will let the content name diverge from podsnapshotcontent-
-	// <uid>). If it is unset, nothing was bound, so drop the finalizer.
-	//
-	// Accepted orphan risk (deemed acceptable, not guarded here): a content created via Create whose
-	// status write did not land before the process crashed AND the PodSnapshot was deleted during
-	// that downtime would leak. A future GC/cleanup policy will reclaim unbound content.
+	// <uid>). If it is unset, the binding was never recorded, but the content can exist: the delete,
+	// or an operator restart, came between its Create and the status write. unrecordedContentName
+	// finds that content, so that it is deleted like a bound one and does not outlive the PodSnapshot.
 	contentName := ptr.Deref(snap.Status.BoundPodSnapshotContentName, "")
+	if contentName == "" {
+		unrecorded, err := sr.unrecordedContentName(ctx, snap)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		contentName = unrecorded
+	}
 	if contentName == "" {
 		controllerutil.RemoveFinalizer(snap, podSnapshotFinalizer)
 		if err := sr.Update(ctx, snap); err != nil {
@@ -571,6 +601,27 @@ func (sr *PodSnapshotReconciler) handleDelete(ctx context.Context, snap *snapsho
 		return ctrl.Result{}, fmt.Errorf("remove snapshot finalizer: %w", err)
 	}
 	return ctrl.Result{}, nil
+}
+
+// unrecordedContentName returns the name of the content captureFromSourcePod created for this
+// PodSnapshot when its status does not record it, or "" when there is none. Left alone, that
+// content is a work order with no owner: the node agent still checkpoints the source pod for it,
+// and nothing deletes it or its artifact. The API server is read because the cache may not hold a
+// content created a moment ago. A content of another owner at this name, which fails the
+// PodSnapshot with ContentConflict, is not this PodSnapshot's to delete.
+func (sr *PodSnapshotReconciler) unrecordedContentName(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot) (string, error) {
+	name := podSnapshotContentName(snap)
+	content := &snapshotv1alpha1.PodSnapshotContent{}
+	if err := sr.NonCacheReadClient.Get(ctx, client.ObjectKey{Name: name}, content); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("look for an unrecorded PodSnapshotContent %q: %w", name, err)
+	}
+	if verifyContentBacklink(snap, content) != nil {
+		return "", nil
+	}
+	return name, nil
 }
 
 // SetupWithManager wires content and source-pod events to their PodSnapshots. The source-pod
