@@ -111,10 +111,14 @@ def test_image_name_drops_registry_tag_and_digest(image, name):
     assert setup.image_name(image) == name
 
 
+# Every install turns retry on, so it is in each expected override list below.
+RETRY_LIMIT = f"config.checkpoint.defaultRetryLimit={setup.E2E_CHECKPOINT_RETRY_LIMIT}"
+
+
 def test_unset_digests_mean_no_check(monkeypatch):
     monkeypatch.delenv("SNAPSHOT_E2E_IMAGE_DIGESTS", raising=False)
     assert setup.expected_image_digests() == {}
-    assert setup.snapshot_helm_overrides("direct", "", None) == []
+    assert setup.snapshot_helm_overrides("direct", "", None) == [RETRY_LIMIT]
 
 
 def test_digests_force_a_fresh_pull_of_every_image(monkeypatch):
@@ -125,6 +129,7 @@ def test_digests_force_a_fresh_pull_of_every_image(monkeypatch):
         "image.operator.pullPolicy=Always",
         "image.agent.pullPolicy=Always",
         "image.pageBroker.pullPolicy=Always",
+        RETRY_LIMIT,
         "a=user",
     ]
 
