@@ -19,6 +19,7 @@ SPDX-License-Identifier: Apache-2.0
 - [Design](#design)
   - [Components](#components)
   - [Interposing VMM sharing](#interposing-vmm-sharing)
+    - [Fabric handles](#fabric-handles)
     - [Creator and checkpoint holder](#creator-and-checkpoint-holder)
     - [Multicast tracking](#multicast-tracking)
   - [Adapting legacy allocation and IPC APIs](#adapting-legacy-allocation-and-ipc-apis)
@@ -32,6 +33,7 @@ SPDX-License-Identifier: Apache-2.0
     - [HOST_NUMA allocations](#host_numa-allocations)
   - [Capture](#capture)
   - [Restore](#restore)
+  - [Groups of Pods](#groups-of-pods)
   - [API](#api)
     - [Kubernetes opt-in](#kubernetes-opt-in)
     - [Source Pod shaping](#source-pod-shaping)
@@ -90,7 +92,7 @@ CuInterpose addresses those limits while preserving the application's existing a
 
 ### Non-Goals
 
-- Cross-Pod coordination or live sharing between nodes.
+- Sharing between nodes outside a [group of Pods](#groups-of-pods) that captures and restores together.
   Cross-node restore moves the captured group together to a compatible destination.
 - Replacing native CUDA checkpointing, CRIU, or Snapshot's storage interfaces.
 - Automatically draining GPU work, changing the participant group during capture, or retrying and rolling back a failed lifecycle operation.
@@ -122,7 +124,7 @@ CuInterpose is available as an opt-in Beta within this workload contract.
 ### Limitations
 
 CuInterpose supports memory sharing through CUDA legacy memory IPC and VMM APIs between processes in one container on a single node.
-Memory sharing across nodes through [Multi-Node NVLink (MNNVL)](https://docs.nvidia.com/multi-node-nvlink-systems/mnnvl-user-guide/overview.html) is not yet supported.
+Memory sharing across nodes through [Multi-Node NVLink (MNNVL)](https://docs.nvidia.com/multi-node-nvlink-systems/mnnvl-user-guide/overview.html) needs the agent to run each Pod's coordinator in a [group](#groups-of-pods), which the agent does not do yet.
 
 The main operational constraints are:
 
@@ -334,9 +336,36 @@ The [appendix](#handle-and-state-formats) specifies the handle encodings.
 A reply to a unicast export request includes the full backing size and the CUDA location where the creator allocated it.
 The importer queries `cuMemGetAllocationPropertiesFromHandle` and records its own handles and mappings.
 
-Tracked sharing uses only `CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR`, with pinned DEVICE or HOST_NUMA backing for unicast allocations.
-Multicast objects must also enable POSIX export.
+Tracked sharing uses `CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR` or [`CU_MEM_HANDLE_TYPE_FABRIC`](#fabric-handles), one handle type per allocation, with pinned DEVICE or HOST_NUMA backing for unicast allocations.
+Multicast objects must also enable exactly one of these exports.
 Imports from processes without CuInterpose must be released, together with their mappings, before checkpoint because the shim cannot reconstruct those external sharing relationships.
+
+#### Fabric handles
+
+Processes on other nodes import memory through a FABRIC handle, so their imports cannot go through a creator's socket.
+FABRIC handles therefore stay real at runtime.
+An export returns the driver's handle and an import passes the application's handle to the driver, so a FABRIC import never uses the creator's socket.
+
+Instead, the shim records every FABRIC handle that a process exports or imports, and the handle joins each importer to its creator.
+A handle does not name the process that created its memory.
+The importer therefore records the import under creator PID 0, which is never a process, and an allocation ID derived from the handle.
+It cannot observe the allocation's size or a multicast object's properties, so it records size 0 and empty multicast properties.
+
+A FABRIC handle does not say whether it names memory or a multicast object, so an import starts with its kind unknown.
+Calls that accept either kind go to the driver with the real handle or address: `cuMemMap`, `cuMemUnmap`, `cuMemSetAccess`, `cuMemRelease`, `cuMemRetainAllocationHandle`, and `cuMemGetAllocationPropertiesFromHandle`.
+The mappings that they record do not depend on the kind.
+The first call that only one kind accepts classifies the import, once the driver accepts that call.
+The object of `cuMulticastAddDevice`, `cuMulticastBindMem`, `cuMulticastBindAddr`, or `cuMulticastUnbind` becomes a multicast object, and the member of a binding, by handle or by address, becomes memory.
+A refused call leaves the import unknown.
+The creator always knows the kind, so its export record names it.
+An import of unknown kind appears in its process's records only as an import record without a kind.
+`BEGIN_CHECKPOINT` gives each import of unknown kind the kind of [its creator](#creator-and-checkpoint-holder), and the process refuses to enter checkpoint mode while any import is still unknown.
+
+During restore, each creator exports a new handle for its recreated backing or multicast object and returns the old and new handles to the coordinator.
+Each importer then imports the new handle that replaces the one it recorded, wherever the creator runs.
+Each process keeps every replacement that it receives or exports, and maps a handle replaced in several restores to its newest replacement.
+An import translates its handle through that table first, so a handle that the application kept from before the checkpoint imports the restored memory.
+Restoring a FABRIC import needs a newer CUDA user-mode driver, listed in [FABRIC Memory Sharing](../../get-started/prerequisites.md#fabric-memory-sharing).
 
 #### Creator and checkpoint holder
 
@@ -351,6 +380,16 @@ Each recorded holder must have a local handle or mapping, and the creator proces
 
 New imports contact the creator, which serves them from its cached export while it retains a handle or mapping, or while a virtual shareable FD for the allocation is still open.
 Checkpoint drops cached exports, so a virtual shareable FD cannot be imported after restore unless the creator still holds the allocation.
+
+The coordinator validates the records of a group of Pods as one topology, and a single Pod is a group of one.
+Each Pod names its processes by PID in its own namespace, so the coordinator puts the Pod's rank in the bits above the largest Linux PID.
+It resolves each [FABRIC import](#fabric-handles) to the process that exported the same handle, in any Pod, and takes the allocation size, location, and multicast properties from that creator.
+A multicast team can therefore have devices in several Pods.
+POSIX sharing cannot cross Pods, because a POSIX import names its creator by PID in the importer's own namespace.
+The creator always saves a FABRIC allocation, because its importers do not know its size.
+The coordinator refuses a FABRIC import whose creator is not in the group, no longer holds the allocation, or exported another kind.
+An import of unknown kind takes its creator's kind, so preparation inspects before `BEGIN_CHECKPOINT`, which carries those kinds to each process.
+A coordinator started without a session runs its Pod alone, as a group of one, so FABRIC sharing between the processes of its one container checkpoints and restores, and a Pod that imports FABRIC memory from another Pod is refused at inspection, before anything changes.
 
 #### Multicast tracking
 
@@ -621,7 +660,9 @@ sequenceDiagram
     C-->>A: Group passes preflight
     Note over A,S: Application finishes outstanding work and prevents new work
     A->>C: Prepare participant group
-    C->>S: BEGIN_CHECKPOINT, one process at a time
+    C->>S: INSPECT
+    S-->>C: Records, with FABRIC imports of unknown kind
+    C->>S: BEGIN_CHECKPOINT with their creators' kinds, one process at a time
     S-->>C: Frozen resource records
     C->>C: Validate group and select holders
     C->>S: PREPARE_MULTICAST
@@ -710,6 +751,8 @@ CRIU also restores namespace PIDs, shim records, and host carriers.
 `LOAD_ALLOCATIONS` recreates backing in the selected holders, copies carrier contents into it, and restores their mappings, permissions, and export FDs.
 `RESTORE_UNICAST` reconnects the other holders to that same backing at their original addresses.
 For each reconstruction phase, the coordinator sends requests across the group and waits for every participant's reply before advancing.
+Creators of FABRIC memory return the new handles that replace their recorded ones in `LOAD_ALLOCATIONS` and `RESTORE_MULTICAST_CREATORS`.
+The coordinator keeps a table of old and new handles and sends it with every later phase, and the final comparison applies the table to the captured records.
 
 Multicast reconstruction requires four separate group barriers:
 
@@ -724,6 +767,65 @@ These barriers explain why multicast restore needs more phases than teardown.
 During teardown, participants can remove their existing references concurrently in one phase.
 During reconstruction, importers must wait for creators to make the new objects available, and memory binding must wait for every device to join.
 A process can create one resource and import another, so the coordinator applies these dependencies per resource rather than dividing processes into separate creator and importer groups.
+
+### Groups of Pods
+
+Pods that share FABRIC memory across nodes capture and restore as one group.
+Each Pod that uses CuInterpose still runs one coordinator, which reaches its own processes over their sockets.
+In a group, the agent passes the coordinator a socket to the `cuinterpose` namespace of the attempt's coordination session and the group arguments of the [coordinator CLI](#coordinator-cli).
+The coordinator of the lowest rank leads the group. It validates the group's records as [one topology](#creator-and-checkpoint-holder) and keeps the table of old and new FABRIC handles.
+
+Every operation of a mode is one round:
+
+1. The leader inserts the round's command, `<mode>.<k>.cmd`, which names the step and its arguments.
+   A command carries only its step's arguments.
+   `BEGIN_CHECKPOINT` carries the creator's kind of each FABRIC import of unknown kind, and `SAVE_ALLOCATIONS` the owners of each process, both keyed by rank and PID.
+   `RESTORE_UNICAST` and `RESTORE_MULTICAST_IMPORTERS` carry the old and new FABRIC handles so far.
+2. Every coordinator runs the step on its own processes, and each one except the leader inserts its reply under `<mode>.<k>.reply.<rank>`: its Pod's records, or each process's reply.
+3. The leader reads every reply, checks each process's reply and carrier bytes against the topology, folds the results into the group state, and removes the round's keys.
+
+The modes run these steps, with `<mode>` set to `inspect`, `prepare`, or `restore`:
+
+| Mode | Steps |
+| --- | --- |
+| `inspect` | `INSPECT`, then validation |
+| `prepare` | `INSPECT` with validation, `BEGIN_CHECKPOINT` with validation, `PREPARE_MULTICAST`, `SAVE_ALLOCATIONS`, `PREPARE_UNICAST` |
+| `restore` | `INSPECT` with the saved records, `LOAD_ALLOCATIONS`, `RESTORE_UNICAST`, the four multicast phases, and a final `INSPECT` |
+
+After the last step, the leader inserts `DONE` as the next command, and every coordinator exits.
+At prepare, each coordinator writes its own Pod's `cuinterpose.state` when the mode ends.
+
+In `inspect`, the leader inserts `inspect.fabric-peers` after validation and before `DONE`.
+Its value is a MessagePack map from each relay rank to a sorted array of the other ranks that share FABRIC memory or multicast objects with it.
+Two ranks share when a process in one imports what a process in the other created.
+A rank without peers maps to an empty array.
+Processes keep running between `inspect` and `prepare`.
+After `BEGIN_CHECKPOINT`, the leader therefore computes the relation again, and fails with `MemberFailed` if a rank gained a peer that `inspect` did not publish.
+
+At capture, each agent whose Pod runs a coordinator reads its own rank's entry after the inspection and records it in its artifact's manifest as `podGroup.fabricPeers`.
+A missing key refuses the capture, which happens only with a coordinator older than the agent.
+At restore admission, a member whose manifest lists peers reads where its restore container's GPUs are in their NVLink fabric.
+The agent runs `nvidia-smi --query-gpu` for `fabric.state`, `fabric.status`, `fabric.clusterUuid`, and `fabric.cliqueId`.
+The member publishes the result with its peers in its admission, as `fabric: {peers, gpus: [{uuid, clusterUUID, cliqueID, state, status}]}`.
+Before the `admitted` barrier, it checks every member that shared FABRIC memory with it, directly or through others, in rank order, so all of them reach the same verdict.
+Every GPU of those members must be registered with its fabric, with state `Completed` and status `Success`.
+All of those GPUs must report one cluster UUID and one clique ID.
+Members that share no memory with each other, directly or through others, may be in different cliques.
+Otherwise the attempt ends with `Refused`, before CRIU runs.
+A member that shared no FABRIC memory publishes no fabric and is not checked.
+The check catches placement mistakes, but it does not promise that every later import succeeds.
+
+The attempt's deadline bounds every round.
+At restore each coordinator starts only after its own Pod's CRIU and CUDA restores, and the per-process timeouts of a step already bound each coordinator's own work, so the leader waits for replies until the deadline.
+A leader that reaches the deadline with replies missing, or a follower without a command by then, does not fail the session.
+The session ends with `DeadlineExceeded` at the deadline by its own clock, which can be later than the coordinator's, so the coordinator then gets the key `<mode>.end`, which nobody inserts, until the session ends, and exits with the session's reason.
+A session that has not ended 60 seconds past the deadline is an error, which fails it as any other error does.
+A coordinator that fails ends the attempt for every member through the session.
+The reason follows the commit point: `Refused` in `--inspect`, which runs before the attempt commits, and `MemberFailed` in `--prepare` and `--restore`, which run after it.
+Every other coordinator then exits with an error, without failing the session again, and each agent handles the failure as for a single Pod.
+
+A Pod alone runs the same steps as the leader of a group of one, without a session.
+The agent side, which creates the socket and serves the session for each coordinator, is in `agent/internal/group`.
 
 ### API
 
@@ -802,6 +904,7 @@ The agent invokes the coordinator with an explicit participant list:
 cuinterpose-coordinator (--inspect | --prepare | --restore)
     --socket-dir DIR --process PID [--process PID ...]
     [--checkpoint-dir DIR]
+    [--session-fd FD --rank RANK --relay-ranks RANK,... --deadline UNIX_SECONDS]
 ```
 
 | Argument | Contract |
@@ -812,6 +915,10 @@ cuinterpose-coordinator (--inspect | --prepare | --restore)
 | `--socket-dir DIR` | Required directory containing participant control sockets. |
 | `--process PID` | Required namespace PID of a participant. Repeat for every participant. The coordinator does not discover additional processes. |
 | `--checkpoint-dir DIR` | Required for `--prepare` and `--restore`, and rejected with `--inspect`. |
+| `--session-fd FD` | The agent's socket for the [group's session](#groups-of-pods). Without it, the Pod runs alone. With it, every argument below is required. |
+| `--rank RANK` | This Pod's rank in the group. |
+| `--relay-ranks RANK,...` | Every rank that runs a coordinator. It must contain `--rank`. The lowest leads the group. |
+| `--deadline UNIX_SECONDS` | The attempt's deadline. It bounds every round and every wait of the other coordinators. |
 
 Select exactly one operation.
 The [capture](#capture) and [restore](#restore) sequences define when the agent invokes each operation relative to the CUDA Driver and CRIU.
@@ -863,7 +970,8 @@ Restore needs to know which processes shared each allocation and verify that rec
 CuInterpose records that information in two checkpoint files:
 
 - `cuinterpose.state` is versioned MessagePack metadata mapping namespace PIDs to captured allocation, mapping, and multicast records.
-  It contains no allocation contents, persistent driver handles, or socket paths.
+  It contains no allocation contents or socket paths.
+  Its only driver handles are the FABRIC handles recorded before the checkpoint, which restore uses to match each import to the new handle that replaces it.
 - `manifest.yaml` records the PIDs that participate in coordinator operations and both library hashes alongside Snapshot's full list of native CUDA participants.
 
 ```yaml
@@ -1045,7 +1153,7 @@ The packet queued on a virtual shareable FD contains a fixed 24-byte value:
 
 | Bytes | Value |
 | --- | --- |
-| 4 | `CUI\x01` |
+| 4 | `CUI\x02` |
 | 4 | Creator namespace PID, little-endian |
 | 16 | Allocation ID |
 
@@ -1059,7 +1167,7 @@ The virtual memory-IPC handle occupies a 64-byte `CUipcMemHandle`:
 
 | Field | Bytes |
 | --- | --- |
-| ASCII `CUIPC001` | 8 |
+| ASCII `CUIPC002` | 8 |
 | Creator namespace PID | 4 |
 | Allocation ID | 16 |
 | Reserved zeros | 20 |
@@ -1072,7 +1180,7 @@ The handle records the requested size separately from the rounded backing extent
 #### Decoded state example
 
 ```yaml
-version: 1
+version: 2
 body:
   41:
     - allocation:
@@ -1140,6 +1248,11 @@ multicast_binding:
 The offset nested under `source` identifies a location within the member allocation.
 The outer `offset` field identifies the location where that memory is bound within the multicast object.
 Separate `multicast`, `multicast_device`, and `multicast_mapping` records describe the object, attached devices, and virtual mappings.
+
+[FABRIC sharing](#fabric-handles) adds a `fabric_export` record to the creator and a `fabric_import` record to each importer.
+Both hold an allocation reference, the 64-byte handle as MessagePack binary data, and a `kind`, `memory` or `multicast`, which is nil in a `fabric_import` of unknown kind.
+A `begin_checkpoint` request carries `imports`, a list of `{allocation, kind}` that names the creator's kind of each import of unknown kind.
+An operation carries only the arguments of its step, and a process replies with only that step's result: `saved` with its carrier bytes, `loaded` with its carrier bytes and the FABRIC handles that it replaced, `multicast_recreated` with the multicast handles that it replaced, and `completed` for every other step.
 
 ### Further reading
 
