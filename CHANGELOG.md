@@ -187,6 +187,12 @@ commit-level history for each release is on its
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 
+- The operator can delete snapshots from an S3-compatible store that requires
+  the `Content-MD5` header on a multi-object delete. Before, the store rejected
+  the delete request with `MissingContentMD5`, and the snapshot and its
+  `PodSnapshotContent` stayed. The delete request now carries `Content-MD5` in
+  place of the AWS SDK's CRC32 checksum.
+
 ### Deprecated
 
 - `SNAPSHOT_RESTORE_STANDBY` (`podcontract.RestoreStandbyModeEnv`): restore
