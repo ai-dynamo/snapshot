@@ -74,7 +74,10 @@ type NodeController struct {
 	controlSentinelExistsFn   func(int, string) (bool, error)
 	sendSignalFn              func(logr.Logger, int, syscall.Signal, string) error
 	// hostProcPath is where the agent reads the node's processes; tests point it elsewhere.
-	hostProcPath         string
+	hostProcPath string
+	// nodeCacheBasePath is where node cache copies are read. Empty when off.
+	nodeCacheBasePath string
+
 	stagingCapacityFn    func(string) (int64, error)
 	minimumImageSizeFn   func(string, []int) (int64, error)
 	reviveGPUProcessesFn func(context.Context, []int, string, logr.Logger) error
@@ -117,6 +120,9 @@ type NodeController struct {
 	stopCh chan struct{}
 }
 
+// restoreModeDirect is the pageBroker.restoreMode that reads a checkpoint in place.
+const restoreModeDirect = "direct"
+
 type restoreArtifact struct {
 	SnapshotName        string
 	ContentUID          string
@@ -124,6 +130,17 @@ type restoreArtifact struct {
 	Path                string
 	// PublishedArtifact is set only for bound content, read from status.
 	PublishedArtifact *pagebroker.PublishedArtifact
+	// NodeCache is set when Path is a checkpoint copy in the node cache.
+	NodeCache bool
+	// NodeCacheMiss says why a node with the cache enabled restores from the
+	// snapshot store instead. Empty when NodeCache is set or the cache is off.
+	NodeCacheMiss string
+	// BasePath and RestoreMode are chosen with the source: the node cache is
+	// read in place, the snapshot store as configured.
+	BasePath    string
+	RestoreMode string
+	// Manifest is the parsed manifest of a node cache copy, kept for preflight.
+	Manifest *types.CheckpointManifest
 }
 
 type restoreTarget struct {
@@ -193,6 +210,7 @@ const (
 	restoreFinalizerUpdateFailedReason = "RestoreFinalizerUpdateFailed"
 	restoreStatusUpdateFailedReason    = "RestoreStatusUpdateFailed"
 	restoreRequestedReason             = "RestoreRequested"
+	restoreSourceSelectedReason        = "RestoreSourceSelected"
 	restoreCompatUncheckedReason       = "RestoreCompatibilityUnchecked"
 	restoreStatusFieldManager          = "snapshot-agent-restore"
 	restorePodFinalizer                = "snapshot/restore-protection"
@@ -289,6 +307,9 @@ func newDefaultController(
 		hookHTTP:                  lifecyclehooks.NewHTTPClient(),
 		nowFn:                     time.Now,
 		postRestoreWaitFn:         waitOrDone,
+	}
+	if cfg.Storage.NodeCacheEnabled {
+		w.nodeCacheBasePath = types.NodeCacheBasePath
 	}
 	w.requeueCaptureFn = w.captureQueue.AddAfter
 	w.checkpointFn = w.executorCheckpoint
@@ -774,11 +795,81 @@ func validateRestoreTarget(pod *corev1.Pod, snapshot *snapshotv1alpha1.PodSnapsh
 	return &restoreTarget{SnapshotName: snapshot.Name, ContentUID: string(content.UID), SourceContainerName: containerName}, mappings, nil
 }
 
-// resolveRestoreArtifact resolves the validated restore target to its physical
-// checkpoint directory. A nil error always returns a complete artifact.
-// resolveRestoreArtifact: legacy content is ready when the filesystem artifact
-// exists; bound content is ready once status records a published container.
+// resolveRestoreArtifact returns the checkpoint a restore reads: a usable copy
+// in the node cache, otherwise the one in the snapshot store.
 func (w *NodeController) resolveRestoreArtifact(
+	podKey string,
+	target *restoreTarget,
+	content *snapshotv1alpha1.PodSnapshotContent,
+) (*restoreArtifact, error) {
+	cached, miss := w.resolveNodeCacheArtifact(podKey, target)
+	if cached != nil {
+		return cached, nil
+	}
+	artifact, err := w.resolveStoreArtifact(podKey, target, content)
+	if err != nil {
+		return nil, err
+	}
+	artifact.BasePath = w.config.Storage.BasePath
+	artifact.RestoreMode = w.config.PageBroker.RestoreMode
+	artifact.NodeCacheMiss = miss
+	return artifact, nil
+}
+
+// resolveNodeCacheArtifact looks for a copy in the node cache. It never fails
+// a restore: an absent or unusable copy is reported as a miss.
+func (w *NodeController) resolveNodeCacheArtifact(podKey string, target *restoreTarget) (*restoreArtifact, string) {
+	basePath := w.nodeCacheBasePath
+	if basePath == "" {
+		return nil, ""
+	}
+	path, err := nsmount.ResolveArtifact(basePath, target.ContentUID, target.SourceContainerName)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, "this node holds no copy"
+		}
+		w.log.Error(err, "Unable to inspect node cache copy; restoring from the snapshot store", "pod", podKey)
+		return nil, "the copy on this node could not be read"
+	}
+	manifest, err := types.ReadManifest(path)
+	if err != nil {
+		w.log.Error(err, "Node cache copy has no readable manifest; restoring from the snapshot store", "pod", podKey, "artifact_path", path)
+		return nil, "the copy on this node has no readable manifest"
+	}
+	if manifest.Artifact.ContentUID != target.ContentUID || manifest.Artifact.ContainerName != target.SourceContainerName {
+		w.log.Info("Node cache copy belongs to another checkpoint; restoring from the snapshot store",
+			"pod", podKey, "artifact_path", path,
+			"manifest_content_uid", manifest.Artifact.ContentUID, "manifest_container", manifest.Artifact.ContainerName)
+		return nil, "the copy on this node belongs to another checkpoint"
+	}
+	return &restoreArtifact{
+		SnapshotName:        target.SnapshotName,
+		ContentUID:          target.ContentUID,
+		SourceContainerName: target.SourceContainerName,
+		Path:                path,
+		NodeCache:           true,
+		BasePath:            w.nodeCacheBasePath,
+		RestoreMode:         restoreModeDirect,
+		Manifest:            manifest,
+	}, ""
+}
+
+// restoreSourceMessage names the source a restore reads, for the Pod event.
+// Empty when the node cache is off, so such a node emits what it always did.
+func restoreSourceMessage(artifact *restoreArtifact) string {
+	switch {
+	case artifact.NodeCache:
+		return "Restoring from the node cache"
+	case artifact.NodeCacheMiss != "":
+		return fmt.Sprintf("Restoring from the snapshot store: %s", artifact.NodeCacheMiss)
+	default:
+		return ""
+	}
+}
+
+// resolveStoreArtifact resolves the checkpoint in the snapshot store: legacy
+// content by its directory, bound content by its published container.
+func (w *NodeController) resolveStoreArtifact(
 	podKey string,
 	target *restoreTarget,
 	content *snapshotv1alpha1.PodSnapshotContent,
@@ -1132,6 +1223,12 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		}
 	}
 
+	// Emitted only here, so a recovered restore that never reruns stays silent.
+	if source := restoreSourceMessage(plan.artifact); source != "" {
+		op.log.Info("Restore source selected", "source", source)
+		emitPodEvent(ctx, w.clientset, op.log, pod, snapshotEventComponent, corev1.EventTypeNormal, restoreSourceSelectedReason, source)
+	}
+
 	// One deadline covers the restore and its post-restore action.
 	restoreCtx := ctx
 	if timeout := w.config.Restore.RestoreTimeout(); timeout > 0 {
@@ -1233,7 +1330,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (executor.Restor
 	w := op.controller
 	req := executor.RestoreRequest{
 		ContentUID:                  op.artifact.ContentUID,
-		BasePath:                    w.config.Storage.BasePath,
+		BasePath:                    op.artifact.BasePath,
 		ContainerID:                 op.containerID,
 		StartedAt:                   op.startedAt,
 		PodName:                     op.pod.Name,
@@ -1246,7 +1343,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (executor.Restor
 		Clientset:                   w.clientset,
 		CustomStorageAvailable:      w.config.CustomStorageAvailable,
 		PageBrokerControlSocketPath: w.config.PageBroker.ControlSocketPath,
-		PageBrokerRestoreMode:       w.config.PageBroker.RestoreMode,
+		PageBrokerRestoreMode:       op.artifact.RestoreMode,
 		PublishedArtifact:           op.artifact.PublishedArtifact,
 	}
 	return w.restoreFn(ctx, w.runtime, op.log, req, w.injector)

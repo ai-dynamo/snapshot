@@ -6,7 +6,9 @@ package types
 import "fmt"
 
 // S3Config configures the S3 maintenance backend. A nil *S3Config on
-// ArtifactCleanupConfig means S3 maintenance is not registered.
+// ArtifactCleanupConfig means S3 maintenance is not registered. An empty
+// CredentialsPath selects the default credential chain under the operator's
+// workload identity.
 type S3Config struct {
 	Bucket          string
 	Prefix          string
@@ -23,8 +25,13 @@ func (c S3Config) Validate() error {
 	if c.Region == "" {
 		return fmt.Errorf("s3 region is required")
 	}
-	if c.CredentialsPath == "" {
-		return fmt.Errorf("s3 credentials path is required")
-	}
 	return nil
+}
+
+// CredentialSource names where the S3 maintenance backend gets credentials.
+func (c S3Config) CredentialSource() string {
+	if c.CredentialsPath == "" {
+		return "default credential chain"
+	}
+	return "credentials file"
 }

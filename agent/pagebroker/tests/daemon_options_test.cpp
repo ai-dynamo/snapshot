@@ -53,4 +53,17 @@ TEST(DaemonOptionsTest, RejectsMissingDuplicateAndInvalidArguments)
   EXPECT_FALSE(Parse({"--max-concurrent-requests", "16", "--storage-config", "a", "--storage-config", "b"}));
   EXPECT_FALSE(Parse({"--max-concurrent-requests", "16", "--model-streamer-config", "a", "--model-streamer-config", "b"}));
 }
+
+TEST(DaemonOptionsTest, NodeCacheRootIsOptionalAndAbsolute)
+{
+  auto options = Parse({});
+  ASSERT_TRUE(options);
+  EXPECT_TRUE(options->node_cache_root.empty());
+  options = Parse({"--node-cache-root", "/node-cache", "--storage-config", "s3.json"});
+  ASSERT_TRUE(options);
+  EXPECT_EQ(options->node_cache_root, "/node-cache");
+  for (const auto* value : {"", "node-cache", "./node-cache", "/node-cache/../etc"})
+    EXPECT_FALSE(Parse({"--node-cache-root", value})) << value;
+  EXPECT_FALSE(Parse({"--node-cache-root", "/a", "--node-cache-root", "/b"}));
+}
 }  // namespace
