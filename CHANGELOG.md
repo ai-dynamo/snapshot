@@ -187,6 +187,11 @@ commit-level history for each release is on its
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 
+- `snapshotctl checkpoint` keeps waiting when a request to the Kubernetes API
+  gets no answer, or an answer that says to try again. Before, one such request
+  ended the command with an error. A refusal, such as a missing permission,
+  still ends it at once.
+
 ### Deprecated
 
 - `SNAPSHOT_RESTORE_STANDBY` (`podcontract.RestoreStandbyModeEnv`): restore

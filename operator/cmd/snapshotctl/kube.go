@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -96,13 +97,18 @@ func loadClientset(kubeContext string) (kubernetes.Interface, *rest.Config, stri
 // does not create a PodSnapshot that would spin on a SourcePodNotFound terminal condition.
 func waitForSourcePod(ctx context.Context, clientset kubernetes.Interface, namespace, jobName string, jobUID types.UID) (*corev1.Pod, error) {
 	var sourcePod *corev1.Pod
+	var retried retriedAPIErrors
 	err := wait.PollUntilContextTimeout(ctx, podScheduleInterval, podScheduleTimeout, true, func(ctx context.Context) (bool, error) {
 		pods, listErr := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 			LabelSelector: "batch.kubernetes.io/job-name=" + jobName,
 		})
 		if listErr != nil {
+			if retried.retry(ctx, listErr) {
+				return false, nil
+			}
 			return false, listErr
 		}
+		retried.answered()
 		for i := range pods.Items {
 			pod := &pods.Items[i]
 			if !isControlledByUID(pod, jobUID) {
@@ -117,7 +123,7 @@ func waitForSourcePod(ctx context.Context, clientset kubernetes.Interface, names
 		return false, nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("source pod for job %s/%s not scheduled within %s: %w", namespace, jobName, podScheduleTimeout, err)
+		return nil, fmt.Errorf("source pod for job %s/%s not scheduled within %s: %w", namespace, jobName, podScheduleTimeout, retried.describe(err))
 	}
 	if sourcePod == nil {
 		return nil, fmt.Errorf("source pod for job %s/%s not scheduled within %s; cannot create PodSnapshot", namespace, jobName, podScheduleTimeout)
@@ -174,14 +180,20 @@ func createPodSnapshot(ctx context.Context, crClient client.Client, namespace, s
 // Reason and Message for actionable diagnostics.
 func waitForPodSnapshot(ctx context.Context, crClient client.Client, namespace, name string) (*snapshotv1alpha1.PodSnapshot, error) {
 	var result *snapshotv1alpha1.PodSnapshot
+	var retried retriedAPIErrors
 	err := wait.PollUntilContextTimeout(ctx, podSnapshotPollInterval, ctxRemaining(ctx), true, func(ctx context.Context) (bool, error) {
 		snap := &snapshotv1alpha1.PodSnapshot{}
 		if getErr := crClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, snap); getErr != nil {
 			if apierrors.IsNotFound(getErr) {
+				retried.answered()
+				return false, nil
+			}
+			if retried.retry(ctx, getErr) {
 				return false, nil
 			}
 			return false, getErr
 		}
+		retried.answered()
 		if snapshotv1alpha1.IsPodSnapshotSucceeded(snap) {
 			result = snap
 			return true, nil
@@ -192,9 +204,42 @@ func waitForPodSnapshot(ctx context.Context, crClient client.Client, namespace, 
 		return false, nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, retried.describe(err)
 	}
 	return result, nil
+}
+
+// retriedAPIErrors lets a wait outlast a request that the API server did not
+// answer, or answered with "try again", instead of abandoning the checkpoint.
+type retriedAPIErrors struct {
+	last error
+}
+
+func (r *retriedAPIErrors) retry(ctx context.Context, err error) bool {
+	var status apierrors.APIStatus
+	if errors.As(err, &status) && !apierrors.IsTimeout(err) && !apierrors.IsServerTimeout(err) &&
+		!apierrors.IsTooManyRequests(err) && !apierrors.IsInternalError(err) && !apierrors.IsServiceUnavailable(err) {
+		return false
+	}
+	if ctx.Err() != nil {
+		return true // the wait is over, and the poll reports that
+	}
+	if r.last == nil {
+		snapshotctlLog.Info("Kubernetes API request failed, retrying until the timeout", "error", err.Error())
+	}
+	r.last = err
+	return true
+}
+
+func (r *retriedAPIErrors) answered() {
+	r.last = nil
+}
+
+func (r *retriedAPIErrors) describe(err error) error {
+	if r.last == nil {
+		return err
+	}
+	return fmt.Errorf("%w (last Kubernetes API error: %v)", err, r.last)
 }
 
 // podSnapshotFailedError builds an error from the PodSnapshot's Failed condition Reason and Message.
