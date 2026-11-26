@@ -62,6 +62,9 @@ other two jobs. Running all three before pushing means CI holds no surprises.
 `make check` needs a Linux amd64 toolchain: the pinned `protoc` it installs is
 only downloaded for that platform. On other hosts, run `make linux-build` and
 `make linux-test`, which execute in a container, and let CI run the full gate.
+The `agent` module's tests also need Linux, so `make test` stops at that module
+on macOS. `make build`, `make lint`, `make -C api test`, and
+`make -C operator test` run on macOS and on Linux.
 
 **Document the change where readers look for it.** Each kind of fact has one
 page, and a change usually adds a few table rows and a few sentences. See
