@@ -254,6 +254,7 @@ CRIU logged.
 **Likely causes:**
 
 - A file descriptor CRIU cannot dump, such as an io_uring instance when the seccomp profile from the supported frameworks is missing, a socket to a peer outside the container, or an open file on a volume the checkpoint did not record
+- A handle on `/dev/nvidiactl` that stays open after the GPU state is checkpointed. CRIU reports it as `Can't dump file <n> of that type [20666] (chr 195:255)`. The GPU metrics of Triton Inference Server, which are on by default, cause this. Start Triton with `--allow-gpu-metrics=false`, as [Prepare a Triton Inference Server Workload](../using-snapshot/supported-frameworks/triton.md#image-and-settings) does
 - Missing ptrace permission
 
 The agent log carries the CRIU error. Check the source pod against the

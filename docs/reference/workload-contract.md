@@ -123,15 +123,15 @@ example, checkpointing with a generation in flight, or resuming before GPU
 memory is restored, fails); skipping the **SHOULD** row still produces a
 working snapshot, just a larger or colder one.
 
-| Requirement | Tier | vLLM | TensorRT-LLM | SGLang |
-|------------|------|------|--------------|--------|
-| Warm up | SHOULD | one `generate` | `LLM.generate` (two prompts) | one `generate` |
-| Stop in-flight work | MUST | `pause_generation()` | synchronous `generate` returns idle | `pause_generation()` |
-| Park GPU memory | SHOULD | `release_kv_cache_memory()` (sleep mode) | `_collective_rpc("sleep", (["kv_cache"],))` + `gc.collect()` | `release_memory_occupation(tags=["kv_cache"])` (memory saver) |
-| Restore GPU memory | MUST | `wake_up()` | `_collective_rpc("wakeup", (["kv_cache"],))` | `resume_memory_occupation(tags=["kv_cache"])` |
-| Resume | MUST | `resume_generation()` + `check_health()` | next `generate` | `continue_generation()` |
+| Requirement | Tier | vLLM | TensorRT-LLM | SGLang | Triton |
+|------------|------|------|--------------|--------|--------|
+| Warm up | SHOULD | one `generate` | `LLM.generate` (two prompts) | one `generate` | `model_warmup` in the model's `config.pbtxt` |
+| Stop in-flight work | MUST | `pause_generation()` | synchronous `generate` returns idle | `pause_generation()` | no pause call: send the source Pod no requests |
+| Park GPU memory | SHOULD | `release_kv_cache_memory()` (sleep mode) | `_collective_rpc("sleep", (["kv_cache"],))` + `gc.collect()` | `release_memory_occupation(tags=["kv_cache"])` (memory saver) | none |
+| Restore GPU memory | MUST | `wake_up()` | `_collective_rpc("wakeup", (["kv_cache"],))` | `resume_memory_occupation(tags=["kv_cache"])` | nothing parked, so nothing to call |
+| Resume | MUST | `resume_generation()` + `check_health()` | next `generate` | `continue_generation()` | none: the restored server serves the next request |
 
-The three are the engines the guides document, not the limit of what the
+The four are the engines the guides document, not the limit of what the
 contract admits. Any inference server that fills in its own column of the table
 and meets the pod and runtime requirements below is snapshot-ready. See
 [Support a New Inference Server](#support-a-new-inference-server).

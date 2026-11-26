@@ -76,6 +76,9 @@ navigation:
           - page: TensorRT-LLM
             path: ../docs/using-snapshot/supported-frameworks/tensorrt-llm.md
             slug: tensorrt-llm
+          - page: Triton Inference Server
+            path: ../docs/using-snapshot/supported-frameworks/triton.md
+            slug: triton
           - page: Use Your Own Engine or Image
             path: ../docs/using-snapshot/supported-frameworks/use-your-own-engine-or-image.md
             slug: use-your-own-engine-or-image

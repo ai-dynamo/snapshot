@@ -9,9 +9,10 @@ you have a Ready `PodSnapshot` with a name. You use that name in
 - Run the commands from [Choose Your Recipe](README.md#choose-your-recipe) in the
   same terminal. The commands on this page use the values they set.
 - Prepare the workload on the page for your framework
-  ([vLLM](supported-frameworks/vllm.md), [SGLang](supported-frameworks/sglang.md) or
-  [TensorRT-LLM](supported-frameworks/tensorrt-llm.md)). What you need from it
-  depends on the method you choose.
+  ([vLLM](supported-frameworks/vllm.md), [SGLang](supported-frameworks/sglang.md),
+  [TensorRT-LLM](supported-frameworks/tensorrt-llm.md), or
+  [Triton](supported-frameworks/triton.md)). What you need from it depends on
+  the method you choose.
 - The examples on this page use the vLLM Qwen3 0.6B recipe. For another recipe,
   change the names to match yours: in the YAML, in the file name and in the
   commands.
@@ -21,7 +22,7 @@ you have a Ready `PodSnapshot` with a name. You use that name in
 | Method | Choose it when… | What it does | What you need |
 |--------|-----------------|--------------|---------------|
 | **`PodSnapshot`** | The running replica can be controlled and tracked | Checkpoints a replica you run yourself. You orchestrate it: bring the replica up, wait until it is ready, then trigger the checkpoint. | The source replica that the framework page deployed |
-| **`SnapshotJob`** | The running pod cannot be tracked directly | Snapshot runs the whole flow: it creates the replica, checkpoints it and tears it down. The source is discarded, so every replica, including the first, comes up via [restore](restore.md). | The ConfigMap from the framework page and the [Model Cache](README.md#model-cache) |
+| **`SnapshotJob`** | The running pod cannot be tracked directly | Snapshot runs the whole flow: it creates the replica, checkpoints it and tears it down. The source is discarded, so every replica, including the first, comes up via [restore](restore.md). | The ConfigMap from the framework page, if it has one, and the [Model Cache](README.md#model-cache) |
 
 ## Option 1 - `PodSnapshot` (Checkpoint a Running Pod)
 
