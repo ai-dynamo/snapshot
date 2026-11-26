@@ -87,6 +87,15 @@ func TestLastCRIUError(t *testing.T) {
 			want: "Unable to open fd=3 id=0x8",
 		},
 		{
+			name: "names the cause in a log without timestamps",
+			log: `Error (criu/tun.c:85): tun: Unable to create tun: No such file or directory
+     1: Error (criu/files-reg.c:2175): File etc/legal has bad size 267 (expect 291)
+     1: Error (criu/files.c:1235): Unable to open fd=3 id=0x8
+Error (criu/cr-restore.c:2419): Restoring FAILED.
+`,
+			want: "File etc/legal has bad size 267 (expect 291)",
+		},
+		{
 			name: "summary alone is not a cause",
 			log:  "(00.083487) Error (criu/cr-restore.c:2390): Restoring FAILED.\n",
 		},
