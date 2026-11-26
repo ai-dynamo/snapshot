@@ -58,6 +58,8 @@ func TestPodSnapshotWithEmptyOptionalFieldsReconciles(t *testing.T) {
 		{"empty-containers", `{source: {podRef: {name: worker-0, containers: [main]}}, containers: []}`},
 		{"empty-http-path", `{source: {podRef: {name: worker-0, containers: [main]}}, ` +
 			`containers: [{name: main, checkpointReadinessProbe: {httpGet: {path: "", port: 8000}}}]}`},
+		{"empty-http-post-path", `{source: {podRef: {name: worker-0, containers: [main]}}, ` +
+			`containers: [{name: main, lifecycle: {postRestore: {httpPost: {path: "", port: 8000}}}}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Unstructured, so the empty value reaches the API server as a user's manifest would send it.
