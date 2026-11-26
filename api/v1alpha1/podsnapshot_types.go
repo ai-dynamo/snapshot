@@ -70,8 +70,8 @@ type PodSnapshotSpec struct {
 	// +kubebuilder:validation:MaxItems=1
 	Containers []ContainerSnapshotConfig `json:"containers,omitempty"`
 
-	// StorageClassName selects the SnapshotStorageClass that holds the
-	// snapshot. Empty selects the default class.
+	// StorageClassName is the SnapshotStorageClass that holds the snapshot.
+	// Empty means the default class.
 	// +kubebuilder:validation:MaxLength=63
 	// +optional
 	StorageClassName string `json:"storageClassName,omitempty"`

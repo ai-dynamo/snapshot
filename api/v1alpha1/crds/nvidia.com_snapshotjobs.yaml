@@ -356,9 +356,8 @@ spec:
                       rule: '!has(self.annotations) || self.annotations.all(k, !format.qualifiedName().validate(k).hasValue())'
                   storageClassName:
                     description: |-
-                      StorageClassName is copied to the generated PodSnapshot: the
-                      SnapshotStorageClass that holds the snapshot. Empty selects the default
-                      class.
+                      StorageClassName is the SnapshotStorageClass that holds the snapshot. It
+                      is copied to the PodSnapshot. Empty means the default class.
                     maxLength: 63
                     type: string
                   targetContainers:
