@@ -48,8 +48,8 @@ data:
       bucket: {{ required "storage.s3.bucket is required" .Values.storage.s3.bucket | quote }}
       prefix: {{ .Values.storage.s3.prefix | default "" | quote }}
     {{- if or .Values.storage.s3.credentialsSecretRef .Values.storage.s3.caBundleConfigMapRef .Values.storage.s3.addressing .Values.storage.s3.allowHttp }}
-    # What the default class needs besides the location. None of it is a store
-    # identity input.
+    # What the default class needs besides the location. None of it identifies
+    # the store.
     s3Access:
       {{- with .Values.storage.s3.credentialsSecretRef }}
       credentialsSecretRef:

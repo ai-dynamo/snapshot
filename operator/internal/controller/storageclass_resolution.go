@@ -21,9 +21,9 @@ const (
 	ReasonStorageClassTerminating = "StorageClassTerminating"
 )
 
-// storageClassResolution is the outcome of looking up the class a request
-// names. A usable resolution has no reason. Its class is nil when new contents
-// are not bound to a store, which keeps the legacy flow.
+// storageClassResolution is the result of looking up the class of a request. It
+// is usable when it has no reason. Its class is nil when content is not bound
+// to a store.
 type storageClassResolution struct {
 	Class   *snapshotv1alpha1.SnapshotStorageClass
 	Reason  string
@@ -32,9 +32,8 @@ type storageClassResolution struct {
 
 func (r storageClassResolution) Usable() bool { return r.Reason == "" }
 
-// resolveStorageClass finds the class a request names, or the default class
-// when it names none. While binding is off only the default class is
-// reconciled, so a request that names another class waits.
+// resolveStorageClass returns the class a request names, or the default class.
+// While binding is off, only the default class is usable.
 func resolveStorageClass(ctx context.Context, reader client.Reader, requested, defaultName string,
 	bindingEnabled bool,
 ) (storageClassResolution, error) {
@@ -65,7 +64,7 @@ func resolveStorageClass(ctx context.Context, reader client.Reader, requested, d
 	return classUsability(class), nil
 }
 
-// classUsability says whether new content may be bound through the class.
+// classUsability says whether new content can be bound through the class.
 func classUsability(class *snapshotv1alpha1.SnapshotStorageClass) storageClassResolution {
 	if !class.DeletionTimestamp.IsZero() {
 		return storageClassResolution{

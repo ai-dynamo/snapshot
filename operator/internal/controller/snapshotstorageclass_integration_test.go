@@ -62,8 +62,8 @@ func TestSnapshotStorageClassControllerAgainstAnAPIServer(t *testing.T) {
 	require.NoError(t, cl.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "snapshot"}}))
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme:  scheme,
-		Metrics: metricsserver.Options{BindAddress: "0"},
+		Scheme:     scheme,
+		Metrics:    metricsserver.Options{BindAddress: "0"},
 		Controller: ctrlconfig.Controller{SkipNameValidation: ptr.To(true)},
 		Cache: cache.Options{ByObject: map[client.Object]cache.ByObject{
 			&corev1.Secret{}:    {Namespaces: map[string]cache.Config{"snapshot": {}}},

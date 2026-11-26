@@ -25,18 +25,18 @@ const (
 )
 
 // DefaultStorageClassCreator creates the default class from the storage
-// configuration when the cluster has no class at all. That covers a fresh
-// install and the first upgrade. Once any class exists it does nothing, so it
-// neither brings back a deleted class nor reverts an edit.
+// configuration when the cluster has no class. If any class exists, it does
+// nothing.
 type DefaultStorageClassCreator struct {
 	Client client.Client
-	// Reader reads without a cache; the manager's cache is not needed before it starts.
+	// Reader reads without a cache.
 	Reader client.Reader
 	Name   string
 	Config storage.Config
 }
 
-// Start runs once, on the leader, and returns when the check is done or the context ends.
+// Start checks once on the leader and retries until it succeeds or the context
+// ends.
 func (c *DefaultStorageClassCreator) Start(ctx context.Context) error {
 	logger := log.FromContext(ctx).WithName("default-storage-class")
 	return wait.PollUntilContextCancel(ctx, defaultClassRetry, true, func(ctx context.Context) (bool, error) {
@@ -78,9 +78,8 @@ func (c *DefaultStorageClassCreator) Ensure(ctx context.Context) error {
 }
 
 // defaultClassFromConfig describes the configured store as a class, or returns
-// nil when no store is configured. Its location fields are the ones the store
-// ID was computed from, so the class has the store ID already recorded on
-// content bound before classes existed.
+// nil when no store is configured. Its location fields give the store ID of the
+// configured store.
 func defaultClassFromConfig(name string, cfg storage.Config) *snapshotv1alpha1.SnapshotStorageClass {
 	class := &snapshotv1alpha1.SnapshotStorageClass{
 		ObjectMeta: metav1.ObjectMeta{Name: name},

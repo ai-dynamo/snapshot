@@ -230,8 +230,7 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
      rendered stagingSizeLimit, not just pageBroker.staging.sizeLimit: the
      default stagingBytes is derived from it together with both containers'
      memory limits, so a change to either limit must also roll both. The default
-     class name is left out: only the operator reads it, so moving the default
-     does not restart the agents. */}}
+     class name is left out because only the operator reads it. */}}
 {{- define "snapshot.operatorConfigChecksum" -}}
 {{- toYaml (dict "storage" (omit .Values.storage "defaultClassName") "pageBrokerS3" .Values.pageBroker.s3 "modelStreamer" .Values.pageBroker.transferEngine.modelStreamer "stagingSizeLimit" (include "snapshot.stagingSizeLimit" .)) | sha256sum -}}
 {{- end -}}

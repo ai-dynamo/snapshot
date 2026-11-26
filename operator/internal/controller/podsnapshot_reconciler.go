@@ -77,10 +77,10 @@ type PodSnapshotReconciler struct {
 	NonCacheReadClient    client.Reader
 	Recorder              record.EventRecorder
 	TestFailureAnnotation string
-	// BindNewContents binds every new PodSnapshotContent to a store through the
-	// class its PodSnapshot names. Off, new content stays legacy and path-addressed.
+	// BindNewContents binds new content to a store through the class its
+	// PodSnapshot names. When off, new content has no store binding.
 	BindNewContents bool
-	// DefaultClassName is the class used by a PodSnapshot that names none.
+	// DefaultClassName is the class of a PodSnapshot that names none.
 	DefaultClassName string
 }
 
@@ -421,13 +421,13 @@ func (sr *PodSnapshotReconciler) ensurePodSnapshotContent(ctx context.Context, s
 	return content, true, nil
 }
 
-// errStorageClassTerminating marks a class that began terminating while its content was being created.
+// errStorageClassTerminating means the class is terminating or gone.
 var errStorageClassTerminating = errors.New("storage class is being deleted or is gone")
 
-// confirmClassStillUsable reads the class from the API server after the content exists. The class
-// finalizer counts content with a live list, so a class that is still there once the content is
-// visible cannot be released before the content goes. A class that is terminating or gone is not
-// bound: the new content is deleted.
+// confirmClassStillUsable reads the class from the API server after the content
+// is created. If the class is terminating or gone, it deletes the new content.
+// The class finalizer lists content live, so a class that is still there cannot
+// be released before the content goes.
 func (sr *PodSnapshotReconciler) confirmClassStillUsable(ctx context.Context, className string, content *snapshotv1alpha1.PodSnapshotContent) error {
 	class := &snapshotv1alpha1.SnapshotStorageClass{}
 	err := sr.NonCacheReadClient.Get(ctx, client.ObjectKey{Name: className}, class)
@@ -650,8 +650,8 @@ func (sr *PodSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(sr)
 }
 
-// classToWaitingPodSnapshots wakes the PodSnapshots that have not been bound yet and resolve to the
-// class that changed, so one that waited for the class to become Ready proceeds without a timer.
+// classToWaitingPodSnapshots returns the PodSnapshots that are not bound yet
+// and use the class that changed.
 func (sr *PodSnapshotReconciler) classToWaitingPodSnapshots(ctx context.Context, obj client.Object) []reconcile.Request {
 	class, ok := obj.(*snapshotv1alpha1.SnapshotStorageClass)
 	if !ok {
