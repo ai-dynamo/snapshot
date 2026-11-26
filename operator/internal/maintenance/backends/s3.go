@@ -194,7 +194,10 @@ func (b *S3Backend) Delete(ctx context.Context, contentUID string) error {
 		if page.IsTruncated == nil || !*page.IsTruncated {
 			return nil
 		}
-		continuationToken = page.NextContinuationToken
+		continuationToken, err = nextContinuationToken(continuationToken, page.NextContinuationToken)
+		if err != nil {
+			return fmt.Errorf("list objects under %q: %w", prefix, err)
+		}
 	}
 }
 
@@ -242,6 +245,22 @@ func (b *S3Backend) Candidates(ctx context.Context, _ logr.Logger) (map[string]s
 		if page.IsTruncated == nil || !*page.IsTruncated {
 			return candidates, nil
 		}
-		continuationToken = page.NextContinuationToken
+		continuationToken, err = nextContinuationToken(continuationToken, page.NextContinuationToken)
+		if err != nil {
+			return nil, fmt.Errorf("list artifact prefixes under %q: %w", b.artifactsPrefix, err)
+		}
 	}
+}
+
+// nextContinuationToken rejects malformed pagination responses before they can
+// make maintenance repeat the same S3 listing indefinitely.
+func nextContinuationToken(current, next *string) (*string, error) {
+	token := aws.ToString(next)
+	if token == "" {
+		return nil, fmt.Errorf("truncated S3 listing without a continuation token")
+	}
+	if current != nil && token == aws.ToString(current) {
+		return nil, fmt.Errorf("truncated S3 listing repeated continuation token %q", token)
+	}
+	return next, nil
 }

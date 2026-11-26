@@ -111,6 +111,16 @@ func TestS3BackendDeletePaginatesListing(t *testing.T) {
 	require.Len(t, api.deleteInputs, 2)
 }
 
+func TestS3BackendDeleteRejectsTruncatedListingWithoutContinuationToken(t *testing.T) {
+	api := &fakeS3API{listPages: []*s3.ListObjectsV2Output{{
+		IsTruncated: aws.Bool(true),
+	}}}
+	b := newTestS3Backend(api)
+
+	err := b.Delete(context.Background(), "uid-1")
+	require.ErrorContains(t, err, "truncated S3 listing without a continuation token")
+}
+
 func TestS3BackendDeleteBatchesOverOneThousandObjects(t *testing.T) {
 	objects := make([]s3types.Object, deleteObjectsBatchSize+1)
 	for i := range objects {
@@ -167,6 +177,17 @@ func TestS3BackendCandidatesPaginates(t *testing.T) {
 	candidates, err := b.Candidates(context.Background(), logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, map[string]struct{}{"uid-1": {}, "uid-2": {}}, candidates)
+}
+
+func TestS3BackendCandidatesRejectsRepeatedContinuationToken(t *testing.T) {
+	api := &fakeS3API{listPages: []*s3.ListObjectsV2Output{
+		{IsTruncated: aws.Bool(true), NextContinuationToken: aws.String("next")},
+		{IsTruncated: aws.Bool(true), NextContinuationToken: aws.String("next")},
+	}}
+	b := newTestS3Backend(api)
+
+	_, err := b.Candidates(context.Background(), logr.Discard())
+	require.ErrorContains(t, err, `truncated S3 listing repeated continuation token "next"`)
 }
 
 func TestS3BackendCandidatesReturnsErrorOnListFailure(t *testing.T) {
