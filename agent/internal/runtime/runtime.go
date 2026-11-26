@@ -42,6 +42,10 @@ type Runtime interface {
 	// ResolveContainerPodUID returns the UID of the container's Pod on the
 	// node, which names the Pod's directories under kubelet's.
 	ResolveContainerPodUID(ctx context.Context, id string) (string, error)
+	// ContainerRunning reports whether the container runs now. Its PID
+	// cannot tell: ResolveContainer returns an exited container's task until
+	// kubelet removes it, and the PID may be reused.
+	ContainerRunning(ctx context.Context, id string) (bool, error)
 	// TerminateContainer requests zero-grace termination through CRI using the
 	// runtime container ID. Implementations validate any supplied runtime scheme
 	// before dispatch.
