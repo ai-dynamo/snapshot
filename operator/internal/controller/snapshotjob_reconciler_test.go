@@ -6,6 +6,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
@@ -269,22 +270,40 @@ func TestSnapshotJobReconcileSourceJobRejectedAsInvalidIsTerminal(t *testing.T) 
 	assert.Equal(t, 1, jobCreates, "a terminal SnapshotJob must not try to create the Job again")
 }
 
+// A refusal that can clear without a new spec must stay retryable.
 func TestSnapshotJobReconcileSourceJobCreateErrorRetries(t *testing.T) {
-	s := snapshotJobReconcilerScheme()
-	sj := minimalSnapshotJob()
-	// A refusal that can clear without a new spec, such as a quota or a missing
-	// permission, must stay retryable.
-	rejection := apierrors.NewForbidden(batchv1.Resource("jobs"), sj.Name, errors.New("exceeded quota"))
-	jobCreates := 0
-	r := makeSnapshotJobReconcilerWithInterceptor(s, rejectSourceJobCreate(&jobCreates, rejection), sj)
+	jobName := minimalSnapshotJob().Name
+	// A ValidatingAdmissionPolicy denial is a Forbidden error that the API
+	// server relabels Invalid unless the policy sets another reason. Its cause
+	// names no field.
+	policyMessage := "ValidatingAdmissionPolicy 'require-ttl' with binding 'require-ttl' denied request: Jobs must set ttlSecondsAfterFinished"
+	policyDenial := apierrors.NewForbidden(batchv1.Resource("jobs"), jobName, errors.New(policyMessage))
+	policyDenial.ErrStatus.Reason = metav1.StatusReasonInvalid
+	policyDenial.ErrStatus.Code = http.StatusUnprocessableEntity
+	policyDenial.ErrStatus.Details.Causes = []metav1.StatusCause{{Message: policyMessage}}
 
-	_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
-	require.Error(t, err, "a create error that is not a validation rejection must be returned so controller-runtime requeues with backoff")
-	assert.Equal(t, 1, jobCreates)
+	for _, tc := range []struct {
+		name      string
+		rejection error
+	}{
+		{"quota", apierrors.NewForbidden(batchv1.Resource("jobs"), jobName, errors.New("exceeded quota"))},
+		{"admission policy", policyDenial},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := snapshotJobReconcilerScheme()
+			sj := minimalSnapshotJob()
+			jobCreates := 0
+			r := makeSnapshotJobReconcilerWithInterceptor(s, rejectSourceJobCreate(&jobCreates, tc.rejection), sj)
 
-	updated := &snapshotv1alpha1.SnapshotJob{}
-	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
-	assert.Empty(t, updated.Status.Conditions, "no status should be written on a retryable create error")
+			_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+			require.Error(t, err, "a create error that is not a validation rejection must be returned so controller-runtime requeues with backoff")
+			assert.Equal(t, 1, jobCreates)
+
+			updated := &snapshotv1alpha1.SnapshotJob{}
+			require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+			assert.Empty(t, updated.Status.Conditions, "no status should be written on a retryable create error")
+		})
+	}
 }
 
 func TestSnapshotJobReconcilePropagatesJobGetError(t *testing.T) {
