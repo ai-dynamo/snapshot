@@ -189,6 +189,10 @@ commit-level history for each release is on its
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 
+- `snapshotctl checkpoint --help` and `snapshotctl restore --help` exit with
+  status 0. They printed the flags, then logged `snapshotctl failed` with a
+  stack trace and exited with status 1.
+
 ### Deprecated
 
 - `SNAPSHOT_RESTORE_STANDBY` (`podcontract.RestoreStandbyModeEnv`): restore
