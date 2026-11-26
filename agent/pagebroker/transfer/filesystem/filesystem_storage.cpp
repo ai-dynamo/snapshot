@@ -124,6 +124,15 @@ ReplaceDirectory(const Path& from, const Path& to)
 }
 }  // namespace
 
+bool
+IsWithinRoot(const StorageBackend& storage, const Path& root)
+{
+  if (root.empty() || !storage.has_filesystem())
+    return false;
+  const Path path(storage.filesystem().directory());
+  return IsPathWithinStorageRoot(path, path.lexically_relative(root));
+}
+
 Path
 SourcePath(const StorageBackend& source, const Path& storage_root)
 {

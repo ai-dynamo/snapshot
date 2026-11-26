@@ -12,12 +12,17 @@
 
 #include <cerrno>
 #include <climits>
+#include <cstdlib>
 #include <fstream>
 #include <future>
+#include <initializer_list>
+#include <string>
 #include <system_error>
 #include <thread>
+#include <utility>
 
 #include "file_descriptor.hpp"
+#include "tests/credential_environment.hpp"
 #include "tests/temporary_directory.hpp"
 
 namespace {
@@ -96,6 +101,52 @@ class RcloneProcessTest : public ::testing::Test {
 TEST_F(RcloneProcessTest, PassesLiteralArgumentsAndOnlySuppliedEnvironment)
 {
   EXPECT_NO_THROW(Upload({"bucket", "literal/$(false); `false` with spaces quote'\""}, Deadline()));
+}
+
+class DefaultCredentialChainTest : public RcloneProcessTest {
+ protected:
+  void SetUp() override
+  {
+    RcloneProcessTest::SetUp();
+    for (const auto& [name, value] : std::initializer_list<std::pair<const char*, const char*>>{
+             {"AWS_ROLE_ARN", "arn:aws:iam::000000000000:role/fake-role"},
+             {"AWS_WEB_IDENTITY_TOKEN_FILE", "/var/run/fake/web-identity-token"},
+             {"AWS_CONTAINER_CREDENTIALS_FULL_URI", "https://credentials.example.test/v1"},
+             {"AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE", "/var/run/fake/container-token"},
+             {"AWS_ACCESS_KEY_ID", "fake-ambient-key"},
+             {"AWS_SECRET_ACCESS_KEY", "fake-ambient-secret"},
+             {"AWS_SESSION_TOKEN", "fake-ambient-token"},
+             {"AWS_PROFILE", "other"},
+             {"AWS_ENDPOINT_URL_STS", "https://sts.example.test"}})
+      setenv(name, value, 1);
+    connection.region = "us-west-2";
+  }
+  void UploadWithChain(const std::string& key)
+  {
+    S3Client chain(connection);
+    chain.UploadFiles(directory.path(), {"bucket", key}, {{"source", 8}}, Deadline());
+  }
+  test::CredentialEnvironment environment;
+  S3Connection connection;
+};
+
+TEST_F(DefaultCredentialChainTest, PassesOnlyIdentityVariablesAndTheStoreRegion)
+{
+  EXPECT_NO_THROW(UploadWithChain("default-chain"));
+}
+
+TEST_F(DefaultCredentialChainTest, PrefersTheInjectedRegion)
+{
+  setenv("AWS_REGION", "eu-central-1", 1);
+  setenv("AWS_DEFAULT_REGION", "ap-south-1", 1);
+  EXPECT_NO_THROW(UploadWithChain("default-chain-region"));
+}
+
+TEST_F(DefaultCredentialChainTest, PassesTheCustomCa)
+{
+  connection.ca_file = (directory.path() / "ca.pem").string();
+  std::ofstream(connection.ca_file) << "fake-ca\n";
+  EXPECT_NO_THROW(UploadWithChain("default-chain-ca"));
 }
 
 TEST_F(RcloneProcessTest, DividesBufferBudgetBetweenRcloneProcesses)

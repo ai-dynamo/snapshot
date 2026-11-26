@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 	"k8s.io/utils/ptr"
+
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 func validAgentConfig() *AgentConfig {
@@ -146,15 +148,18 @@ func TestResolveRetryLimit(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		configured *int
+		requested  *int32
 		want       int
 	}{
-		{"absent takes the default", nil, DefaultCheckpointRetryLimit},
-		{"a configured limit is honoured", ptr.To(3), 3},
-		{"a configured zero is honoured", ptr.To(0), 0},
+		{"neither set takes the default", nil, nil, DefaultCheckpointRetryLimit},
+		{"the cluster default applies when the request is silent", ptr.To(3), nil, 3},
+		{"a configured zero is honoured", ptr.To(0), nil, 0},
+		{"an explicit request wins", ptr.To(3), ptr.To(int32(1)), 1},
+		{"an explicit zero is a request, not absence", ptr.To(3), ptr.To(int32(0)), 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := &CheckpointSpec{RetryLimit: tc.configured}
-			if got := c.ResolveRetryLimit(); got != tc.want {
+			c := &CheckpointSpec{DefaultRetryLimit: tc.configured}
+			if got := c.ResolveRetryLimit(tc.requested); got != tc.want {
 				t.Errorf("ResolveRetryLimit() = %d, want %d", got, tc.want)
 			}
 		})
@@ -192,11 +197,25 @@ func TestRestoreSpecRejectsANegativeRetryLimit(t *testing.T) {
 	}
 }
 
-func TestCheckpointSpecRejectsANegativeRetryLimit(t *testing.T) {
-	if err := (&CheckpointSpec{RetryLimit: ptr.To(-1)}).Validate(); err == nil {
-		t.Error("a negative retryLimit should not validate")
-	}
-	if err := (&CheckpointSpec{RetryLimit: ptr.To(0)}).Validate(); err != nil {
-		t.Errorf("zero retryLimit should validate, got %v", err)
+// The cluster default is bounded like the spec fields it stands in for. Without
+// the upper bound it could hand a request more attempts than the request would
+// have been allowed to ask for.
+func TestCheckpointSpecBoundsTheDefaultRetryLimit(t *testing.T) {
+	for _, tc := range []struct {
+		limit int
+		valid bool
+	}{
+		{-1, false},
+		{0, true},
+		{snapshotv1alpha1.MaxCheckpointRetryLimit, true},
+		{snapshotv1alpha1.MaxCheckpointRetryLimit + 1, false},
+	} {
+		err := (&CheckpointSpec{DefaultRetryLimit: ptr.To(tc.limit)}).Validate()
+		if tc.valid && err != nil {
+			t.Errorf("defaultRetryLimit %d should validate, got %v", tc.limit, err)
+		}
+		if !tc.valid && err == nil {
+			t.Errorf("defaultRetryLimit %d should not validate", tc.limit)
+		}
 	}
 }

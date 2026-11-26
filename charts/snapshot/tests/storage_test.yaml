@@ -299,16 +299,74 @@ tests:
                 - key: credentials
                   path: credentials
 
-  - it: rejects an S3 install missing the shared credentials secret
+  - it: renders an S3 install without a credentials secret
     template: templates/configmap.yaml
     set:
       storage.type: s3
       storage.s3.endpoint: https://s3.example.com
       storage.s3.region: us-east-1
       storage.s3.bucket: snapshot-bucket
+      operator.bindNewContents: true
     asserts:
-      - failedTemplate:
-          errorMessage: storage.s3.credentialsSecretRef is required when storage.type=s3
+      - matchRegex:
+          path: data["storage.yaml"]
+          pattern: 'bucket: "snapshot-bucket"'
+
+  - it: gives the operator no credentials file without a credentials secret
+    template: templates/operator-deployment.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      operator.bindNewContents: true
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --artifact-cleanup-s3-credentials-path=/etc/snapshot-s3-credentials/credentials
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: s3-credentials
+          any: true
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: s3-credentials
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --pagebroker-s3-settings=/etc/snapshot/pagebroker-s3.yaml
+
+  - it: gives PageBroker no credentials file without a credentials secret
+    template: templates/daemonset.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      operator.bindNewContents: true
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].env
+          content:
+            name: AWS_SHARED_CREDENTIALS_FILE
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            name: s3-credentials
+          any: true
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: s3-credentials
+          any: true
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            name: pagebroker-s3-config
+          any: true
 
   - it: honours a custom shared credentials secret key
     template: templates/operator-deployment.yaml

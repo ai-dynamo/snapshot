@@ -43,6 +43,9 @@ navigation:
       - page: Limitations
         path: ../docs/overview/limitations.md
         slug: limitations
+      - page: Roadmap
+        path: ../docs/roadmap.md
+        slug: roadmap
   - section: Get Started
     slug: get-started
     contents:

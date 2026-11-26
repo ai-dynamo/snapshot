@@ -5,6 +5,7 @@ package types
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,6 +16,7 @@ import (
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v3"
 
 	"github.com/ai-dynamo/snapshot/api/compat"
@@ -244,11 +246,29 @@ func WriteManifest(checkpointDir string, data *CheckpointManifest) error {
 	return nil
 }
 
+// safeReadRegularFile reads path only when it is a regular file: it does not
+// follow a symbolic link and does not block on a named pipe.
+func safeReadRegularFile(path string) ([]byte, error) {
+	file, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	return io.ReadAll(file)
+}
+
 // ReadManifest reads checkpoint manifest from a checkpoint directory.
 func ReadManifest(checkpointDir string) (*CheckpointManifest, error) {
 	manifestPath := filepath.Join(checkpointDir, manifestFilename)
 
-	content, err := os.ReadFile(manifestPath)
+	content, err := safeReadRegularFile(manifestPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint manifest: %w", err)
 	}
