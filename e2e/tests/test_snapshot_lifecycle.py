@@ -771,7 +771,7 @@ def test_restored_workload_keeps_its_own_mount_at_the_securityfs_path(
 
 @pytest.mark.snapshot_failure
 @pytest.mark.gpu
-def test_failed_restore_gpu_checkpoint_into_non_gpu_target(
+def test_restore_of_a_gpu_checkpoint_into_a_pod_without_a_gpu_is_refused(
     config: k8s.E2EConfig,
     run: snap.TestRun,
 ) -> None:
@@ -788,9 +788,12 @@ def test_failed_restore_gpu_checkpoint_into_non_gpu_target(
                 source_node=source_node,
             )
         )
-        snap.wait_for_restored_condition(
-            config.namespace, run.restore_pod, "False", "RestoreFailed"
+        pod = snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "False", "RestoreIncompatible"
         )
+
+        refusal = snap.pod_condition(pod, snap.RESTORED_CONDITION)
+        assert "gpu-count: source 1, target 0" in refusal.message
 
         pod_snapshot, content = snap.wait_for_snapshot_ready(
             config.namespace,
@@ -799,17 +802,8 @@ def test_failed_restore_gpu_checkpoint_into_non_gpu_target(
         )
         assert snap.condition(pod_snapshot, "Ready")["status"] == "True"
         assert snap.condition(content, "Ready")["status"] == "True"
-        # RestoreAlreadyFailed is deliberately not asserted: the agent marks a
-        # failed restore as handled in-process, so that event only fires when a
-        # fresh agent process re-encounters the already-failed pod (e.g. after
-        # an agent restart) — unreachable in this single-agent flow. The sticky
-        # failure itself is covered by the Restored=False/RestoreFailed
-        # condition asserted above.
-        assert_restore_events(
-            config.namespace,
-            run.restore_pod,
-            {"RestoreFailed"},
-        )
+        assert_restore_events(config.namespace, run.restore_pod, {"RestoreIncompatible"})
+        assert "RestoreFailed" not in restore_event_reasons(config.namespace, run.restore_pod)
     except Exception:
         snap.debug_dump(config, run)
         raise
@@ -823,10 +817,10 @@ def test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot(
 ) -> None:
     """A hard failure, which is not the same thing as a refusal.
 
-    This is deliberately not a port of the GPU test above. That one fails
-    because GPU discovery cannot read a device that is not there, and every
-    path that produces RestoreFailed in the restore executor sits behind a
-    CUDA manifest a CPU capture never writes — so no arrangement of pods or
+    This is deliberately not a port of the GPU test above. That one is a
+    refusal: the gate turns away a Pod without a GPU before any work happens.
+    Every path that produces RestoreFailed in the restore executor sits behind
+    a CUDA manifest a CPU capture never writes — so no arrangement of pods or
     annotations reaches it without a GPU.
 
     Damaging the artifact reaches the same verdict by the only route a CPU
