@@ -63,6 +63,10 @@ commit-level history for each release is on its
   and shared admission bytes. The default remains 10 GB; restart PageBroker
   after changing it.
 
+- [Argo CD operations guide](docs/operate/argocd.md) with checkpoint-completion
+  gating, restore manifests, and snapshot retention. The vLLM example adds
+  `/health` to check engine availability for readiness and liveness probes.
+
 - `SnapshotJob.spec.nonTargetArtifacts` lets callers declare shared-PVC writers
   and opt into cleanup after failure; omission or `Retain` preserves output.
   CRD change: deploy the matching CRD and operator together.
