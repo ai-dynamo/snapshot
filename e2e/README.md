@@ -203,10 +203,10 @@ a credential endpoint next to it and prints the store's chart values with
 `storage.s3.credentialEndpoint` in place of `storage.s3.credentialsSecretRef`. The
 endpoint checks the projected service-account token that PageBroker and the operator
 present, with a `TokenReview` for the audience the chart sets, and answers with the
-store's keys as 15-minute credentials, so a run exercises renewal. Its certificate
-comes from a CA generated per run, published as the chart's
-`storage.s3.caBundleConfigMapRef`. It listens on the node network like the store, on
-`SNAPSHOT_E2E_S3_CREDENTIAL_PORT` (default 19443).
+store's keys as 15-minute credentials, only to the agent's and the operator's
+service accounts. Its certificate comes from a CA generated per run, published as the
+chart's `storage.s3.caBundleConfigMapRef`. It listens on the node network like the
+store, on `SNAPSHOT_E2E_S3_CREDENTIAL_PORT` (default 19443).
 
 `test_s3_credential_endpoint.py` runs with `SNAPSHOT_E2E_S3_CREDENTIALS=endpoint`: it
 checks the identity variables in PageBroker, takes a CPU checkpoint into the store,

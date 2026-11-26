@@ -6,8 +6,8 @@
 This file is copied into a ConfigMap and runs in a plain Python image, so it
 uses only the standard library. A GET with the projected service-account token
 in the Authorization header is checked with a TokenReview for the expected
-audience, then answered with the store's keys in the container-credentials
-format, with an expiry short enough that the clients renew during a run.
+audience and for the service accounts allowed to ask, then answered with the store's keys in the container-credentials
+format, with a short expiry.
 """
 
 import datetime
@@ -19,6 +19,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 AUDIENCE = os.environ["TOKEN_AUDIENCE"]
+ALLOWED_SUBJECTS = {name for name in os.environ["ALLOWED_SUBJECTS"].split(",") if name}
 ACCESS_KEY = os.environ["ACCESS_KEY"]
 SECRET_KEY = os.environ["SECRET_KEY"]
 LIFETIME_SECONDS = int(os.environ.get("LIFETIME_SECONDS", "900"))
@@ -83,6 +84,9 @@ class Handler(BaseHTTPRequestHandler):
             self.log_message("rejected: audience %s", status.get("audiences"))
             return self.reply(403, {"error": "wrong audience"})
         user = status.get("user", {}).get("username", "?")
+        if user not in ALLOWED_SUBJECTS:
+            self.log_message("rejected: identity %s", user)
+            return self.reply(403, {"error": "identity not allowed"})
         expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
             seconds=LIFETIME_SECONDS
         )

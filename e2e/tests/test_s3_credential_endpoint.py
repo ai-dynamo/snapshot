@@ -58,7 +58,7 @@ def issued_to(config: k8s.E2EConfig, service_account: str) -> bool:
         tail_lines=None,
         container="endpoint",
     )
-    subject = f"system:serviceaccount:{config.namespace}:{service_account}"
+    subject = credential_endpoint.subject(config.namespace, service_account)
     return f"{credential_endpoint.ISSUED} {subject}" in logs
 
 
@@ -101,7 +101,9 @@ def test_checkpoint_restore_and_cleanup_use_credentials_the_endpoint_issued(
     ), (
         "the checkpoint must not also be written to the checkpoint volume"
     )
-    assert issued_to(config, config.release), "the endpoint issued nothing to the agent"
+    assert issued_to(config, credential_endpoint.agent_service_account(config.release)), (
+        "the endpoint issued nothing to the agent"
+    )
 
     k8s.delete_pod(config.namespace, run.source_pod)
     snap.wait_for_pod_deleted(config.namespace, run.source_pod)
@@ -114,6 +116,6 @@ def test_checkpoint_restore_and_cleanup_use_credentials_the_endpoint_issued(
 
     snap.delete_podsnapshot(config.namespace, run.snapshot_name)
     snap.wait_for_custom_object_deleted(None, content["metadata"]["name"], "podsnapshotcontents")
-    assert issued_to(config, f"{config.release}-operator"), (
+    assert issued_to(config, credential_endpoint.operator_service_account(config.release)), (
         "the endpoint issued nothing to the operator"
     )

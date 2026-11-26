@@ -38,6 +38,7 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from kubernetes import client, config
 
 from snapshot_e2e import s3
+from snapshot_e2e.infra.setup import DEFAULT_SNAPSHOT_RELEASE, snapshot_chart_fullname
 
 NAME = "snapshot-s3-credentials"
 AUDIENCE = NAME
@@ -150,7 +151,21 @@ def generate_certificates(addresses: list[str], namespace: str) -> Certificates:
     )
 
 
-def endpoint_deployment(namespace: str, port: int, node_name: str) -> client.V1Deployment:
+def agent_service_account(release: str) -> str:
+    return snapshot_chart_fullname(release)
+
+
+def operator_service_account(release: str) -> str:
+    return f"{snapshot_chart_fullname(release)}-operator"
+
+
+def subject(namespace: str, service_account: str) -> str:
+    return f"system:serviceaccount:{namespace}:{service_account}"
+
+
+def endpoint_deployment(
+    namespace: str, port: int, node_name: str, release: str = DEFAULT_SNAPSHOT_RELEASE
+) -> client.V1Deployment:
     labels = {"app.kubernetes.io/name": NAME}
     keys = [
         client.V1EnvVar(
@@ -170,6 +185,13 @@ def endpoint_deployment(namespace: str, port: int, node_name: str) -> client.V1D
         client.V1EnvVar(name="TOKEN_AUDIENCE", value=AUDIENCE),
         client.V1EnvVar(name="PORT", value=str(port)),
         client.V1EnvVar(name="LIFETIME_SECONDS", value=str(CREDENTIAL_LIFETIME_SECONDS)),
+        client.V1EnvVar(
+            name="ALLOWED_SUBJECTS",
+            value=",".join(
+                subject(namespace, account)
+                for account in (agent_service_account(release), operator_service_account(release))
+            ),
+        ),
     ]
     container = client.V1Container(
         name="endpoint",
@@ -245,8 +267,9 @@ def apply_token_review_access(namespace: str) -> None:
             )
         ],
     )
+    binding_name = f"{TOKEN_REVIEW_ROLE}-{namespace}"
     binding = client.V1ClusterRoleBinding(
-        metadata=client.V1ObjectMeta(name=TOKEN_REVIEW_ROLE),
+        metadata=client.V1ObjectMeta(name=binding_name),
         role_ref=client.V1RoleRef(
             api_group="rbac.authorization.k8s.io",
             kind="ClusterRole",
@@ -261,7 +284,7 @@ def apply_token_review_access(namespace: str) -> None:
     )
     _create_or_replace(
         rbac.create_cluster_role_binding,
-        lambda body: rbac.replace_cluster_role_binding(TOKEN_REVIEW_ROLE, body),
+        lambda body: rbac.replace_cluster_role_binding(binding_name, body),
         binding,
     )
 
@@ -335,7 +358,7 @@ def certificates_exist(namespace: str) -> bool:
     return True
 
 
-def deploy_endpoint(namespace: str, port: int) -> str:
+def deploy_endpoint(namespace: str, port: int, release: str = DEFAULT_SNAPSHOT_RELEASE) -> str:
     """Create the endpoint and return its URL once it serves.
 
     A second deploy keeps the certificates of the first: the running endpoint
@@ -351,7 +374,7 @@ def deploy_endpoint(namespace: str, port: int) -> str:
     _create_or_replace(
         lambda body: apps.create_namespaced_deployment(namespace, body),
         lambda body: apps.replace_namespaced_deployment(NAME, namespace, body),
-        endpoint_deployment(namespace, port, node_name),
+        endpoint_deployment(namespace, port, node_name, release),
     )
     deadline = time.monotonic() + READY_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
@@ -369,7 +392,8 @@ def main(argv: list[str] | None = None) -> int:
     namespace = os.environ.get("SNAPSHOT_E2E_TEST_NAMESPACE", s3.DEFAULT_NAMESPACE)
     config.load_kube_config(os.environ.get("KUBECONFIG"))
     store_port = int(os.environ.get("SNAPSHOT_E2E_S3_PORT", s3.DEFAULT_STORE_PORT))
-    url = deploy_endpoint(namespace, port_from_env())
+    release = os.environ.get("SNAPSHOT_E2E_SNAPSHOT_RELEASE", DEFAULT_SNAPSHOT_RELEASE)
+    url = deploy_endpoint(namespace, port_from_env(), release)
     print("\n".join(helm_set(s3.store_endpoint(namespace, store_port), url)))
     return 0
 

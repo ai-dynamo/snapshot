@@ -77,3 +77,18 @@ def test_endpoint_reads_the_store_login_and_serves_on_the_node_network() -> None
     assert plain["TOKEN_AUDIENCE"] == credential_endpoint.AUDIENCE
     assert plain["PORT"] == "19443"
     assert credential_endpoint.SERVER_SCRIPT.name in container.command[-1]
+
+
+def test_endpoint_allows_only_the_snapshot_service_accounts() -> None:
+    deployment = credential_endpoint.endpoint_deployment("ns", 19443, "node-a", "trial")
+    plain = {item.name: item.value for item in deployment.spec.template.spec.containers[0].env}
+    assert plain["ALLOWED_SUBJECTS"].split(",") == [
+        "system:serviceaccount:ns:trial-snapshot",
+        "system:serviceaccount:ns:trial-snapshot-operator",
+    ]
+
+
+def test_service_account_names_follow_the_chart_full_name() -> None:
+    assert credential_endpoint.agent_service_account("snapshot") == "snapshot"
+    assert credential_endpoint.operator_service_account("snapshot") == "snapshot-operator"
+    assert credential_endpoint.agent_service_account("trial") == "trial-snapshot"
