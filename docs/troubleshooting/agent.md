@@ -38,14 +38,17 @@ PageBroker sets it up.
 
 ## PageBroker Does Not Start After an S3 Settings Change
 
-After a change to `storage.s3.addressing` or the CA bundle, a PageBroker pod can
-start before the operator has rewritten its configuration. PageBroker refuses to
-start while its environment and its configuration disagree, and the pod
-recovers after the operator's configuration catches up and PageBroker restarts.
-PageBroker also refuses to start on a key it does not know in
+PageBroker refuses to start on a key it does not know in
 `pageBroker.transferEngine.modelStreamer`, so a misspelled key shows up as a
 failing pod, not as a rendering error. Read the PageBroker container log for the
 rejected setting.
+
+A change to `storage.s3.addressing` or the CA bundle does not stop PageBroker.
+A PageBroker pod that starts before the operator has rewritten its
+configuration runs with the previous configuration. The addressing and any CA
+bundle that configuration names take precedence over the variables on the
+container. See
+[Change S3 Settings](../operate/configure-storage.md#change-s3-settings).
 
 ## CRIU Reports `Unable to create tun`
 

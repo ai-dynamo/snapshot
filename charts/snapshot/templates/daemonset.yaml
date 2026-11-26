@@ -204,12 +204,12 @@ spec:
               value: {{ printf "%s/%s" (include "snapshot.s3CredentialsMountDir" .) .Values.storage.s3.credentialsSecretKey | quote }}
             {{- end }}
             {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.addressing }}
-            # PageBroker refuses to start unless this agrees with the JSON's addressing.
+            # PageBroker takes addressing from the operator's JSON and resets this to match.
             - name: RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING
               value: {{ ternary "1" "0" (eq .Values.storage.s3.addressing "virtual") | quote }}
             {{- end }}
             {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.caBundleConfigMapRef }}
-            # PageBroker refuses to start unless this equals the JSON's caFile.
+            # Used when the operator's JSON names no caFile; otherwise PageBroker resets it to the JSON's.
             - name: AWS_CA_BUNDLE
               value: {{ include "snapshot.s3CABundlePath" . | quote }}
             {{- end }}
