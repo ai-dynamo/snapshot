@@ -40,6 +40,25 @@ there, runs the environment check, then runs the snapshot lifecycle tests.
 The workflow resolves the latest published Snapshot operator/agent image tag and
 passes it through `SNAPSHOT_E2E_SNAPSHOT_TAG`.
 
+The GPU suites share one host cluster, and each installs a Snapshot agent on
+every GPU node. Before a GPU, framework, or upgrade suite creates its vCluster,
+`snapshot_e2e.infra.suite_slot` creates the suite's host namespace and waits
+for a suite slot. Up to six suites run at once, in the order their host
+namespaces were created. A suite that finds no slot in 175 minutes fails with a
+`No suite slot` error that names the suites holding the slots. A suite that
+cannot list the host namespaces runs without a slot and warns
+`Running without a suite slot`.
+
+To see the suites in line, oldest first, run this against the host cluster:
+
+```bash
+kubectl get namespaces -l snapshot-e2e=true --sort-by=.metadata.creationTimestamp
+```
+
+A suite frees its slot when its cleanup deletes its host namespace, even when
+the suite fails or is cancelled. A run that loses its runner keeps its slot
+until a later suite deletes host namespaces older than 12 hours.
+
 ### Pull requests
 
 Pull requests are tested by `e2e-pr.yaml` on their copy-pr-bot mirror branch
