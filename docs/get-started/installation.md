@@ -34,8 +34,9 @@ The node agent needs elevated privileges to checkpoint and restore processes:
 ## Install from a Release
 
 Install the published chart. Replace `<version>` with the release you want from
-the [releases page](https://github.com/ai-dynamo/snapshot/releases). Every
-command on this page uses the same placeholder.
+the [releases page](https://github.com/ai-dynamo/snapshot/releases), without the
+leading `v`. For release `v0.3.0`, use `0.3.0`. Every command on this page uses
+the same placeholder.
 
 ```bash
 helm install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \

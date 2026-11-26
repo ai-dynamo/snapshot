@@ -108,7 +108,8 @@ Some features raise this floor. See [Prerequisites by Feature](docs/get-started/
 ### From a Release
 
 Install the published chart. Replace `<version>` with the release you want from
-the [releases page](https://github.com/ai-dynamo/snapshot/releases):
+the [releases page](https://github.com/ai-dynamo/snapshot/releases), without the
+leading `v`. For release `v0.3.0`, use `0.3.0`:
 
 ```bash
 helm install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
