@@ -254,17 +254,17 @@ sees describes the capability, not the mechanism behind it.
 - Add or update tests alongside behavior changes. Controller logic under
   `agent/internal` and `operator/internal` has substantial table-driven test
   coverage; follow the existing patterns rather than inventing new harnesses.
+- The operator's Job informer cache is trimmed. `TrimJobForCache` in
+  `operator/internal/controller/job_cache.go` keeps the spec and status only of
+  Jobs that a `SnapshotJob` controls. Every other Job in the cluster is cached
+  as metadata (minus `managedFields`), so a controller that needs the spec or
+  status of such a Job reads it through the API reader.
 - The operator's Pod informer cache is trimmed. `TrimPodForCache` in
   `operator/internal/controller/pod_cache.go` keeps metadata (minus
   `managedFields`), `spec.nodeName`, `status.phase` and the container and
   init-container statuses, and clears the rest of spec and status. A controller
   that reads any other Pod field from the cache gets a zero value, so extend
   the transform and its test in the same change.
-- The operator's Job informer cache is trimmed too. `TrimJobForCache` in
-  `operator/internal/controller/job_cache.go` keeps the spec and status only of
-  Jobs that a `SnapshotJob` controls. Every other Job in the cluster is cached
-  as metadata (minus `managedFields`), so a controller that needs the spec or
-  status of such a Job reads it through the API reader.
 - Do not edit generated files (`zz_generated*.go`, both CRD directories).
 - Do not bump dependencies as a side effect of an unrelated change; Dependabot
   handles routine updates.
