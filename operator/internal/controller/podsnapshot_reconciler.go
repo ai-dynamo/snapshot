@@ -293,10 +293,23 @@ func pendingCaptureSourceFailure(snap *snapshotv1alpha1.PodSnapshot, content *sn
 	}
 }
 
+// sourcePodForBinding reads the source pod from the cache, and from the API server when the
+// cached answer would fail the PodSnapshot for good: no pod, or a pod with another UID than the
+// pinned one. The cache can be behind for a pod that was created, or deleted and created again, a
+// moment ago, and Failed is sticky.
+func (sr *PodSnapshotReconciler) sourcePodForBinding(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot) (*corev1.Pod, error) {
+	pod, err := sr.getSourcePod(ctx, snap)
+	replaced := err == nil && snap.Spec.Source.PodRef.UID != "" && pod.UID != snap.Spec.Source.PodRef.UID
+	if apierrors.IsNotFound(err) || replaced {
+		return sr.readAuthoritativeSourcePod(ctx, snap)
+	}
+	return pod, err
+}
+
 // captureFromSourcePod is the no-content path: it resolves and validates the live source pod, then
 // creates the PodSnapshotContent and records the binding.
 func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot) (ctrl.Result, error) {
-	pod, err := sr.getSourcePod(ctx, snap)
+	pod, err := sr.sourcePodForBinding(ctx, snap)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return sr.failPodSnapshot(ctx, snap, "SourcePodNotFound",
