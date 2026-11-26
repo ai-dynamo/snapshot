@@ -1160,18 +1160,33 @@ def wait_for_artifact_root_absent(
     )
 
 
+ARTIFACT_STAGING_FILE_CREATED = "__snapshot_artifact_staging_file_created__"
+
+
 def create_artifact_staging_file(
     config: k8s.E2EConfig,
     node: str,
     content_uid: str,
 ) -> None:
-    k8s.exec_command(
+    """Write a staging file under an artifact root, and fail unless it was written.
+
+    The exec that writes the file also confirms it. The operator's sweep
+    reclaims a root that no PodSnapshotContent owns as soon as it finds it, so
+    a later exec cannot tell a reclaimed root from one that was never created.
+    """
+    root = checkpoint_artifact_root(content_uid)
+    output = k8s.exec_command(
         config.namespace,
         checkpoint_agent_pod(config, node),
-        f"mkdir -p {checkpoint_artifact_root(content_uid)}/.tmp && "
-        f"printf orphan > {checkpoint_artifact_root(content_uid)}/.tmp/partial",
+        f"mkdir -p {root}/.tmp && "
+        f"printf orphan > {root}/.tmp/partial && "
+        f"printf '%s' {ARTIFACT_STAGING_FILE_CREATED}",
         container=AGENT_CONTAINER,
     )
+    if ARTIFACT_STAGING_FILE_CREATED not in output:
+        raise AssertionError(
+            f"staging file under {root} on {node!r} was not created: {output!r}"
+        )
 
 
 NODE_CACHE_VOLUME = "node-cache"
