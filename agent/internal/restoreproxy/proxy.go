@@ -22,11 +22,34 @@ import (
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
-// ForwardedSignals are passed on to the restored process. SIGKILL and SIGSTOP
-// cannot be caught, so kubelet's final SIGKILL takes the whole container down.
-var ForwardedSignals = []os.Signal{
-	syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP,
-	syscall.SIGQUIT, syscall.SIGUSR1, syscall.SIGUSR2,
+// ForwardedSignals are passed on to the restored process: every signal the
+// proxy can subscribe to, so the workload gets what its container is sent,
+// whatever stop signal the image or the Pod sets. SIGKILL and SIGSTOP cannot
+// be caught, so kubelet's final SIGKILL takes the whole container down.
+var ForwardedSignals = forwardedSignals()
+
+// lastSignal is the highest signal number on linux/amd64 and linux/arm64.
+const lastSignal = 64
+
+func forwardedSignals() []os.Signal {
+	signals := make([]os.Signal, 0, lastSignal)
+	for n := 1; n <= lastSignal; n++ {
+		switch sig := syscall.Signal(n); sig {
+		case syscall.SIGKILL, syscall.SIGSTOP:
+			// Cannot be caught.
+		case syscall.SIGPROF, 32, 33, 34:
+			// The Go runtime does not deliver these to a subscriber: it
+			// keeps SIGPROF for its profiler, and 32 to 34 are reserved for
+			// threading libraries.
+		case syscall.SIGCHLD, syscall.SIGURG, syscall.SIGPIPE:
+			// About the proxy itself, not the workload: its children's
+			// exits, the Go runtime preempting its goroutines, and its own
+			// writes.
+		default:
+			signals = append(signals, sig)
+		}
+	}
+	return signals
 }
 
 // DefaultPollInterval backs up inotify. It only matters when a watch event is
