@@ -50,8 +50,8 @@ Advisories; Snapshot does not publish those.
 
 ## Verifying what you run
 
-From `v0.2.0` on, every published artifact — the operator image, the agent
-image, and the Helm chart — is signed in CI with
+From `v0.2.0` on, every published artifact — the operator, agent, and
+PageBroker images, and the Helm chart — is signed in CI with
 [Sigstore](https://www.sigstore.dev/) cosign keyless signing. Earlier releases
 predate the signing pipeline and carry SBOMs only; they are not signed
 retroactively. There is no key to distribute: the signing identity is this

@@ -84,12 +84,13 @@ has landed there since.
    release notes (see below).
 3. The `Release` workflow triggers on `release: published` and:
    - runs the full validation gate against the release commit,
-   - builds and pushes the operator and agent images to
-     `ghcr.io/ai-dynamo/snapshot`, each carrying SLSA provenance and an SPDX
-     SBOM as OCI attestations,
+   - builds and pushes the operator, agent, and PageBroker images to
+     `ghcr.io/ai-dynamo/snapshot` for amd64 and arm64, each carrying SLSA
+     provenance and an SPDX SBOM as OCI attestations,
    - packages and pushes the Helm chart to GHCR as an OCI artifact,
-   - signs both images and the chart by digest with cosign keyless signing,
-   - attaches an SPDX and a CycloneDX SBOM per image, the chart tarball, and a
+   - signs the three images and the chart by digest with cosign keyless signing,
+   - attaches an SPDX and a CycloneDX SBOM per image and architecture, the
+     chart tarball, and a
      signed `SHA256SUMS` to the GitHub release,
    - creates the three Go module sub-path tags.
 4. Verify the workflow succeeded and that the images and chart are pullable at
@@ -136,6 +137,9 @@ same workflow at `refs/heads/main` and are deliberately rejected by it.
 
 ### Images
 
+A release publishes three images: the operator, the agent, and PageBroker,
+which runs in the agent pod. Verify each one.
+
 Verify by digest where you can; a tag can be repointed, a digest cannot.
 
 ```bash
@@ -148,6 +152,11 @@ cosign verify \
   --certificate-identity-regexp "${COSIGN_IDENTITY}" \
   --certificate-oidc-issuer "${COSIGN_ISSUER}" \
   ghcr.io/ai-dynamo/snapshot/agent:v0.3.0
+
+cosign verify \
+  --certificate-identity-regexp "${COSIGN_IDENTITY}" \
+  --certificate-oidc-issuer "${COSIGN_ISSUER}" \
+  ghcr.io/ai-dynamo/snapshot/pagebroker:v0.3.0
 ```
 
 A successful run prints the signature payload and the certificate subject; a
@@ -186,9 +195,10 @@ built the image, so you can confirm an image came from the commit it claims.
 
 ### Release assets and checksums
 
-Releases from `v0.2.0` carry two SBOMs per image — SPDX (`.spdx.json`) and
-CycloneDX (`.cdx.json`), the same inventory in the two formats consumers ask
-for — plus the packaged chart and a `SHA256SUMS` covering all of them.
+Releases from `v0.2.0` carry two SBOMs per image and architecture — SPDX
+(`.spdx.json`) and CycloneDX (`.cdx.json`), the same inventory in the two
+formats consumers ask for — plus the packaged chart and a `SHA256SUMS` covering
+all of them. The arm64 files have `-arm64` in their names.
 `SHA256SUMS` is itself signed, so verifying one signature transitively covers
 every asset:
 
