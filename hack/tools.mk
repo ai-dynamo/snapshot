@@ -33,7 +33,6 @@ GOVULNCHECK    := $(TOOLS_BIN_DIR)/govulncheck
 HELM           := $(TOOLS_BIN_DIR)/helm
 PROTOC         := $(TOOLS_BIN_DIR)/protoc
 MDTOC          := $(TOOLS_BIN_DIR)/mdtoc
-MDTOC_VERSION_STAMP := $(TOOLS_BIN_DIR)/.mdtoc-version
 SETUP_ENVTEST  := $(TOOLS_BIN_DIR)/setup-envtest
 
 # A tool that type-checks our source has to be built with at least our Go
@@ -44,21 +43,41 @@ SETUP_ENVTEST  := $(TOOLS_BIN_DIR)/setup-envtest
 # catch up. Tools that only rewrite or generate files do not need it.
 TOOL_TOOLCHAIN := GOTOOLCHAIN=go$(GO_VERSION)
 
-# Each tool installs on demand (only when its binary is missing), so targets can
-# depend on it as a prerequisite without a separate install step in CI.
-$(CONTROLLER_GEN):
-	GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
+# Each tool installs on demand, so targets can depend on it as a prerequisite
+# without a separate install step in CI. A Go tool is rechecked on every
+# invocation and reinstalled unless the binary is the pinned build: the default
+# TOOLS_BIN_DIR outlives a version bump here and is shared with other
+# checkouts, and a binary left from before the bump fails in ways that do not
+# name the cause. The check costs one read of the binary.
+.PHONY: force-tool-version-check
+force-tool-version-check:
 
-$(GOLANGCI_LINT):
-	GOBIN=$(TOOLS_BIN_DIR) GOWORK=off $(TOOL_TOOLCHAIN) \
-	  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+# go-tool-pinned succeeds when binary $(1) was built from module version $(2)
+# and, when $(3) is given, by Go toolchain $(3). `go version -m` prints both
+# from the binary itself, so there is no stamp file to fall out of step.
+go-tool-pinned = test -x "$(1)" && go version -m "$(1)" 2>/dev/null | \
+  awk -v version="$(2)" -v toolchain="$(3)" \
+    'NR == 1 && toolchain != "" && $$NF != toolchain { stale = 1 } \
+     $$1 == "mod" && $$3 == version { pinned = 1 } \
+     END { exit stale || !pinned }'
 
-$(ADDLICENSE):
-	GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install github.com/google/addlicense@$(ADDLICENSE_VERSION)
+$(CONTROLLER_GEN): force-tool-version-check
+	@$(call go-tool-pinned,$@,$(CONTROLLER_GEN_VERSION)) || { set -x; \
+	  GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION); }
 
-$(GOVULNCHECK):
-	GOBIN=$(TOOLS_BIN_DIR) GOWORK=off $(TOOL_TOOLCHAIN) \
-	  go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+$(GOLANGCI_LINT): force-tool-version-check
+	@$(call go-tool-pinned,$@,$(GOLANGCI_LINT_VERSION),go$(GO_VERSION)) || { set -x; \
+	  GOBIN=$(TOOLS_BIN_DIR) GOWORK=off $(TOOL_TOOLCHAIN) \
+	  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION); }
+
+$(ADDLICENSE): force-tool-version-check
+	@$(call go-tool-pinned,$@,$(ADDLICENSE_VERSION)) || { set -x; \
+	  GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install github.com/google/addlicense@$(ADDLICENSE_VERSION); }
+
+$(GOVULNCHECK): force-tool-version-check
+	@$(call go-tool-pinned,$@,$(GOVULNCHECK_VERSION),go$(GO_VERSION)) || { set -x; \
+	  GOBIN=$(TOOLS_BIN_DIR) GOWORK=off $(TOOL_TOOLCHAIN) \
+	  go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION); }
 
 # helm ships as a tarball (<os>-<arch>/helm); extract just the binary.
 $(HELM):
@@ -77,22 +96,13 @@ $(PROTOC):
 protoc: $(PROTOC)
 	@test "$$($(PROTOC) --version)" = "libprotoc $(PROTOC_VERSION)"
 
-# Recheck the requested version on every invocation. The install only runs when
-# the recorded version changes, so a deliberate MDTOC_VERSION update replaces
-# an existing binary without reinstalling it for every make target.
-.PHONY: force-mdtoc-version-check
-force-mdtoc-version-check:
+$(MDTOC): force-tool-version-check
+	@$(call go-tool-pinned,$@,$(MDTOC_VERSION)) || { set -x; \
+	  GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install sigs.k8s.io/mdtoc@$(MDTOC_VERSION); }
 
-$(MDTOC): force-mdtoc-version-check
-	@if test ! -x "$@" || test ! -f "$(MDTOC_VERSION_STAMP)" || \
-	    test "$$(cat "$(MDTOC_VERSION_STAMP)")" != "$(MDTOC_VERSION)"; then \
-	  mkdir -p $(TOOLS_BIN_DIR); \
-	  GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install sigs.k8s.io/mdtoc@$(MDTOC_VERSION); \
-	  printf '%s\n' "$(MDTOC_VERSION)" > "$(MDTOC_VERSION_STAMP)"; \
-	fi
-
-$(SETUP_ENVTEST):
-	GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION)
+$(SETUP_ENVTEST): force-tool-version-check
+	@$(call go-tool-pinned,$@,$(SETUP_ENVTEST_VERSION)) || { set -x; \
+	  GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION); }
 
 .PHONY: install-tools
 install-tools: $(CONTROLLER_GEN) $(GOLANGCI_LINT) $(ADDLICENSE) $(GOVULNCHECK) $(HELM) $(MDTOC) $(SETUP_ENVTEST)
