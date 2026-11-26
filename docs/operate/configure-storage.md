@@ -98,6 +98,8 @@ bucket instead, set `storage.type: s3`.
 - `storage.type: s3` requires `operator.bindNewContents: true`, because S3 has no
   legacy local-path checkpoint mode. The chart fails the render without it. See
   [Enable Artifact Addressing](#enable-artifact-addressing) for the rollout order
+- GPU CustomStorage needs a newer kernel with an S3 store than the baseline. See
+  [S3 Snapshot Store](../get-started/prerequisites.md#s3-snapshot-store)
 
 ### Required S3 Settings
 
