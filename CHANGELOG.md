@@ -186,6 +186,11 @@ commit-level history for each release is on its
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
+- A `SnapshotJob` whose `spec.podTemplate` the API server rejects as invalid,
+  such as a `volumeMounts` entry that names no volume, now fails with
+  `Failed=True` and reason `InvalidSpec`, and the condition message carries the
+  rejected field. It used to keep an empty status and retry without end. Create
+  a new `SnapshotJob` with the template fixed.
 
 ### Deprecated
 
