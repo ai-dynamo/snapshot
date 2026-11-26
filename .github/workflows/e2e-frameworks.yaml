@@ -94,11 +94,12 @@ jobs:
     name: ${{ matrix.case }}
     needs: check
     runs-on: prod-deploy-tester-v1
-    # Above the sum of this job's own step timeout-minutes (123, dominated by
-    # the 56-min test step) plus margin: a job-level timeout kills the whole
-    # job, including the failure() diagnostics upload and always() vCluster
-    # cleanup, which is exactly the safety net a slow run needs most.
-    timeout-minutes: 140
+    # Above the sum of this job's own step timeout-minutes (336, dominated by
+    # the 180-min suite slot wait and the 56-min test step) plus margin: a
+    # job-level timeout kills the whole job, including the failure()
+    # diagnostics upload and always() vCluster cleanup, which is exactly the
+    # safety net a slow run needs most.
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -175,40 +176,10 @@ jobs:
         run: |
           echo "kubeconfig=${KUBECONFIG:-}" >> "${GITHUB_OUTPUT}"
 
-      - name: Install vCluster CLI
-        if: ${{ steps.selected.outputs.run == 'true' }}
-        timeout-minutes: 3
-        uses: ./.github/actions/install-vcluster-cli
-
       - name: Cleanup stale e2e namespaces
         if: ${{ steps.selected.outputs.run == 'true' }}
-        timeout-minutes: 5
-        run: |
-          set -euo pipefail
-
-          cutoff_epoch="$(date -u -d '12 hours ago' +%s)"
-          kubectl get ns -l snapshot-e2e=true \
-            -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}' |
-          while IFS=$'\t' read -r namespace created_at; do
-            if [[ -z "${namespace}" ]]; then
-              continue
-            fi
-            if [[ "${namespace}" == "${HOST_NAMESPACE}" ]]; then
-              echo "Keeping current namespace ${namespace}"
-              continue
-            fi
-
-            created_epoch="$(date -u -d "${created_at}" +%s)"
-            if (( created_epoch >= cutoff_epoch )); then
-              echo "Keeping recent namespace ${namespace} created at ${created_at}"
-              continue
-            fi
-
-            echo "Deleting stale Snapshot e2e namespace ${namespace} created at ${created_at}"
-            helm uninstall vcluster-hpm -n "${namespace}" || true
-            vcluster delete "${namespace}" --namespace "${namespace}" || true
-            kubectl delete namespace "${namespace}" --ignore-not-found --wait=false || true
-          done
+        timeout-minutes: 8
+        uses: ./.github/actions/cleanup-stale-e2e-namespaces
 
       - name: Install Python tooling (ARM64)
         if: ${{ steps.selected.outputs.run == 'true' && runner.arch == 'ARM64' }}
@@ -277,6 +248,13 @@ jobs:
           else
             echo "::notice::Shared model cache uses the workflow default ${SNAPSHOT_E2E_MODEL_CACHE_SERVER}:${SNAPSHOT_E2E_MODEL_CACHE_PATH}; set repository variables SNAPSHOT_E2E_MODEL_CACHE_SERVER and SNAPSHOT_E2E_MODEL_CACHE_PATH to override."
           fi
+
+      - name: Wait for a GPU suite slot
+        if: ${{ steps.selected.outputs.run == 'true' }}
+        timeout-minutes: 180
+        env:
+          KUBECONFIG: ${{ steps.host.outputs.kubeconfig }}
+        run: uv run --locked --project e2e python -m snapshot_e2e.infra.suite_slot
 
       - name: Validate host GPU cluster
         if: ${{ steps.selected.outputs.run == 'true' }}
