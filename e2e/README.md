@@ -200,18 +200,18 @@ PodSnapshotContent status and that nothing was written to the checkpoint volume.
 
 `python -m snapshot_e2e.credential_endpoint deploy`, run after the store is up, adds
 a credential endpoint next to it and prints the store's chart values with
-`storage.s3.credentialEndpoint` in place of `storage.s3.credentialsSecretRef`. The
-endpoint checks the projected service-account token that PageBroker and the operator
-present, with a `TokenReview` for the audience the chart sets, and answers with the
-store's keys as 15-minute credentials, only to the agent's and the operator's
-service accounts. Its certificate comes from a CA generated per run, published as the
+`storage.s3.credentialEndpoint` in place of `storage.s3.credentialsSecretRef`. PageBroker
+and the operator present a projected service-account token. The endpoint checks it with a
+`TokenReview` for the audience the chart sets. It answers with the store's keys as
+15-minute credentials, and only to the agent's and the operator's service accounts. Its
+certificate comes from a CA generated per run, published as the
 chart's `storage.s3.caBundleConfigMapRef`. It listens on the node network like the
 store, on `SNAPSHOT_E2E_S3_CREDENTIAL_PORT` (default 19443).
 
 `test_s3_credential_endpoint.py` runs with `SNAPSHOT_E2E_S3_CREDENTIALS=endpoint`: it
-checks the identity variables in PageBroker, takes a CPU checkpoint into the store,
-restores it and deletes it, and reads the endpoint's log for the credentials it issued
-to the agent, to the restore reader and to the operator. The `s3-credential-endpoint`
+checks the identity variables in PageBroker. It takes a CPU snapshot into the store,
+restores it and deletes it. Then it reads the endpoint's log for the credentials it
+issued to the agent, to the restore reader, and to the operator. The `s3-credential-endpoint`
 job of `e2e.yaml` runs it.
 
 ### Local Direct Mode
