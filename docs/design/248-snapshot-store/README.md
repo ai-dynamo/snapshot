@@ -52,8 +52,9 @@ storage CRD" was to add a reference beside it. This proposal is that CRD.
 ### Goals
 
 - Register more than one snapshot store in a cluster, PVC or S3-compatible. An S3 store is added
-  without restarting Snapshot; a PVC store needs its claim mounted on the operator and agents first,
-  a Helm upgrade and a restart.
+  without restarting Snapshot when its addressing mode and CA bundle match the ones PageBroker
+  started with; one that differs is refused until PageBroker restores per store, a follow-up. A PVC
+  store needs its claim mounted on the operator and agents first, a Helm upgrade and a restart.
 - Let a `PodSnapshot` or `SnapshotJob` select a store by name, defaulting to the installation's
   store.
 - Bind each `PodSnapshotContent` to one store at creation, and refuse two stores in one cluster
@@ -153,7 +154,7 @@ overwrites a store. The default moves by changing the value; bound content keeps
 | Rollback with retained data | The previous release ignores `reclaimPolicy` and `.retained`. After a rollback its sweep deletes retained directories in the store that `storage.*` names, and deleting a `Retain` content deletes its data. | Not preventable from the new release. The Rollback procedure tells the administrator to copy retained data out of that store first. The locations of other stores are not reached by the previous operator. |
 | Nested stores | One store's location is a parent of another's, in this cluster or another. | Allowed, because each store keeps its snapshots under its own `artifacts/`: a sweep looks only there and deletes only orphans named by a UUID, and deleting content removes only its own recorded handles. The API rejects a location inside another store's `artifacts/`. |
 | Old agent, new store | During a rolling upgrade an agent that predates this proposal receives content bound to a non-default store. | It passes its startup store to PageBroker, whose `storeID` does not match the content's; PageBroker returns `STORE_MISMATCH` and the checkpoint fails before any I/O. That agent treats the failure as final: the `PodSnapshot` fails with `BrokerRejected` and is not retried, so it needs a new attempt after the node upgrades. Create non-default stores only after every node runs the new agent. |
-| Restore from several S3 stores | The native restore engine holds one session per PageBroker process, fixed to one endpoint, one region and one set of credentials, and reads its CA bundle and addressing mode once at start. | Restores whose stores share the endpoint, region and credentials run in parallel; a restore that differs in any of them waits until the others drain, then PageBroker replaces the session. A long restore delays the others, and a waiting transaction can expire. An S3 store whose CA bundle or addressing mode differs from PageBroker's startup values cannot restore. Parallel restore across sessions is a follow-up; see [Agent and PageBroker](#agent-and-pagebroker). |
+| Restore from several S3 stores | The native restore engine holds one session per PageBroker process, fixed to one endpoint, one region and one set of credentials, and reads its CA bundle and addressing mode once at start. | Restores whose stores share the endpoint, region and credentials run in parallel; a restore that differs in any of them waits until the others drain, then PageBroker replaces the session. A long restore delays the others, and a waiting transaction can expire. An S3 store whose CA bundle or addressing mode differs from PageBroker's startup settings could not restore, so the operator refuses it with `RestoreSettingsMismatch` instead of letting checkpoints succeed and restores fail. Parallel restore across sessions is a follow-up; see [Agent and PageBroker](#agent-and-pagebroker). |
 | Any namespace may use a store | A store is cluster-scoped and any `PodSnapshot` may name it, so a team's store is not reserved for that team: another namespace can capture into it and restore from it. | Intended for this release: a store is usable by every namespace, like a `StorageClass`, and RBAC on naming a store is a non-goal. Workloads never see the store's credentials. An optional namespace allow-list on the store can be added later without breaking the API. |
 | Default misconfigured | `storage.defaultStoreName` names a store that does not exist, is not Ready or is being deleted, and unnamed `PodSnapshot`s fail. | The default is one configured name, so two defaults cannot exist. An unnamed `PodSnapshot` fails with the same reasons as a named one and retries until the store is usable. The operator reports a missing default at start, and a Warning event flags a terminating one; see [Default store](#default-store). |
 
@@ -272,7 +273,7 @@ storage configuration file stays `basePath` until PageBroker reads the new name.
 the value, not the key, so `storeID` does not change.
 
 `Ready` carries the reasons `ClaimNotMounted`, `CredentialsUnavailable`, `DuplicateStore`,
-`InvalidLocation`, `StoreUnreachable` and `Terminating`.
+`InvalidLocation`, `RestoreSettingsMismatch`, `StoreUnreachable` and `Terminating`.
 
 #### Request and content fields
 
@@ -480,8 +481,18 @@ same region that use the same workload identity. When the next restore differs i
 or the credentials have changed, it waits until the running restores drain; PageBroker then ends the
 session and starts one with the new settings. This reuses the path that replaces a failed session
 today. Until restores run in parallel across sessions, a long restore delays the others and a
-waiting transaction can expire, and an S3 store whose CA bundle or addressing mode differs from
-PageBroker's startup values, taken from `storage.s3`, cannot restore.
+waiting transaction can expire.
+
+The engine's addressing mode and CA bundle are fixed at start and shared by every session, so an S3
+store that differs in either could checkpoint but never restore. The operator refuses such a store:
+it reads the startup settings from its storage configuration file, the same values the chart gives
+PageBroker, compares them with the store's `addressing` and `caBundleConfigMapRef`, and sets
+`Ready=False` with `RestoreSettingsMismatch`, naming the setting and the value PageBroker runs with.
+The check is part of every reconcile, so a store becomes Ready after a restart that changes the
+settings. In an installation whose default store is a PVC, PageBroker starts with no S3 settings,
+which means virtual addressing and the system roots; an S3 store there must use those, and a
+path-addressed store or one with a private CA is refused with the same reason until restores run
+per store.
 
 #### Credential delivery
 
@@ -723,8 +734,11 @@ other stores are not touched.
   once; the access check, run inside `artifacts/`, including credentials that can write but not
   read, list or delete; nested stores are accepted; a Ready store goes `Ready=False` when its Secret
   is revoked or deleted; a store on the default claim with a `subPath` beside `.claims/` is
-  accepted; with binding off the default store is created and a request that names another store
-  fails with `StoreNotReady`; `.origin` is written at binding and for content bound earlier; default
+  accepted; an S3 store whose addressing or CA bundle differs from the startup settings is
+  `RestoreSettingsMismatch`, in an S3-default and in a PVC-default installation, and becomes Ready
+  when the settings change; with binding off the default store is created and a request that names
+  another store fails with `StoreNotReady`; `.origin` is written at binding and for content bound
+  earlier; default
   resolution from the configured name, with the named store missing, and after the name changes; the
   default store is created only when no store exists, and `StoreValuesDiffer` fires when the values
   move; a job that names a missing store waits and proceeds when the store appears; terminating
