@@ -11,4 +11,22 @@ package storage
 type Config struct {
 	PVC *PVC `json:"pvc,omitempty" yaml:"pvc,omitempty"`
 	S3  *S3  `json:"s3,omitempty" yaml:"s3,omitempty"`
+	// S3Access holds the settings the default class needs besides the store
+	// location. It is read only when S3 is set.
+	S3Access *S3Access `json:"s3Access,omitempty" yaml:"s3Access,omitempty"`
+}
+
+// S3Access holds the access settings of an S3 store. None of them is an input
+// to the store identity.
+type S3Access struct {
+	CredentialsSecretRef *KeyRef `json:"credentialsSecretRef,omitempty" yaml:"credentialsSecretRef,omitempty"`
+	Addressing           string  `json:"addressing,omitempty" yaml:"addressing,omitempty"`
+	AllowHTTP            bool    `json:"allowHttp,omitempty" yaml:"allowHttp,omitempty"`
+	CABundleConfigMapRef *KeyRef `json:"caBundleConfigMapRef,omitempty" yaml:"caBundleConfigMapRef,omitempty"`
+}
+
+// KeyRef names a key of a Secret or ConfigMap in the Snapshot namespace.
+type KeyRef struct {
+	Name string `json:"name" yaml:"name"`
+	Key  string `json:"key,omitempty" yaml:"key,omitempty"`
 }
