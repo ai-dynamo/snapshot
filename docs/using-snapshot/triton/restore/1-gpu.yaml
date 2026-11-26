@@ -45,6 +45,14 @@ spec:
           resources:
             limits:
               nvidia.com/gpu: "1"
+          # Holds the readiness probe until the restore is complete.
+          startupProbe:
+            exec:
+              command:
+                - cat
+                - /snapshot-control/restore-complete
+            periodSeconds: 1
+            failureThreshold: 1800
           readinessProbe:
             httpGet:
               path: /v2/health/ready

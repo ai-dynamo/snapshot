@@ -44,9 +44,12 @@ command. Snapshot then restores the checkpointed server with its models loaded.
 Triton needs no call to resume. For this reason, the recipe sets no
 `postRestore` hook.
 
-The readiness probe of the restore Pod is also `/v2/health/ready`. The Pod is
-Ready when the restored server answers. To make sure that the restore worked,
-see [Verify the Restored Pod](../restore.md#verify-the-restored-pod).
+The restore Pod has two probes. A startup probe waits for the
+`restore-complete` file, which Snapshot writes when the restore is complete.
+The readiness probe, on `/v2/health/ready`, starts only after that. As a
+result, the Pod is Ready when the server is restored and answers. To make sure
+that the restore worked, see
+[Verify the Restored Pod](../restore.md#verify-the-restored-pod).
 
 ### Image and Settings
 
