@@ -188,10 +188,10 @@ Uninstall the release:
 helm uninstall snapshot --namespace snapshot
 ```
 
-The uninstall keeps the Snapshot CRDs and every remaining `PodSnapshot` and
-`PodSnapshotContent`. Without the operator, a deleted `PodSnapshot` stays in
-`Terminating`, and so does a deleted namespace that contains one. To complete
-the deletion, install Snapshot again.
+The uninstall keeps the Snapshot CRDs and every remaining `SnapshotJob`,
+`PodSnapshot`, and `PodSnapshotContent`. Without the operator, the deletion of
+a `PodSnapshot` does not complete, and a deleted namespace that contains one
+stays in `Terminating`. To complete the deletion, install Snapshot again.
 
 To remove the CRDs, delete them after every `PodSnapshot` is gone:
 
