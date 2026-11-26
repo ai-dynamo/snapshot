@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/utils/ptr"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotprotocol "github.com/ai-dynamo/snapshot/operator/internal/protocol"
@@ -89,8 +90,8 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 		return nil, err
 	}
 
-	// Clean up the Job on any error after this point. The PodSnapshot is left in place
-	// to aid debugging when the flow fails.
+	// Clean up the Job and its source Pod on any error after this point. The PodSnapshot
+	// is left in place to aid debugging when the flow fails.
 	defer func() {
 		if retErr != nil {
 			_ = deleteCheckpointJob(ctx, clientset, namespace, checkpointJobName)
@@ -128,9 +129,13 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 	return res, nil
 }
 
-// deleteCheckpointJob removes the Job of a checkpoint that failed.
+// deleteCheckpointJob removes the Job of a checkpoint that failed, and its source Pod with it.
+// The API server keeps the Pods of a deleted batch/v1 Job unless the delete names a
+// propagation policy, and the source Pod would go on holding its GPU.
 func deleteCheckpointJob(ctx context.Context, clientset kubernetes.Interface, namespace, name string) error {
-	return clientset.BatchV1().Jobs(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	return clientset.BatchV1().Jobs(namespace).Delete(ctx, name, metav1.DeleteOptions{
+		PropagationPolicy: ptr.To(metav1.DeletePropagationBackground),
+	})
 }
 
 func captureJobName(snapshotName string) string {

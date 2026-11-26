@@ -93,6 +93,10 @@ record after the checkpoint completes. It is not deleted automatically. A
 `--cleanup` flag to remove it after a successful capture is planned as future
 work.
 
+When a checkpoint fails or times out, `snapshotctl checkpoint` deletes the
+source Pod and the Job that ran it, and leaves the `PodSnapshot` CR in place for
+debugging.
+
 ## Restore
 
 `snapshotctl restore` creates a new pod from a manifest and restores it from a
