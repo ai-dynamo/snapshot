@@ -307,7 +307,8 @@ seccomp:
   # Use seccomp.deploy; seccomp.enabled is not a chart value.
   deploy: true
   # Set the block-iouring profile on SnapshotJob source Pods. false leaves the
-  # podTemplate's seccomp settings unchanged, so the cluster default applies.
+  # podTemplate's seccomp settings unchanged: the cluster default applies unless
+  # the podTemplate sets a profile itself.
   applyToSourcePods: true
 
 # Service account configuration for the agent and PageBroker, which share a pod

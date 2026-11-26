@@ -122,7 +122,8 @@ source Job shows a `FailedCreate` event.
 
 To run source Pods under `restricted-v2` on RHCOS 9.6 or newer, set these
 values. These kernels already block io_uring, and source Pods get the cluster
-default profile instead.
+default profile instead. A seccomp profile that the SnapshotJob `podTemplate`
+sets itself stays, so remove it from the template to get the cluster default.
 
 - `seccomp.deploy=false`
 - `seccomp.applyToSourcePods=false`
