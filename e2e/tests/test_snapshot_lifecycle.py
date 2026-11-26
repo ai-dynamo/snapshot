@@ -1029,6 +1029,10 @@ def test_restore_onto_a_cpu_missing_an_instruction_set_is_refused(
         assert f"cpu-features: source {missing}, target missing" in refusal.message
         assert_restore_events(config.namespace, run.restore_pod, {"RestoreIncompatible"})
         assert "RestoreFailed" not in restore_event_reasons(config.namespace, run.restore_pod)
+        # This refusal needs only the Pod, so the agent can post it before the
+        # placeholder starts, and an exec into a container that has not started
+        # is refused.
+        snap.wait_for_container_running(config.namespace, run.restore_pod)
         assert not snap.file_present(config.namespace, run.restore_pod, snap.RESTORE_DONE)
     except Exception:
         snap.debug_dump(config, run)
