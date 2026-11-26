@@ -47,6 +47,27 @@ data:
       region: {{ required "storage.s3.region is required" .Values.storage.s3.region | quote }}
       bucket: {{ required "storage.s3.bucket is required" .Values.storage.s3.bucket | quote }}
       prefix: {{ .Values.storage.s3.prefix | default "" | quote }}
+    {{- if or .Values.storage.s3.credentialsSecretRef .Values.storage.s3.caBundleConfigMapRef .Values.storage.s3.addressing .Values.storage.s3.allowHttp }}
+    # What the default store needs besides the location. None of it is a store
+    # identity input.
+    s3Access:
+      {{- with .Values.storage.s3.credentialsSecretRef }}
+      credentialsSecretRef:
+        name: {{ . | quote }}
+        key: {{ $.Values.storage.s3.credentialsSecretKey | quote }}
+      {{- end }}
+      {{- with .Values.storage.s3.addressing }}
+      addressing: {{ . | quote }}
+      {{- end }}
+      {{- if .Values.storage.s3.allowHttp }}
+      allowHttp: true
+      {{- end }}
+      {{- with .Values.storage.s3.caBundleConfigMapRef }}
+      caBundleConfigMapRef:
+        name: {{ . | quote }}
+        key: {{ $.Values.storage.s3.caBundleConfigMapKey | quote }}
+      {{- end }}
+    {{- end }}
     {{- end }}
   {{- if eq .Values.storage.type "s3" }}
   # PageBroker-only S3 settings, none of them a store identity input. The
