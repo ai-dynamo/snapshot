@@ -132,6 +132,10 @@ Once Snapshot is installed, the
 checkpoints a vLLM replica that serves Qwen3 0.6B on one GPU, then starts a new
 replica from the snapshot.
 
+If you do not have a GPU cluster,
+[Try Snapshot Without a GPU](docs/get-started/try-without-a-gpu.md) checkpoints
+and restores a CPU-only pod on a local cluster.
+
 ## How to Use It
 
 Snapshot is driven entirely through Kubernetes resources, with standard tooling.

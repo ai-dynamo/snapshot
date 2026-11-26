@@ -58,6 +58,9 @@ navigation:
       - page: Quickstart - Checkpoint and Restore One Pod
         path: ../docs/get-started/quickstart.md
         slug: quickstart
+      - page: Try Snapshot Without a GPU
+        path: ../docs/get-started/try-without-a-gpu.md
+        slug: try-without-a-gpu
   - section: Using Snapshot
     slug: using-snapshot
     contents:
