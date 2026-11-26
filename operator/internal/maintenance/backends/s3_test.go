@@ -405,6 +405,38 @@ func TestNewS3BackendDoesNotBoundS3RequestsByTheCredentialTimeout(t *testing.T) 
 	require.Len(t, *requests, 1)
 }
 
+func TestNewS3BackendRenewsExpiredContainerCredentialsWithTheRotatedToken(t *testing.T) {
+	clearAmbientS3Credentials(t)
+	server, requests := newListObjectsServer(t, httptest.NewServer)
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(tokenPath, []byte("fake-token-1"), 0o600))
+	var presentedTokens []string
+	credentialEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		presentedTokens = append(presentedTokens, r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		// Already expired, so the next request must renew.
+		_, _ = fmt.Fprintf(w, `{"AccessKeyId":"FAKEKEY%d","SecretAccessKey":"fake-secret","Token":"fake-session","Expiration":%q}`,
+			len(presentedTokens), time.Now().Add(-time.Minute).UTC().Format(time.RFC3339))
+	}))
+	t.Cleanup(credentialEndpoint.Close)
+	t.Setenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", credentialEndpoint.URL)
+	t.Setenv("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE", tokenPath)
+
+	b, err := NewS3Backend(context.Background(), S3Config{Bucket: "checkpoints", Region: "us-east-1", Endpoint: server.URL})
+	require.NoError(t, err)
+
+	_, err = b.Candidates(context.Background(), logr.Discard())
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(tokenPath, []byte("fake-token-2"), 0o600))
+	_, err = b.Candidates(context.Background(), logr.Discard())
+	require.NoError(t, err)
+
+	require.Len(t, *requests, 2)
+	assert.Contains(t, (*requests)[0].Header.Get("Authorization"), "Credential=FAKEKEY1/")
+	assert.Contains(t, (*requests)[1].Header.Get("Authorization"), "Credential=FAKEKEY2/")
+	assert.Equal(t, []string{"fake-token-1", "fake-token-2"}, presentedTokens)
+}
+
 func TestNewS3BackendNeverUsesInstanceMetadata(t *testing.T) {
 	clearAmbientS3Credentials(t)
 	server, requests := newListObjectsServer(t, httptest.NewServer)

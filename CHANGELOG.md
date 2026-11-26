@@ -54,8 +54,10 @@ commit-level history for each release is on its
   empty, PageBroker and the operator use the workload identity of their service
   accounts, and credentials refresh without a restart. Instance metadata is
   excluded, so the node's role is never used.
-  `operator.serviceAccount.annotations` is new. Nothing changes when a Secret is
-  set. See
+  `operator.serviceAccount.annotations` is new, and
+  `storage.s3.credentialEndpoint` covers platforms that issue credentials from an
+  endpoint in exchange for a service-account token. Nothing changes when a
+  Secret is set. See
   [Use Workload Identity for S3](docs/operate/configure-storage.md#use-workload-identity-for-s3).
 
 - S3 restore tuning accepts
