@@ -296,9 +296,9 @@ kubectl exec <restore-pod> -n <ns> -c <container> -- nvidia-smi -L
 
 nsrestore prepares the placeholder's mounts and sentinels for CRIU, runs the
 CRIU restore, and reads the restored process table. For a CRIU failure the
-cause is the last error CRIU logged. When that error only names what gave up,
+cause is the last error CRIU logged. When that error does not give a reason,
 such as `Unable to open fd=3 id=0x8`, the cause is the error logged directly
-before it, which names the file. The agent log holds the key lines of
+before it. The agent log holds the key lines of
 `restore.log`. The other causes name the operation that failed, such as
 `failed to unmount /dev/shm before restore`, and `restore.log` has nothing on
 them.
