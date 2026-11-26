@@ -424,6 +424,8 @@ impl Memblock {
                     location: location_metadata(allocation.properties.location),
                 },
                 Self::Multicast(object) => ExportMetadata::Multicast(object.properties),
+                // CUDA refuses to export an imported handle.
+                Self::Unclassified(_) => return Err(CoreError::from(CUDA_ERROR_INVALID_VALUE)),
             };
             export_cache()?.insert(reference, fd, metadata)?;
         }
@@ -432,6 +434,7 @@ impl Memblock {
                 allocation.shared = true;
             }
             Self::Multicast(object) => object.shared = true,
+            Self::Unclassified(_) => {}
         }
         Ok(reference)
     }
@@ -463,6 +466,8 @@ pub(crate) fn import_reference(
                 allocation.shared = true;
             }
             Memblock::Multicast(object) => object.shared = true,
+            // A FABRIC import is always shared.
+            Memblock::Unclassified(_) => {}
         }
         let handle = state.mint_virtual_allocation_handle(id)?;
         state
@@ -517,6 +522,7 @@ pub(crate) fn import_reference(
         // Imported backing already uses the host carrier.
         home_device: None,
         context,
+        fabric: None,
     }));
     Ok((state, handle))
 }
