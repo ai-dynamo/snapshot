@@ -333,8 +333,8 @@ serviceAccount:
 # RBAC configuration
 rbac:
   # Create RBAC resources (agent and operator) and the operator's service
-  # account. With false, create that service account yourself: the release's
-  # full name with -operator appended, for example snapshot-operator.
+  # account. With false, create that service account yourself. Its name is the
+  # release's full name with -operator appended, for example snapshot-operator.
   create: true
 
 # Static agent configuration (loaded from ConfigMap)
