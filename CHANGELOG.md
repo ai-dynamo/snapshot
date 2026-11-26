@@ -186,6 +186,12 @@ commit-level history for each release is on its
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
+- A SnapshotJob now starts on OpenShift, and on any cluster that enables the
+  `OwnerReferencesPermissionEnforcement` admission plugin. The operator
+  ClusterRole grants `update` on `snapshotjobs/finalizers`, which the plugin
+  requires before the operator can create the source Job (#1002). Before, the
+  SnapshotJob kept an empty status and repeated a `SourceJobCreateFailed`
+  event.
 
 ### Deprecated
 
