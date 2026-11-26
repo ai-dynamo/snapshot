@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
@@ -377,6 +378,38 @@ func TestPostRestoreRecoveryRunsOnlyThePostRestoreStep(t *testing.T) {
 
 			assert.Equal(t, 0, h.restores, "CRIU must never run again")
 			assert.Equal(t, tc.want, h.recordedEvents())
+		})
+	}
+}
+
+func TestRestoreSourceEventOnlyWhenRestoreStarts(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		recovering bool
+		want       []string
+	}{
+		{name: "recovered restore", recovering: true},
+		{name: "new restore", want: []string{"Restoring from the node cache"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newPostRestoreHarness(t, filePostRestoreSpec(postRestoreMarker))
+			h.plan.artifact.NodeCache = true
+			if tc.recovering {
+				recoveringPod(h)
+				h.addFile(postRestoreMarker)
+			}
+
+			require.NoError(t, h.run(tc.recovering))
+
+			events, err := h.w.clientset.CoreV1().Events(h.pod.Namespace).List(context.Background(), metav1.ListOptions{})
+			require.NoError(t, err)
+			var messages []string
+			for _, event := range events.Items {
+				if event.InvolvedObject.UID == h.pod.UID && event.Reason == restoreSourceSelectedReason {
+					messages = append(messages, event.Message)
+				}
+			}
+			assert.Equal(t, tc.want, messages)
 		})
 	}
 }

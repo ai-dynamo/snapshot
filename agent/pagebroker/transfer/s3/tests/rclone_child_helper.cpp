@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <iostream>
 #include <fstream>
+#include <set>
 #include <string>
 
 int
@@ -51,7 +52,46 @@ main(int argc, char** argv)
   }
   if (remote == "pagebroker:bucket/literal/$(false); `false` with spaces quote'\"") {
     const auto* token = std::getenv("RCLONE_CONFIG_PAGEBROKER_SESSION_TOKEN");
-    return token && std::string(token) == "fake-session-token" && !std::getenv("PATH") ? 0 : 4;
+    const auto* auth = std::getenv("RCLONE_CONFIG_PAGEBROKER_ENV_AUTH");
+    return token && std::string(token) == "fake-session-token" && auth && std::string(auth) == "false" &&
+           !std::getenv("PATH") ? 0 : 4;
+  }
+  if (remote.starts_with("pagebroker:bucket/default-chain")) {
+    std::set<std::string> actual;
+    for (char** variable = environ; *variable; ++variable)
+      actual.insert(*variable);
+    std::string ca;
+    for (int i = 4; i + 1 < argc; ++i) {
+      if (std::string(argv[i]) == "--ca-cert")
+        ca = argv[i + 1];
+    }
+    std::set<std::string> expected{
+        "RCLONE_CONFIG_PAGEBROKER_TYPE=s3",
+        "RCLONE_CONFIG_PAGEBROKER_PROVIDER=AWS",
+        "RCLONE_CONFIG_PAGEBROKER_ENV_AUTH=true",
+        "RCLONE_CONFIG_PAGEBROKER_REGION=us-west-2",
+        "RCLONE_CONFIG_PAGEBROKER_ENDPOINT=",
+        "AWS_EC2_METADATA_DISABLED=true",
+        "AWS_CONFIG_FILE=/dev/null",
+        "AWS_SHARED_CREDENTIALS_FILE=/dev/null",
+        "AWS_ROLE_ARN=arn:aws:iam::000000000000:role/fake-role",
+        "AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/fake/web-identity-token",
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI=https://credentials.example.test/v1",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE=/var/run/fake/container-token",
+        remote.ends_with("-region") ? "AWS_REGION=eu-central-1" : "AWS_REGION=us-west-2"};
+    if (remote.ends_with("-ca")) {
+      expected.insert("AWS_CA_BUNDLE=" + ca);
+      expected.insert("SSL_CERT_FILE=" + ca);
+    }
+    for (const auto& entry : actual) {
+      if (!expected.contains(entry))
+        std::cerr << "unexpected: " << entry << '\n';
+    }
+    for (const auto& entry : expected) {
+      if (!actual.contains(entry))
+        std::cerr << "missing: " << entry << '\n';
+    }
+    return actual == expected ? 0 : 11;
   }
   if (remote.starts_with("pagebroker:bucket/descriptors/")) {
     if (fcntl(std::stoi(remote.substr(remote.rfind('/') + 1)), F_GETFD) >= 0)
