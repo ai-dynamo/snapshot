@@ -19,6 +19,9 @@ listed per feature. If a feature is not listed, the baseline is all it needs.
   with MIG disabled.
 - NVIDIA kernel-mode driver 580 or newer. A restore on a node with an older
   kernel-mode driver is refused with the `driver-minimum` check.
+  On NVIDIA GB10 (DGX Spark), use 595 or newer: with 580,
+  `cuCheckpointProcessCheckpoint` fails with error `801` even for a
+  single-GPU, single-process workload.
 - A `ReadWriteMany` storage class, or an existing `ReadWriteMany` claim, for the
   snapshot volume. See
   [Configure Storage](../operate/configure-storage.md).
