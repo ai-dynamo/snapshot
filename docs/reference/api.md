@@ -92,12 +92,20 @@ one declarative object.
 | `podSnapshotTemplate.targetContainers` | []string        | no       | `["main"]` | Container(s) to checkpoint. Exactly one in `v1alpha1`; each must name a container present in `podTemplate`.                                                                             |
 | `podSnapshotTemplate.checkpointRetryLimit` | int32 | no       | —          | Copied to the generated `PodSnapshot`: times a failed checkpoint may be retried, to a maximum of 10. Unset defers to `config.checkpoint.defaultRetryLimit`.                                                        |
 | `podSnapshotTemplate.containers`       | []ContainerSnapshotConfig | no       | —          | [Container settings](#container-settings), copied to the generated `PodSnapshot`. Each `name` must be in `targetContainers`.                                                            |
+| `podSnapshotTemplate.metadata.labels`  | map[string]string | no       | —          | Labels copied to the generated `PodSnapshot`. `nvidia.com/snapshot-job` and `nvidia.com/snapshot-job-uid` are reserved for the controller and are refused. |
+| `podSnapshotTemplate.metadata.annotations` | map[string]string | no       | —          | Annotations copied to the generated `PodSnapshot`. |
 | `activeDeadlineSeconds`                | int64           | no       | `3600`     | Total time allowed for scheduling, quiesce, and dump; applied to the batch/v1 Job.                                                                                                      |
 | `nonTargetArtifacts.containers`        | []string        | no       | —          | Non-target containers that write artifacts to the snapshot volume. Must be nonempty if `nonTargetArtifacts` is set.                                                               |
 | `nonTargetArtifacts.onFailure`         | string          | no       | `Retain`   | `Retain` keeps a failed attempt's artifacts. `Cleanup` lets the operator delete them once all writers have stopped.                                                                     |
 
 `podSnapshotTemplate` itself is required; its fields are optional. The object's
 `metadata.name` must be at most 63 characters (it is used as a label value).
+
+Keys under `podSnapshotTemplate.metadata` must be Kubernetes qualified names,
+and a label value can have at most 63 characters. A label value that Kubernetes
+does not accept for another reason, such as one with a space, is admitted. The
+`SnapshotJob` then fails with reason `InvalidSpec` before it starts the source
+Pod.
 
 `status`:
 
