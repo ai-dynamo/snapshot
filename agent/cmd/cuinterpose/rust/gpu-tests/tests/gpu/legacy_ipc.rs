@@ -99,7 +99,9 @@ fn exporter(increments: u32) {
     // SAFETY: CUipcMemHandle is plain data.
     let mut handle: sys::CUipcMemHandle = unsafe { std::mem::zeroed() };
     cu!(cuIpcGetMemHandle(&mut handle, address));
-    channel().send(&handle.reserved.map(|byte| byte as u8).to_vec());
+    // c_char is u8 on aarch64, where clippy rejects a cast that names u8.
+    let bytes: Vec<u8> = handle.reserved.iter().map(|&byte| byte as _).collect();
+    channel().send(&bytes);
     assert_eq!(channel().recv::<String>(), "imports closed");
     assert_eq!(cuda::read_u32(address), increments, "importer increments");
     // Freeing after restore checks the restored malloc.

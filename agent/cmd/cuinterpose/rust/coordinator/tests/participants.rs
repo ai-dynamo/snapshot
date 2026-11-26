@@ -15,7 +15,7 @@ use rustix::io::FdFlags;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -90,6 +90,19 @@ fn reply(connection: UnixStream, namespace_pid: NamespacePid, result: Result<Rep
     protocol::send(&connection, &response, None).unwrap();
 }
 
+/// Wait up to `timeout` for a descriptor in `descriptors` and return how many are ready.
+/// A signal can interrupt the wait, as it does under amd64 emulation on an arm64 host, so
+/// an interrupted wait starts again.
+fn poll_ready(descriptors: &mut [PollFd<'_>], timeout: Duration) -> usize {
+    let timeout = Timespec::try_from(timeout).unwrap();
+    loop {
+        match poll(descriptors, Some(&timeout)) {
+            Err(rustix::io::Errno::INTR) => {}
+            ready => return ready.unwrap(),
+        }
+    }
+}
+
 /// Pass `directory` to the coordinator as descriptor `CHECKPOINT_FD` and return the path
 /// that names it there, as the agent does.
 fn inherit(command: &mut Command, directory: &OwnedFd) -> PathBuf {
@@ -98,10 +111,15 @@ fn inherit(command: &mut Command, directory: &OwnedFd) -> PathBuf {
         // SAFETY: `target` only names the descriptor that dup2 replaces. It is forgotten,
         // so it never closes anything.
         let mut target = unsafe { OwnedFd::from_raw_fd(CHECKPOINT_FD) };
-        // The coordinator inherits the descriptor only without close-on-exec. dup2 does
-        // not clear it if `directory` already has this number.
-        let result = rustix::io::dup2(&directory, &mut target)
-            .and_then(|()| rustix::io::fcntl_setfd(&target, FdFlags::empty()));
+        // `directory` can already have this number. Duplicating a descriptor onto itself
+        // fails on aarch64, where rustix calls dup3, so only clear close-on-exec then.
+        let duplicated = if directory.as_raw_fd() == CHECKPOINT_FD {
+            Ok(())
+        } else {
+            rustix::io::dup2(&directory, &mut target)
+        };
+        // The coordinator inherits the descriptor only without close-on-exec.
+        let result = duplicated.and_then(|()| rustix::io::fcntl_setfd(&target, FdFlags::empty()));
         std::mem::forget(target);
         result.map_err(Into::into)
     };
@@ -206,7 +224,7 @@ impl Harness {
             .values()
             .map(|listener| PollFd::new(listener, PollFlags::IN))
             .collect();
-        let pending = poll(&mut listeners, Some(&Timespec::try_from(timeout).unwrap())).unwrap();
+        let pending = poll_ready(&mut listeners, timeout);
         assert_eq!(pending, 0, "{message}");
     }
 
@@ -257,7 +275,7 @@ impl Harness {
         let timeout = HANG_TIMEOUT;
         let listener = &self.listeners[&pid];
         let mut pending = [PollFd::new(listener, PollFlags::IN)];
-        let ready = poll(&mut pending, Some(&Timespec::try_from(timeout).unwrap())).unwrap();
+        let ready = poll_ready(&mut pending, timeout);
         assert_eq!(ready, 1, "no {expected:?} request for {pid}");
         let (connection, _) = listener.accept().unwrap();
         connection.set_read_timeout(Some(timeout)).unwrap();
