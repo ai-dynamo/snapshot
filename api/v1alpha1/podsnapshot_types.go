@@ -110,7 +110,7 @@ type PodReference struct {
 // PodSnapshotStatus defines the observed state of PodSnapshot.
 type PodSnapshotStatus struct {
 	// BoundPodSnapshotContentName is the name of the cluster-scoped PodSnapshotContent
-	// this PodSnapshot is bound to. It is nil until the agent has created the
+	// this PodSnapshot is bound to. It is nil until the operator has created the
 	// content and recorded the binding.
 	// +optional
 	BoundPodSnapshotContentName *string `json:"boundSnapshotContentName,omitempty"`
