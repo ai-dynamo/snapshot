@@ -103,8 +103,12 @@ func TestGPURequestCarriesHostPIDsAfterControlPathMoves(t *testing.T) {
 			return
 		}
 		identity, err := os.ReadFile(fmt.Sprintf("/proc/self/fdinfo/%d", descriptors[1]))
-		if err != nil || !strings.Contains(string(identity), fmt.Sprintf("Pid:\t%d\n", os.Getpid())) {
-			server <- fmt.Errorf("received wrong process descriptor: %s, %v", identity, err)
+		if err != nil {
+			server <- fmt.Errorf("read process descriptor fdinfo: %w", err)
+			return
+		}
+		if !strings.Contains(string(identity), fmt.Sprintf("Pid:\t%d\n", os.Getpid())) {
+			server <- fmt.Errorf("received wrong process descriptor: %s", identity)
 			return
 		}
 		targets := request.GetRestoreGpu().GetTargets()

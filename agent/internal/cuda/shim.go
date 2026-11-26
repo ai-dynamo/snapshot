@@ -5,6 +5,7 @@ package cuda
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -86,7 +87,7 @@ func runAction(ctx context.Context, pid int, action, deviceMap, helperBinaryPath
 			err = ctx.Err()
 		}
 		// Skip restores cancelled by a failed sibling, so the real failure stands out.
-		if !(action == actionRestore && err == context.Canceled) {
+		if !(action == actionRestore && errors.Is(err, context.Canceled)) {
 			log.Error(err, "cuda-checkpoint-helper command failed",
 				"pid", pid,
 				"outermost_pid", details.OutermostPID,

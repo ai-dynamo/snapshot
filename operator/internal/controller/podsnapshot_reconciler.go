@@ -253,7 +253,7 @@ func (sr *PodSnapshotReconciler) readAuthoritativeBoundContent(ctx context.Conte
 		return nil, fmt.Errorf("re-read pending PodSnapshotContent %q: %w", cachedContent.Name, err)
 	}
 	if err := verifyContentBacklink(snap, content); err != nil {
-		return nil, fmt.Errorf("%w: %v", errContentConflict, err)
+		return nil, fmt.Errorf("%w: %w", errContentConflict, err)
 	}
 	return content, nil
 }
@@ -392,8 +392,7 @@ func (sr *PodSnapshotReconciler) ensurePodSnapshotContent(ctx context.Context, s
 				return nil, fmt.Errorf("get existing PodSnapshotContent %q: %w", contentName, err)
 			}
 			if err := verifyContentBacklink(snap, existing); err != nil {
-				// %v on the inner: only errContentConflict needs to be unwrappable by the caller.
-				return nil, fmt.Errorf("%w: %v", errContentConflict, err)
+				return nil, fmt.Errorf("%w: %w", errContentConflict, err)
 			}
 			return existing, nil
 		}

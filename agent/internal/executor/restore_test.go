@@ -25,6 +25,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/criu"
@@ -1329,9 +1330,7 @@ func TestFailStepUnlessNamed(t *testing.T) {
 		t.Fatalf("StepOf(unnamed) = %q", got)
 	}
 	named := failStep(StepRestoreCRIU, cause)
-	if got := failStepUnlessNamed(StepRunNSRestore, named); got != named {
-		t.Fatalf("failStepUnlessNamed(named) = %v, want the error unchanged", got)
-	}
+	require.Same(t, named, failStepUnlessNamed(StepRunNSRestore, named))
 	if failStepUnlessNamed(StepRunNSRestore, nil) != nil {
 		t.Fatal("failStepUnlessNamed(nil) must stay nil")
 	}
@@ -1903,8 +1902,12 @@ func TestFailedRestoreWaitsForAbortBeforeTermination(t *testing.T) {
 				}
 				defer connection.Close()
 				request, err := readPageBrokerTestRequest(connection)
-				if err != nil || request.GetAbort() == nil || request.GetTransactionId() != "failed-restore" {
-					server <- fmt.Errorf("restore Abort: %v, %v", request, err)
+				if err != nil {
+					server <- fmt.Errorf("read restore Abort request: %w", err)
+					return
+				}
+				if request.GetAbort() == nil || request.GetTransactionId() != "failed-restore" {
+					server <- fmt.Errorf("unexpected restore Abort request: %v", request)
 					return
 				}
 				close(abortReceived)
