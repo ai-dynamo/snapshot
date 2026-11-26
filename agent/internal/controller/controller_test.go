@@ -55,6 +55,10 @@ type fakeRuntime struct {
 	resolveContainerPID  int
 	// podUID is the Pod's UID on the node, as the runtime reports it.
 	podUID string
+	// sandboxIPs are the IPs of the Pod's sandbox, and sandboxPodUIDs the
+	// Pod UIDs they were asked for.
+	sandboxIPs     []string
+	sandboxPodUIDs []string
 }
 
 var _ snapshotruntime.Runtime = (*fakeRuntime)(nil)
@@ -93,6 +97,16 @@ func (r *fakeRuntime) ResolveContainerPodUID(_ context.Context, _ string) (strin
 		return r.podUID, nil
 	}
 	return "", errors.New("not implemented")
+}
+
+func (r *fakeRuntime) ResolvePodSandboxIPs(_ context.Context, podUID string) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sandboxPodUIDs = append(r.sandboxPodUIDs, podUID)
+	if len(r.sandboxIPs) != 0 {
+		return r.sandboxIPs, nil
+	}
+	return nil, errors.New("not implemented")
 }
 
 func (r *fakeRuntime) TerminateContainer(_ context.Context, _ string) error {

@@ -106,6 +106,10 @@ commit-level history for each release is on its
 
 ### Changed
 
+- With `config.criu.tcpEstablished`, the default, a restore no longer waits
+  for kubelet to publish the restore Pod's IP address, which can take up to a
+  second after the Pod starts. While the API has none, the node agent reads it
+  from the Pod's sandbox in the container runtime.
 - **Breaking:** the agent timeout values lost their redundant prefixes.
   `config.checkpoint.checkpointTimeoutSeconds` is now
   `config.checkpoint.timeoutSeconds`, and `config.restore.restoreTimeoutSeconds`

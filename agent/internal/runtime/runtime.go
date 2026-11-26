@@ -42,6 +42,11 @@ type Runtime interface {
 	// ResolveContainerPodUID returns the UID of the container's Pod on the
 	// node, which names the Pod's directories under kubelet's.
 	ResolveContainerPodUID(ctx context.Context, id string) (string, error)
+	// ResolvePodSandboxIPs returns the IPs the runtime reports for the newest
+	// sandbox of the Pod with this UID on the node, primary first. As in
+	// kubelet, it returns an error while that sandbox is not ready, and never
+	// an older sandbox's IPs.
+	ResolvePodSandboxIPs(ctx context.Context, podUID string) ([]string, error)
 	// TerminateContainer requests zero-grace termination through CRI using the
 	// runtime container ID. Implementations validate any supplied runtime scheme
 	// before dispatch.

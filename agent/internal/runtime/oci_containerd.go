@@ -49,6 +49,10 @@ func (r *ContainerdRuntime) ResolveContainerPodUID(ctx context.Context, containe
 	return resolveContainerPodUID(ctx, r.cri, containerID)
 }
 
+func (r *ContainerdRuntime) ResolvePodSandboxIPs(ctx context.Context, podUID string) ([]string, error) {
+	return resolvePodSandboxIPs(ctx, r.cri, podUID)
+}
+
 func (r *ContainerdRuntime) TerminateContainer(ctx context.Context, containerID string) error {
 	id, err := containerIDForRuntime(containerID, "containerd://")
 	if err != nil {

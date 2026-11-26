@@ -8,6 +8,7 @@
 package controller
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -113,6 +114,12 @@ type NodeController struct {
 	// begins before kubelet publishes the container in the Pod status.
 	startedRestoreContainers sync.Map
 
+	// podIPWaits holds, per restore Pod UID, when a pass first waited for the
+	// Pod's IP. Passes keep waiting for it until podIPWaitTimeout after that;
+	// zero makes each pass ask once.
+	podIPWaits       sync.Map
+	podIPWaitTimeout time.Duration
+
 	// contentIndexer is the PodSnapshotContent informer's indexer, indexed by source pod
 	// (podRefIndex). The source-pod informer uses it to map a pod event back to its work order.
 	contentIndexer cache.Indexer
@@ -159,6 +166,9 @@ type restorePlan struct {
 	// preflight already checked it against the destination containers.
 	postRestore       postRestoreHandler
 	postRestorePeriod time.Duration
+	// podIP is the restore Pod's IP when the restore needs one and this
+	// pass's copy of the Pod has none: its sandbox's, or a newer copy's.
+	podIP string
 }
 
 type restoreResultState int
@@ -197,6 +207,9 @@ type restoreOperation struct {
 	containerID       string
 	startedAt         time.Time
 	log               logr.Logger
+	// targetPodIP is the restore Pod's IP, which restored TCP connections
+	// move to.
+	targetPodIP string
 }
 
 const (
@@ -307,6 +320,7 @@ func newDefaultController(
 		hookHTTP:                  lifecyclehooks.NewHTTPClient(),
 		nowFn:                     time.Now,
 		postRestoreWaitFn:         waitOrDone,
+		podIPWaitTimeout:          restorePodIPWaitTimeout,
 	}
 	if cfg.Storage.NodeCacheEnabled {
 		w.nodeCacheBasePath = types.NodeCacheBasePath
@@ -467,6 +481,7 @@ func (w *NodeController) forgetRestorePod(obj interface{}) {
 		return
 	}
 	w.handledRestores.Delete(string(pod.UID))
+	w.podIPWaits.Delete(string(pod.UID))
 	prefix := string(pod.UID) + "/"
 	w.startedRestoreContainers.Range(func(key, _ any) bool {
 		if strings.HasPrefix(key.(string), prefix) {
@@ -649,8 +664,9 @@ func (w *NodeController) preflightRestore(ctx context.Context, pod *corev1.Pod) 
 	if err := w.preflightCompatibility(ctx, pod, artifact, mappings, skipCompatCheck); err != nil {
 		return nil, err
 	}
-	if w.config.CRIU.TcpEstablished && pod.Status.PodIP == "" {
-		return nil, newRestorePendingError("PodIPPending", fmt.Sprintf("Waiting for restore Pod %s/%s to receive an IP address", pod.Namespace, pod.Name))
+	podIP, err := w.preflightPodIP(ctx, pod)
+	if err != nil {
+		return nil, err
 	}
 	// The post-restore action is checked against the Pod spec here, so an
 	// action that can never run restores nothing.
@@ -665,6 +681,7 @@ func (w *NodeController) preflightRestore(ctx context.Context, pod *corev1.Pod) 
 		skipCompatCheck:   skipCompatCheck,
 		postRestore:       postRestore,
 		postRestorePeriod: postRestorePeriod,
+		podIP:             podIP,
 	}, nil
 }
 
@@ -1323,6 +1340,8 @@ func (w *NodeController) newRestoreOperation(
 		containerID:       containerID,
 		startedAt:         startedAt,
 		log:               w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "content_uid", artifact.ContentUID, "source_container", artifact.SourceContainerName, "destination_container", destination, "container_id", containerID),
+		// The API's IP comes first, as in the preflight.
+		targetPodIP: cmp.Or(pod.Status.PodIP, plan.podIP),
 	}
 }
 
@@ -1335,7 +1354,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (executor.Restor
 		StartedAt:                   op.startedAt,
 		PodName:                     op.pod.Name,
 		PodNamespace:                op.pod.Namespace,
-		TargetPodIP:                 op.pod.Status.PodIP,
+		TargetPodIP:                 op.targetPodIP,
 		ArtifactContainerName:       op.artifact.SourceContainerName,
 		DestinationContainerName:    op.destination,
 		SkipCompatCheck:             op.skipCompatCheck,

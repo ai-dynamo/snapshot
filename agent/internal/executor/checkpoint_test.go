@@ -55,6 +55,10 @@ func (checkpointPathRuntime) ResolveContainerPodUID(context.Context, string) (st
 	return "", errors.New("not implemented")
 }
 
+func (checkpointPathRuntime) ResolvePodSandboxIPs(context.Context, string) ([]string, error) {
+	return nil, errors.New("not implemented")
+}
+
 func (checkpointPathRuntime) TerminateContainer(context.Context, string) error {
 	return errors.New("not implemented")
 }
