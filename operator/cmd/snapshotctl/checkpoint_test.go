@@ -13,12 +13,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -41,6 +43,29 @@ func TestCaptureJobName(t *testing.T) {
 	long := captureJobName(strings.Repeat("x", 100))
 	assert.Len(t, long, 63)
 	assert.Contains(t, long, "-capture-")
+}
+
+// TestDeleteCheckpointJobDeletesSourcePod verifies that cleaning up a failed checkpoint asks the
+// API server to delete the Job's Pods with it. A batch/v1 Job delete that names no propagation
+// policy orphans them, which leaves the source Pod running.
+func TestDeleteCheckpointJobDeletesSourcePod(t *testing.T) {
+	clientset := k8sfake.NewClientset(&batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-snapshot-capture-abcde", Namespace: "default"},
+	})
+
+	require.NoError(t, deleteCheckpointJob(context.Background(), clientset, "default", "my-snapshot-capture-abcde"))
+
+	var deletes []clienttesting.DeleteActionImpl
+	for _, action := range clientset.Actions() {
+		if deletion, ok := action.(clienttesting.DeleteActionImpl); ok {
+			deletes = append(deletes, deletion)
+		}
+	}
+	require.Len(t, deletes, 1, "the Job must be deleted once")
+	assert.Equal(t, "my-snapshot-capture-abcde", deletes[0].GetName())
+	policy := deletes[0].DeleteOptions.PropagationPolicy
+	require.NotNil(t, policy, "a Job delete without a propagation policy orphans the source Pod")
+	assert.Equal(t, metav1.DeletePropagationBackground, *policy)
 }
 
 // TestPodSnapshotNameUIDPinned verifies that createPodSnapshot stamps the source pod's UID

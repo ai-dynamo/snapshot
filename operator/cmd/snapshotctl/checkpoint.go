@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotprotocol "github.com/ai-dynamo/snapshot/operator/internal/protocol"
@@ -92,7 +93,7 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 	// to aid debugging when the flow fails.
 	defer func() {
 		if retErr != nil {
-			_ = clientset.BatchV1().Jobs(namespace).Delete(ctx, checkpointJobName, metav1.DeleteOptions{})
+			_ = deleteCheckpointJob(ctx, clientset, namespace, checkpointJobName)
 		}
 	}()
 
@@ -125,6 +126,11 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 		res.BoundContent = strings.TrimSpace(*snap.Status.BoundPodSnapshotContentName)
 	}
 	return res, nil
+}
+
+// deleteCheckpointJob removes the Job of a checkpoint that failed.
+func deleteCheckpointJob(ctx context.Context, clientset kubernetes.Interface, namespace, name string) error {
+	return clientset.BatchV1().Jobs(namespace).Delete(ctx, name, metav1.DeleteOptions{})
 }
 
 func captureJobName(snapshotName string) string {
