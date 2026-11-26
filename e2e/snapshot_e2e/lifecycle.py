@@ -329,12 +329,26 @@ def file_present(
     *,
     container: str = CONTAINER,
 ) -> bool:
-    # Require a stdout marker because exec does not expose remote exit status,
-    # and look for it rather than match on it: exec returns stderr too, and a
-    # login shell is free to write to it.
-    marker = "__snapshot_e2e_file_present__"
-    command = f"[[ -f {shlex.quote(path)} ]] && printf '%s' {shlex.quote(marker)}"
-    return marker in k8s.exec_command(namespace, pod, command, container=container)
+    # Exec does not expose the remote exit status, and it returns no output for
+    # a command that never ran, such as an exec the cluster refused in the
+    # stream. So each answer prints its own stdout marker, and output with
+    # neither is no answer. Look for the markers rather than match on them:
+    # exec returns stderr too, and a login shell is free to write to it.
+    present = "__snapshot_e2e_file_present__"
+    absent = "__snapshot_e2e_file_absent__"
+    command = (
+        f"if [[ -f {shlex.quote(path)} ]]; then printf '%s' {shlex.quote(present)}; "
+        f"else printf '%s' {shlex.quote(absent)}; fi"
+    )
+    output = k8s.exec_command(namespace, pod, command, container=container)
+    if present in output and absent not in output:
+        return True
+    if absent in output and present not in output:
+        return False
+    raise AssertionError(
+        f"cannot tell whether {path} exists in {namespace}/{pod} ({container}): "
+        f"exec returned {output!r}"
+    )
 
 
 def wait_for_file(namespace: str, pod: str, path: str, timeout: int = 180) -> None:

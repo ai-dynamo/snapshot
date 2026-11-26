@@ -138,6 +138,33 @@ def test_snapshot_operator_hook_uses_configured_input(monkeypatch) -> None:
     assert k8s.snapshot_operator_test_hook_enabled("snapshot-e2e", "snapshot")
 
 
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("__snapshot_e2e_file_present__", True),
+        ("__snapshot_e2e_file_absent__", False),
+        ("login banner\n__snapshot_e2e_file_absent__", False),
+    ],
+)
+def test_file_present_reads_the_marker(monkeypatch, output, expected) -> None:
+    monkeypatch.setattr(k8s, "exec_command", lambda *args, **kwargs: output)
+
+    assert lifecycle.file_present("snapshot-e2e", "pod", "/tmp/marker") is expected
+
+
+@pytest.mark.parametrize(
+    "output",
+    ["", "login banner", "__snapshot_e2e_file_present____snapshot_e2e_file_absent__"],
+)
+def test_file_present_rejects_output_without_one_marker(monkeypatch, output) -> None:
+    # An exec that the cluster refuses in the stream returns no output. Reading
+    # that as "absent" lets a test that expects no file pass without looking.
+    monkeypatch.setattr(k8s, "exec_command", lambda *args, **kwargs: output)
+
+    with pytest.raises(AssertionError, match="cannot tell whether /tmp/marker exists"):
+        lifecycle.file_present("snapshot-e2e", "pod", "/tmp/marker")
+
+
 def test_file_present_executes_in_requested_container(monkeypatch) -> None:
     calls = []
 
@@ -157,8 +184,9 @@ def test_file_present_executes_in_requested_container(monkeypatch) -> None:
         (
             "snapshot-e2e",
             "pod",
-            "[[ -f /e2e-helper-sync/helper-finished ]] && printf '%s' "
-            "__snapshot_e2e_file_present__",
+            "if [[ -f /e2e-helper-sync/helper-finished ]]; "
+            "then printf '%s' __snapshot_e2e_file_present__; "
+            "else printf '%s' __snapshot_e2e_file_absent__; fi",
             "main",
         )
     ]
