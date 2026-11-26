@@ -160,6 +160,9 @@ and rewritten documentation, including SNEPs. Preserve technical meaning and
 necessary technical terms. Treat this range as a writing target, not a measured
 score. Do not claim measured or certified compliance without validation.
 
+For a clarity-only rewrite, keep existing code, identifiers, and commands
+unchanged, including command options. Keep short options as written in guides.
+
 - Give each paragraph one point, and make it as long as the point needs. A long
   paragraph is fine when the reasoning really needs it. Padding is not.
 - Ask of each sentence whether it helps the reader act, decide, or understand,
