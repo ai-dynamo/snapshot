@@ -319,9 +319,9 @@ custom image still has to meet these:
   valid, provided the running container satisfies this contract and the runtime
   compatibility constraints above.
 - **Stock image and command.** An engine that exposes its own signals, such
-  as a health endpoint that succeeds once the model is loaded, runs unchanged.
-  Name the signals with [Lifecycle Hooks](#lifecycle-hooks). The pod
-  requirements and the runtime compatibility constraints above still apply.
+  as a health endpoint, needs no such entrypoint. Name the signals with
+  [Lifecycle Hooks](#lifecycle-hooks). The running container must still
+  satisfy this contract and the runtime compatibility constraints above.
 
 ## Support a New Inference Server
 
