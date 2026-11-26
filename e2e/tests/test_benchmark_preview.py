@@ -174,6 +174,22 @@ def test_pages_workflow_never_cancels_a_pending_publication() -> None:
     assert deployer["cancel-in-progress"] is False
 
 
+def test_pages_workflow_deploys_when_no_preview_is_published() -> None:
+    workflow = _workflow("e2e-benchmark-pages.yaml")
+    builder = workflow["jobs"]["build"]
+    deployer = workflow["jobs"]["deploy"]
+
+    # A scheduled run, a push and a manual dispatch all skip prepare-preview.
+    # GitHub skips every job downstream of a skipped job, at any depth, unless
+    # the job's own `if` calls a status function. Both jobs after it need one,
+    # or the nightly results never reach the site.
+    assert builder["needs"] == "prepare-preview"
+    assert "always()" in builder["if"]
+    assert deployer["needs"] == "build"
+    assert "!cancelled()" in deployer["if"]
+    assert "needs.build.result == 'success'" in deployer["if"]
+
+
 def test_pages_workflow_downloads_the_uploaded_comparison_artifact() -> None:
     pages = _workflow("e2e-benchmark-pages.yaml")
     frameworks = _workflow("e2e-frameworks.yaml")
