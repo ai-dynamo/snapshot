@@ -32,7 +32,8 @@ for vLLM. Each framework page lists its own under After the Restore:
 [SGLang](supported-frameworks/sglang.md#after-the-restore),
 [TensorRT-LLM](supported-frameworks/tensorrt-llm.md#after-the-restore), and
 [Triton](supported-frameworks/triton.md#after-the-restore). Triton writes no
-file. Its restored pod is Ready when its readiness endpoint answers.
+file. Its restored pod is Ready when the restore is complete and its readiness
+endpoint answers.
 
 ## Choose the Restore Profile
 
