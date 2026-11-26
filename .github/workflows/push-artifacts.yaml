@@ -71,6 +71,7 @@ jobs:
           # have advanced to a later commit by the time this workflow fires.
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
           REF_NAME: ${{ github.event.workflow_run.head_branch || github.ref_name }}
+          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
           if [ -n "${INPUT}" ]; then
             echo "${INPUT}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
@@ -80,7 +81,23 @@ jobs:
             if [[ "${INPUT}" == *-* ]]; then
               echo "tags=${INPUT}" >> "$GITHUB_OUTPUT"
             else
-              echo "tags=${INPUT} latest" >> "$GITHUB_OUTPUT"
+              # Nor must a patch release of an older line, such as v0.2.2 once
+              # v0.3.0 exists: latest names the highest stable version, not the
+              # one published last. The tag of a release exists before this
+              # runs. Stop when the tags cannot be listed, because nothing is
+              # published yet and either guess leaves latest on the wrong image.
+              release_tags="$(git ls-remote --tags --refs "${REPOSITORY_URL}" 'refs/tags/v*')" \
+                || { echo "Cannot list the release tags of ${REPOSITORY_URL}" >&2; exit 1; }
+              highest="$(
+                { echo "${INPUT}"; cut -d/ -f3 <<< "${release_tags}"; } \
+                  | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1
+              )"
+              if [ "${highest}" = "${INPUT}" ]; then
+                echo "tags=${INPUT} latest" >> "$GITHUB_OUTPUT"
+              else
+                echo "${INPUT} is older than ${highest}, so the latest tags stay where they are."
+                echo "tags=${INPUT}" >> "$GITHUB_OUTPUT"
+              fi
             fi
           elif [[ "${REF_NAME}" == "main" || "${REF_NAME}" == release/* ]]; then
             # The 'g' prefix prevents all-numeric SHAs from forming invalid semver.

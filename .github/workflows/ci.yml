@@ -128,6 +128,7 @@ jobs:
             e2e/tests/test_pod_status_writers.py \
             e2e/tests/test_pr_e2e_workflow.py \
             e2e/tests/test_prune_ghcr.py \
+            e2e/tests/test_push_artifacts_workflow.py \
             e2e/tests/test_required_tests.py \
             e2e/tests/test_resolve_snapshot_image_tag.py \
             e2e/tests/test_restored_state.py \
