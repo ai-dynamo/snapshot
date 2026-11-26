@@ -92,9 +92,9 @@ describes.
    ```
 
    The checkpoint ends the source process, but the Deployment restarts the
-   container. The new container loads the model again and keeps its GPU. On a
-   node with no other free GPU, the restored pod stays `Pending` until you
-   delete the source.
+   container, and the source pod keeps its GPUs. If no other GPUs are free for
+   the restore pod, that pod stays `Pending` until you delete the source
+   Deployment.
 
 The operator binds a cluster-scoped `PodSnapshotContent` and records the artifact.
 
