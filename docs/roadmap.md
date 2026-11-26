@@ -99,11 +99,11 @@ The following items are under way.
   weights to new replicas over the network, so a new replica restores faster
   from a smaller snapshot
   ([#927](https://github.com/ai-dynamo/snapshot/issues/927)).
-- **Node-local cache (phase 1).** Optionally keep a copy of a snapshot on a
-  node's fast local storage, such as NVMe. Later restores on that node read from
-  it instead of the snapshot store. Snapshot status shows which nodes hold a
-  copy, and administrators can warm nodes ahead of time with their own tools
-  ([#644](https://github.com/ai-dynamo/snapshot/issues/644), design proposal
+- **Node-local copies.** A restore reads a copy of the snapshot on the node's
+  fast local storage, such as NVMe, when there is one, and reads the snapshot
+  store when there is not. Administrators place the copies with their own tools
+  ([#1001](https://github.com/ai-dynamo/snapshot/issues/1001),
+  [#644](https://github.com/ai-dynamo/snapshot/issues/644), design proposal
   [#918](https://github.com/ai-dynamo/snapshot/pull/918)).
 - **Storage per workload (object storage).** A workload can use its own
   S3-compatible bucket as its snapshot store instead of the cluster default
@@ -126,9 +126,11 @@ These items are planned. Scope and order may shift as Q4 work lands.
 - **SGLang and TensorRT-LLM out of the box.** The same no-wrapper experience as
   vLLM ([#45](https://github.com/ai-dynamo/snapshot/issues/45),
   [#236](https://github.com/ai-dynamo/snapshot/issues/236); help wanted).
-- **Node-local cache (phase 2).** Pre-warm nodes: copy a snapshot to selected
-  nodes ahead of a scale-up, so even the first restore on those nodes is fast
-  ([#644](https://github.com/ai-dynamo/snapshot/issues/644)).
+- **Pre-warm nodes.** An administrator distributes a snapshot to selected nodes
+  ahead of a scale-up, so even the first restore on those nodes is fast.
+  Snapshot status shows which nodes hold a copy and whether each one succeeded,
+  and a copy can be deleted on specific nodes
+  ([#1048](https://github.com/ai-dynamo/snapshot/issues/1048)).
 - **Node-local store.** Keep snapshots on each node's own disk, with no shared
   store ([#1007](https://github.com/ai-dynamo/snapshot/issues/1007)).
 - **Faster checkpoints.** Take checkpoints faster ([#576](https://github.com/ai-dynamo/snapshot/issues/576),
