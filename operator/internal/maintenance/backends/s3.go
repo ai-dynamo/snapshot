@@ -99,8 +99,8 @@ func NewS3Backend(ctx context.Context, cfg S3Config) (*S3Backend, error) {
 
 // S3ClientConfig describes how to reach one S3-compatible service. Credentials
 // come from Credentials, else from the file at CredentialsPath, else from the
-// default credential chain with instance metadata excluded. The CA bundle comes
-// from CABundlePEM, else from the file at CABundlePath, else from system trust.
+// default credential chain without instance metadata. The CA bundle comes from
+// CABundlePEM, else from the file at CABundlePath, else from system trust.
 type S3ClientConfig struct {
 	Region          string
 	Endpoint        string

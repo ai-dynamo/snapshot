@@ -20,7 +20,7 @@ import (
 	"github.com/ai-dynamo/snapshot/operator/internal/maintenance/backends"
 )
 
-// objectAPI is the subset of the S3 client the access check uses.
+// objectAPI is the part of the S3 client that the check uses.
 type objectAPI interface {
 	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
 	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)

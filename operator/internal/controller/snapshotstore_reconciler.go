@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	// SnapshotStoreProtectionFinalizer keeps a store while content still uses it.
+	// SnapshotStoreProtectionFinalizer keeps a store while content uses it.
 	SnapshotStoreProtectionFinalizer = "nvidia.com/snapshotstore-protection"
 
 	ReasonStoreReachable         = "StoreReachable"
@@ -51,10 +51,10 @@ const (
 	storeTerminatingRecheck   = 30 * time.Second
 )
 
-// SnapshotStoreReconciler tells whether each store names a store that
-// can be used: its location is valid and unique in the cluster, and a test
-// object can be written, read, listed and deleted there. It also keeps a store
-// from being deleted while content still uses it.
+// SnapshotStoreReconciler sets the store ID and the Ready condition of
+// each store. A store is Ready when its location is valid, no earlier store
+// names the same store, and a test object can be written, read, listed and
+// deleted there. A finalizer keeps a store while content uses it.
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotstores,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotstores/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotstores/finalizers,verbs=update
@@ -62,19 +62,18 @@ const (
 // +kubebuilder:rbac:groups="",resources=secrets;configmaps,verbs=get;list;watch
 type SnapshotStoreReconciler struct {
 	client.Client
-	// APIReader reads without a cache: credentials, CA bundles and content.
+	// APIReader reads without a cache.
 	APIReader client.Reader
 	Recorder  record.EventRecorder
 	Prober    storageprobe.Prober
 
-	// Namespace is the Snapshot namespace, where stores name their claims,
-	// Secrets and ConfigMaps.
+	// Namespace is the Snapshot namespace.
 	Namespace string
 	ClusterID string
-	// DefaultStoreName is the one store reconciled while binding is off.
+	// DefaultStoreName is the only store reconciled while binding is off.
 	DefaultStoreName string
 	BindingEnabled   bool
-	// MountPath returns where the operator has mounted a claim.
+	// MountPath returns the mount path of a claim.
 	MountPath func(claimName string) (string, bool)
 
 	CheckInterval time.Duration
@@ -196,7 +195,7 @@ func (r *SnapshotStoreReconciler) setReady(ctx context.Context, store *snapshotv
 	return r.Status().Patch(ctx, store, client.MergeFrom(base))
 }
 
-// checkStore runs the access check and returns the reason and message of a
+// checkStore runs the access check. It returns the reason and message of a
 // failure, or an empty reason when the store can be used.
 func (r *SnapshotStoreReconciler) checkStore(ctx context.Context,
 	store *snapshotv1alpha1.SnapshotStore,
@@ -341,9 +340,9 @@ func (r *SnapshotStoreReconciler) reconcileDeletion(ctx context.Context,
 	return ctrl.Result{}, nil
 }
 
-// contentUsing counts content that names the store, or that has no store name
-// and carries its store ID. It reads the spec fields without a cache; the label
-// on the content can be edited and only serves queries.
+// contentUsing counts content that names the store, or that names no store and
+// carries its store ID. It reads the spec fields without a cache, not the
+// label.
 func (r *SnapshotStoreReconciler) contentUsing(ctx context.Context, storeName, storeID string) (int, error) {
 	contents := &snapshotv1alpha1.PodSnapshotContentList{}
 	if err := r.APIReader.List(ctx, contents); err != nil {
@@ -390,8 +389,8 @@ func (r *SnapshotStoreReconciler) storesAtTheSameLocation(ctx context.Context, o
 	return requests
 }
 
-// storesOfContent names the stores a deleted content may have been holding
-// back from deletion.
+// storesOfContent returns the stores that a deleted content may have kept
+// from being deleted.
 func (r *SnapshotStoreReconciler) storesOfContent(ctx context.Context, obj client.Object) []reconcile.Request {
 	content, ok := obj.(*snapshotv1alpha1.PodSnapshotContent)
 	if !ok || content.Spec.Storage == nil {
@@ -494,7 +493,7 @@ func (r *SnapshotStoreReconciler) checkTimeout() time.Duration {
 	return defaultStoreCheckTimeout
 }
 
-// storeIDOf derives the store identity from a store's location fields.
+// storeIDOf derives the store ID from the location fields of a store.
 func storeIDOf(store *snapshotv1alpha1.SnapshotStore, namespace string) (string, error) {
 	switch {
 	case store.Spec.PVC != nil && store.Spec.S3 == nil:

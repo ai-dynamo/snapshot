@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Credentials and CA bundles that SnapshotStores name live in the release namespace.
+# The operator reads the Secrets and ConfigMaps that stores name, in the release namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

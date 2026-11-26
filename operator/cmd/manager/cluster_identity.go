@@ -13,8 +13,8 @@ import (
 	"github.com/ai-dynamo/snapshot/api/storage"
 )
 
-// kubeSystemUID names the cluster: the UID of the kube-system namespace is
-// fixed for the life of the cluster and differs between clusters.
+// kubeSystemUID returns the UID of the kube-system namespace, which identifies
+// the cluster.
 func kubeSystemUID(ctx context.Context, reader client.Reader) (string, error) {
 	namespace := &corev1.Namespace{}
 	if err := reader.Get(ctx, client.ObjectKey{Name: "kube-system"}, namespace); err != nil {
@@ -23,8 +23,8 @@ func kubeSystemUID(ctx context.Context, reader client.Reader) (string, error) {
 	return string(namespace.UID), nil
 }
 
-// mountedClaims returns where the operator has mounted a claim. Today that is
-// the one claim of the configured PVC store.
+// mountedClaims returns the mount path of the claim of the configured PVC
+// store. Any other claim is not mounted.
 func mountedClaims(cfg storage.Config, mountPath string) func(string) (string, bool) {
 	return func(claimName string) (string, bool) {
 		if cfg.PVC == nil || mountPath == "" || cfg.PVC.ClaimName != claimName {
