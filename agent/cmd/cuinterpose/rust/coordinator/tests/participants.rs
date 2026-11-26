@@ -15,7 +15,7 @@ use rustix::io::FdFlags;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -111,15 +111,10 @@ fn inherit(command: &mut Command, directory: &OwnedFd) -> PathBuf {
         // SAFETY: `target` only names the descriptor that dup2 replaces. It is forgotten,
         // so it never closes anything.
         let mut target = unsafe { OwnedFd::from_raw_fd(CHECKPOINT_FD) };
-        // `directory` can already have this number. Duplicating a descriptor onto itself
-        // fails on aarch64, where rustix calls dup3, so only clear close-on-exec then.
-        let duplicated = if directory.as_raw_fd() == CHECKPOINT_FD {
-            Ok(())
-        } else {
-            rustix::io::dup2(&directory, &mut target)
-        };
-        // The coordinator inherits the descriptor only without close-on-exec.
-        let result = duplicated.and_then(|()| rustix::io::fcntl_setfd(&target, FdFlags::empty()));
+        // The coordinator inherits the descriptor only without close-on-exec. dup2 does
+        // not clear it if `directory` already has this number.
+        let result = rustix::io::dup2(&directory, &mut target)
+            .and_then(|()| rustix::io::fcntl_setfd(&target, FdFlags::empty()));
         std::mem::forget(target);
         result.map_err(Into::into)
     };
