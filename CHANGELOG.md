@@ -186,6 +186,10 @@ commit-level history for each release is on its
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
+- A checkpoint that fails with `SourcePodGone` while its source Pod is being
+  deleted now reports `source pod "<name>" is being deleted`. The message was
+  `is no longer running (phase Running)`, which named the phase that the Pod was
+  still in.
 
 ### Deprecated
 

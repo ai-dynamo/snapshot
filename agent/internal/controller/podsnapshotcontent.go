@@ -537,9 +537,13 @@ func classifySourcePodIdentity(content *snapshotv1alpha1.PodSnapshotContent, pod
 // terminates the source process — so callers must check for an in-flight capture or a
 // committed artifact before treating this as terminal.
 func classifySourcePodLiveness(pod *corev1.Pod) (string, string) {
-	if pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
+	if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
 		return "SourcePodGone",
 			fmt.Sprintf("source pod %q is no longer running (phase %s)", pod.Name, pod.Status.Phase)
+	}
+	// A Pod being deleted keeps its Running or Pending phase until its containers stop.
+	if pod.DeletionTimestamp != nil {
+		return "SourcePodGone", fmt.Sprintf("source pod %q is being deleted", pod.Name)
 	}
 	return "", ""
 }
