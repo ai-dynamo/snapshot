@@ -2519,8 +2519,10 @@ TEST_F(ModelStreamerSessionTest, PipelinePendingFrontCancellationReleasesTailsDu
   {
     std::unique_lock lock(state.mutex);
     EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.allocation_entered == 4; }));
-    EXPECT_TRUE(ModelStreamerRestoreTestPeer::HasOnlyUnclaimedPending(restore, 2));
   }
+  // The worker dequeues the active batch only after its submission was counted.
+  EXPECT_TRUE(ModelStreamerRestoreTestPeer::WaitForPending(restore, 2));
+  EXPECT_TRUE(ModelStreamerRestoreTestPeer::HasOnlyUnclaimedPending(restore, 2));
   active_stop.Cancel();
   EXPECT_TRUE(WaitForEnd());
   pending_stop.Cancel();
