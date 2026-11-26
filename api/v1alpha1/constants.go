@@ -15,8 +15,8 @@ const (
 	// object so the per-node agent's cache can label-select work for its node.
 	SnapshotNodeLabel = "nvidia.com/snapshot-node"
 
-	// SnapshotStoreLabel names the SnapshotStore a PodSnapshotContent was
-	// bound through. It only serves queries: the content's spec fields decide.
+	// SnapshotStoreLabel names the SnapshotStore a
+	// PodSnapshotContent was bound through. It is for queries only.
 	SnapshotStoreLabel = "nvidia.com/snapshot-store"
 
 	CheckpointVolumeName = "checkpoint-storage"

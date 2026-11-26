@@ -62,8 +62,8 @@ type SnapshotJobReconciler struct {
 	NonCacheReadClient   client.Reader
 	Recorder             record.EventRecorder
 	CuInterposeContainer operatortypes.CuInterposeContainerConfiguration
-	// BindNewContents and DefaultStoreName say which store a template without a
-	// snapshotStoreName resolves to, and whether stores are reconciled.
+	// BindNewContents and DefaultStoreName decide which store a template
+	// without a snapshotStoreName uses.
 	BindNewContents  bool
 	DefaultStoreName string
 }
@@ -73,8 +73,8 @@ type snapshotJobFailure struct {
 	cause  error
 }
 
-// snapshotJobWait says why the source Pod has not been started, for a reason
-// that is expected to clear on its own.
+// snapshotJobWait says why the source Pod has not started, when the reason is
+// expected to clear.
 type snapshotJobWait struct {
 	reason  string
 	message string
@@ -701,8 +701,8 @@ func (r *SnapshotJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// storeToWaitingSnapshotJobs wakes the SnapshotJobs that have not started their source Pod and
-// resolve to the store that changed.
+// storeToWaitingSnapshotJobs returns the SnapshotJobs that have not started and
+// use the store that changed.
 func (r *SnapshotJobReconciler) storeToWaitingSnapshotJobs(ctx context.Context, obj client.Object) []reconcile.Request {
 	store, ok := obj.(*snapshotv1alpha1.SnapshotStore)
 	if !ok {

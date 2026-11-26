@@ -25,18 +25,18 @@ const (
 )
 
 // DefaultSnapshotStoreCreator creates the default store from the storage
-// configuration when the cluster has no store at all. That covers a fresh
-// install and the first upgrade. Once any store exists it does nothing, so it
-// neither brings back a deleted store nor reverts an edit.
+// configuration when the cluster has no store. If any store exists, it does
+// nothing.
 type DefaultSnapshotStoreCreator struct {
 	Client client.Client
-	// Reader reads without a cache; the manager's cache is not needed before it starts.
+	// Reader reads without a cache.
 	Reader client.Reader
 	Name   string
 	Config storage.Config
 }
 
-// Start runs once, on the leader, and returns when the check is done or the context ends.
+// Start checks once on the leader and retries until it succeeds or the context
+// ends.
 func (c *DefaultSnapshotStoreCreator) Start(ctx context.Context) error {
 	logger := log.FromContext(ctx).WithName("default-snapshot-store")
 	return wait.PollUntilContextCancel(ctx, defaultStoreRetry, true, func(ctx context.Context) (bool, error) {
@@ -78,9 +78,8 @@ func (c *DefaultSnapshotStoreCreator) Ensure(ctx context.Context) error {
 }
 
 // defaultStoreFromConfig describes the configured store as a store, or returns
-// nil when no store is configured. Its location fields are the ones the store
-// ID was computed from, so the store has the store ID already recorded on
-// content bound before stores existed.
+// nil when no store is configured. Its location fields give the store ID of the
+// configured store.
 func defaultStoreFromConfig(name string, cfg storage.Config) *snapshotv1alpha1.SnapshotStore {
 	store := &snapshotv1alpha1.SnapshotStore{
 		ObjectMeta: metav1.ObjectMeta{Name: name},

@@ -21,9 +21,9 @@ const (
 	ReasonStoreTerminating = "StoreTerminating"
 )
 
-// snapshotStoreResolution is the outcome of looking up the store a request
-// names. A usable resolution has no reason. Its store is nil when new contents
-// are not bound to a store, which keeps the legacy flow.
+// snapshotStoreResolution is the result of looking up the store of a request. It
+// is usable when it has no reason. Its store is nil when content is not bound
+// to a store.
 type snapshotStoreResolution struct {
 	Store   *snapshotv1alpha1.SnapshotStore
 	Reason  string
@@ -32,9 +32,8 @@ type snapshotStoreResolution struct {
 
 func (r snapshotStoreResolution) Usable() bool { return r.Reason == "" }
 
-// resolveSnapshotStore finds the store a request names, or the default store
-// when it names none. While binding is off only the default store is
-// reconciled, so a request that names another store waits.
+// resolveSnapshotStore returns the store a request names, or the default store.
+// While binding is off, only the default store is usable.
 func resolveSnapshotStore(ctx context.Context, reader client.Reader, requested, defaultName string,
 	bindingEnabled bool,
 ) (snapshotStoreResolution, error) {
@@ -65,7 +64,7 @@ func resolveSnapshotStore(ctx context.Context, reader client.Reader, requested, 
 	return storeUsability(store), nil
 }
 
-// storeUsability says whether new content may be bound through the store.
+// storeUsability says whether new content can be bound through the store.
 func storeUsability(store *snapshotv1alpha1.SnapshotStore) snapshotStoreResolution {
 	if !store.DeletionTimestamp.IsZero() {
 		return snapshotStoreResolution{

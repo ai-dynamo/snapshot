@@ -30,7 +30,8 @@ func mustStorageConfig(configPath string) (storage.Config, string) {
 	return cfg, storeID
 }
 
-// Binding new contents to a store needs the store to be configured: the default store is made from it.
+// validateContentBinding requires a configured store when binding is on,
+// because the default store is made from it.
 func validateContentBinding(storeID string, enabled bool) error {
 	if enabled && storeID == "" {
 		return fmt.Errorf("bind-new-contents requires snapshot-storage-config")

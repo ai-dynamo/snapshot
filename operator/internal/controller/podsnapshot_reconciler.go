@@ -77,10 +77,10 @@ type PodSnapshotReconciler struct {
 	NonCacheReadClient    client.Reader
 	Recorder              record.EventRecorder
 	TestFailureAnnotation string
-	// BindNewContents binds every new PodSnapshotContent to a store through the
-	// store its PodSnapshot names. Off, new content stays legacy and path-addressed.
+	// BindNewContents binds new content to a store through the store its
+	// PodSnapshot names. When off, new content has no store binding.
 	BindNewContents bool
-	// DefaultStoreName is the store used by a PodSnapshot that names none.
+	// DefaultStoreName is the store of a PodSnapshot that names none.
 	DefaultStoreName string
 }
 
@@ -421,13 +421,13 @@ func (sr *PodSnapshotReconciler) ensurePodSnapshotContent(ctx context.Context, s
 	return content, true, nil
 }
 
-// errStoreTerminating marks a store that began terminating while its content was being created.
+// errStoreTerminating means the store is terminating or gone.
 var errStoreTerminating = errors.New("storage class is being deleted or is gone")
 
-// confirmStoreStillUsable reads the store from the API server after the content exists. The store
-// finalizer counts content with a live list, so a store that is still there once the content is
-// visible cannot be released before the content goes. A store that is terminating or gone is not
-// bound: the new content is deleted.
+// confirmStoreStillUsable reads the store from the API server after the content
+// is created. If the store is terminating or gone, it deletes the new content.
+// The store finalizer lists content live, so a store that is still there cannot
+// be released before the content goes.
 func (sr *PodSnapshotReconciler) confirmStoreStillUsable(ctx context.Context, storeName string, content *snapshotv1alpha1.PodSnapshotContent) error {
 	store := &snapshotv1alpha1.SnapshotStore{}
 	err := sr.NonCacheReadClient.Get(ctx, client.ObjectKey{Name: storeName}, store)
@@ -650,8 +650,8 @@ func (sr *PodSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(sr)
 }
 
-// storeToWaitingPodSnapshots wakes the PodSnapshots that have not been bound yet and resolve to the
-// store that changed, so one that waited for the store to become Ready proceeds without a timer.
+// storeToWaitingPodSnapshots returns the PodSnapshots that are not bound yet
+// and use the store that changed.
 func (sr *PodSnapshotReconciler) storeToWaitingPodSnapshots(ctx context.Context, obj client.Object) []reconcile.Request {
 	store, ok := obj.(*snapshotv1alpha1.SnapshotStore)
 	if !ok {
