@@ -35,13 +35,16 @@ SPDX-License-Identifier: Apache-2.0
 ## Summary
 
 A snapshot can be restored outside the namespace and the cluster that took it,
-without checkpointing the workload again and without copying its data. A cluster
-admin creates a `SharedSnapshot` that names one snapshot and the namespaces that
-can use it. A user in one of those namespaces creates a `PodSnapshot` that
-refers to the `SharedSnapshot` and restores from it the same way as from any
-other `PodSnapshot`. The same object covers a snapshot taken in another
-namespace of the cluster and a snapshot taken in another cluster that uses the
-same snapshot store.
+without checkpointing the workload again and without copying its data. An admin
+creates a `SharedSnapshot` that names one snapshot and the namespaces that can
+use it. A user in one of those namespaces creates a `PodSnapshot` that refers to
+the `SharedSnapshot` and restores from it the same way as from any other
+`PodSnapshot`. The same object covers a snapshot taken in another namespace of
+the cluster and a snapshot taken in another cluster that uses the same snapshot
+store.
+
+In this document, an admin is anyone who holds the permission to create a
+`SharedSnapshot`. Each cluster decides who holds it.
 
 ## Motivation
 
@@ -82,9 +85,10 @@ like the one it tested.
 
 1. **Checkpointing a pod in another namespace.** A `PodSnapshot` still
    checkpoints a pod in its own namespace.
-2. **Sharing by users.** In this proposal only an admin shares a snapshot. A
-   way for a user to share their own snapshot is a possible later addition, see
-   [Alternatives](#alternatives).
+2. **A sharing permission limited to one namespace.** `SharedSnapshot` is
+   cluster-scoped, and the permission to create one covers every snapshot in
+   the cluster. A way for a user to share only the snapshots of their own
+   namespace is a possible later addition, see [Alternatives](#alternatives).
 3. **Revoking access that is already in use.** Narrowing or deleting a
    `SharedSnapshot` stops new use. It does not detach a `PodSnapshot` that is
    already bound.
@@ -186,7 +190,9 @@ a restore in the development cluster.
   their `PodSnapshot` to remove the data cannot see that it is still in use.
 - **Access is checked once.** Removing a namespace from a `SharedSnapshot`, or
   deleting the `SharedSnapshot`, does not affect a `PodSnapshot` that is already
-  bound. An admin removes that access by deleting the `PodSnapshot`.
+  bound. An admin removes that access by deleting the `PodSnapshot`. The one
+  exception is a content whose status is lost, see
+  [Which PodSnapshots a Content Lists](#which-podsnapshots-a-content-lists).
 - **Cluster sharing depends on SNEP-248.** Without its ownership marker and
   retain setting, the maintenance of one cluster deletes the data of another.
   Import is implemented after SNEP-248.
@@ -205,19 +211,28 @@ A `PodSnapshot` whose source is `sharedSnapshotRef` does not checkpoint a pod.
 The operator binds it in these steps:
 
 1. Add the existing `PodSnapshot` finalizer.
-2. Read the `SharedSnapshot`. Wait while it is not `Ready`.
-3. Check the namespace of the `PodSnapshot` against `allowedNamespaces`. If it
+2. Look for a content that already lists the `PodSnapshot` by UID. If one
+   exists, go to step 7.
+3. Read the `SharedSnapshot`. Wait while it is not `Ready`.
+4. Check the namespace of the `PodSnapshot` against `allowedNamespaces`. If it
    does not match, the `PodSnapshot` stays not `Ready` with a reason that says
    so.
-4. Check that the content named in `SharedSnapshot.status.contentName` is
+5. Check that the content named in `SharedSnapshot.status.contentName` is
    `Ready` and is not being deleted.
-5. Add the `PodSnapshot` to `status.boundPodSnapshots` of the content.
-6. Set `status.boundSnapshotContentName` on the `PodSnapshot`.
+6. Add the `PodSnapshot` to `status.boundPodSnapshots` of the content.
+7. Set `status.boundSnapshotContentName` on the `PodSnapshot`.
 
 The operator writes the content before the `PodSnapshot`. If it stops between
-steps 5 and 6, the next reconcile completes step 6. The reverse order could
+steps 6 and 7, the next reconcile completes step 7. The reverse order could
 leave a bound `PodSnapshot` that the content does not list, and its restore
 would be refused.
+
+The list on the content is the record that a `PodSnapshot` was admitted. Steps 3
+to 5 run only for a `PodSnapshot` that no content lists. Once a content lists
+it, the operator does not check it against the `SharedSnapshot` again. A later
+reconcile only confirms that the content still lists it. A binding therefore
+stays valid when the `SharedSnapshot` is narrowed or deleted, including between
+steps 6 and 7.
 
 A `PodSnapshot` that checkpoints a pod is bound the same way as today, and the
 operator also adds it to `status.boundPodSnapshots` of the content it creates.
@@ -243,6 +258,13 @@ An entry stays once it is in the list. The operator removes an entry when its
 the `SharedSnapshot` changes. If the status of a content is lost, the operator
 rebuilds the list with the same two rules, using each `SharedSnapshot` as it is
 at that time.
+
+A rebuild is the one case in which a binding does not survive a change to its
+`SharedSnapshot`. A `PodSnapshot` whose namespace was removed, or whose
+`SharedSnapshot` was deleted, after it was bound is not listed again. It
+becomes not `Ready` until its namespace is allowed again. The status of a
+content is lost only in rare cases, for example when a cluster is restored from
+a backup, and the rebuild then refuses access instead of granting it.
 
 The list is flat. The `PodSnapshot` that took the checkpoint is one entry like
 any other. `spec.snapshotRef` of the content keeps recording which `PodSnapshot`
@@ -318,6 +340,11 @@ Otherwise it is not `Ready` and says that the settings differ.
 Legacy content, which has no `spec.storage`, can be shared within a cluster. It
 cannot be imported, because it has no artifact handle to copy.
 
+An import also recovers a snapshot whose content was deleted while its data was
+retained. This works in another cluster and in the cluster that took the
+snapshot. The admin needs the artifact handles that were recorded on the
+deleted content.
+
 ### Restore
 
 A restore Pod names a `PodSnapshot` in its own namespace with
@@ -329,7 +356,8 @@ content it is bound to. Two checks change:
   that `status.boundPodSnapshots` lists the `PodSnapshot` by namespace, name,
   and UID.
 - **The artifact identity.** The agent checks today that the content UID
-  recorded in the artifact manifest equals the UID of the content. A shared
+  recorded in the artifact manifest equals the UID of the content. This check
+  guards against a restore from data that belongs to another content. A shared
   content is the one that took the checkpoint, and the check is unchanged. An
   imported content has a different UID than the one in the manifest, and the
   agent skips this check for it.
@@ -487,7 +515,8 @@ source process held: model weights, request data, credentials, and service
 account tokens. A process restored in another namespace starts with that memory.
 The permission on `SharedSnapshot` is therefore equal to read access to the
 memory of every workload that has a snapshot in the cluster. The chart grants it
-only to the operator. A cluster grants it to people like a cluster-admin
+only to the operator. A cluster can grant it to any user or group. It cannot be
+limited to one namespace, so a cluster grants it like a cluster-admin
 permission.
 
 **The source namespace is not asked.** An admin can share a snapshot without the
