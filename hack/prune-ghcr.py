@@ -27,8 +27,10 @@ cache manifest — --cache-from names tags, and a tag always points at the newes
 
 Pull request images are the one tagged kind that is deleted. e2e-pr.yaml
 publishes the operator, agent, and pagebroker of every mirrored commit as
-v0.0.0-pull-request-<number>-g<sha8>, for the GPU suite of that run alone, so a
-version whose every tag has that shape expires on its own short clock. Its
+v0.0.0-pull-request-<number>-g<sha8>, and tags each run attempt's images
+v0.0.0-pull-request-<number>-g<sha8>-<run_id>-<run_attempt> for that attempt's
+GPU suites alone, so a version whose every tag has one of those shapes expires
+on its own short clock. Its
 child manifests go in the same sweep -- once the index is gone they are
 orphans, and waiting out the untagged clock would keep them for a quarter. A
 version carrying any other tag is kept, and so is any child a kept version
@@ -52,9 +54,10 @@ from datetime import datetime, timedelta, timezone
 API = "https://api.github.com"
 REGISTRY = "https://ghcr.io"
 
-# The tag e2e-pr.yaml publishes pull request images under. Anchored at both
-# ends: a looser match is how a release tag would end up deleted.
-PR_TAG = re.compile(r"^v0\.0\.0-pull-request-[0-9]+-g[0-9a-f]{8}$")
+# The tags e2e-pr.yaml publishes pull request images under, per commit and per
+# run attempt. Anchored at both ends: a looser match is how a release tag would
+# end up deleted.
+PR_TAG = re.compile(r"^v0\.0\.0-pull-request-[0-9]+-g[0-9a-f]{8}(-[0-9]+-[0-9]+)?$")
 
 INDEX_TYPES = {
     "application/vnd.oci.image.index.v1+json",

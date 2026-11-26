@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Cleanup stale e2e namespaces
+description: >-
+  Install the vCluster CLI and delete Snapshot e2e host namespaces older than
+  12 hours, keeping HOST_NAMESPACE. Run it before waiting for a GPU suite slot,
+  so namespaces left by lost runners cannot hold every slot. Needs the host
+  cluster KUBECONFIG.
+
+runs:
+  using: composite
+  steps:
+    - name: Install vCluster CLI
+      uses: ./.github/actions/install-vcluster-cli
+
+    - name: Cleanup stale e2e namespaces
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        cutoff_epoch="$(date -u -d '12 hours ago' +%s)"
+        kubectl get ns -l snapshot-e2e=true \
+          -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}' |
+        while IFS=$'\t' read -r namespace created_at; do
+          if [[ -z "${namespace}" ]]; then
+            continue
+          fi
+          if [[ "${namespace}" == "${HOST_NAMESPACE}" ]]; then
+            echo "Keeping current namespace ${namespace}"
+            continue
+          fi
+
+          created_epoch="$(date -u -d "${created_at}" +%s)"
+          if (( created_epoch >= cutoff_epoch )); then
+            echo "Keeping recent namespace ${namespace} created at ${created_at}"
+            continue
+          fi
+
+          echo "Deleting stale Snapshot e2e namespace ${namespace} created at ${created_at}"
+          helm uninstall vcluster-hpm -n "${namespace}" || true
+          vcluster delete "${namespace}" --namespace "${namespace}" || true
+          kubectl delete namespace "${namespace}" --ignore-not-found --wait=false || true
+        done
