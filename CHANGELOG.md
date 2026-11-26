@@ -186,6 +186,14 @@ commit-level history for each release is on its
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
+- A `PodSnapshot` that names a target container its source Pod does not have
+  fails with `InvalidTargetContainer`. It used to stay `Pending` for as long as
+  the Pod ran, and held back every later checkpoint of that Pod. With
+  `nvidia.com/snapshot-multi-gpu: enabled`, or a `checkpointReadinessProbe` on a
+  named port, it already failed, as `CuInterposeMisconfigured` or
+  `InvalidCheckpointReadinessProbe`, and now fails as `InvalidTargetContainer`
+  instead. See
+  [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#a-checkpoint-fails-with-invalidtargetcontainer).
 
 ### Deprecated
 

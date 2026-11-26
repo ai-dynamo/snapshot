@@ -74,6 +74,18 @@ func singleTargetContainer(containers []string) (string, error) {
 	return containers[0], nil
 }
 
+// hasContainer reports whether the Pod has a container by that name. Init and ephemeral
+// containers do not count: the checkpoint finds its target in the Pod's container statuses,
+// which list neither.
+func hasContainer(pod *corev1.Pod, name string) bool {
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // reconcileCapture drives one PodSnapshotContent work order end to end: validate the source pod,
 // promote it with CaptureEligibleLabel, run the dump inline. Every trigger for this work order
 // shares one queue key, which is what lets validation and the dump live in one function: neither
@@ -139,6 +151,15 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	// atomic rename.
 	if recovered, err := w.recoverCommittedArtifact(ctx, content, contentUID, containerName, artifactPath); recovered || err != nil {
 		return err
+	}
+
+	// A Pod's containers never change, so a target it does not have can never report Ready.
+	// Waiting for it would hold this work order, and every later one for the Pod, for as long
+	// as the Pod runs, and would have it sweep the Pod's containers if one of them crashed.
+	// This reads the spec rather than live state, so it does not wait for ownership.
+	if !hasContainer(pod, containerName) {
+		return w.setSnapshotContentFailed(ctx, content, "InvalidTargetContainer",
+			fmt.Errorf("source pod %q has no container %q", podKey.String(), containerName))
 	}
 
 	// Several work orders can name one pod, and everything below draws conclusions from live pod
