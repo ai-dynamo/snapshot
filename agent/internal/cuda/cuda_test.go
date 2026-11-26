@@ -998,6 +998,72 @@ func TestDiscoverGPUsDescribePodResourcesGPUs(t *testing.T) {
 	}
 }
 
+// The device plugin advertises a GPU it shares as one device per replica, named
+// "<UUID>::<replica>", and kubelet reports those names. The container lists the
+// GPU by its UUID, and can hold several replicas of one GPU.
+func TestDiscoverGPUsFindSharedGPUsByUUID(t *testing.T) {
+	installTestPodResourcesServer(t, &podresourcesv1.ListPodResourcesResponse{
+		PodResources: []*podresourcesv1.PodResources{
+			{
+				Name:      "test-pod",
+				Namespace: "default",
+				Containers: []*podresourcesv1.ContainerResources{
+					{
+						Name: "main",
+						Devices: []*podresourcesv1.ContainerDevices{
+							{
+								ResourceName: nvidiaGPUResource,
+								DeviceIds:    []string{"GPU-a::3", "GPU-b::0", "GPU-a::1"},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	visible := func() (VisibleGPUs, error) {
+		return VisibleGPUs{GPUs: compat.GPUInfo{
+			DriverVersion: "580.65.06",
+			Devices: []compat.GPUDevice{
+				{UUID: "GPU-b", ProductName: "NVIDIA L4"},
+				{UUID: "GPU-a", ProductName: "NVIDIA L4"},
+			},
+		}}, nil
+	}
+	want := compat.GPUInfo{
+		DriverVersion: "580.65.06",
+		Devices: []compat.GPUDevice{
+			{UUID: "GPU-b", ProductName: "NVIDIA L4"},
+			{UUID: "GPU-a", ProductName: "NVIDIA L4"},
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	t.Run("kubelet device IDs", func(t *testing.T) {
+		got, err := GetPodGPUUUIDs(ctx, "test-pod", "default", "main")
+		if err != nil {
+			t.Fatalf("GetPodGPUUUIDs: %v", err)
+		}
+		if want := []string{"GPU-a", "GPU-b"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("GetPodGPUUUIDs() = %v, want %v", got, want)
+		}
+	})
+	for _, selection := range []string{"all", "/var/run/nvidia-container-devices", "/run/nvidia-container-devices"} {
+		t.Run(selection, func(t *testing.T) {
+			got, err := DiscoverGPUs(ctx, nil, "test-pod", "default", "main",
+				[]string{"NVIDIA_VISIBLE_DEVICES=" + selection}, visible, logr.Discard())
+			if err != nil {
+				t.Fatalf("DiscoverGPUs: %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("DiscoverGPUs() = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
 func TestDeviceDirectorySelectionFailsOnAllocationError(t *testing.T) {
 	previousSocketPath := podResourcesSocketPath
 	podResourcesSocketPath = filepath.Join(t.TempDir(), "missing-kubelet.sock")

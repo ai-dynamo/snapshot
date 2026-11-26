@@ -34,6 +34,10 @@ const (
 	nvidiaGPUResource  = "nvidia.com/gpu"
 	nvidiaGPUDRADriver = "gpu.nvidia.com"
 
+	// sharedGPUReplicaSeparator ends the UUID in the name the NVIDIA device
+	// plugin gives each replica of a GPU it shares, "<UUID>::<replica>".
+	sharedGPUReplicaSeparator = "::"
+
 	// HelperBinaryName is the cuda-checkpoint-helper executable name.
 	HelperBinaryName = "cuda-checkpoint-helper"
 	// DefaultHelperBinaryPath is the agent-side cuda-checkpoint-helper absolute path.
@@ -59,7 +63,9 @@ type RestorePhaseTimings struct {
 }
 
 // GetPodGPUUUIDs resolves GPU UUIDs for a pod/container from kubelet
-// PodResources (nvidia.com/gpu entries in GetDevices()).
+// PodResources (nvidia.com/gpu entries in GetDevices()). A GPU the device
+// plugin shares is returned once, by its UUID, however many of its replicas
+// the container holds.
 func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName string) ([]string, error) {
 	if podName == "" || podNamespace == "" {
 		return nil, nil
@@ -81,6 +87,7 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 	}
 
 	var uuids []string
+	seen := map[string]bool{}
 	for _, pod := range resp.GetPodResources() {
 		if pod.GetName() != podName || pod.GetNamespace() != podNamespace {
 			continue
@@ -90,8 +97,15 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 				continue
 			}
 			for _, device := range container.GetDevices() {
-				if device.GetResourceName() == nvidiaGPUResource {
-					uuids = append(uuids, device.GetDeviceIds()...)
+				if device.GetResourceName() != nvidiaGPUResource {
+					continue
+				}
+				for _, id := range device.GetDeviceIds() {
+					uuid, _, _ := strings.Cut(id, sharedGPUReplicaSeparator)
+					if !seen[uuid] {
+						seen[uuid] = true
+						uuids = append(uuids, uuid)
+					}
 				}
 			}
 
