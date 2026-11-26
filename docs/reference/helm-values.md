@@ -140,7 +140,7 @@ payload checksums.
 | `daemonset.imagePullSecrets`   | `[]`                                    | Pull secrets for the agent image; empty for the public GHCR image.                                                                        |
 | `seccomp.deploy`               | `true`                                  | Install the block-iouring seccomp profile (required for CRIU; set `false` on RHCOS 9.6+).                                                 |
 | `rbac.create`                  | `true`                                  | Create agent and operator RBAC.                                                                                                           |
-| `serviceAccount.create`        | `true`                                  | Create the agent service account.                                                                                                         |
+| `serviceAccount.create`        | `true`                                  | Create the agent service account. `rbac.create` creates the operator's service account. With `rbac.create: false`, create a service account in the release namespace with the release's full name and `-operator` appended, for example `snapshot-operator`. The operator pod does not start without it. |
 | `serviceAccount.annotations` | `{}` | Annotations for the service account that the agent and PageBroker share, for example to bind a workload identity. Applied only with `serviceAccount.create: true`, and a change does not restart the agent; see [Use Workload Identity for S3](../operate/configure-storage.md#use-workload-identity-for-s3). |
 
 ## Agent Config (`config.*`)
