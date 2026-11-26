@@ -190,8 +190,8 @@ it with the credentials Secret and a default bucket, then prints the chart value
 `SNAPSHOT_E2E_S3_ACCESS_KEY` and `SNAPSHOT_E2E_S3_SECRET_KEY`, because the store listens
 on the node network and must not use a default login; the workflow generates both per job.
 The store runs on the host
-network because the agent pod, which hosts PageBroker, does too and cannot resolve
-cluster service names. The job derives `SNAPSHOT_E2E_S3_PORT` and
+network, where the agent pod, which hosts PageBroker, runs too and reaches it at
+the node address. The job derives `SNAPSHOT_E2E_S3_PORT` and
 `SNAPSHOT_E2E_S3_CONSOLE_PORT` from the run id, so two runs on one node do not collide. In S3 mode
 the test needs no S3 client of its own: it checks the descriptor in the
 PodSnapshotContent status and that nothing was written to the checkpoint volume.

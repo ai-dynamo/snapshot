@@ -60,6 +60,11 @@ spec:
       hostPID: true
       hostIPC: true
       hostNetwork: true
+      # A host-network pod resolves names through the node unless it asks for
+      # cluster DNS, and the node does not know Service names. PageBroker needs
+      # them to reach an S3 store that runs in the cluster. Other names still
+      # resolve: cluster DNS forwards them.
+      dnsPolicy: ClusterFirstWithHostNet
       {{- with .Values.daemonset.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

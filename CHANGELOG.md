@@ -183,6 +183,11 @@ commit-level history for each release is on its
 
 ### Fixed
 
+- PageBroker can reach an S3 store that runs in the cluster by its Service
+  name, such as a `storage.s3.endpoint` on `minio.minio.svc`. The agent pod
+  runs on the host network and resolved names through the node, which does not
+  know Service names, while the operator did resolve them. The agent pod now
+  uses cluster DNS, which forwards every other name.
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
