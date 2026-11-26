@@ -13,7 +13,7 @@ import (
 )
 
 // ParseSharedCredentials reads the [default] profile of a shared-credentials
-// file, the format PageBroker parses.
+// file.
 func ParseSharedCredentials(data []byte) (aws.Credentials, error) {
 	var credentials aws.Credentials
 	inDefault := false

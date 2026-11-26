@@ -3,7 +3,7 @@
 
 // Package storageprobe checks that a snapshot store can be used. It writes a
 // test object where snapshots live, reads it back, finds it in a listing and
-// deletes it: the four permissions a snapshot needs over its life.
+// deletes it.
 package storageprobe
 
 import (
@@ -25,8 +25,8 @@ const (
 
 var accessCheckPayload = []byte("snapshot storage access check\n")
 
-// Failure is a failed access check. Step names where it failed. Credentials
-// says the credentials are the cause, as opposed to the store or the network.
+// Failure is a failed access check. Step says where it failed. Credentials says
+// the credentials are the cause, not the store or the network.
 type Failure struct {
 	Step        string
 	Credentials bool
@@ -45,21 +45,21 @@ func (f *Failure) Unwrap() error { return f.Err }
 // Target is one store to check. Exactly one of PVC and S3 is set.
 type Target struct {
 	// ClusterID names the cluster in the test object, so two clusters that
-	// share a store never collide.
+	// share a store do not collide.
 	ClusterID string
 	PVC       *PVC
 	S3        *S3
 }
 
-// PVC is a claim the operator has mounted, and a directory in it.
+// PVC is a mounted claim and a directory in it.
 type PVC struct {
 	MountPath string
 	BasePath  string
 }
 
-// S3 is a bucket and how to reach it. Credentials holds a shared-credentials
-// file; empty selects the workload identity of the operator. CABundle holds
-// PEM certificates; empty selects system trust.
+// S3 is a bucket and how to reach it. Credentials is a shared-credentials file;
+// empty means the workload identity of the operator. CABundle is PEM
+// certificates; empty means system trust.
 type S3 struct {
 	Endpoint    string
 	Region      string

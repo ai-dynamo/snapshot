@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	// StorageClassProtectionFinalizer keeps a class while content still uses it.
+	// StorageClassProtectionFinalizer keeps a class while content uses it.
 	StorageClassProtectionFinalizer = "nvidia.com/snapshotstorageclass-protection"
 
 	ReasonStoreReachable         = "StoreReachable"
@@ -51,10 +51,10 @@ const (
 	classTerminatingRecheck   = 30 * time.Second
 )
 
-// SnapshotStorageClassReconciler tells whether each class names a store that
-// can be used: its location is valid and unique in the cluster, and a test
-// object can be written, read, listed and deleted there. It also keeps a class
-// from being deleted while content still uses it.
+// SnapshotStorageClassReconciler sets the store ID and the Ready condition of
+// each class. A class is Ready when its location is valid, no earlier class
+// names the same store, and a test object can be written, read, listed and
+// deleted there. A finalizer keeps a class while content uses it.
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotstorageclasses,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotstorageclasses/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotstorageclasses/finalizers,verbs=update
@@ -62,19 +62,18 @@ const (
 // +kubebuilder:rbac:groups="",resources=secrets;configmaps,verbs=get;list;watch
 type SnapshotStorageClassReconciler struct {
 	client.Client
-	// APIReader reads without a cache: credentials, CA bundles and content.
+	// APIReader reads without a cache.
 	APIReader client.Reader
 	Recorder  record.EventRecorder
 	Prober    storageprobe.Prober
 
-	// Namespace is the Snapshot namespace, where classes name their claims,
-	// Secrets and ConfigMaps.
+	// Namespace is the Snapshot namespace.
 	Namespace string
 	ClusterID string
-	// DefaultClassName is the one class reconciled while binding is off.
+	// DefaultClassName is the only class reconciled while binding is off.
 	DefaultClassName string
 	BindingEnabled   bool
-	// MountPath returns where the operator has mounted a claim.
+	// MountPath returns the mount path of a claim.
 	MountPath func(claimName string) (string, bool)
 
 	CheckInterval time.Duration
@@ -196,7 +195,7 @@ func (r *SnapshotStorageClassReconciler) setReady(ctx context.Context, class *sn
 	return r.Status().Patch(ctx, class, client.MergeFrom(base))
 }
 
-// checkStore runs the access check and returns the reason and message of a
+// checkStore runs the access check. It returns the reason and message of a
 // failure, or an empty reason when the store can be used.
 func (r *SnapshotStorageClassReconciler) checkStore(ctx context.Context,
 	class *snapshotv1alpha1.SnapshotStorageClass,
@@ -341,9 +340,9 @@ func (r *SnapshotStorageClassReconciler) reconcileDeletion(ctx context.Context,
 	return ctrl.Result{}, nil
 }
 
-// contentUsing counts content that names the class, or that has no class name
-// and carries its store ID. It reads the spec fields without a cache; the label
-// on the content can be edited and only serves queries.
+// contentUsing counts content that names the class, or that names no class and
+// carries its store ID. It reads the spec fields without a cache, not the
+// label.
 func (r *SnapshotStorageClassReconciler) contentUsing(ctx context.Context, className, storeID string) (int, error) {
 	contents := &snapshotv1alpha1.PodSnapshotContentList{}
 	if err := r.APIReader.List(ctx, contents); err != nil {
@@ -390,8 +389,8 @@ func (r *SnapshotStorageClassReconciler) classesWithTheSameStore(ctx context.Con
 	return requests
 }
 
-// classesOfContent names the classes a deleted content may have been holding
-// back from deletion.
+// classesOfContent returns the classes that a deleted content may have kept
+// from being deleted.
 func (r *SnapshotStorageClassReconciler) classesOfContent(ctx context.Context, obj client.Object) []reconcile.Request {
 	content, ok := obj.(*snapshotv1alpha1.PodSnapshotContent)
 	if !ok || content.Spec.Storage == nil {
@@ -494,7 +493,7 @@ func (r *SnapshotStorageClassReconciler) checkTimeout() time.Duration {
 	return defaultClassCheckTimeout
 }
 
-// classStoreID derives the store identity from a class's location fields.
+// classStoreID derives the store ID from the location fields of a class.
 func classStoreID(class *snapshotv1alpha1.SnapshotStorageClass, namespace string) (string, error) {
 	switch {
 	case class.Spec.PVC != nil && class.Spec.S3 == nil:
