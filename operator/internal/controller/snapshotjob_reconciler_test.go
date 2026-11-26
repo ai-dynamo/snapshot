@@ -921,3 +921,39 @@ func TestSnapshotJobCuInterposeInvalidSource(t *testing.T) {
 		})
 	}
 }
+
+func TestSnapshotJobReconcileStaleCachePreservesCompleted(t *testing.T) {
+	ctx := context.Background()
+	sj := minimalSnapshotJob()
+	sj.Status.SourceJobUID = types.UID("source-job-uid")
+	var stale *snapshotv1alpha1.SnapshotJob
+	serveStale := false
+	r := makeSnapshotJobReconcilerWithInterceptor(snapshotJobReconcilerScheme(), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if target, ok := obj.(*snapshotv1alpha1.SnapshotJob); ok && serveStale {
+				serveStale = false
+				stale.DeepCopyInto(target)
+				return nil
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}, sj)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(sj), sj))
+	stale = sj.DeepCopy()
+	setCondition(sj, snapshotv1alpha1.SnapshotJobConditionCompleted, metav1.ConditionTrue,
+		metav1.Now(), snapshotv1alpha1.ReasonJobCompleted, "source Job finished")
+	require.NoError(t, r.Status().Update(ctx, sj))
+
+	// The source Job has been cleaned up, but the informer still returns old status.
+	serveStale = true
+	_, err := r.Reconcile(ctx, reconcileRequest(sj))
+	require.True(t, apierrors.IsConflict(err), "stale status must not overwrite completion: %v", err)
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(sj), updated))
+	assert.True(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
+
+	// A retry observes the committed completion and accepts the absent source Job.
+	_, err = r.Reconcile(ctx, reconcileRequest(sj))
+	require.NoError(t, err)
+}

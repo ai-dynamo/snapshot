@@ -625,7 +625,7 @@ func (r *SnapshotJobReconciler) patchSnapshotJobStatus(ctx context.Context, sj *
 	}
 	updated := sj.DeepCopy()
 	updated.Status = desired
-	if err := r.Status().Patch(ctx, updated, client.MergeFrom(sj)); err != nil {
+	if err := r.Status().Patch(ctx, updated, client.MergeFromWithOptions(sj, client.MergeFromWithOptimisticLock{})); err != nil {
 		return fmt.Errorf("patch SnapshotJob status: %w", err)
 	}
 	return nil
