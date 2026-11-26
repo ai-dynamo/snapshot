@@ -115,9 +115,16 @@ type NodeController struct {
 
 	// restoreAttemptRecords holds, per restoreContainerKey, the
 	// podcontract.ContainerRetryStatus that records the attempts of a
-	// destination whose restore allows retries. It goes with the Pod, so a new
-	// Pod starts a new restore.
+	// destination whose restore allows retries, and attemptSeeds, per Pod UID,
+	// the *attemptSeed that copied the Pod's retry status annotation in. A
+	// record goes with the Pod, so a new Pod starts a new restore.
 	restoreAttemptRecords sync.Map
+	attemptSeeds          sync.Map
+	// retryStatusQueue holds the Pods whose retry status annotation lags
+	// their records, and retryStatusWritten, per Pod UID, the
+	// retryStatusDigest of the value the agent last wrote.
+	retryStatusQueue   workqueue.TypedRateLimitingInterface[retryStatusKey]
+	retryStatusWritten sync.Map
 
 	// contentIndexer is the PodSnapshotContent informer's indexer, indexed by source pod
 	// (podRefIndex). The source-pod informer uses it to map a pod event back to its work order.
@@ -298,6 +305,7 @@ func newDefaultController(
 			workqueue.DefaultTypedControllerRateLimiter[string](),
 			workqueue.TypedRateLimitingQueueConfig[string]{Name: "capture-contents"},
 		),
+		retryStatusQueue: newRetryStatusQueue(retryStatusRetryDelay),
 
 		restoreFn:                 executor.Restore,
 		writeControlSentinelFn:    snapshotruntime.WriteControlSentinel,
@@ -335,6 +343,7 @@ func (w *NodeController) RestoreWithoutProxy() {
 func (w *NodeController) Run(ctx context.Context) error {
 	defer w.restoreQueue.ShutDown()
 	defer w.captureQueue.ShutDown()
+	defer w.retryStatusQueue.ShutDown()
 	// Seed the agent logger onto ctx so the capture path resolves it via log.FromContext.
 	ctx = logr.NewContext(ctx, w.log)
 	w.log.Info("Starting snapshot node controller",
@@ -431,6 +440,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 		<-ctx.Done()
 		w.restoreQueue.ShutDown()
 		w.captureQueue.ShutDown()
+		w.retryStatusQueue.ShutDown()
 		stopOnce.Do(func() { close(w.stopCh) })
 	}()
 
@@ -440,6 +450,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 
 	go w.runRestoreQueue(ctx)
 	go w.runCaptureQueue(ctx)
+	go w.runRetryStatusQueue(ctx)
 	w.log.Info("PodSnapshot node controller started and caches synced")
 	<-ctx.Done()
 	stopOnce.Do(func() { close(w.stopCh) })
@@ -482,6 +493,8 @@ func (w *NodeController) forgetRestorePod(obj interface{}) {
 			return true
 		})
 	}
+	w.attemptSeeds.Delete(pod.UID)
+	w.retryStatusWritten.Delete(pod.UID)
 }
 
 // RestoreContainerStarted records a restore destination's container that the

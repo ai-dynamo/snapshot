@@ -142,7 +142,8 @@ func TestNewDefaultControllerSetsDefaultOperations(t *testing.T) {
 		testr.New(t),
 	)
 	t.Cleanup(w.restoreQueue.ShutDown)
-	if w.checkpointFn == nil || w.restoreFn == nil || w.writeControlSentinelFn == nil || w.writePodControlSentinelFn == nil || w.controlSentinelExistsFn == nil || w.sendSignalFn == nil || w.restoreQueue == nil {
+	t.Cleanup(w.retryStatusQueue.ShutDown)
+	if w.checkpointFn == nil || w.restoreFn == nil || w.writeControlSentinelFn == nil || w.writePodControlSentinelFn == nil || w.controlSentinelExistsFn == nil || w.sendSignalFn == nil || w.restoreQueue == nil || w.retryStatusQueue == nil {
 		t.Fatal("default controller operations must be initialized")
 	}
 	if w.compareFn == nil {
@@ -187,6 +188,7 @@ func makeTestController(t *testing.T, pod *corev1.Pod, apiObjects ...runtime.Obj
 		controlSentinelExistsFn:   func(int, string) (bool, error) { return false, nil },
 		sendSignalFn:              func(logr.Logger, int, syscall.Signal, string) error { return nil },
 		restoreQueue:              workqueue.NewTypedDelayingQueue[client.ObjectKey](),
+		retryStatusQueue:          newRetryStatusQueue(time.Millisecond),
 		compareFn:                 compat.Compare,
 		log:                       testr.New(t),
 		captureQueue:              newTestCaptureQueue(t),
@@ -196,6 +198,7 @@ func makeTestController(t *testing.T, pod *corev1.Pod, apiObjects ...runtime.Obj
 	w.nowFn = time.Now
 	w.requeueCaptureFn = w.captureQueue.AddAfter
 	t.Cleanup(w.restoreQueue.ShutDown)
+	t.Cleanup(w.retryStatusQueue.ShutDown)
 	return w
 }
 
