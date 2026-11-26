@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/sys/unix"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
@@ -370,10 +371,15 @@ func restoreTarCmd(bundleDir string, args ...string) (*exec.Cmd, error) {
 
 // ApplyRootfsDiff extracts rootfs-diff.tar into the target root.
 //
+// A file the target already has is left as it is, with one exception: the
+// regular files in referenced, container paths such as
+// criu.ReadReferencedPaths returns. CRIU reopens those by path and expects
+// the file it dumped, so the archive's copy replaces the target's.
+//
 // tar reads the archive one 1 MiB record at a time. On NFS that leaves one read
 // in flight per round trip, so prefetchRootfsDiff reads ahead in parallel and
 // tar finds the archive in the page cache.
-func ApplyRootfsDiff(checkpointPath, targetRoot, bundleDir string, log logr.Logger) error {
+func ApplyRootfsDiff(checkpointPath, targetRoot, bundleDir string, referenced []string, log logr.Logger) error {
 	rootfsDiffPath := filepath.Join(checkpointPath, rootfsDiffFilename)
 	archive, err := os.Open(rootfsDiffPath)
 	if os.IsNotExist(err) {
@@ -396,6 +402,7 @@ func ApplyRootfsDiff(checkpointPath, targetRoot, bundleDir string, log logr.Logg
 	// --skip-old-files: silently skip files that already exist in the restore target.
 	// The rootfs diff only contains overlay upperdir changes (runtime-generated files
 	// like triton caches, tmp files) — base image files should not be overwritten.
+	// replaceSkippedFiles makes the exception for files CRIU reopens.
 	// --numeric-owner: the restored processes hold the checkpoint's numeric ids;
 	// re-resolving the archived names through the placeholder's passwd database
 	// would remap them.
@@ -405,21 +412,133 @@ func ApplyRootfsDiff(checkpointPath, targetRoot, bundleDir string, log logr.Logg
 	// which can fail the restore on an SELinux node, and the trusted.overlay.*
 	// markers carried by archives captured before they were excluded.
 	log.Info("Applying rootfs diff", "target", targetRoot, "bytes", info.Size())
-	cmd, err := restoreTarCmd(bundleDir,
+	// Listed before the extraction, which creates every file it does not skip.
+	skipped := existingRegularFiles(targetRoot, referenced, pathMountID)
+	prefetchRootfsDiff(archive, info.Size())
+	if err := extractRootfsDiff(bundleDir, targetRoot, rootfsDiffPath, nil, "--skip-old-files"); err != nil {
+		return fmt.Errorf("tar extract failed: %w", err)
+	}
+	return replaceSkippedFiles(bundleDir, targetRoot, rootfsDiffPath, skipped, log)
+}
+
+// extractRootfsDiff runs the bundled tar over the archive with the flags every
+// extraction shares, then extra. members, when set, is tar's member list.
+func extractRootfsDiff(bundleDir, targetRoot, rootfsDiffPath string, members io.Reader, extra ...string) error {
+	args := append([]string{
 		"--xattrs", "--xattrs-include=user.*", "--xattrs-include=security.capability",
-		"--numeric-owner", "--skip-old-files", "--blocking-factor=2048",
-		"-C", targetRoot, "-xf", rootfsDiffPath)
+		"--numeric-owner", "--blocking-factor=2048",
+		"-C", targetRoot, "-xf", rootfsDiffPath,
+	}, extra...)
+	cmd, err := restoreTarCmd(bundleDir, args...)
 	if err != nil {
 		return err
 	}
+	cmd.Stdin = members
 	// tar prefixes its messages with the path it was invoked by.
 	output := NewProcessOutput(os.Stderr, filepath.Join(bundleDir, nsmount.BundleTar)+":")
 	output.Attach(cmd)
-	prefetchRootfsDiff(archive, info.Size())
 	if err := cmd.Run(); err != nil {
-		return WithDetail(fmt.Errorf("tar extract failed: %w", err), output.Detail())
+		return WithDetail(err, output.Detail())
 	}
 	return nil
+}
+
+// existingRegularFiles returns the paths that are regular files already, on
+// the mount root itself is on, relative to root. A file on another mount is
+// the target's own: a volume, or a file the runtime bound there. It is left
+// out, as is a path that cannot be inspected.
+func existingRegularFiles(root string, paths []string, mountID func(path string) (uint64, error)) []string {
+	rootMount, err := mountID(root)
+	if err != nil {
+		return nil
+	}
+	var existing []string
+	for _, p := range paths {
+		p = filepath.Clean(p)
+		if !filepath.IsAbs(p) || p == "/" {
+			continue
+		}
+		full := filepath.Join(root, p)
+		if info, err := os.Lstat(full); err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if id, err := mountID(full); err != nil || id != rootMount {
+			continue
+		}
+		existing = append(existing, strings.TrimPrefix(p, "/"))
+	}
+	return existing
+}
+
+// pathMountID returns the ID of the mount that path is on.
+func pathMountID(path string) (uint64, error) {
+	var stat unix.Statx_t
+	if err := unix.Statx(unix.AT_FDCWD, path, unix.AT_SYMLINK_NOFOLLOW, unix.STATX_MNT_ID, &stat); err != nil {
+		return 0, fmt.Errorf("statx %s: %w", path, err)
+	}
+	if stat.Mask&unix.STATX_MNT_ID == 0 {
+		return 0, fmt.Errorf("statx %s: the kernel reports no mount ID", path)
+	}
+	return stat.Mnt_id, nil
+}
+
+// replaceSkippedFiles extracts, over the files the first extraction skipped,
+// the ones the archive holds as regular files. tar unlinks the target's file
+// and creates the archive's, so nothing is written through the old one.
+//
+// When the archive cannot be listed nothing is replaced, which is what the
+// first extraction alone did.
+func replaceSkippedFiles(bundleDir, targetRoot, rootfsDiffPath string, skipped []string, log logr.Logger) error {
+	if len(skipped) == 0 {
+		return nil
+	}
+	members, err := archivedRegularFiles(rootfsDiffPath, skipped)
+	if err != nil {
+		log.Error(err, "Cannot list the rootfs diff; files the target already has stay as they are")
+		return nil
+	}
+	if len(members) == 0 {
+		return nil
+	}
+	list := strings.NewReader(strings.Join(members, "\x00") + "\x00")
+	if err := extractRootfsDiff(bundleDir, targetRoot, rootfsDiffPath, list,
+		"--null", "--verbatim-files-from", "--no-recursion", "-T", "-"); err != nil {
+		return fmt.Errorf("tar extract of files the snapshot's processes hold open failed: %w", err)
+	}
+	log.Info("Replaced existing files with the snapshot's copies, which its processes hold open",
+		"count", len(members), "paths", members[:min(len(members), 20)])
+	return nil
+}
+
+// archivedRegularFiles returns the names, as the archive spells them, of its
+// regular-file members among paths, which are relative to the archive's root.
+func archivedRegularFiles(archivePath string, paths []string) ([]string, error) {
+	wanted := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		wanted[p] = struct{}{}
+	}
+	archive, err := os.Open(archivePath)
+	if err != nil {
+		return nil, fmt.Errorf("open rootfs diff: %w", err)
+	}
+	defer archive.Close()
+	reader := tar.NewReader(archive)
+	var names []string
+	for {
+		header, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			return names, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read rootfs diff members: %w", err)
+		}
+		if header.Typeflag != tar.TypeReg {
+			continue
+		}
+		if _, ok := wanted[strings.TrimPrefix(header.Name, "./")]; ok {
+			names = append(names, header.Name)
+		}
+	}
 }
 
 // On NFS, four 4 MiB readers bring a cold 3.4 GB archive in as fast as tar

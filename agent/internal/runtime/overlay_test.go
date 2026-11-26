@@ -4,6 +4,7 @@
 package runtime
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -287,7 +288,7 @@ func TestCaptureRootfsDiff(t *testing.T) {
 		}
 
 		targetRoot := t.TempDir()
-		if err := ApplyRootfsDiff(checkpointDir, targetRoot, testBundle(t), testr.New(t)); err != nil {
+		if err := ApplyRootfsDiff(checkpointDir, targetRoot, testBundle(t), nil, testr.New(t)); err != nil {
 			t.Fatalf("ApplyRootfsDiff: %v", err)
 		}
 		data, err := os.ReadFile(filepath.Join(targetRoot, "generated.txt"))
@@ -367,7 +368,7 @@ func TestCaptureRootfsDiff(t *testing.T) {
 		}
 
 		targetRoot := t.TempDir()
-		if err := ApplyRootfsDiff(checkpointDir, targetRoot, testBundle(t), testr.New(t)); err != nil {
+		if err := ApplyRootfsDiff(checkpointDir, targetRoot, testBundle(t), nil, testr.New(t)); err != nil {
 			t.Fatalf("ApplyRootfsDiff: %v", err)
 		}
 		for rel, want := range map[string]string{
@@ -415,7 +416,7 @@ func TestCaptureRootfsDiff(t *testing.T) {
 			t.Errorf("Kept = %q, want %q", diff.Kept, want)
 		}
 		targetRoot := t.TempDir()
-		if err := ApplyRootfsDiff(checkpointDir, targetRoot, testBundle(t), testr.New(t)); err != nil {
+		if err := ApplyRootfsDiff(checkpointDir, targetRoot, testBundle(t), nil, testr.New(t)); err != nil {
 			t.Fatalf("ApplyRootfsDiff: %v", err)
 		}
 		for rel, want := range map[string]string{"needed.txt": "kept", "other\nneeded.txt": "archived"} {
@@ -523,7 +524,7 @@ func TestApplyRootfsDiff(t *testing.T) {
 			t.Fatalf("write corrupt rootfs diff: %v", err)
 		}
 		bundle := testBundle(t)
-		err := ApplyRootfsDiff(checkpointDir, t.TempDir(), bundle, testr.New(t))
+		err := ApplyRootfsDiff(checkpointDir, t.TempDir(), bundle, nil, testr.New(t))
 		if err == nil || !strings.Contains(err.Error(), "tar extract failed: exit status") {
 			t.Fatalf("ApplyRootfsDiff(corrupt) = %v, want the exit status", err)
 		}
@@ -533,7 +534,7 @@ func TestApplyRootfsDiff(t *testing.T) {
 	})
 
 	t.Run("missing archive is no-op", func(t *testing.T) {
-		if err := ApplyRootfsDiff(t.TempDir(), t.TempDir(), testBundle(t), testr.New(t)); err != nil {
+		if err := ApplyRootfsDiff(t.TempDir(), t.TempDir(), testBundle(t), nil, testr.New(t)); err != nil {
 			t.Fatalf("ApplyRootfsDiff: %v", err)
 		}
 	})
@@ -543,7 +544,7 @@ func TestApplyRootfsDiff(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(checkpointDir, rootfsDiffFilename), nil, 0644); err != nil {
 			t.Fatalf("write empty rootfs diff: %v", err)
 		}
-		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testBundle(t), testr.New(t)); err != nil {
+		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testBundle(t), nil, testr.New(t)); err != nil {
 			t.Fatalf("ApplyRootfsDiff: %v", err)
 		}
 	})
@@ -553,7 +554,7 @@ func TestApplyRootfsDiff(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(checkpointDir, rootfsDiffFilename), []byte("not a tar archive"), 0644); err != nil {
 			t.Fatalf("write invalid rootfs diff: %v", err)
 		}
-		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testBundle(t), testr.New(t)); err == nil {
+		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testBundle(t), nil, testr.New(t)); err == nil {
 			t.Fatal("ApplyRootfsDiff should fail for invalid non-empty archive")
 		}
 	})
@@ -566,8 +567,196 @@ func TestApplyRootfsDiff(t *testing.T) {
 			t.Fatalf("create temp file: %v", err)
 		}
 		f.Close()
-		if err := ApplyRootfsDiff(f.Name(), t.TempDir(), testBundle(t), testr.New(t)); err == nil {
+		if err := ApplyRootfsDiff(f.Name(), t.TempDir(), testBundle(t), nil, testr.New(t)); err == nil {
 			t.Fatal("ApplyRootfsDiff should propagate non-ENOENT stat error")
+		}
+	})
+}
+
+// A file the restore target already has, such as one from the image, keeps the
+// target's content. The exception is a file the snapshot's processes hold
+// open: CRIU reopens it by path and refuses a file of another size.
+func TestApplyRootfsDiffReplacesReferencedFiles(t *testing.T) {
+	const fromImage = "from the image\n"
+	const changed = "from the image\nchanged by the workload\n"
+	const created = "created by the workload\n"
+
+	upperDir := t.TempDir()
+	checkpointDir := t.TempDir()
+	targetRoot := t.TempDir()
+	// The upperdir holds two image files the workload changed and one it created.
+	writeUpperFile(t, upperDir, "etc/legal", changed)
+	writeUpperFile(t, upperDir, "etc/issue", changed)
+	writeUpperFile(t, upperDir, "etc/created", created)
+	// The restore target starts from the image.
+	writeUpperFile(t, targetRoot, "etc/legal", fromImage)
+	writeUpperFile(t, targetRoot, "etc/issue", fromImage)
+	writeUpperFile(t, targetRoot, "usr/lib/libc.so", fromImage)
+
+	if _, err := CaptureRootfsDiff(upperDir, checkpointDir, RootfsDiffOptions{}); err != nil {
+		t.Fatalf("CaptureRootfsDiff: %v", err)
+	}
+	// The dump references the changed file it holds open, a library and a
+	// directory the rootfs diff has no file for, and the file it created.
+	referenced := []string{"/etc/legal", "/usr/lib/libc.so", "/etc", "/etc/created"}
+	if err := ApplyRootfsDiff(checkpointDir, targetRoot, testBundle(t), referenced, testr.New(t)); err != nil {
+		t.Fatalf("ApplyRootfsDiff: %v", err)
+	}
+
+	for _, tc := range []struct{ rel, want, why string }{
+		{"etc/legal", changed, "a referenced file is the one the snapshot holds open"},
+		{"etc/issue", fromImage, "an unreferenced file stays the target's"},
+		{"etc/created", created, "a file the target lacks is extracted"},
+		{"usr/lib/libc.so", fromImage, "a referenced file the rootfs diff lacks is untouched"},
+	} {
+		got, err := os.ReadFile(filepath.Join(targetRoot, tc.rel))
+		if err != nil {
+			t.Fatalf("read %s: %v", tc.rel, err)
+		}
+		if string(got) != tc.want {
+			t.Errorf("%s = %q, want %q: %s", tc.rel, got, tc.want, tc.why)
+		}
+	}
+}
+
+// A file on another mount than the target's root is the target's own, such as
+// a volume or a file the runtime bound there, and is never replaced.
+func TestExistingRegularFilesStaysOnTheRootMount(t *testing.T) {
+	root := t.TempDir()
+	for _, rel := range []string{"etc/legal", "etc/hosts", "models/weights", "srv/unreadable"} {
+		writeUpperFile(t, root, rel, "the target's\n")
+	}
+	if err := os.Symlink("legal", filepath.Join(root, "etc/link")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	const rootMount, volumeMount = 21, 34
+	mountID := func(path string) (uint64, error) {
+		switch path {
+		case filepath.Join(root, "etc/hosts"), filepath.Join(root, "models/weights"):
+			return volumeMount, nil
+		case filepath.Join(root, "srv/unreadable"):
+			return 0, errors.New("statx failed")
+		}
+		return rootMount, nil
+	}
+
+	got := existingRegularFiles(root, []string{
+		"/etc/legal",      // a file on the root mount
+		"/etc/hosts",      // a file the runtime bound there
+		"/models/weights", // a file on a volume
+		"/srv/unreadable", // a mount that cannot be told
+		"/etc/link",       // a symlink
+		"/etc",            // a directory
+		"/etc/missing",    // not in the target
+		"relative",
+		"/",
+	}, mountID)
+	if want := []string{"etc/legal"}; !slices.Equal(got, want) {
+		t.Fatalf("existingRegularFiles() = %v, want %v", got, want)
+	}
+
+	// The real lookup agrees for files that share the root's mount.
+	got = existingRegularFiles(root, []string{"/etc/legal", "/models/weights"}, pathMountID)
+	if want := []string{"etc/legal", "models/weights"}; !slices.Equal(got, want) {
+		t.Fatalf("existingRegularFiles() with statx = %v, want %v", got, want)
+	}
+}
+
+// pathMountID is what keeps a volume's files out of existingRegularFiles, so
+// it is checked against a real mount where the test may make one.
+func TestPathMountIDDiffersAcrossMounts(t *testing.T) {
+	root := t.TempDir()
+	volume := filepath.Join(root, "models")
+	if err := os.Mkdir(volume, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := unix.Mount("tmpfs", volume, "tmpfs", 0, ""); err != nil {
+		t.Skipf("mounting a tmpfs needs privileges: %v", err)
+	}
+	t.Cleanup(func() { _ = unix.Unmount(volume, unix.MNT_DETACH) })
+	writeUpperFile(t, root, "etc/legal", "the target's\n")
+	writeUpperFile(t, root, "models/weights", "the volume's\n")
+
+	got := existingRegularFiles(root, []string{"/etc/legal", "/models/weights"}, pathMountID)
+	if want := []string{"etc/legal"}; !slices.Equal(got, want) {
+		t.Fatalf("existingRegularFiles() = %v, want %v", got, want)
+	}
+}
+
+func TestReplaceSkippedFiles(t *testing.T) {
+	const target = "the target's\n"
+	const archived = "the snapshot's\n"
+
+	setup := func(t *testing.T) (targetRoot, rootfsDiffPath string) {
+		t.Helper()
+		upperDir := t.TempDir()
+		checkpointDir := t.TempDir()
+		targetRoot = t.TempDir()
+		for _, rel := range []string{"etc/legal", "etc/issue"} {
+			writeUpperFile(t, upperDir, rel, archived)
+			writeUpperFile(t, targetRoot, rel, target)
+		}
+		if _, err := CaptureRootfsDiff(upperDir, checkpointDir, RootfsDiffOptions{}); err != nil {
+			t.Fatalf("CaptureRootfsDiff: %v", err)
+		}
+		return targetRoot, filepath.Join(checkpointDir, rootfsDiffFilename)
+	}
+	read := func(t *testing.T, targetRoot, rel string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(targetRoot, rel))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		return string(data)
+	}
+
+	t.Run("only the skipped files are replaced", func(t *testing.T) {
+		targetRoot, rootfsDiffPath := setup(t)
+
+		err := replaceSkippedFiles(testBundle(t), targetRoot, rootfsDiffPath, []string{"etc/legal"}, testr.New(t))
+		if err != nil {
+			t.Fatalf("replaceSkippedFiles: %v", err)
+		}
+		if got := read(t, targetRoot, "etc/legal"); got != archived {
+			t.Errorf("etc/legal = %q, want %q", got, archived)
+		}
+		if got := read(t, targetRoot, "etc/issue"); got != target {
+			t.Errorf("etc/issue = %q, want %q", got, target)
+		}
+	})
+
+	t.Run("a directory member does not replace a file", func(t *testing.T) {
+		targetRoot, rootfsDiffPath := setup(t)
+		// The archive holds etc as a directory; the target has a file there.
+		if err := os.RemoveAll(filepath.Join(targetRoot, "etc")); err != nil {
+			t.Fatalf("remove etc: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(targetRoot, "etc"), []byte(target), 0o644); err != nil {
+			t.Fatalf("write etc: %v", err)
+		}
+
+		err := replaceSkippedFiles(testBundle(t), targetRoot, rootfsDiffPath, []string{"etc"}, testr.New(t))
+		if err != nil {
+			t.Fatalf("replaceSkippedFiles: %v", err)
+		}
+		if got := read(t, targetRoot, "etc"); got != target {
+			t.Errorf("etc = %q, want %q", got, target)
+		}
+	})
+
+	t.Run("an archive that cannot be listed replaces nothing", func(t *testing.T) {
+		targetRoot, _ := setup(t)
+		notAnArchive := filepath.Join(t.TempDir(), rootfsDiffFilename)
+		if err := os.WriteFile(notAnArchive, bytes.Repeat([]byte("not a tar archive "), 64), 0o644); err != nil {
+			t.Fatalf("write archive: %v", err)
+		}
+
+		err := replaceSkippedFiles(testBundle(t), targetRoot, notAnArchive, []string{"etc/legal"}, testr.New(t))
+		if err != nil {
+			t.Fatalf("replaceSkippedFiles: %v", err)
+		}
+		if got := read(t, targetRoot, "etc/legal"); got != target {
+			t.Errorf("etc/legal = %q, want %q", got, target)
 		}
 	})
 }
@@ -774,7 +963,7 @@ func TestRootfsDiffPreservesCapabilities(t *testing.T) {
 	if _, err := CaptureRootfsDiff(upperDir, checkpointDir, RootfsDiffOptions{}); err != nil {
 		t.Fatalf("CaptureRootfsDiff: %v", err)
 	}
-	if err := ApplyRootfsDiff(checkpointDir, targetRoot, testBundle(t), testr.New(t)); err != nil {
+	if err := ApplyRootfsDiff(checkpointDir, targetRoot, testBundle(t), nil, testr.New(t)); err != nil {
 		t.Fatalf("ApplyRootfsDiff: %v", err)
 	}
 

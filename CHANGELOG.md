@@ -180,6 +180,13 @@ commit-level history for each release is on its
   namespace rather than the restore container's (#593), so lookups by PID,
   such as UCX shared-memory endpoints (#802), work after a restore. Only
   checkpoints taken after the upgrade get it; take older ones again.
+- Restore semantics: a restore replaces a file in the destination container
+  with the snapshot's copy when a checkpointed process holds that file open or
+  mapped. Before, a workload that changed such a file from its image failed
+  every restore in CRIU, with `File <path> has bad size` in the agent log.
+  Other changes to files that the destination container already has are still
+  not restored. See
+  [Limitations and Known Issues](docs/overview/limitations.md).
 
 ### Fixed
 
