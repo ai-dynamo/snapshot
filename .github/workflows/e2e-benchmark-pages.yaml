@@ -229,6 +229,41 @@ jobs:
           ref: main
           persist-credentials: false
 
+      # The results of a scheduled main run reach the history branch through
+      # the E2E Benchmark History workflow, which the same workflow_run event
+      # starts at the same moment as this one. Without the wait this job
+      # fetches the branch a few seconds before that commit lands, and the
+      # site shows the previous night until the next deployment. The condition
+      # is the history publisher's own, so the wait runs only when a commit is
+      # coming. A publisher that fails costs the full wait and nothing else.
+      - name: Wait for the scheduled run's history commit
+        if: >-
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.event == 'schedule' &&
+          github.event.workflow_run.head_branch == 'main' &&
+          github.event.workflow_run.conclusion != 'cancelled'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          set -euo pipefail
+          # Must match the commit message in e2e-frameworks-history.yaml
+          # (test_pages_workflow_waits_for_the_scheduled_run_history_commit).
+          subject="data(e2e): record benchmark run ${SOURCE_RUN_ID}-${SOURCE_RUN_ATTEMPT}"
+          for attempt in $(seq 1 30); do
+            # Read into a variable first: with pipefail, grep leaving a pipe
+            # early can fail the pipeline on a match.
+            messages="$(gh api "repos/${GITHUB_REPOSITORY}/commits?sha=e2e-benchmark-history&per_page=10" \
+              --jq '.[].commit.message' 2>/dev/null || true)"
+            if grep -Fxq "${subject}" <<<"${messages}"; then
+              echo "The history branch holds run ${SOURCE_RUN_ID}-${SOURCE_RUN_ATTEMPT} (check ${attempt})."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::warning::The history branch has no commit for run ${SOURCE_RUN_ID}-${SOURCE_RUN_ATTEMPT} after 150 seconds; deploying without its results."
+
       - name: Fetch benchmark history
         id: history
         uses: ./.github/actions/fetch-benchmark-history
