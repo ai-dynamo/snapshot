@@ -1333,8 +1333,10 @@ def test_orphan_sweep_reclaims_uid_root(
     try:
         _, source_node = create_ready_source(config, run, gpu=False)
         orphan_uid = f"e2e-orphan-{run.suffix}"
+        # The helper fails unless the file was written. The root is not looked
+        # up again before the wait: the sweep runs every few seconds here and
+        # can already have reclaimed it.
         snap.create_artifact_staging_file(config, source_node, orphan_uid)
-        assert snap.artifact_root_exists(config, source_node, orphan_uid)
         snap.wait_for_artifact_root_absent(
             config, source_node, orphan_uid, timeout=60
         )

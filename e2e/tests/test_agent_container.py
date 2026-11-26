@@ -41,6 +41,8 @@ def test_agent_pod_exec_names_the_agent_container(monkeypatch, call):
 
     def exec_command(namespace, pod, command, *, container=None):
         calls.append((namespace, pod, container))
+        if lifecycle.ARTIFACT_STAGING_FILE_CREATED in command:
+            return lifecycle.ARTIFACT_STAGING_FILE_CREATED
         return f"{k8s.PAYLOAD_MARKER}\n"
 
     monkeypatch.setattr(lifecycle, "checkpoint_agent_pod", lambda *_: "agent-pod")
@@ -119,3 +121,31 @@ def test_the_agent_pod_really_has_more_than_one_container():
     constraint the cluster no longer has.
     """
     assert len(daemonset_container_names()) > 1
+
+
+def test_staging_file_creation_is_confirmed_by_the_exec_that_writes_it(monkeypatch):
+    commands = []
+
+    def exec_command(namespace, pod, command, *, container=None):
+        commands.append(command)
+        return f"login banner\n{lifecycle.ARTIFACT_STAGING_FILE_CREATED}"
+
+    monkeypatch.setattr(lifecycle, "checkpoint_agent_pod", lambda *_: "agent-pod")
+    monkeypatch.setattr(k8s, "exec_command", exec_command)
+
+    lifecycle.create_artifact_staging_file(CONFIG, "node", "uid")
+
+    assert commands == [
+        "mkdir -p /checkpoints/artifacts/uid/.tmp && "
+        "printf orphan > /checkpoints/artifacts/uid/.tmp/partial && "
+        f"printf '%s' {lifecycle.ARTIFACT_STAGING_FILE_CREATED}"
+    ]
+
+
+def test_staging_file_that_was_not_written_fails_the_caller(monkeypatch):
+    refused = "bash: line 1: /checkpoints/artifacts/uid/.tmp/partial: Read-only file system"
+    monkeypatch.setattr(lifecycle, "checkpoint_agent_pod", lambda *_: "agent-pod")
+    monkeypatch.setattr(k8s, "exec_command", lambda *args, **kwargs: refused)
+
+    with pytest.raises(AssertionError, match="was not created"):
+        lifecycle.create_artifact_staging_file(CONFIG, "node", "uid")
