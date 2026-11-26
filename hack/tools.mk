@@ -66,7 +66,22 @@ $(HELM):
 	curl -fsSL --retry 3 --retry-connrefused https://get.helm.sh/helm-$(HELM_VERSION)-$(SYSTEM_NAME)-$(SYSTEM_ARCH).tar.gz \
 	  | tar -xzf - -C $(TOOLS_BIN_DIR) --strip-components=1 $(SYSTEM_NAME)-$(SYSTEM_ARCH)/helm
 
-$(PROTOC):
+# The protoc release pinned below is the linux/amd64 build. On a host that
+# cannot run it, stop before downloading it. A host passes when it is
+# linux/amd64, when it has that platform's program loader, as a host that
+# emulates linux/amd64 does, or when a protoc of the pinned version is already
+# installed. The prerequisite is order-only, so it runs on every invocation
+# without reinstalling protoc.
+.PHONY: require-protoc-host
+require-protoc-host:
+	@test "$(SYSTEM_NAME)/$(SYSTEM_ARCH)" = linux/amd64 || \
+	  test -e /lib64/ld-linux-x86-64.so.2 || \
+	  test "$$($(PROTOC) --version 2>/dev/null)" = "libprotoc $(PROTOC_VERSION)" || { \
+	  echo "ERROR: the pinned protoc is downloaded for linux/amd64 only, and this host is $(SYSTEM_NAME)/$(SYSTEM_ARCH)." >&2; \
+	  echo "Let CI run 'make check', or install protoc $(PROTOC_VERSION) for this host at $(PROTOC)." >&2; \
+	  exit 1; }
+
+$(PROTOC): | require-protoc-host
 	@set -e; mkdir -p $(TOOLS_BIN_DIR); tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
 	 curl -fsSL --retry 3 --connect-timeout 10 --max-time 120 https://github.com/protocolbuffers/protobuf/releases/download/v$(PROTOC_RELEASE)/protoc-$(PROTOC_RELEASE)-linux-x86_64.zip -o "$$tmp/protoc.zip"; \
  echo '3a4c1e5f2516c639d3079b1586e703fc7bcfa2136d58bda24d1d54f949c315e8  '"$$tmp/protoc.zip" | sha256sum -c -; \
