@@ -69,7 +69,8 @@ storage CRD" was to add a reference beside it. This proposal is that CRD.
   mounted on the operator and every agent.
 - Moving snapshots between stores.
 - Restoring in one cluster a snapshot taken in another. A shared store only keeps the clusters'
-  snapshots side by side; `.origin` and `Retain` leave room for it.
+  snapshots side by side; `.origin` and `Retain` leave room for it, and
+  [SNEP-740](../740-shared-snapshot/README.md) takes it on.
 - Several layers for one content, with reads falling back from the fastest to the slowest. The
   `SnapshotStore` names the one authoritative location; the binding and the PageBroker protocol
   leave room for layers.
@@ -85,7 +86,10 @@ describes storage that already exists and provisions nothing. One object is one 
 cluster never holds two objects for the same location.
 
 **Registering a store.** The administrator creates the PVC or bucket, puts any credentials in a
-Secret in the Snapshot namespace, and creates a `SnapshotStore`. The operator computes the
+Secret in the Snapshot namespace, and creates a `SnapshotStore`. The Snapshot namespace is the
+namespace the operator and the agents run in, the Helm release namespace. A `SnapshotStore` is
+cluster-scoped, so a second installation in the same cluster resolves the same object's claim and
+Secret in its own namespace. The operator computes the
 `storeID`, refuses a location another store in the cluster already holds, and sets `Ready` once it
 can write, read, list and delete a test object at the location; that is the access check. Every
 store, Ready or not, re-validates when its Secret or ConfigMap changes and periodically, so a Ready
@@ -147,7 +151,7 @@ overwrites a store. The default moves by changing the value; bound content keeps
 
 #### SnapshotStore
 
-A new cluster-scoped kind in `snapshot.nvidia.com/v1alpha1`. Exactly one store block is set, `pvc`
+A new cluster-scoped kind in `nvidia.com/v1alpha1`. Exactly one store block is set, `pvc`
 or `s3`, and the block that is set names the kind of store. Its location fields are the `storeID`
 inputs defined in `../../../api/storage`; they are immutable through CEL transition rules, and a
 store cannot move from one block to the other. `reclaimPolicy`, credentials and TLS settings stay
@@ -174,9 +178,10 @@ type SnapshotStoreSpec struct {
     S3  *S3StoreSpec  `json:"s3,omitempty"`
 }
 
-// A claim in the Snapshot namespace that the chart already mounts. An absent
-// and an empty basePath or prefix compare as equal, so an update that drops
-// the empty field is not taken for a location change.
+// A claim in the namespace Snapshot is installed in. It must be mounted into
+// the operator and every node agent. An absent and an empty basePath or prefix
+// compare as equal, so an update that drops the empty field is not taken for a
+// location change.
 // +kubebuilder:validation:XValidation:rule="self.claimName == oldSelf.claimName && self.?basePath.orValue('') == oldSelf.?basePath.orValue('')",message="claimName and basePath are immutable"
 // +kubebuilder:validation:XValidation:rule="!has(self.basePath) || !self.basePath.split('/').exists(p, p == 'artifacts' || p == '..')",message="basePath must not contain an artifacts or .. segment"
 type PVCStoreSpec struct {
@@ -289,8 +294,9 @@ snapshots. Between clusters a location may be shared.
 - **Digest.** Another store in the cluster with the same `storeID` is `DuplicateStore`. The scan
   reads the `SnapshotStore` informer cache and compares only immutable location fields. Adding or
   deleting a store re-reconciles every store with the same digest, so a stale cache can only delay a
-  refusal, never make one permanent. The later store by `creationTimestamp`, ties by name, is
-  refused, so two stores created at once get the same answer in any reconcile order. Bindings play
+  refusal, never make one permanent. The later store by `creationTimestamp` is refused; a tie,
+  possible because the timestamp has second precision, is won by the configured default store, then
+  by name. So two stores created at once get the same answer in any reconcile order. Bindings play
   no part in the decision: a store refused as `DuplicateStore` takes no new bindings, and the
   content it already has keeps its backend; see [Maintenance](#maintenance).
 - **Access.** Before `Ready`, the operator writes a test object at the location, reads it back,
@@ -481,7 +487,7 @@ storage:
   # the values below when the cluster has no store.
   defaultStoreName: default
   pvc:
-    # Claims that PVC stores may use, in the release namespace.
+    # Claims that PVC stores may use, in the Snapshot namespace.
     claimNames: []
 ```
 
@@ -499,7 +505,7 @@ paths. A store on `storage.pvc.name` must use the whole claim; see
 once it is removed `/checkpoints` holds only the listed claims' mounts. The chart writes the same
 name-to-path mapping into the agent's `config.yaml` and the names into the operator's
 `--pvc-claim-names` flag, so a store's `claimName` always resolves to the directory that was
-mounted. The claims must already exist in the release namespace and be mountable on every agent
+mounted. The claims must already exist in the Snapshot namespace and be mountable on every agent
 node. On install and upgrade the chart looks up each listed claim and fails when one does not exist
 or is not bound, so a wrong name is an error message and not a pod that cannot start; a dry run,
 which cannot look claims up, skips the check. The list is the whole set, so an upgrade repeats the
@@ -512,7 +518,7 @@ storage:
       - team-a-snapshots   # /checkpoints/team-a-snapshots
       - team-b-snapshots   # /checkpoints/team-b-snapshots
 ---
-apiVersion: snapshot.nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1alpha1
 kind: SnapshotStore
 metadata:
   name: team-b
@@ -565,8 +571,8 @@ run with the previous values:
    bound `PodSnapshotContent`.
 2. Existing content is not rewritten. Content that has a `storeID` but no store name is matched to a
    store by digest whenever it is used, and it protects that store from deletion. That store is
-   `default`: it is created before any other store can exist, so it is the oldest store with its
-   digest and is never the one refused as `DuplicateStore`. Content matching none keeps SNEP-237's [`StoreInactive` handling](../237-s3-storage/README.md#limitations-risks-and-mitigations).
+   `default`: it is created before any other store can exist, and a tie on `creationTimestamp` goes
+   to the default, so it is never the one refused as `DuplicateStore`. Content matching none keeps SNEP-237's [`StoreInactive` handling](../237-s3-storage/README.md#limitations-risks-and-mitigations).
 3. Content with no `spec.storage`, bound before SNEP-237, keeps the legacy path-addressed flow and
    is never assigned a store.
 4. `PodSnapshot`s and `SnapshotJob`s without `snapshotStoreName` resolve to the default store.
@@ -647,7 +653,9 @@ other stores are not touched.
 ### Graduation Criteria
 
 - **Alpha:** CRD and fields as above; PVC and S3 stores; default store from the chart's values;
-  protection finalizer; `Retain`; shared stores; PVC mount limitation documented.
+  protection finalizer; `Retain`; shared stores; PVC mount limitation documented. Alpha needs store
+  binding in the operator and artifact addressing in PageBroker turned on, both off by default; see
+  [Configuration](#configuration). Turning them on by default is planned with their removal.
 
 ## Alternatives
 
