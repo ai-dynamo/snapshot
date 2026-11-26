@@ -12,11 +12,11 @@ lifecycle: reach a state that is safe to checkpoint, signal when it does, and
 resume correctly once restored. That cooperation, not any particular image,
 is the requirement. This page defines it.
 
-The framework pages in [Using Snapshot](../using-snapshot/README.md) package workloads as a self-contained
-custom image. Other packaging methods work too, for example mounting the
-entrypoint into a stock image and overriding the command, as long as the
-container's entrypoint satisfies this contract; see
-[Packaging Methods](#packaging-methods).
+The framework pages in [Using Snapshot](../using-snapshot/README.md) run the
+framework's runtime image unmodified. They mount the entrypoint from a ConfigMap
+and set it as the command. Other packaging methods work too, for example a
+custom image that includes the entrypoint. The container's entrypoint must
+satisfy this contract; see [Packaging Methods](#packaging-methods).
 
 A snapshot-ready workload has two parts:
 
@@ -259,10 +259,9 @@ are complete examples of both.
 ## Runtime Compatibility
 
 CRIU restores a process only if everything in it is checkpointable, so the
-workload's *environment*, not just its logic, has to cooperate. In the
-reference images this is why the build starts from the framework's tested runtime
-image and sets a few environment variables. A packaging method that skips the
-custom image still has to meet these:
+workload's *environment*, not just its logic, has to cooperate. The framework
+recipes meet this with the framework's tested runtime image and a few
+environment variables. Every packaging method has to meet these:
 
 - **glibc floor and architecture.** The restore bundle requires a recent glibc,
   which the reference runtime images already clear. The workload image must
@@ -292,12 +291,13 @@ custom image still has to meet these:
 
 ## Packaging Methods
 
-- **Custom image (reference).** Start from the framework runtime image, add a
-  small entrypoint that implements the checkpoint and restore steps, and set it as
-  the command. The framework pages in [Using Snapshot](../using-snapshot/README.md) walk through this for
-  vLLM, SGLang, and TensorRT-LLM.
-- **Any equivalent.** Mounting the entrypoint into a stock image and overriding
-  the command, or a framework that implements these steps natively, is equally
+- **Mounted entrypoint (reference).** Run the framework runtime image
+  unmodified. Mount a small entrypoint from a ConfigMap and set it as the
+  command. The entrypoint implements the checkpoint and restore steps. The
+  framework pages in [Using Snapshot](../using-snapshot/README.md) walk through
+  this for vLLM, SGLang, and TensorRT-LLM.
+- **Any equivalent.** A custom image that includes the entrypoint, or a
+  framework that implements these steps natively, is equally
   valid, provided the running container satisfies this contract and the runtime
   compatibility constraints above.
 
