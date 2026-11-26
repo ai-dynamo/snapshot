@@ -12,29 +12,40 @@ and how to run `snapshotctl checkpoint` and `snapshotctl restore`.
 
 ### Checkpoint
 
-- The snapshot Helm chart must already be installed in the target namespace
-- A `snapshot-agent` DaemonSet must be running in that namespace
-- The namespace must already have the snapshot volume mounted by the agent
-- The snapshot operator (`PodSnapshotReconciler`) must be installed in the cluster
+- Snapshot must already be installed in the cluster, with its operator
+  (`PodSnapshotReconciler`) running. See
+  [Installation](../get-started/installation.md)
+- A `snapshot-agent` pod must be running on the node that runs the source Pod
+- The target namespace needs nothing from the chart. The operator, the agent,
+  and the snapshot volume stay in the installation namespace
 
-`snapshotctl checkpoint` creates a `PodSnapshot` CR, which the operator's
+`snapshotctl checkpoint` runs the pod manifest as a Job and creates a
+`PodSnapshot` CR for the Job's pod, which the operator's
 `PodSnapshotReconciler` resolves into a `PodSnapshotContent` work order. The
 node agent then performs the CRIU dump. Both the operator and the agent are
 required; neither can be skipped.
 
 The caller must have the following RBAC permissions in the target namespace:
 
-- `create`, `get`, `list`, `watch` on `podsnapshots` (nvidia.com)
-- `get`, `list` on `pods`
+- `create`, `delete` on `jobs` (batch). `snapshotctl` deletes the Job only when
+  the checkpoint fails
+- `list` on `pods`
+- `create`, `get` on `podsnapshots` (nvidia.com)
 
 ### Restore
 
-- The snapshot Helm chart must already be installed in the target namespace
-- A `snapshot-agent` DaemonSet must be running in that namespace
-- The namespace must already have the snapshot volume mounted by the agent
+- Snapshot must already be installed in the cluster. See
+  [Installation](../get-started/installation.md)
+- A `snapshot-agent` pod must be running on the node that runs the restore Pod
+- The target namespace needs nothing from the chart
 
 `snapshotctl restore` does not require the operator. The agent handles restore
 directly from pod annotations.
+
+The caller must have the following RBAC permissions in the target namespace:
+
+- `get` on `podsnapshots` (nvidia.com)
+- `create` on `pods`
 
 ## Manifest Requirements
 
