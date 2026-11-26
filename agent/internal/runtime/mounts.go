@@ -165,18 +165,41 @@ func isDeviceListMarker(mountPoint string) bool {
 	})
 }
 
+const procSysPath = "/proc/sys"
+
 // RemountProcSys remounts /proc/sys read-write or read-only.
+//
+// The runtime binds /proc/sys read-only over the container's procfs, and that
+// bind is what is remounted. A privileged container, or one with an unmasked
+// /proc, has no such bind: /proc/sys is part of the writable procfs mount, and
+// remounting a path that is not a mount fails with EINVAL. There is nothing to
+// change there, in either direction.
 func RemountProcSys(rw bool) error {
+	return remountProcSys(rw, mountinfo.Mounted, syscall.Mount)
+}
+
+func remountProcSys(
+	rw bool,
+	mounted func(path string) (bool, error),
+	mount func(source, target, fstype string, flags uintptr, data string) error,
+) error {
+	isMount, err := mounted(procSysPath)
+	if err != nil {
+		return fmt.Errorf("failed to check whether %s is a mount: %w", procSysPath, err)
+	}
+	if !isMount {
+		return nil
+	}
 	flags := uintptr(syscall.MS_BIND | syscall.MS_REMOUNT)
 	if !rw {
 		flags |= syscall.MS_RDONLY
 	}
-	if err := syscall.Mount("proc", "/proc/sys", "", flags, ""); err != nil {
+	if err := mount("proc", procSysPath, "", flags, ""); err != nil {
 		mode := "rw"
 		if !rw {
 			mode = "ro"
 		}
-		return fmt.Errorf("failed to remount /proc/sys %s: %w", mode, err)
+		return fmt.Errorf("failed to remount %s %s: %w", procSysPath, mode, err)
 	}
 	return nil
 }
