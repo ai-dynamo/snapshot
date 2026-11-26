@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -828,6 +829,105 @@ def test_only_scheduled_main_history_job_has_write_permission() -> None:
     fetch_action = "fetch-benchmark-history"
     assert step(publisher, fetch_action)["with"]["persist-credentials"] == "true"
     assert "persist-credentials" not in step(read_only, fetch_action)["with"]
+
+
+def test_pages_workflow_waits_for_the_scheduled_run_history_commit() -> None:
+    workflows = Path(__file__).resolve().parents[2] / ".github/workflows"
+    pages = yaml.safe_load((workflows / "e2e-benchmark-pages.yaml").read_text())
+    publisher = yaml.safe_load(
+        (workflows / "e2e-frameworks-history.yaml").read_text()
+    )["jobs"]["publish"]
+    steps = pages["jobs"]["build"]["steps"]
+    index = next(i for i, item in enumerate(steps) if "history commit" in item["name"])
+    wait = steps[index]
+
+    # Both workflows start from the same workflow_run event, so the build must
+    # not read the history branch before the publisher's commit is on it.
+    assert "fetch-benchmark-history" in steps[index + 1]["uses"]
+    # The wait runs exactly when the publisher does. Otherwise it waits for a
+    # commit that never comes, or skips one that does.
+    for clause in (
+        "github.event.workflow_run.event == 'schedule'",
+        "github.event.workflow_run.head_branch == 'main'",
+        "github.event.workflow_run.conclusion != 'cancelled'",
+    ):
+        assert clause in publisher["if"]
+        assert clause in wait["if"]
+    for name in ("SOURCE_RUN_ID", "SOURCE_RUN_ATTEMPT"):
+        assert wait["env"][name] == publisher["env"][name]
+
+    commit = next(
+        item["run"] for item in publisher["steps"] if "commit --signoff" in item.get("run", "")
+    )
+    committed = re.search(r'--message "([^"]+)"', commit)
+    awaited = re.search(r'subject="([^"]+)"', wait["run"])
+    assert committed is not None and awaited is not None
+    assert awaited.group(1) == committed.group(1)
+
+
+@pytest.mark.parametrize(
+    ("appears_on_check", "api_fails_first", "checks", "warned"),
+    [
+        pytest.param("1", "", 1, False, id="already there"),
+        pytest.param("3", "", 3, False, id="lands during the wait"),
+        pytest.param("2", "true", 2, False, id="one failed request"),
+        pytest.param("", "", 30, True, id="never lands"),
+    ],
+)
+def test_pages_history_wait_ends_on_the_run_commit_or_gives_up(
+    tmp_path: Path, appears_on_check: str, api_fails_first: str, checks: int, warned: bool,
+) -> None:
+    workflows = Path(__file__).resolve().parents[2] / ".github/workflows"
+    pages = yaml.safe_load((workflows / "e2e-benchmark-pages.yaml").read_text())
+    wait = next(
+        item for item in pages["jobs"]["build"]["steps"] if "history commit" in item["name"]
+    )
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    calls = tmp_path / "calls"
+    # The branch already holds another run, and a later attempt of this run
+    # whose number starts with the same digit.
+    (tools / "gh").write_text(
+        """#!/usr/bin/env bash
+count=$(( $(cat "${CALLS}" 2>/dev/null || echo 0) + 1 ))
+echo "${count}" > "${CALLS}"
+if [[ -n "${API_FAILS_FIRST}" && "${count}" -eq 1 ]]; then
+  echo "HTTP 502" >&2
+  exit 1
+fi
+commit() { printf '%s\n' "data(e2e): record benchmark run $1" "" "Signed-off-by: bot <bot@example.com>"; }
+commit 41-1
+commit 42-10
+if [[ -n "${APPEARS_ON_CHECK}" && "${count}" -ge "${APPEARS_ON_CHECK}" ]]; then
+  commit 42-1
+fi
+"""
+    )
+    (tools / "sleep").write_text("#!/usr/bin/env bash\nexit 0\n")
+    for tool in tools.iterdir():
+        tool.chmod(0o755)
+
+    completed = subprocess.run(
+        ["bash", "-c", wait["run"]],
+        env=dict(
+            os.environ,
+            PATH=f"{tools}{os.pathsep}{os.environ['PATH']}",
+            GITHUB_REPOSITORY="example/snapshot",
+            SOURCE_RUN_ID="42",
+            SOURCE_RUN_ATTEMPT="1",
+            CALLS=str(calls),
+            APPEARS_ON_CHECK=appears_on_check,
+            API_FAILS_FIRST=api_fails_first,
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    # Giving up still deploys: the site is rebuilt from what the branch holds.
+    assert completed.returncode == 0, completed.stderr
+    assert int(calls.read_text()) == checks
+    assert ("::warning::" in completed.stdout) is warned
 
 
 def _result(
