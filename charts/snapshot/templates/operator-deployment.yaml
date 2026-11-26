@@ -109,10 +109,15 @@ spec:
             - {{ printf "--artifact-cleanup-s3-ca-bundle-path=%s" (include "snapshot.s3CABundlePath" .) | quote }}
             {{- end }}
             {{- end }}
-          {{- if .Values.operator.testFailCaptureSourceAnnotation }}
+          {{- if or .Values.operator.testFailCaptureSourceAnnotation (include "snapshot.s3CredentialEndpointEnabled" .) }}
           env:
+            {{- if .Values.operator.testFailCaptureSourceAnnotation }}
             - name: SNAPSHOT_E2E_TEST_FAIL_CAPTURE_SOURCE_ANNOTATION
               value: {{ .Values.operator.testFailCaptureSourceAnnotation | quote }}
+            {{- end }}
+            {{- if include "snapshot.s3CredentialEndpointEnabled" . }}
+            {{- include "snapshot.s3CredentialEndpointEnv" . | nindent 12 }}
+            {{- end }}
           {{- end }}
           volumeMounts:
             {{- if eq .Values.storage.type "pvc" }}
@@ -126,6 +131,9 @@ spec:
             - name: s3-credentials
               mountPath: {{ include "snapshot.s3CredentialsMountDir" . }}
               readOnly: true
+            {{- end }}
+            {{- if include "snapshot.s3CredentialEndpointEnabled" . }}
+            {{- include "snapshot.s3IdentityTokenVolumeMount" . | nindent 12 }}
             {{- end }}
             {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.caBundleConfigMapRef }}
             - name: s3-ca-bundle
@@ -155,6 +163,9 @@ spec:
             items:
               - key: {{ .Values.storage.s3.credentialsSecretKey }}
                 path: {{ .Values.storage.s3.credentialsSecretKey }}
+        {{- end }}
+        {{- if include "snapshot.s3CredentialEndpointEnabled" . }}
+        {{- include "snapshot.s3IdentityTokenVolume" . | nindent 8 }}
         {{- end }}
         {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.caBundleConfigMapRef }}
         - name: s3-ca-bundle
