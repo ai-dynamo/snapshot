@@ -155,10 +155,10 @@ commit-level history for each release is on its
   occurs and the agent `ClusterRole`'s now-unused `leases` rule is kept for one
   more release before removal in v0.3.0+.
 - The operator's cache keeps the spec and status only of the Jobs that a
-  `SnapshotJob` controls, and the metadata of every other Job. It kept every
-  Job in the cluster in full, so its memory grew with Jobs that are not
-  Snapshot's: with 12,500 of them it used 220 MiB, against 60 MiB now, and it
-  was killed at its 256Mi limit when they changed. No action on upgrade.
+  `SnapshotJob` controls. For every other Job it keeps the metadata. Before, it
+  kept every Job in the cluster in full, and its memory grew with Jobs that are
+  not Snapshot's. With 12,500 such Jobs it used 220 MiB and was killed at its
+  256Mi limit when they changed. It now uses 60 MiB. No action on upgrade.
 - A checkpoint or restore on a MIG slice is refused up front, under the new
   `mig-slice` check, because Snapshot supports whole GPUs only. A checkpoint
   fails before anything is locked, leaving the source process running, with the
