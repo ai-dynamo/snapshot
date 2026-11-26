@@ -84,9 +84,19 @@ describes.
      --timeout=30m
    ```
 
+4. Delete the source Deployment:
+
+   ```bash
+   kubectl delete deployment "$SOURCE_NAME" \
+     --namespace "$WORKLOAD_NAMESPACE"
+   ```
+
+   The checkpoint ends the source process, but the Deployment restarts the
+   container, and the source pod keeps its GPUs. If no other GPUs are free for
+   the restore pod, that pod stays `Pending` until you delete the source
+   Deployment.
+
 The operator binds a cluster-scoped `PodSnapshotContent` and records the artifact.
-The source replica is terminated once the checkpoint completes, so it does not keep
-serving.
 
 ## Option 2 - `SnapshotJob` (Checkpoint a Throwaway Pod)
 
