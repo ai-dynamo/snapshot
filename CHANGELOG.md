@@ -101,9 +101,21 @@ commit-level history for each release is on its
   `example.com/pool DoesNotExist` keeps the agent off those nodes. An install
   that sets none is unchanged. See
   [Agent DaemonSet and Access](docs/reference/helm-values.md#agent-daemonset-and-access).
+- Restore retry: `config.restore.retryLimit` (default `0`), or the restore
+  Pod's `nvidia.com/restore-retry-limit`, gives each destination container
+  more restore attempts after the first fails. All attempts share
+  `config.restore.timeoutSeconds`. Each failed attempt gets a
+  `RestoreAttemptFailed` event, and `nvidia.com/restore-retry-status` holds the
+  last failure. Only a failure that left the container untouched is retried,
+  in the same container. See
+  [Restore Retry](docs/design/restore-retry/README.md).
 
 ### Changed
 
+- A node agent that stops during a restore attempt, as in a DaemonSet roll, no
+  longer fails the restore. The next agent on the node runs the attempt again.
+  With a retry limit above 0, the attempt keeps its deadline. See
+  [Restore Retry](docs/design/restore-retry/README.md#agent-restarts).
 - **Breaking:** the agent timeout values lost their redundant prefixes.
   `config.checkpoint.checkpointTimeoutSeconds` is now
   `config.checkpoint.timeoutSeconds`, and `config.restore.restoreTimeoutSeconds`

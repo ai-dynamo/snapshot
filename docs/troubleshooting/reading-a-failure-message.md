@@ -36,6 +36,10 @@ kubectl get pod <restore-pod> -n <ns> -o jsonpath='{.status.conditions[?(@.type=
 kubectl get events -n <ns> --field-selector involvedObject.name=<restore-pod>
 ```
 
+With a retry limit above 0, each failed attempt also has a
+`RestoreAttemptFailed` event; see
+[Troubleshoot Restores](restores.md#restore-attempts-fail-with-restoreattemptfailed).
+
 ### For a Checkpoint
 
 The message is on the `PodSnapshotContent` `Failed` condition with reason
