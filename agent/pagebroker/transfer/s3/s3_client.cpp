@@ -122,18 +122,28 @@ IsSupportedObjectLocation(const S3ObjectLocation& object)
   return bucket.find("..") == std::string::npos && !bucket.ends_with(kDirectoryBucketSuffix);
 }
 
-// Only expose HTTP status, never rclone's raw logs or server text.
-int
-HttpStatus(const std::string& logs)
+// The msg field of each JSON log line rclone wrote, in order.
+std::vector<std::string>
+RcloneMessages(const std::string& logs)
 {
-  int http_status = 0;
+  std::vector<std::string> messages;
   std::istringstream lines(logs);
   std::string line;
   while (std::getline(lines, line)) {
     const auto json = nlohmann::json::parse(line, nullptr, false);
     if (!json.is_object() || !json.contains(kMessageField) || !json[kMessageField].is_string())
       continue;
-    const auto message = json[kMessageField].get<std::string>();
+    messages.push_back(json[kMessageField].get<std::string>());
+  }
+  return messages;
+}
+
+// Only expose HTTP status, never rclone's raw logs or server text.
+int
+HttpStatus(const std::string& logs)
+{
+  int http_status = 0;
+  for (const auto& message : RcloneMessages(logs)) {
     const auto status = message.find(kStatusPrefix);
     if (status != std::string::npos) {
       int value = 0;
@@ -367,7 +377,7 @@ WaitForRclone(Child& child, int output, int diagnostics, std::size_t output_limi
   cancellation.ThrowIfCancelled();
   const auto exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
   if (exit_code != 0)
-    throw S3Error(HttpStatus(diagnostic_bytes));
+    throw S3Error(HttpStatus(diagnostic_bytes), CredentialsUnresolved(diagnostic_bytes));
   return output_bytes;
 }
 
@@ -392,7 +402,31 @@ AppendIdentityEnvironment(const S3Connection& connection, std::vector<std::strin
   }
 }
 
+// Phrases the AWS SDK puts in its error when every provider of the default
+// credential chain came up empty or its token exchange was refused.
+constexpr const char* kCredentialFailurePhrases[] = {
+    "failed to refresh cached credentials",
+    "failed to retrieve credentials",
+    "no EC2 IMDS role found",
+    "access disabled to EC2 IMDS",
+    "NoCredentialProviders",
+    "InvalidIdentityToken",
+    "ExpiredTokenException",
+    "WebIdentityErr",
+};
 } // namespace
+
+bool
+CredentialsUnresolved(const std::string& rclone_logs)
+{
+  for (const auto& message : RcloneMessages(rclone_logs)) {
+    for (const auto* phrase : kCredentialFailurePhrases) {
+      if (message.find(phrase) != std::string::npos)
+        return true;
+    }
+  }
+  return false;
+}
 
 void
 S3Connection::Validate() const

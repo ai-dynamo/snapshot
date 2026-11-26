@@ -117,11 +117,23 @@ struct S3Limits {
 
 // Exposes HTTP status when available, without retaining server text or credentials.
 // A failed write may have completed remotely; callers must confirm publication.
+// credentials_unresolved is set when the client found no credentials at all,
+// so the operation never reached the store.
 class S3Error : public std::runtime_error {
  public:
-  explicit S3Error(int status = 0) : std::runtime_error("S3 operation failed"), http_status(status) {}
+  explicit S3Error(int status = 0, bool credentials_unresolved = false)
+      : std::runtime_error(credentials_unresolved ? kCredentialsUnresolvedMessage : "S3 operation failed"),
+        http_status(status), credentials_unresolved(credentials_unresolved)
+  {
+  }
+  static constexpr char kCredentialsUnresolvedMessage[] = "S3 credentials did not resolve";
   int http_status;
+  bool credentials_unresolved;
 };
+
+// True when rclone's JSON log lines report that the credential chain produced
+// no credentials; the lines themselves are never retained.
+bool CredentialsUnresolved(const std::string& rclone_logs);
 
 // Reports invalid or inconsistent object sizes in otherwise successful reads.
 class S3ResponseError : public std::runtime_error {

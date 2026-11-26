@@ -366,6 +366,19 @@ TEST_F(RcloneProcessTest, MissingExecutableFailsAndReaps)
   ExpectReaped();
 }
 
+TEST_F(RcloneProcessTest, UnresolvedCredentialsAreNamedWithoutRetainingTheLog)
+{
+  try {
+    Upload({"bucket", "no-credentials"}, Deadline());
+    FAIL();
+  } catch (const S3Error& error) {
+    EXPECT_EQ(error.http_status, 0);
+    EXPECT_TRUE(error.credentials_unresolved);
+    EXPECT_STREQ(error.what(), S3Error::kCredentialsUnresolvedMessage);
+  }
+  ExpectReaped();
+}
+
 TEST_F(RcloneProcessTest, ChildExit127FailsAndReaps)
 {
   try {

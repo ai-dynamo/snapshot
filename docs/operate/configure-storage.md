@@ -213,8 +213,8 @@ kubectl get pod <agent-pod> -n <snapshot-ns> \
 ```
 
 When credentials do not resolve, a checkpoint fails with a storage error on the
-`PodSnapshotContent`, and a restore fails on the restore pod's
-`nvidia.com/Restored` condition; see
+`PodSnapshotContent` that ends in `S3 credentials did not resolve`, and a
+restore fails on the restore pod's `nvidia.com/Restored` condition; see
 [Find the Message](../troubleshooting/reading-a-failure-message.md#find-the-message).
 The operator logs the failed cleanup request.
 
@@ -223,7 +223,7 @@ Secret was meant to be set and no identity is bound, the install succeeds and
 the first checkpoint fails with:
 
 ```text
-PageBroker STORAGE_UNAVAILABLE: S3 checkpoint operation failed
+PageBroker STORAGE_UNAVAILABLE: S3 checkpoint operation failed: S3 credentials did not resolve
 ```
 
 Check the PageBroker container's variables with the command above: no
