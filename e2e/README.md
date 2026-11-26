@@ -324,8 +324,9 @@ cannot be used. Set `GH_TOKEN` to avoid GitHub API rate limits.
 
 A version you name with `--from` must be published, or the script fails. When
 the script picks the releases itself, it passes over a release that has no
-images or chart in GHCR, prints a warning, and takes the next patch release
-down in the same minor version.
+images or chart in GHCR and prints a warning. It then takes the next patch
+release down in the same minor version, and leaves out a minor version that has
+no published release.
 
 ## Upgrade Tests
 
@@ -396,7 +397,8 @@ and upgrades to the version under test.
 The versions to upgrade from are the newest patch release of each of the last
 `UPGRADE_FROM_MINOR_VERSIONS` (3) minor versions, prereleases excluded. With
 fewer minor versions, the newest patch release of each existing minor version
-is tested.
+is tested. The run passes over a release that has no images or chart in GHCR.
+See [Installing a Published Version](#installing-a-published-version).
 
 | Trigger | Profile | Configs | Skipping |
 | --- | --- | --- | --- |
