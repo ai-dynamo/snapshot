@@ -6,9 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 # Troubleshoot Restores
 
 Use this page when a restore is slow, is refused, or fails. It starts with a
-restore that is slower than expected and a restore that is refused because a
-mount is missing. Then it lists each step a restore can fail at, with the
-likely causes and what to check. To find which step failed, see
+restore that is slower than expected, a restore that is refused because a
+mount is missing, and a restore from a Lustre snapshot store that fails in
+CRIU. Then it lists each step a restore can fail at, with the likely causes and
+what to check. To find which step failed, see
 [Reading a Failure Message](reading-a-failure-message.md).
 
 ## A Restore Is Slower Than Expected
@@ -32,6 +33,29 @@ kubectl get pod <restore-pod> -n <ns> -o jsonpath='{.status.conditions[?(@.type=
 
 Add the volume to the restore Pod at the same `mountPath`. The volume's
 backing store can differ; only the path inside the container has to match.
+
+## A Restore Fails with `vdso: Invalid ELF magic`
+
+The restore fails at `restoring with CRIU`, and the CRIU lines in the agent log
+include `vdso: Invalid ELF magic`. The snapshot store is on Lustre, and the
+snapshot was taken with `config.criu.imageIoMode: direct`, the default. The
+Lustre client mishandles the direct I/O that CRIU uses in that mode without
+reporting an error. The checkpoint still succeeds, and the `PodSnapshot`
+becomes Ready. This was seen on Amazon FSx for Lustre with Lustre client 2.15.
+
+Search the agent log on the restore Pod's node for the message:
+
+```bash
+kubectl logs $agent -n <snapshot-ns> -c agent | grep 'Invalid ELF magic'
+```
+
+To confirm the filesystem, run `findmnt` as in the
+[restore-node checks](slow-restores.md#check-the-restore-node). It reports
+`lustre` as the `FSTYPE` of the snapshot path.
+
+Set `config.criu.imageIoMode: writeback` and take a new snapshot. A restore
+uses the mode saved in the snapshot, so changing the value does not fix a
+snapshot that already exists.
 
 ## Restore Fails at a Step
 

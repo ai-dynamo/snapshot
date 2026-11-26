@@ -34,6 +34,11 @@ Snapshot currently focuses on inference cold-start; further use cases are on the
 - An S3 store that uses [workload identity](../operate/configure-storage.md#use-workload-identity-for-s3)
   supports a token or credential service behind a private CA for uploads and
   cleanup only. Restores cannot reach such a service.
+- On a Lustre snapshot store mounted with Lustre client 2.15, such as Amazon FSx
+  for Lustre, a snapshot taken with the default
+  `config.criu.imageIoMode: direct` does not restore. Set `writeback` before
+  you checkpoint. See
+  [Troubleshoot Restores](../troubleshooting/restores.md#a-restore-fails-with-vdso-invalid-elf-magic).
 
 ## GPU Device Selection and Restore Paths
 
