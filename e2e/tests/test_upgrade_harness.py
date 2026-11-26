@@ -145,15 +145,18 @@ def test_configs_say_which_version_each_component_runs_after_the_upgrade(
     [
         ("v0.1.0", False),
         ("v0.1.0-rc2", False),
-        ("v0.2.0-rc.1", True),
-        ("v0.2.0", True),
+        ("v0.2.0-rc.1", False),
+        ("v0.2.0", False),
+        ("v0.2.1", False),
+        ("v0.3.0-rc1", True),
+        ("v0.3.0", True),
         ("v0.10.3", True),
         ("v1.0.0", True),
         ("v0.0.0-g1a2b3c4d", True),
         ("v0.0.0-feat-restore-proxy-on-g1a2b3c4d", True),
     ],
 )
-def test_restore_proxy_starts_with_0_2(tag: str, proxy: bool) -> None:
+def test_restore_proxy_starts_with_0_3(tag: str, proxy: bool) -> None:
     assert scenarios.has_restore_proxy(tag) is proxy
 
 
