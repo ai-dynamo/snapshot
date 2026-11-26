@@ -21,6 +21,7 @@ This page lists every page in the Snapshot documentation, grouped by section.
 - [Prerequisites](get-started/prerequisites.md) - Minimum GPU driver and other dependency versions, per feature.
 - [Installation](get-started/installation.md) - Helm install and uninstall.
 - [Quickstart: Checkpoint and Restore One Pod](get-started/quickstart.md) - Checkpoint and restore one pod end to end.
+- [Try Snapshot Without a GPU](get-started/try-without-a-gpu.md) - Checkpoint and restore a CPU-only pod on a local cluster.
 
 ## Using Snapshot
 
