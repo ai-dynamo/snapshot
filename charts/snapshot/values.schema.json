@@ -15,6 +15,15 @@
               "maximum": 10
             }
           }
+        },
+        "restore": {
+          "type": "object",
+          "properties": {
+            "retryLimit": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
         }
       }
     },
