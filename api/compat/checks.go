@@ -330,7 +330,11 @@ var driverMinimumCheck = check{
 // https://docs.nvidia.com/deploy/nvidia-smi/index.html#product-name
 //
 // It returns unknown if any GPU has no name because partial data cannot prove
-// that the source and target models differ.
+// that the source and target models differ. A GPU named "Unknown" has no name
+// either: an agent that read the model from the driver's procfs recorded the
+// procfs placeholder, as the 580 driver writes for the GB10 in DGX Spark
+// (#921), and a newer one still does when nvidia-smi cannot run in the
+// container. The same GPU then reads as "NVIDIA GB10" on the other side.
 func gpuModels(devices []GPUDevice) (string, bool) {
 	if len(devices) == 0 {
 		return "", false
@@ -338,7 +342,7 @@ func gpuModels(devices []GPUDevice) (string, bool) {
 	counts := make(map[string]int, len(devices))
 	for _, device := range devices {
 		model := strings.TrimSpace(device.ProductName)
-		if model == "" {
+		if model == "" || strings.EqualFold(model, "Unknown") {
 			return "", false
 		}
 		counts[model]++
