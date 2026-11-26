@@ -81,9 +81,13 @@ func (op *restoreOperation) storeAttempts(record *podcontract.ContainerRetryStat
 // record, so a restarted agent starts the restore over with a full timeout,
 // as before retries. A restore that allows retries saves the first attempt as
 // a new record before it runs, and otherwise picks the restore up from the
-// destination's record: it gets errRetryScheduled while an in-place retry is
-// not due, and an agent that restarted during an attempt repeats it within the
-// record's limit and deadline.
+// destination's record, getting errRetryScheduled while an in-place retry is
+// not due.
+//
+// A record with no retry saved holds an attempt that no agent saw finish,
+// since one agent never runs two passes of a Pod at once. The attempt runs
+// again within the same deadline and keeps its number, as an agent restart
+// always repeated it.
 func (op *restoreOperation) startAttempt(ctx context.Context) (*podcontract.ContainerRetryStatus, error) {
 	now := op.controller.nowFn()
 	limit, err := op.retryLimit()
