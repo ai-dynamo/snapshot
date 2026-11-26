@@ -4,6 +4,7 @@
 package restoreproxy
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -206,6 +207,216 @@ func TestRunPrefersRestoreFailedOverSignal(t *testing.T) {
 	r.signals <- syscall.SIGTERM
 
 	assert.Equal(t, podcontract.RestoreNotRepeatableExitCode, r.exitCode(t), "restore-failed must win over the signal, not exit with 143")
+}
+
+// coldStartFake stands in for the container's command. A real exec does not
+// return, so the fake records what the proxy asked for and returns
+// errExecReplaced: the exit code 126 the proxy then reports is only the fake's.
+type coldStartFake struct {
+	dir string
+
+	execCalled bool
+	execPath   string
+	execArgv   []string
+	// triggerGone is whether the cold-start file was already removed when exec
+	// was called.
+	triggerGone bool
+	// execErr is what Exec returns. It defaults to errExecReplaced.
+	execErr error
+}
+
+var errExecReplaced = errors.New("exec replaced the process")
+
+func (f *coldStartFake) config(t *testing.T, args []string, signals <-chan os.Signal) Config {
+	t.Helper()
+	return Config{
+		ControlDir:   f.dir,
+		Args:         args,
+		ProcRoot:     "/proc",
+		Signals:      signals,
+		PollInterval: time.Hour,
+		Log:          testr.New(t),
+		LookPath: func(file string) (string, error) {
+			if file == "server" || file == "/usr/bin/server" {
+				return "/usr/bin/server", nil
+			}
+			return "", exec.ErrNotFound
+		},
+		Exec: func(path string, argv, _ []string) error {
+			f.execCalled, f.execPath, f.execArgv = true, path, argv
+			_, err := os.Stat(filepath.Join(f.dir, podcontract.ColdStartFile))
+			f.triggerGone = os.IsNotExist(err)
+			if f.execErr != nil {
+				return f.execErr
+			}
+			return errExecReplaced
+		},
+	}
+}
+
+func (f *coldStartFake) requestColdStart(t *testing.T) {
+	t.Helper()
+	// Publish the way the agent does: write a temp file, then rename it.
+	tmp := filepath.Join(f.dir, ".cold-start.tmp")
+	require.NoError(t, os.WriteFile(tmp, nil, 0o644))
+	require.NoError(t, os.Rename(tmp, filepath.Join(f.dir, podcontract.ColdStartFile)))
+}
+
+func TestRunColdStartAtStart(t *testing.T) {
+	for name, tc := range map[string]struct {
+		args     []string
+		wantArgv []string
+	}{
+		"command":                 {args: []string{"--", "server"}, wantArgv: []string{"server"}},
+		"command and arguments":   {args: []string{"--", "server", "--port", "8000"}, wantArgv: []string{"server", "--port", "8000"}},
+		"a path":                  {args: []string{"--", "/usr/bin/server", "-v"}, wantArgv: []string{"/usr/bin/server", "-v"}},
+		"later -- is not special": {args: []string{"--", "server", "--", "--x"}, wantArgv: []string{"server", "--", "--x"}},
+		"empty argument":          {args: []string{"--", "server", ""}, wantArgv: []string{"server", ""}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &coldStartFake{dir: t.TempDir()}
+			f.requestColdStart(t)
+
+			code := Run(f.config(t, tc.args, nil))
+
+			assert.True(t, f.execCalled)
+			assert.Equal(t, "/usr/bin/server", f.execPath)
+			assert.Equal(t, tc.wantArgv, f.execArgv)
+			assert.True(t, f.triggerGone, "the cold-start file must be removed before the command runs")
+			assert.Equal(t, podcontract.ColdStartExecFailedExitCode, code, "only the fake's exec returns")
+		})
+	}
+}
+
+// The request wins over restore results an earlier container left behind, and
+// those results are not touched.
+func TestRunColdStartWinsOverRestoreFiles(t *testing.T) {
+	for _, name := range []string{podcontract.RestoreCompleteFile, podcontract.RestoreFailedFile} {
+		t.Run(name, func(t *testing.T) {
+			f := &coldStartFake{dir: t.TempDir()}
+			stale := filepath.Join(f.dir, name)
+			require.NoError(t, os.WriteFile(stale, []byte("pid=1\n"), 0o644))
+			f.requestColdStart(t)
+
+			Run(f.config(t, []string{"--", "server"}, nil))
+
+			assert.True(t, f.execCalled)
+			assert.FileExists(t, stale, "the proxy must never delete a restore result file")
+		})
+	}
+}
+
+func TestRunColdStartWhileWaiting(t *testing.T) {
+	// An hour-long poll means only the inotify watch can wake the proxy.
+	f := &coldStartFake{dir: t.TempDir()}
+	exit := make(chan int, 1)
+	cfg := f.config(t, []string{"--", "server", "--port", "8000"}, nil)
+	go func() { exit <- Run(cfg) }()
+	select {
+	case code := <-exit:
+		t.Fatalf("proxy exited early with %d", code)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	f.requestColdStart(t)
+
+	select {
+	case <-exit:
+	case <-time.After(10 * time.Second):
+		t.Fatal("proxy did not act on the cold-start request")
+	}
+	assert.True(t, f.execCalled)
+	assert.Equal(t, []string{"server", "--port", "8000"}, f.execArgv)
+	assert.True(t, f.triggerGone)
+}
+
+func TestRunColdStartExitCodes(t *testing.T) {
+	for name, tc := range map[string]struct {
+		args    []string
+		execErr error
+		want    int
+	}{
+		"no arguments":             {args: nil, want: podcontract.RestoreProxyErrorExitCode},
+		"-- and no command":        {args: []string{"--"}, want: podcontract.RestoreProxyErrorExitCode},
+		"arguments without the --": {args: []string{"server"}, want: podcontract.RestoreProxyErrorExitCode},
+		"command not found":        {args: []string{"--", "missing"}, want: podcontract.ColdStartCommandNotFoundExitCode},
+		"exec fails":               {args: []string{"--", "server"}, execErr: syscall.EACCES, want: podcontract.ColdStartExecFailedExitCode},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &coldStartFake{dir: t.TempDir(), execErr: tc.execErr}
+			f.requestColdStart(t)
+
+			code := Run(f.config(t, tc.args, nil))
+
+			assert.Equal(t, tc.want, code)
+			// Whatever went wrong, a restarted container must not find the request.
+			assert.NoFileExists(t, filepath.Join(f.dir, podcontract.ColdStartFile))
+			if tc.want != podcontract.ColdStartExecFailedExitCode {
+				assert.False(t, f.execCalled)
+			}
+		})
+	}
+}
+
+func TestRunColdStartDoesNotRunWhenTheRequestCannotBeRemoved(t *testing.T) {
+	f := &coldStartFake{dir: t.TempDir()}
+	// A directory with something in it exists, but cannot be removed.
+	trigger := filepath.Join(f.dir, podcontract.ColdStartFile)
+	require.NoError(t, os.MkdirAll(filepath.Join(trigger, "child"), 0o755))
+
+	code := Run(f.config(t, []string{"--", "server"}, nil))
+
+	assert.Equal(t, podcontract.RestoreProxyErrorExitCode, code)
+	assert.False(t, f.execCalled, "a request that cannot be removed would run the command again on every restart")
+}
+
+// SIGTERM and a cold-start request can arrive together. The container is being
+// stopped, so the command is not started, and the request is still consumed.
+func TestRunColdStartLosesToSignal(t *testing.T) {
+	// No inotify and an hour-long poll: only the signal can wake the wait, so
+	// it always finds the request already on disk.
+	watchDirFn = func(string, logr.Logger) (<-chan struct{}, func()) { return nil, func() {} }
+	t.Cleanup(func() { watchDirFn = watchDir })
+
+	f := &coldStartFake{dir: t.TempDir()}
+	signals := make(chan os.Signal, 1)
+	exit := make(chan int, 1)
+	cfg := f.config(t, []string{"--", "server"}, signals)
+	go func() { exit <- Run(cfg) }()
+	select {
+	case code := <-exit:
+		t.Fatalf("proxy exited early with %d", code)
+	case <-time.After(200 * time.Millisecond):
+	}
+	f.requestColdStart(t)
+
+	signals <- syscall.SIGTERM
+
+	select {
+	case code := <-exit:
+		assert.Equal(t, 128+int(syscall.SIGTERM), code)
+	case <-time.After(10 * time.Second):
+		t.Fatal("proxy did not exit")
+	}
+	assert.False(t, f.execCalled)
+	assert.NoFileExists(t, filepath.Join(f.dir, podcontract.ColdStartFile))
+}
+
+func TestContainerCommand(t *testing.T) {
+	for name, tc := range map[string]struct {
+		args []string
+		want []string
+	}{
+		"none":                  {args: nil, want: nil},
+		"only the --":           {args: []string{"--"}, want: []string{}},
+		"command and arguments": {args: []string{"--", "a", "b"}, want: []string{"a", "b"}},
+		"no --":                 {args: []string{"a", "b"}, want: nil},
+		"a flag first":          {args: []string{"--x", "--", "a"}, want: nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, containerCommand(tc.args))
+		})
+	}
 }
 
 func TestRunProxyErrors(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -560,7 +561,8 @@ func checkRestoreProxy(pid int) error {
 	if err != nil {
 		return fmt.Errorf("read the command of the container's PID 1: %w", err)
 	}
-	if cmdline != podcontract.RestoreProxyPath {
+	// Adding " " makes sure the path is not just the start of a different app's name (snapshot-restore-proxy-other).
+	if !strings.HasPrefix(cmdline+" ", podcontract.RestoreProxyPath+" ") {
 		return fmt.Errorf("the container's PID 1 is %q, not %s: the agent's NRI plugin did not set up this container; check that NRI is enabled in the container runtime",
 			cmdline, podcontract.RestoreProxyPath)
 	}

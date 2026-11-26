@@ -41,7 +41,12 @@ def test_restored_state_requires_every_remote_assertion_to_pass(
     proc = tmp_path / "proc"
     monkeypatch.setattr(lifecycle, "PROC_ROOT", str(proc))
     (proc / "1").mkdir(parents=True)
-    pid_1 = "sleep\0infinity\0" if failure == "pid-1-not-proxy" else f"{lifecycle.RESTORE_PROXY}\0"
+    # The plugin runs the proxy with the container's own command after "--".
+    pid_1 = (
+        "sleep\0infinity\0"
+        if failure == "pid-1-not-proxy"
+        else f"{lifecycle.RESTORE_PROXY}\0--\0sleep\0infinity\0"
+    )
     (proc / "1" / "cmdline").write_text(pid_1)
     (proc / "42").mkdir()
     restored = "/bin/sh\0" if failure == "restored-pid-not-workload" else f"{lifecycle.CUDA_HOLD}\0"

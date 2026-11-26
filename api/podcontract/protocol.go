@@ -95,6 +95,11 @@ const (
 	// Pod's one restore was already used.
 	RestoreFailedFile = "restore-failed"
 
+	// ColdStartFile is an empty file the Snapshot agent writes to tell a
+	// destination container's restore proxy to give up on the restore and run
+	// the container's own command in its place (an in-place cold start).
+	ColdStartFile = "cold-start"
+
 	// RestoreCompletePIDKey names the restored process's PID, relative to the
 	// destination container's PID namespace, in RestoreCompleteFile.
 	RestoreCompletePIDKey = "pid"
@@ -121,7 +126,9 @@ func IsReservedControlFile(name string) bool {
 }
 
 // Exit codes reserved by the restore proxy. Every other code is the restored
-// workload's own, or 128 plus the signal number that killed it.
+// workload's own, or 128 plus the signal number that killed it. After a cold
+// start (see ColdStartFile) the proxy has become the container's own command,
+// so its code is that command's own.
 const (
 	// RestoreNotRepeatableExitCode means this Pod's one restore is spent: the
 	// proxy found RestoreCompleteFile or RestoreFailedFile at start, left by an
@@ -132,6 +139,14 @@ const (
 	// process, for example because RestoreCompleteFile was malformed or the
 	// restored PID was not its child.
 	RestoreProxyErrorExitCode = 113
+
+	// ColdStartCommandNotFoundExitCode means a cold start was requested and the
+	// container's command was not found, as a shell reports a missing program.
+	ColdStartCommandNotFoundExitCode = 127
+
+	// ColdStartExecFailedExitCode means a cold start was requested and the
+	// container's command could not run.
+	ColdStartExecFailedExitCode = 126
 )
 
 // RestoreComplete is the content of RestoreCompleteFile.

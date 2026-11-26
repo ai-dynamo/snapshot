@@ -250,7 +250,9 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 	}
 
 	adjust := &api.ContainerAdjustment{}
-	adjust.SetArgs([]string{podcontract.RestoreProxyPath})
+	// The container's own command follows the proxy, after a "--" used for in-place cold start.
+	// ctr.GetArgs() contains the container's own command and arguments.
+	adjust.SetArgs(append([]string{podcontract.RestoreProxyPath, "--"}, ctr.GetArgs()...))
 	p.created.Store(ctr.GetId(), destination{
 		pod:       ktypes.NamespacedName{Namespace: namespace, Name: name},
 		uid:       ktypes.UID(uid),
