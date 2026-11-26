@@ -192,8 +192,8 @@ type SnapshotStoreSpec struct {
 
 // A claim in the namespace Snapshot is installed in. It must be mounted into
 // the operator and every node agent.
-// +kubebuilder:validation:XValidation:rule="self.claimName == oldSelf.claimName && self.basePath == oldSelf.basePath",message="claimName and basePath are immutable"
-// +kubebuilder:validation:XValidation:rule="!self.basePath.split('/').exists(p, p == 'artifacts' || p == '..')",message="basePath must not contain an artifacts or .. segment"
+// +kubebuilder:validation:XValidation:rule="self.claimName == oldSelf.claimName && self.subPath == oldSelf.subPath",message="claimName and subPath are immutable"
+// +kubebuilder:validation:XValidation:rule="!self.subPath.split('/').exists(p, p == 'artifacts' || p == '.claims' || p == '..')",message="subPath must not contain an artifacts, .claims or .. segment"
 type PVCStoreSpec struct {
     // +kubebuilder:validation:MinLength=1
     // +kubebuilder:validation:MaxLength=253
@@ -202,14 +202,14 @@ type PVCStoreSpec struct {
     // +kubebuilder:default="/"
     // +kubebuilder:validation:MaxLength=4096
     // +kubebuilder:validation:Pattern=`^/`
-    BasePath string `json:"basePath,omitempty"`
+    SubPath string `json:"subPath,omitempty"`
 }
 
 // Endpoint, Region, Bucket and Prefix are storeID inputs; the rest are access
 // settings and stay editable. An absent and an empty prefix compare as equal,
 // so an update that drops the empty field is not taken for a location change.
 // +kubebuilder:validation:XValidation:rule="self.endpoint == oldSelf.endpoint && self.region == oldSelf.region && self.bucket == oldSelf.bucket && self.?prefix.orValue('') == oldSelf.?prefix.orValue('')",message="endpoint, region, bucket and prefix are immutable"
-// +kubebuilder:validation:XValidation:rule="!has(self.prefix) || !self.prefix.split('/').exists(p, p == 'artifacts' || p == '..')",message="prefix must not contain an artifacts or .. segment"
+// +kubebuilder:validation:XValidation:rule="!has(self.prefix) || !self.prefix.split('/').exists(p, p == 'artifacts' || p == '.claims' || p == '..')",message="prefix must not contain an artifacts, .claims or .. segment"
 // +kubebuilder:validation:XValidation:rule="self.?allowHTTP.orValue(false) || !self.endpoint.startsWith('http://')",message="allowHTTP is required for an http:// endpoint"
 type S3StoreSpec struct {
     // An absolute http(s) URL with no path, query, fragment or userinfo.
@@ -266,10 +266,13 @@ at creation instead of frozen in an immutable field. What a pattern cannot expre
 name that is a dotted IP address, fails normalization in the operator and sets `Ready=False` with
 reason `InvalidLocation`. The Secret and ConfigMap references are small own types rather than
 `corev1.SecretKeySelector`: that type requires `key`, so a default is impossible, and its `optional`
-field has no meaning here.
+field has no meaning here. `subPath` is the Kubernetes word for a path inside a volume; the
+identity input in `api/storage` is renamed to match, while the serialized key in the operator's
+storage configuration file stays `basePath` until PageBroker reads the new name. The digest hashes
+the value, not the key, so `storeID` does not change.
 
-`Ready` carries the reasons `BasePathNotAllowed`, `ClaimNotMounted`, `CredentialsUnavailable`,
-`DuplicateStore`, `InvalidLocation`, `StoreUnreachable` and `Terminating`.
+`Ready` carries the reasons `ClaimNotMounted`, `CredentialsUnavailable`, `DuplicateStore`,
+`InvalidLocation`, `StoreUnreachable` and `Terminating`.
 
 #### Request and content fields
 
@@ -353,16 +356,12 @@ the store carries no default field and nothing has to arbitrate between stores.
 Inside a cluster, one location has exactly one store, and no store sits inside another store's
 snapshots. Between clusters a location may be shared.
 
-- **Reserved path.** The API rejects a `prefix` or `basePath` with a path segment named `artifacts`,
+- **Reserved paths.** The API rejects a `prefix` or `subPath` with a path segment named `artifacts`,
   the directory every store keeps its snapshots in, so no store can be placed inside another store's
-  `artifacts/`, in this cluster or another. It also rejects a `..` segment, as the store identity
-  code already does, so a `basePath` cannot leave its claim.
-- **Whole claim.** A store on `storage.pvc.name`, the single claim mounted at `/checkpoints`, must
-  use the whole claim, `basePath: /`. Listed claims are mounted inside that claim's mount, so a
-  subdirectory store on it, such as `basePath: /archive`, would have the same path as a listed claim
-  named `archive` and would write to that claim. The operator refuses such a store with
-  `BasePathNotAllowed`. A store in a subdirectory needs a listed claim, where any `basePath` is
-  allowed. The rule ends when the single claim is removed.
+  `artifacts/`, in this cluster or another. It also rejects `.claims`, the directory below which the
+  agent and the operator mount the listed claims, so a store on the default claim cannot be placed
+  where a claim is mounted; see [Agent and PageBroker](#agent-and-pagebroker). And it rejects a
+  `..` segment, as the store identity code already does, so a `subPath` cannot leave its claim.
 - **Digest.** Another store in the cluster with the same `storeID` is `DuplicateStore`. The scan
   reads the `SnapshotStore` informer cache and compares only immutable location fields. Adding or
   deleting a store re-reconciles every store with the same digest, so a stale cache can only delay a
@@ -409,7 +408,7 @@ longer selects a store. Only new fields are shown.
 ```protobuf
 message StorageBackend {
   oneof kind {
-    FilesystemStorage filesystem = 1;  // PVC: mount path joined with basePath.
+    FilesystemStorage filesystem = 1;  // PVC: mount path joined with subPath.
     S3Storage s3 = 2;
   }
 }
@@ -440,20 +439,24 @@ that is temporarily unavailable, because a store, Secret or mount that is missin
 appears without a new request. This retry is implemented last, after the rest of the proposal works.
 Until then `StoreUnavailable` fails the operation before any I/O and it needs a new attempt;
 the retry removes that manual step and changes nothing else. For PVC the agent maps `claimName` to a
-mount path: the default claim at `/checkpoints`, each listed claim at `/checkpoints/<claimName>`,
-rendered by the chart into the agent's `config.yaml` and the operator's `--pvc-claim-names` flag.
-Every store path is below `/checkpoints`, the one source root the privileged mount helper accepts,
-so the direct restore of a snapshot on a listed claim needs no change to the helper.
+mount path: the default claim at `/checkpoints`, each listed claim at
+`/checkpoints/.claims/<claimName>`, from the claim list in its `config.yaml`; the operator derives
+the same paths from its `--pvc-claim-names` flag. The listed claims sit below one reserved parent,
+`.claims`, so a single reserved segment keeps them apart from any directory a store or the
+operator's cleanup uses at the root of the default claim, such as `artifacts/` or
+`non-target-artifacts/`, and a store on the default claim may use any `subPath` that avoids that
+segment. Every store path is below `/checkpoints`, the one source root the privileged mount helper
+accepts, so the direct restore of a snapshot on a listed claim needs no change to the helper.
 
 Before any I/O on a PVC store, the agent confirms from its mount table that the claim's mount path,
-`/checkpoints` or `/checkpoints/<claimName>`, is a mount point; a directory that merely exists is
-not enough. The store's `basePath` is resolved below that mount after the check, so a store in a
-subdirectory of a claim passes. A listed claim is mounted inside the default claim's mount, so
-Kubernetes creates its directory in the default claim, which every agent shares. An agent pod that
-still runs the previous spec sees that directory without the mount, and it also sees the new claim
-list, because `config.yaml` is refreshed in running pods. Without the check it would write the
-snapshot into the default claim. A path that is not a mount point fails with
-`StoreUnavailable`. The check runs in the agent before it calls PageBroker, which shares the
+`/checkpoints` or `/checkpoints/.claims/<claimName>`, is a mount point; a directory that merely
+exists is not enough. The store's `subPath` is resolved below that mount after the check, so a store
+in a subdirectory of a claim passes. A listed claim is mounted inside the default claim's mount, so
+Kubernetes creates `.claims/<claimName>` in the default claim, which every agent shares. An agent
+pod that still runs the previous spec sees that directory without the mount, and it also sees the
+new claim list, because `config.yaml` is refreshed in running pods. Without the check it would write
+the snapshot into the default claim. A path that is not a mount point fails with `StoreUnavailable`.
+The check runs in the agent before it calls PageBroker, which shares the
 pod's mounts, and the operator makes the same check before cleanup.
 
 How a restore reads a snapshot depends on the kind of store. From a PVC store the restore is direct
@@ -580,23 +583,22 @@ storage:
 ```
 
 A claim name is all `claimNames` needs, because the chart derives the rest. For each name it adds a
-volume and a mount at `/checkpoints/<claimName>` to the operator and to the agent pod's agent and
-PageBroker containers, as it already does for the default claim at `/checkpoints`; Kubernetes mounts
-them when those pods restart. The name is unique in the namespace and a valid path segment, so no
-two claims share a path and nobody has to choose one. The listed claims are mounted inside the
-default claim's mount, so Kubernetes creates an empty directory per name at the root of the default
-claim. The chart refuses the name `artifacts`, which would hide the default store's snapshots. It
-also refuses a list that contains `storage.pvc.name`, because one claim name would then map to two
-paths. A store on `storage.pvc.name` must use the whole claim; see
-[Store uniqueness](#store-uniqueness).
+volume and a mount at `/checkpoints/.claims/<claimName>` to the operator and to the agent pod's
+agent and PageBroker containers, as it already does for the default claim at `/checkpoints`;
+Kubernetes mounts them when those pods restart. The name is unique in the namespace and a valid path
+segment, so no two claims share a path and nobody has to choose one. The listed claims are mounted
+inside the default claim's mount, so Kubernetes creates an empty `.claims/<claimName>` directory in
+the default claim; the reserved parent is what keeps a claim from hiding a directory at the claim
+root, see [Store uniqueness](#store-uniqueness). The chart refuses a list that contains
+`storage.pvc.name`, because one claim name would then map to two paths.
 `storage.pvc.name`, the single claim at `/checkpoints`, is deprecated as a store location:
 `claimNames` replaces it for stores. It still names the claim that holds non-target artifacts, and
 a dedicated value takes that over before it is removed; once it is removed `/checkpoints` holds
-only the listed claims' mounts. The chart writes the same
-name-to-path mapping into the agent's `config.yaml` and the names into the operator's
-`--pvc-claim-names` flag, so a store's `claimName` always resolves to the directory that was
-mounted. The claims must already exist in the Snapshot namespace and be mountable on every agent
-node. On install and upgrade the chart looks up each listed claim and fails when one does not exist
+only `.claims/` with the listed claims' mounts. The chart writes the claim names into the agent's
+`config.yaml` and into the operator's `--pvc-claim-names` flag, so a store's `claimName` always
+resolves to the directory that was mounted. The claims must already exist in the Snapshot namespace
+and be mountable on every agent node. On install and upgrade the chart looks up each listed claim
+and fails when one does not exist
 or is not bound, so a wrong name is an error message and not a pod that cannot start; a dry run,
 which cannot look claims up, skips the check. The list is the whole set, so an upgrade repeats the
 claims it keeps:
@@ -605,8 +607,8 @@ claims it keeps:
 storage:
   pvc:
     claimNames:
-      - team-a-snapshots   # /checkpoints/team-a-snapshots
-      - team-b-snapshots   # /checkpoints/team-b-snapshots
+      - team-a-snapshots   # /checkpoints/.claims/team-a-snapshots
+      - team-b-snapshots   # /checkpoints/.claims/team-b-snapshots
 ---
 apiVersion: nvidia.com/v1alpha1
 kind: SnapshotStore
@@ -615,7 +617,7 @@ metadata:
 spec:
   pvc:
     claimName: team-b-snapshots   # Which mounted claim.
-    basePath: /prod               # A directory inside it, not the mount path.
+    subPath: /prod                # A directory inside it, not the mount path.
 ```
 
 `SnapshotStore` requires store binding and artifact addressing, the chart values
@@ -629,8 +631,9 @@ Every other `storage.*` value keeps its meaning and feeds the default store: `st
 the `pvc` or `s3` block; `s3.endpoint`, `region`, `bucket`, `prefix`, `addressing`, `allowHttp`,
 `credentialsSecretRef`, `credentialsSecretKey`, `caBundleConfigMapRef` and `caBundleConfigMapKey`
 become the store's `s3` fields, with `allowHttp` landing in `allowHTTP`; `pvc.name` becomes
-`claimName`, with the store `basePath` at the claim root. `pvc.basePath` stays the container mount
-path, and `pvc.create`, `size` and `storageClass` still only provision the claim. An empty
+`claimName`, with the store `subPath` at the claim root. `pvc.basePath` is a different thing: the
+fixed container mount path `/checkpoints`, not an identity input, and it goes away with the single
+claim. `pvc.create`, `size` and `storageClass` still only provision the claim. An empty
 `s3.credentialsSecretRef` gives a default store with no Secret. What changes is delivery: the chart
 no longer mounts the S3 Secret, which is
 read through the API and passed per transaction. The CA ConfigMap stays mounted in PageBroker,
@@ -712,15 +715,16 @@ other stores are not touched.
 ### Test Plan
 
 - **API:** CEL rejects two store blocks, none, a move between blocks, a location change, a name over
-  63 characters, an `artifacts` path segment, an `http://` endpoint without `allowHTTP`, an
-  `addressing` value outside the enum, and each `api/storage` limit; an update that drops an empty
-  `prefix` is accepted, and `basePath` defaults to `/`; a reference without `key` gets the default.
+  63 characters, an `artifacts` or `.claims` path segment, an `http://` endpoint without
+  `allowHTTP`, an `addressing` value outside the enum, and each `api/storage` limit; an update that
+  drops an empty `prefix` is accepted, and `subPath` defaults to `/`; a reference without `key` gets
+  the default.
 - **Operator:** Ready/NotReady for each reason; digest detection, including two stores created at
   once; the access check, run inside `artifacts/`, including credentials that can write but not
   read, list or delete; nested stores are accepted; a Ready store goes `Ready=False` when its Secret
-  is revoked or deleted; a store on the single claim with a `basePath` other than `/` is refused;
-  with binding off the default store is created and a request that names another store fails with
-  `StoreNotReady`; `.origin` is written at binding and for content bound earlier; default
+  is revoked or deleted; a store on the default claim with a `subPath` beside `.claims/` is
+  accepted; with binding off the default store is created and a request that names another store
+  fails with `StoreNotReady`; `.origin` is written at binding and for content bound earlier; default
   resolution from the configured name, with the named store missing, and after the name changes; the
   default store is created only when no store exists, and `StoreValuesDiffer` fires when the values
   move; a job that names a missing store waits and proceeds when the store appears; terminating
@@ -733,9 +737,10 @@ other stores are not touched.
   `storage.pvc.name` fails the render.
 - **Agent:** Secret fetch per transaction; credentials in the request and never on a volume or in a
   log; empty credentials for a store without a Secret; mount mapping for the default and listed
-  claims; a listed claim's directory with nothing mounted on it is refused, and a store with a
-  `basePath` below a mounted claim passes; a bound snapshot restores directly from the single claim
-  and from a listed claim, staged with `pageBroker.restoreMode: staged`, and always staged from S3;
+  claims below `.claims/`; a listed claim's directory with nothing mounted on it is refused, and a
+  store with a `subPath` below a mounted claim passes; a bound snapshot restores directly from the
+  single claim and from a listed claim, staged with `pageBroker.restoreMode: staged`, and always
+  staged from S3;
   `StoreUnavailable`, and its retry once implemented, on a missing store, a `status.storeID`
   mismatch, or a claim with no mount.
 - **Maintenance:** a sweep looks only inside `artifacts/` and deletes only UUID-named orphans whose
