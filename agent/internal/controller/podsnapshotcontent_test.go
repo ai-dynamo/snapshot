@@ -424,6 +424,75 @@ func TestReconcileCapture_ConcurrentTriggerCannotFailARunningCapture(t *testing.
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
 }
 
+// TestReconcileCapture_RedeliveryDoesNotRepeatAFailedCapture covers the reconcile that follows a
+// terminal write at once. A trigger that arrived during the capture redelivers the key the moment
+// it is released, before the informer delivers the write, so the cached work order still reads as
+// pending. The failure left the source running, and capturing it now would end a workload whose
+// snapshot already failed.
+func TestReconcileCapture_RedeliveryDoesNotRepeatAFailedCapture(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := makeSourcePod()
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
+	captures := 0
+	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		captures++
+		if captures == 1 {
+			return nil, errors.New("staging refused")
+		}
+		return nil, nil
+	}
+
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
+	failed := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, failed)
+
+	// The index still holds the work order as it was before the write.
+	assert.NoError(t, w.reconcileCapture(context.Background(), content.Name))
+
+	assert.Equal(t, 1, captures, "a work order that already failed must not be captured again")
+	assert.Equal(t, []metav1.Condition{*failed}, getContent(t, w, content.Name).Status.Conditions)
+}
+
+// TestReconcileCapture_RedeliveryDoesNotSweepACapturedPod is the same reconcile after a capture
+// that succeeded. The dump ended the target, so a stale pending work order reads its exit code as
+// a crashed checkpoint container, and the sweep would kill the containers still running.
+func TestReconcileCapture_RedeliveryDoesNotSweepACapturedPod(t *testing.T) {
+	content := boundWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := makeSourcePod()
+	pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, corev1.ContainerStatus{
+		Name: "helper", ContainerID: "containerd://helper-id", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	})
+	rt := &fakeRuntime{resolveContainerPID: 7}
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+	w.runtime = rt
+	w.checkpointFn = func(ctx context.Context, _ CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		// The dump ends the target, and the kubelet reports it while the store publishes.
+		ended := getPod(t, w, pod.Namespace, pod.Name)
+		ended.Status.ContainerStatuses[0].Ready = false
+		ended.Status.ContainerStatuses[0].State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137}}
+		require.NoError(t, w.client.Status().Update(ctx, ended))
+		return &pagebroker.PublishedArtifact{StoreId: testStoreID, ArtifactHandle: "artifact-abc"}, nil
+	}
+
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
+	ready := getContent(t, w, content.Name).Status.Conditions
+	require.NotNil(t, meta.FindStatusCondition(ready, snapshotv1alpha1.PodSnapshotConditionReady))
+
+	// The index still holds the work order as it was before the write. From here on the
+	// runtime resolves nothing, so a sweep is seen and signals no process.
+	rt.mu.Lock()
+	rt.resolveContainerPID = 0
+	rt.resolvedContainerIDs = nil
+	rt.mu.Unlock()
+	assert.NoError(t, w.reconcileCapture(context.Background(), content.Name))
+
+	assert.Empty(t, rt.resolvedContainerIDs, "the containers of a captured pod must not be resolved or signaled")
+	assert.False(t, sawEventReason(w.clientset.(*k8sfake.Clientset), "CheckpointFailed"),
+		"a captured pod must not get a checkpoint failure event")
+	assert.Equal(t, ready, getContent(t, w, content.Name).Status.Conditions)
+}
+
 func TestReconcileCapture_FailedContainerUnsticksAndFails(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	pod := &corev1.Pod{

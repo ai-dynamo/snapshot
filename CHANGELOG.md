@@ -189,6 +189,11 @@ commit-level history for each release is on its
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 
+- The node agent no longer acts again on a checkpoint that it recorded as ready
+  or failed a moment ago. It could checkpoint the source Pod a second time
+  after a failure that left the workload running. It could also end the other
+  containers of the Pod and report `CheckpointFailed` on it.
+
 ### Deprecated
 
 - `SNAPSHOT_RESTORE_STANDBY` (`podcontract.RestoreStandbyModeEnv`): restore
