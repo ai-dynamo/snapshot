@@ -444,12 +444,24 @@ jobs:
       - name: Collect diagnostics
         if: ${{ failure() && steps.selected.outputs.run == 'true' }}
         timeout-minutes: 5
+        # KUBECONFIG reaches the vCluster API, which holds the test namespace.
+        # HOST_KUBECONFIG reaches the real cluster, where vCluster syncs those
+        # Pods into HOST_NAMESPACE and the host scheduler places them.
         env:
+          HOST_KUBECONFIG: ${{ steps.host.outputs.kubeconfig }}
           KUBECONFIG: ${{ env.SNAPSHOT_E2E_TARGET_KUBECONFIG }}
         run: |
           set +e
           out="${RUNNER_TEMP}/diagnostics"
           mkdir -p "${out}"
+          KUBECONFIG="${HOST_KUBECONFIG}" kubectl get pods -n "${HOST_NAMESPACE}" -o wide \
+            --request-timeout=30s > "${out}/host-pods.txt" 2>&1
+          KUBECONFIG="${HOST_KUBECONFIG}" kubectl get events -n "${HOST_NAMESPACE}" \
+            --sort-by=.lastTimestamp --request-timeout=30s > "${out}/host-events.txt" 2>&1
+          KUBECONFIG="${HOST_KUBECONFIG}" kubectl get pods -n "${HOST_NAMESPACE}" -o name \
+            --field-selector=status.phase=Pending --request-timeout=30s \
+            | KUBECONFIG="${HOST_KUBECONFIG}" xargs -r kubectl describe -n "${HOST_NAMESPACE}" \
+              --request-timeout=30s > "${out}/host-pending-describe.txt" 2>&1
           kubectl get pods -n "${TEST_NAMESPACE}" -o yaml > "${out}/pods.yaml"
           kubectl describe pods -n "${TEST_NAMESPACE}" > "${out}/pods-describe.txt"
           kubectl get events -n "${TEST_NAMESPACE}" --sort-by=.lastTimestamp > "${out}/events.txt"

@@ -30,6 +30,7 @@ import yaml
 from kubernetes import client
 from kubernetes.client import ApiException
 from packaging.version import Version
+from urllib3.exceptions import HTTPError
 
 from snapshot_e2e import k8s
 from snapshot_e2e.frameworks import SharedModelCache
@@ -1361,6 +1362,7 @@ def wait_for_pods_ready(
     deadline = time.monotonic() + timeout_seconds
     last_report = 0.0
     last_detail = "not checked"
+    pods: list[client.V1Pod] = []
     while time.monotonic() < deadline:
         pods = api.list_namespaced_pod(
             namespace=namespace, label_selector=label_selector
@@ -1372,7 +1374,11 @@ def wait_for_pods_ready(
         last_report = progress(description, last_detail, last_report)
         time.sleep(5)
     print_pods(namespace, label_selector)
-    raise SetupError(f"timed out waiting for {description}; last state: {last_detail}")
+    raise readiness_timeout(
+        f"timed out waiting for {description}; last state: {last_detail}",
+        namespace,
+        pods,
+    )
 
 
 def wait_for_daemonset_rollout_by_selector(
@@ -1387,6 +1393,7 @@ def wait_for_daemonset_rollout_by_selector(
     deadline = time.monotonic() + timeout_seconds
     last_report = 0.0
     last_detail = "not checked"
+    pods: list[client.V1Pod] = []
     while time.monotonic() < deadline:
         daemonsets = apps_api.list_namespaced_daemon_set(
             namespace=namespace, label_selector=label_selector
@@ -1405,9 +1412,48 @@ def wait_for_daemonset_rollout_by_selector(
             return
         last_report = progress(f"{description} daemonset", last_detail, last_report)
         time.sleep(5)
-    raise SetupError(
-        f"timed out waiting for {description} daemonset; last state: {last_detail}"
+    raise readiness_timeout(
+        f"timed out waiting for {description} daemonset; last state: {last_detail}",
+        namespace,
+        pods,
     )
+
+
+def readiness_timeout(
+    message: str, namespace: str, pods: list[client.V1Pod]
+) -> SetupError:
+    reason = report_unready_pod_events(namespace, pods)
+    if reason:
+        message = f"{message}; scheduler: {reason}"
+    return SetupError(message)
+
+
+def report_unready_pod_events(namespace: str, pods: list[client.V1Pod]) -> str:
+    unready = [pod for pod in pods if not pod_ready(pod)][:10]
+    if not unready:
+        return ""
+    log(f"Warning events of unready pods in {namespace}:")
+    scheduling = ""
+    for pod in unready:
+        name = pod.metadata.name
+        try:
+            events = k8s.list_events(
+                namespace,
+                field_selector={"involvedObject.name": name, "type": "Warning"},
+            )
+        except ApiException as exc:
+            log(f"  {name}: could not list events: {exc.status} {exc.reason}")
+            continue
+        except HTTPError as exc:
+            log(f"  {name}: could not list events: {exc}")
+            continue
+        if not events:
+            log(f"  {name}: no Warning events")
+        for event in events:
+            log(f"  {name}: {event.reason} (x{event.count or 1}): {event.message}")
+            if not scheduling and event.reason == "FailedScheduling" and event.message:
+                scheduling = event.message.strip()
+    return scheduling
 
 
 def wait_for_daemonset_rollout(
