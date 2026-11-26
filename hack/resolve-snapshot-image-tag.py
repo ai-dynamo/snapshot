@@ -196,7 +196,7 @@ def release_tags(headers: dict[str, str]) -> list[str]:
 def warn_unpublished_release(tag: str, missing: list[str]) -> None:
     message = (
         f"{tag} is released but not published for: {', '.join(missing)}. "
-        "Taking the next patch release down in the same minor version instead."
+        "Trying the next patch release down in the same minor version instead."
     )
     # stdout carries the JSON list; the runner reads commands from stderr too.
     print(f"::warning title=Release {tag} is not published::{message}", file=sys.stderr)
