@@ -101,16 +101,18 @@ under `docs/using-snapshot/<framework>/`:
 | `capture/<model>.yaml` | Deploys the replica that gets checkpointed |
 | `restore/1-gpu.yaml` | Consumes a checkpoint through the `nvidia.com/restore-from` annotation |
 
-Plus `docs/using-snapshot/<framework>.md` walking through it, and an entry in the
+Plus `docs/using-snapshot/supported-frameworks/<framework>.md` walking through
+it, and an entry in the
 [Using Snapshot overview](docs/using-snapshot/README.md) with a row in its recipe table for each
 model you add.
 
-The contract your entrypoint has to honor — the control volume, the startup
-gate, the `SNAPSHOT_CONTROL_DIR` environment variable, and the seccomp profile
-— is specified in the
-[Restore Pod contract](docs/reference/restore-pod-contract.md). Read that
-before writing `app.py`; everything a framework must do to be checkpointable is
-there.
+The contract your entrypoint has to honor is the
+[Workload Contract](docs/reference/workload-contract.md): the control volume,
+the `SNAPSHOT_CONTROL_DIR` environment variable, the sentinel files, and the
+seccomp profile. Read it before writing `app.py`; everything a framework must
+do to be checkpointable is there. The
+[Restore Pod Contract](docs/reference/restore-pod-contract.md) covers what a
+restore Pod carries, such as the startup gate.
 
 Extending the API surface instead — a new field, or a new custom resource — is
 a larger change that affects stored checkpoints. Open an issue and agree the
