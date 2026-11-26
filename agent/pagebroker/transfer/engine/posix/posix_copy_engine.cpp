@@ -11,9 +11,35 @@
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
 
-PosixCopyEngine::PosixCopyEngine(Path storage_root)
-    : storage_root_(fs::weakly_canonical(std::move(storage_root)))
+namespace {
+constexpr char kNodeCacheArtifactsDirectory[] = "artifacts";
+
+Path
+CanonicalPath(Path path)
 {
+  return path.empty() ? Path{} : fs::weakly_canonical(std::move(path));
+}
+}  // namespace
+
+PosixCopyEngine::PosixCopyEngine(Path storage_root, Path node_cache_root)
+    : storage_root_(CanonicalPath(std::move(storage_root)))
+{
+  if (!node_cache_root.empty()) {
+    node_cache_root_ = CanonicalPath(std::move(node_cache_root));
+    node_cache_artifacts_ = node_cache_root_ / kNodeCacheArtifactsDirectory;
+  }
+}
+
+const Path&
+PosixCopyEngine::RestoreRoot(const StorageBackend& source) const
+{
+  // Only copies under artifacts/ are sources. The root is the node cache
+  // itself, so the storage helpers also reject a symlinked artifacts/.
+  if (filesystem_storage::IsWithinRoot(source, node_cache_artifacts_))
+    return node_cache_root_;
+  if (storage_root_.empty())
+    throw std::invalid_argument("source must be within the node cache");
+  return storage_root_;
 }
 
 IoEngine
@@ -28,7 +54,7 @@ PosixCopyEngine::PrepareRestore(const StorageBackend& source, Cancellation cance
 {
   if (artifact || metadata_only)
     throw std::invalid_argument("POSIX copy requires filesystem storage");
-  return filesystem_storage::PrepareRestore(source, storage_root_, mode, cancellation);
+  return filesystem_storage::PrepareRestore(source, RestoreRoot(source), mode, cancellation);
 }
 
 RestoreAccess
@@ -54,7 +80,7 @@ PosixCopyEngine::ValidateCheckpointDestination(const StorageBackend& destination
     const PublishedArtifact* artifact, Cancellation cancellation) const
 {
   cancellation.ThrowIfCancelled();
-  if (artifact)
+  if (artifact || storage_root_.empty())
     throw std::invalid_argument("POSIX copy requires filesystem storage");
   filesystem_storage::DestinationPath(destination, storage_root_);
 }

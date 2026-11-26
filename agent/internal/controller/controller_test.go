@@ -1726,6 +1726,8 @@ func TestRunRestoreCleanupFailureStillCompletesRestore(t *testing.T) {
 		ContentUID:          "content-uid",
 		SourceContainerName: "main",
 		Path:                artifactPath,
+		BasePath:            w.config.Storage.BasePath,
+		RestoreMode:         w.config.PageBroker.RestoreMode,
 	}
 
 	var request executor.RestoreRequest

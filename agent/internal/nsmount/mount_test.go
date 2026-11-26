@@ -251,6 +251,12 @@ func TestCHelperRejectsUnsafeSourcesBeforeMountSyscalls(t *testing.T) {
 		{name: "whitespace", source: "/checkpoints/bad id"},
 		{name: "shell punctuation", source: "/checkpoints/bad;id"},
 		{name: "unicode", source: "/checkpoints/é"},
+		{name: "node cache root", source: "/node-cache"},
+		{name: "node cache artifacts root", source: "/node-cache/artifacts"},
+		{name: "node cache outside artifacts", source: "/node-cache/unpublished/id"},
+		{name: "node cache sibling prefix", source: "/node-cache/artifacts-other/id"},
+		{name: "node cache traversal", source: "/node-cache/artifacts/../unpublished"},
+		{name: "node cache shell punctuation", source: "/node-cache/artifacts/bad;id"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cmd := exec.Command(binary, "mount-checkpoint-fd", fmt.Sprintf("%d", nsFdChildNum), tc.source)

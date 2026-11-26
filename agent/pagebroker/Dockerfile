@@ -168,6 +168,7 @@ ENV LD_LIBRARY_PATH=/usr/local/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
 
 FROM build-dependencies AS build
+ARG BUILD_JOBS=4
 WORKDIR /src
 RUN useradd --create-home --user-group pagebroker-test \
     && chown pagebroker-test:pagebroker-test /src
@@ -176,9 +177,9 @@ USER pagebroker-test
 # Run unit tests unprivileged so directory permissions are enforced.
 # GPU tests are compiled here and run separately.
 RUN test "$(id -u)" -ne 0 \
-    && make test CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local \
-    && make build/gpu-checkpoint-test build/gpu-transfer-test CUDA_ROOT=/opt/cuda CUDA_LIBRARY_DIR=/opt/cuda/lib64/stubs \
-    && make daemon CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local
+    && make -j"${BUILD_JOBS}" test CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local \
+    && make -j"${BUILD_JOBS}" build/gpu-checkpoint-test build/gpu-transfer-test CUDA_ROOT=/opt/cuda CUDA_LIBRARY_DIR=/opt/cuda/lib64/stubs \
+    && make -j"${BUILD_JOBS}" daemon CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local
 
 # Packaging below needs root to collect libraries and corresponding sources.
 USER root

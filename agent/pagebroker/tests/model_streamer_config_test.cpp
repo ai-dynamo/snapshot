@@ -11,6 +11,7 @@
 #include <fstream>
 #include <map>
 
+#include "tests/credential_environment.hpp"
 #include "tests/temporary_directory.hpp"
 #include "transfer/engine/model_streamer/model_streamer_transfer_engine.hpp"
 
@@ -25,8 +26,6 @@ class ModelStreamerConfigTest : public ::testing::Test {
         "S3_MAX_CONNECTIONS", "S3_MAX_INFLIGHT_MIB", "S3_MAX_RETRIES", "S3_TIMEOUT", "S3_REQUEST_TIMEOUT_MS",
         "S3_LOW_SPEED_LIMIT", "LOG_LEVEL", "LOG_TO_STDERR", "S3_USE_VIRTUAL_ADDRESSING"})
       SaveAndClear(std::string("RUNAI_STREAMER_") + suffix);
-    SaveAndClear("AWS_CA_BUNDLE");
-    SaveAndClear("AWS_EC2_METADATA_DISABLED");
   }
   void TearDown() override
   {
@@ -43,6 +42,7 @@ class ModelStreamerConfigTest : public ::testing::Test {
     previous_[name] = value ? std::optional<std::string>(value) : std::nullopt;
     unsetenv(name.c_str());
   }
+  test::CredentialEnvironment credentials_;
   std::map<std::string, std::optional<std::string>> previous_;
 };
 
@@ -131,6 +131,58 @@ TEST_F(ModelStreamerConfigTest, AppliesAllNativeSettingsAndSharedConnection)
   EXPECT_THROW(options.ValidateEnvironment(), std::invalid_argument);
 }
 
+TEST_F(ModelStreamerConfigTest, DefaultCredentialChainKeepsOnlyWorkloadIdentityForTheNativeReader)
+{
+  setenv("AWS_ACCESS_KEY_ID", "fake-ambient-key", 1);
+  setenv("AWS_SECRET_ACCESS_KEY", "fake-ambient-secret", 1);
+  setenv("AWS_SESSION_TOKEN", "fake-ambient-token", 1);
+  setenv("AWS_PROFILE", "other", 1);
+  setenv("AWS_ENDPOINT_URL_STS", "https://sts.example.test", 1);
+  setenv("AWS_ROLE_ARN", "arn:aws:iam::000000000000:role/fake-role", 1);
+  setenv("AWS_WEB_IDENTITY_TOKEN_FILE", "/var/run/fake/web-identity-token", 1);
+  S3Config storage;
+  storage.transfer.connection.region = "us-west-2";
+  ConfigureEnvironment(Options{}, &storage);
+  for (const auto* name : {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE",
+                           "AWS_ENDPOINT_URL_STS"})
+    EXPECT_EQ(std::getenv(name), nullptr) << name;
+  EXPECT_STREQ(std::getenv("AWS_CONFIG_FILE"), "/dev/null");
+  EXPECT_STREQ(std::getenv("AWS_SHARED_CREDENTIALS_FILE"), "/dev/null");
+  EXPECT_STREQ(std::getenv("AWS_ROLE_ARN"), "arn:aws:iam::000000000000:role/fake-role");
+  EXPECT_STREQ(std::getenv("AWS_WEB_IDENTITY_TOKEN_FILE"), "/var/run/fake/web-identity-token");
+  EXPECT_STREQ(std::getenv("AWS_DEFAULT_REGION"), "us-west-2");
+  EXPECT_STREQ(std::getenv("AWS_REGION"), "us-west-2");
+
+  unsetenv("AWS_DEFAULT_REGION");
+  setenv("AWS_REGION", "eu-central-1", 1);
+  ConfigureEnvironment(Options{}, &storage);
+  EXPECT_STREQ(std::getenv("AWS_DEFAULT_REGION"), "eu-central-1");
+
+  setenv("AWS_DEFAULT_REGION", "ap-south-1", 1);
+  ConfigureEnvironment(Options{}, &storage);
+  EXPECT_STREQ(std::getenv("AWS_DEFAULT_REGION"), "eu-central-1");
+
+  unsetenv("AWS_REGION");
+  setenv("AWS_DEFAULT_REGION", "ap-south-1", 1);
+  ConfigureEnvironment(Options{}, &storage);
+  EXPECT_STREQ(std::getenv("AWS_DEFAULT_REGION"), "ap-south-1");
+}
+
+TEST_F(ModelStreamerConfigTest, StaticCredentialsLeaveTheCredentialEnvironmentUntouched)
+{
+  setenv("AWS_ACCESS_KEY_ID", "fake-ambient-key", 1);
+  setenv("AWS_SHARED_CREDENTIALS_FILE", "/mounted/credentials", 1);
+  S3Config storage;
+  storage.transfer.connection.region = "us-west-2";
+  storage.transfer.connection.access_key_id = "fake-key";
+  storage.transfer.connection.secret_access_key = "fake-secret";
+  ConfigureEnvironment(Options{}, &storage);
+  EXPECT_STREQ(std::getenv("AWS_ACCESS_KEY_ID"), "fake-ambient-key");
+  EXPECT_STREQ(std::getenv("AWS_SHARED_CREDENTIALS_FILE"), "/mounted/credentials");
+  EXPECT_EQ(std::getenv("AWS_CONFIG_FILE"), nullptr);
+  EXPECT_EQ(std::getenv("AWS_DEFAULT_REGION"), nullptr);
+}
+
 TEST_F(ModelStreamerConfigTest, RestoreBatchBudgetIsLocalAndPreservedDuringResolution)
 {
   EXPECT_FALSE(ParseConfig("{}").restore_batch_bytes);
@@ -202,7 +254,6 @@ TEST_F(ModelStreamerConfigTest, InvalidEnvironmentFailsBeforeAnySettingsAreAppli
 
 TEST_F(ModelStreamerConfigTest, DaemonRejectsRelativeCaBeforeApplyingSettings)
 {
-  SaveAndClear("AWS_SHARED_CREDENTIALS_FILE");
   setenv("AWS_CA_BUNDLE", "relative/ca.pem", 1);
   test::TemporaryDirectory root;
   const auto credentials = root.path() / "credentials";
