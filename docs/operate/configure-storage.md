@@ -268,8 +268,15 @@ The examples use `/mnt/nvme/snapshot-cache` as the directory.
 
 ### Prepare the Nodes
 
-Set these Helm values when you install or [upgrade](upgrade.md) Snapshot.
-They apply to both `pvc` and `s3` stores:
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:446ffa057810f1d7a29739877547a55b95549f207fded50c739b86e083bc51e5 -->
+
+Deploy matching agent and PageBroker images that support the node cache
+before enabling it. Set these Helm values when you install or
+[upgrade](upgrade.md) Snapshot. They apply to both `pvc` and `s3` stores:
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ```yaml
 storage:
@@ -429,8 +436,16 @@ directory and its `.index.json` file before you run the script again.
 
 ### Check Which Source a Restore Used
 
-With the node cache enabled, each restore Pod gets a `RestoreSourceSelected`
-event. It says which source the restore reads. Read it with this command:
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:1b07c85c6fdc0f28e6bc1773a808ec19d71becf51eed5c275750272d8386557c -->
+
+With the node cache enabled, the agent emits a `RestoreSourceSelected` Pod
+event when it starts executing a restore. The event reports the selected
+source, and can appear even if the restore later fails. Read it with this
+command:
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ```bash
 kubectl get events --namespace <namespace> \

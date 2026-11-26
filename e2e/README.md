@@ -113,9 +113,18 @@ the chart values this cluster needs (k3s keeps containerd outside the
 conventional paths, and a single node has to fit the workload pods) in the
 newline-separated form `SNAPSHOT_E2E_HELM_SET` accepts.
 
-Those values also turn on the node cache (`storage.nodeCache`), with a node
-directory the script bind-mounts into the cluster. The node cache tests place
-and remove their copies there, and skip on an install without the setting.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:aa96b57fe0a1e28b5aa1052a0786fafda497f43bdf1d7ebadf0b6b2dd038af8a -->
+
+Those values also turn on the node cache (`storage.nodeCache`). The script
+bind-mounts `SNAPSHOT_E2E_NODE_CACHE_HOST` (default
+`${RUNNER_TEMP:-/tmp}/snapshot-node-cache`) into the node at
+`SNAPSHOT_E2E_NODE_CACHE_NODE` (default `/node-cache-data`). Use the same node
+path for cluster creation and `helm-set`. The node cache tests place and remove
+their copies there and skip if the cache is disabled.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 `make cpu-e2e` runs the whole sequence on a linux/amd64 Docker host — build,
 cluster, install, tests — and deletes the cluster afterwards:
