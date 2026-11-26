@@ -4,6 +4,8 @@
 package types
 
 import (
+	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -186,5 +188,22 @@ func TestCheckpointSpecBoundsTheDefaultRetryLimit(t *testing.T) {
 		if !tc.valid && err == nil {
 			t.Errorf("defaultRetryLimit %d should not validate", tc.limit)
 		}
+	}
+}
+
+func TestCheckpointSpecParsesFreezeTimeout(t *testing.T) {
+	for _, raw := range []string{"freezeTimeoutSeconds: 0", "freezeTimeoutSeconds: -1", "freezeTimeoutSeconds: 4294967296"} {
+		var spec CheckpointSpec
+		err := yaml.Unmarshal([]byte(raw), &spec)
+		if err == nil {
+			err = spec.Validate()
+		}
+		require.Error(t, err, raw)
+	}
+	for _, value := range []uint32{1, 300, math.MaxUint32} {
+		var spec CheckpointSpec
+		require.NoError(t, yaml.Unmarshal([]byte(fmt.Sprintf("freezeTimeoutSeconds: %d", value)), &spec))
+		require.NoError(t, spec.Validate())
+		require.Equal(t, value, *spec.FreezeTimeoutSeconds)
 	}
 }

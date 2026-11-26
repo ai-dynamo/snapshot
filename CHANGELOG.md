@@ -34,6 +34,10 @@ commit-level history for each release is on its
 
 ### Added
 
+- `config.checkpoint.freezeTimeoutSeconds` controls how long checkpointing waits
+  for the process tree to freeze, without rebuilding the node agent. The default
+  remains 10 seconds. See [Helm Chart Values](docs/reference/helm-values.md).
+
 - Node cache: with `storage.nodeCache.enabled`, a restore reads a checkpoint
   copy from a directory on its node's local disk, and reads the snapshot store
   when the node holds none. An administrator places and removes the copies.

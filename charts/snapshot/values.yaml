@@ -340,6 +340,8 @@ config:
       - "*.pyc"
 
   checkpoint:
+    # Seconds allowed to freeze the process tree before checkpointing fails.
+    freezeTimeoutSeconds: 10
     # Maximum seconds before the agent marks a checkpoint failed.
     timeoutSeconds: 3600
     # Times a failed checkpoint may be retried, beyond the first attempt, when the
