@@ -160,7 +160,7 @@ func TestPodSnapshotBindsThroughItsStoreAgainstAnAPIServer(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "gold"},
 			Spec: snapshotv1alpha1.SnapshotStoreSpec{
 				ReclaimPolicy: snapshotv1alpha1.ReclaimPolicyRetain,
-				PVC:           &snapshotv1alpha1.PVCStoreSpec{ClaimName: "snapshot-pvc", BasePath: "/gold"},
+				PVC:           &snapshotv1alpha1.PVCStoreSpec{ClaimName: "snapshot-pvc", SubPath: "/gold"},
 			},
 		}))
 		require.Eventually(t, func() bool { return boundContent(snap) != nil }, storeEventually, storeTick)

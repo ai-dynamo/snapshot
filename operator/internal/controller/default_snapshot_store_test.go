@@ -46,7 +46,7 @@ func TestDefaultStoreIsCreatedFromAPVCStore(t *testing.T) {
 	require.NoError(t, c.Get(t.Context(), types.NamespacedName{Name: "default"}, store))
 	require.NotNil(t, store.Spec.PVC)
 	assert.Equal(t, "snapshot-pvc", store.Spec.PVC.ClaimName)
-	assert.Empty(t, store.Spec.PVC.BasePath)
+	assert.Empty(t, store.Spec.PVC.SubPath)
 	assert.Equal(t, snapshotv1alpha1.ReclaimPolicyDelete, store.Spec.ReclaimPolicy)
 	want, err := storage.PVC{Namespace: "snapshot", ClaimName: "snapshot-pvc", BasePath: "/"}.StoreID()
 	require.NoError(t, err)

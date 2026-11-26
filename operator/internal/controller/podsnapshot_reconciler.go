@@ -422,7 +422,7 @@ func (sr *PodSnapshotReconciler) ensurePodSnapshotContent(ctx context.Context, s
 }
 
 // errStoreTerminating means the store is terminating or gone.
-var errStoreTerminating = errors.New("storage class is being deleted or is gone")
+var errStoreTerminating = errors.New("snapshot store is being deleted or is gone")
 
 // confirmStoreStillUsable reads the store from the API server after the content
 // is created. If the store is terminating or gone, it deletes the new content.
