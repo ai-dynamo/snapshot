@@ -1368,6 +1368,33 @@ func TestListProcfsGPUs(t *testing.T) {
 			t.Fatal("expected no procfs answer without a spec")
 		}
 	})
+
+	t.Run("nodes the device cgroup rules do not allow defer to nvidia-smi", func(t *testing.T) {
+		hostProc, _ := setup(t)
+		if _, ok := listProcfsGPUs(hostProc, 42, gpuRulesSpec()); ok {
+			t.Fatal("expected no procfs answer when the rules allow none of the nodes")
+		}
+	})
+
+	// A container that was given no GPU has no nvidia-smi either, so asking it
+	// fails with nsenter's exit status and says nothing about the GPU.
+	t.Run("a container without a GPU node holds no GPU", func(t *testing.T) {
+		hostProc, root := setup(t)
+		for _, minor := range []string{"0", "6"} {
+			if err := os.Remove(filepath.Join(root, "dev", "nvidia"+minor)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		installFakeNSenter(t, "exit 127\n")
+
+		visible, err := ListVisibleGPUs(context.Background(), hostProc, 42, gpuRulesSpec())()
+		if err != nil {
+			t.Fatalf("ListVisibleGPUs: %v", err)
+		}
+		if !reflect.DeepEqual(visible, VisibleGPUs{}) {
+			t.Fatalf("ListVisibleGPUs() = %#v, want no GPU", visible)
+		}
+	})
 }
 
 // gpuRulesSpec returns an OCI spec whose device cgroup, as containerd writes

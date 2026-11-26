@@ -101,11 +101,15 @@ process (check `lsm-labels`). Agents that predate this check write no such
 record, so their checkpoints are refused even when the dumped processes carry
 labels. Re-checkpoint with an agent that records them.
 
+A destination container with a different number of GPUs than the snapshot,
+including none, is also refused (check `gpu-count`). Give the container the
+number of GPUs that the source Pod had.
+
 **Likely causes:**
 
 - The placeholder container exited or restarted before the agent reached it
 - The runtime did not answer
-- The placeholder has fewer GPUs allocated than the checkpoint used, or none
+- The agent could not list the GPUs of the destination container, for example on a node without the NVIDIA driver
 
 ```bash
 kubectl describe pod <restore-pod> -n <ns>

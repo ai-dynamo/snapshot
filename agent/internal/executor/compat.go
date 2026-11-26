@@ -97,6 +97,12 @@ func inspectCompatibility(
 			return path == podcontract.CuInterposeMountPath
 		})
 	}
+	if len(sourceEnv.GPUDevices) > 0 && len(targetGPUs.Devices) == 0 {
+		// The GPU count is refused below. A container without a GPU also lacks
+		// every file the NVIDIA runtime mounts beside one, and listing each as
+		// a missing mount would bury that refusal.
+		sourceEnv.ExternalizedMounts = nil
+	}
 	targetEnv := compat.Environment{
 		ImageID:            targetImageID,
 		DriverVersion:      targetGPUs.DriverVersion,
