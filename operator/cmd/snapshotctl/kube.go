@@ -219,6 +219,7 @@ func (r *retriedAPIErrors) retry(ctx context.Context, err error) bool {
 	var status apierrors.APIStatus
 	if errors.As(err, &status) && !apierrors.IsTimeout(err) && !apierrors.IsServerTimeout(err) &&
 		!apierrors.IsTooManyRequests(err) && !apierrors.IsInternalError(err) && !apierrors.IsServiceUnavailable(err) {
+		r.answered()
 		return false
 	}
 	if ctx.Err() != nil {

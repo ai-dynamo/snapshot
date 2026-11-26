@@ -297,6 +297,16 @@ func TestRetriedAPIErrorsRetry(t *testing.T) {
 	}
 }
 
+// An answer that ends the wait is the error to report, without the outage before it.
+func TestRetriedAPIErrorsDropOutageOnRefusal(t *testing.T) {
+	var retried retriedAPIErrors
+	require.True(t, retried.retry(context.Background(), unansweredRequest()))
+
+	forbidden := apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "", errors.New("no access"))
+	require.False(t, retried.retry(context.Background(), forbidden))
+	assert.Equal(t, forbidden, retried.describe(forbidden))
+}
+
 func TestWaitForPodSnapshotOutlastsUnansweredRequest(t *testing.T) {
 	crClient, calls := podSnapshotClient(t, readyPodSnapshot("snap-1"), 1, unansweredRequest())
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
