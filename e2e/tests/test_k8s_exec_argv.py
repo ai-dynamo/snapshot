@@ -9,7 +9,7 @@ from snapshot_e2e import k8s
 
 
 class FakeSession:
-    def __init__(self, *, output: str, returncode: int, exits: bool = True) -> None:
+    def __init__(self, *, output: str, returncode: object, exits: bool = True) -> None:
         self.output = output
         self._returncode = returncode
         self.exits = exits
@@ -23,6 +23,8 @@ class FakeSession:
 
     @property
     def returncode(self) -> int:
+        if isinstance(self._returncode, Exception):
+            raise self._returncode
         return self._returncode
 
     def read_all(self) -> str:
@@ -60,4 +62,13 @@ def test_exec_argv_raises_when_the_program_outlasts_the_deadline(monkeypatch) ->
     session = FakeSession(output="partial", returncode=0, exits=False)
     with pytest.raises(TimeoutError):
         run(monkeypatch, session)
+    assert session.closed
+
+
+def test_exec_argv_fails_with_minus_one_when_the_exit_status_is_missing(monkeypatch) -> None:
+    session = FakeSession(output="cut off", returncode=TypeError("no status"))
+    with pytest.raises(k8s.ExecFailed) as failure:
+        run(monkeypatch, session)
+    assert failure.value.returncode == -1
+    assert failure.value.output == "cut off"
     assert session.closed
