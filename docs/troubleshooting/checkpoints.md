@@ -102,6 +102,22 @@ part-written. Both name the same shortfall.
 Whether the workload is still running after any of these: see
 [After a Failed Checkpoint, Is the Workload Still Running?](#after-a-failed-checkpoint-is-the-workload-still-running).
 
+## A Checkpoint Fails with `ProcessNamespaceShared`
+
+The source Pod sets `shareProcessNamespace: true`. Snapshot cannot checkpoint a
+Pod that shares its process namespace. The agent fails the checkpoint before it
+suspends the workload, and the source Pod continues to run.
+
+The following command prints `true` for such a Pod:
+
+```bash
+kubectl get pod <source-pod> -n <ns> -o jsonpath='{.spec.shareProcessNamespace}'
+```
+
+Start the workload in a Pod that does not set `shareProcessNamespace`. Then
+create a new `PodSnapshot` for that Pod. See
+[Workload Contract](../reference/workload-contract.md#pod-requirements).
+
 ## After a Failed Checkpoint, Is the Workload Still Running?
 
 A failure after the workload was suspended terminates the source Pod, unless the
