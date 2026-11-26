@@ -188,9 +188,9 @@ commit-level history for each release is on its
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 - The restore proxy forwards every signal it can catch to the restored process,
   not only `SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`, `SIGUSR1`, and `SIGUSR2`.
-  A restored workload now receives another stop signal, such as the `SIGWINCH`
-  of the `httpd` image, when its Pod is deleted. Before, it was killed at the
-  end of the grace period. See
+  A restored workload whose stop signal is another one, such as the `SIGWINCH`
+  of the `httpd` image, now receives it when its Pod is deleted. Before, it was
+  killed at the end of the grace period. See
   [Restore Pod Contract](docs/reference/restore-pod-contract.md).
 
 ### Deprecated
