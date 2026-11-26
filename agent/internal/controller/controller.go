@@ -113,6 +113,12 @@ type NodeController struct {
 	// begins before kubelet publishes the container in the Pod status.
 	startedRestoreContainers sync.Map
 
+	// restoreAttemptRecords holds, per restoreContainerKey, the
+	// podcontract.ContainerRetryStatus that records the attempts of a
+	// destination whose restore allows retries. It goes with the Pod, so a new
+	// Pod starts a new restore.
+	restoreAttemptRecords sync.Map
+
 	// contentIndexer is the PodSnapshotContent informer's indexer, indexed by source pod
 	// (podRefIndex). The source-pod informer uses it to map a pod event back to its work order.
 	contentIndexer cache.Indexer
@@ -468,12 +474,14 @@ func (w *NodeController) forgetRestorePod(obj interface{}) {
 	}
 	w.handledRestores.Delete(string(pod.UID))
 	prefix := string(pod.UID) + "/"
-	w.startedRestoreContainers.Range(func(key, _ any) bool {
-		if strings.HasPrefix(key.(string), prefix) {
-			w.startedRestoreContainers.Delete(key)
-		}
-		return true
-	})
+	for _, containers := range []*sync.Map{&w.startedRestoreContainers, &w.restoreAttemptRecords} {
+		containers.Range(func(key, _ any) bool {
+			if strings.HasPrefix(key.(string), prefix) {
+				containers.Delete(key)
+			}
+			return true
+		})
+	}
 }
 
 // RestoreContainerStarted records a restore destination's container that the
@@ -1223,17 +1231,22 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		}
 	}
 
+	record, err := op.startAttempt()
+	if err != nil {
+		return op.failRestore(ctx, err)
+	}
+
 	// Emitted only here, so a recovered restore that never reruns stays silent.
 	if source := restoreSourceMessage(plan.artifact); source != "" {
 		op.log.Info("Restore source selected", "source", source)
 		emitPodEvent(ctx, w.clientset, op.log, pod, snapshotEventComponent, corev1.EventTypeNormal, restoreSourceSelectedReason, source)
 	}
 
-	// One deadline covers the restore and its post-restore action.
+	// One deadline covers every attempt and the post-restore action.
 	restoreCtx := ctx
-	if timeout := w.config.Restore.RestoreTimeout(); timeout > 0 {
+	if !record.Deadline.IsZero() {
 		var cancel context.CancelFunc
-		restoreCtx, cancel = context.WithTimeout(ctx, timeout)
+		restoreCtx, cancel = context.WithDeadline(ctx, record.Deadline)
 		defer cancel()
 	}
 
@@ -1243,6 +1256,9 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		if errors.As(err, &incompatible) {
 			// The placeholder is left running: killing it restarts the container
 			// straight back into the same refusal.
+			if record.RetryLimit > 0 {
+				op.forgetAttempts()
+			}
 			return incompatible
 		}
 
