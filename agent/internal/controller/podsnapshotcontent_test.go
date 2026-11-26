@@ -728,6 +728,37 @@ func TestClassifySourcePod(t *testing.T) {
 	assert.Equal(t, "SourcePodGone", reason)
 }
 
+// A Pod being deleted is still Running or Pending, so its phase does not say why it is gone.
+func TestClassifySourcePodLivenessMessage(t *testing.T) {
+	deleted := metav1.Now()
+	tests := []struct {
+		name     string
+		phase    corev1.PodPhase
+		deleting bool
+		want     string
+	}{
+		{name: "failed", phase: corev1.PodFailed, want: `source pod "worker-0" is no longer running (phase Failed)`},
+		{name: "succeeded", phase: corev1.PodSucceeded, want: `source pod "worker-0" is no longer running (phase Succeeded)`},
+		{name: "running and being deleted", phase: corev1.PodRunning, deleting: true, want: `source pod "worker-0" is being deleted`},
+		{name: "pending and being deleted", phase: corev1.PodPending, deleting: true, want: `source pod "worker-0" is being deleted`},
+		{name: "failed and being deleted", phase: corev1.PodFailed, deleting: true, want: `source pod "worker-0" is no longer running (phase Failed)`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference"},
+				Status:     corev1.PodStatus{Phase: tt.phase},
+			}
+			if tt.deleting {
+				pod.DeletionTimestamp = &deleted
+			}
+			reason, message := classifySourcePodLiveness(pod)
+			assert.Equal(t, "SourcePodGone", reason)
+			assert.Equal(t, tt.want, message)
+		})
+	}
+}
+
 func TestReconcileCapture_StalePodUIDFails(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := &corev1.Pod{
@@ -758,6 +789,25 @@ func TestReconcileCapture_PodFailedFails(t *testing.T) {
 	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, cond)
 	assert.Equal(t, "SourcePodGone", cond.Reason)
+}
+
+func TestReconcileCapture_PodBeingDeletedFails(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	pod := makeSourcePod()
+	deleted := metav1.Now()
+	pod.DeletionTimestamp = &deleted
+	pod.Finalizers = []string{"example.com/hold"}
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
+
+	assert.False(t, fc.wasCalled())
+	got := getContent(t, w, content.Name)
+	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "SourcePodGone", cond.Reason)
+	assert.Equal(t, `source pod "`+pod.Name+`" is being deleted`, cond.Message)
 }
 
 func TestReconcileCapture_NotReadyQuiesceNoOp(t *testing.T) {
