@@ -257,8 +257,9 @@ sees describes the capability, not the mechanism behind it.
 - The operator's Job informer cache is trimmed. `TrimJobForCache` in
   `operator/internal/controller/job_cache.go` keeps the spec and status only of
   Jobs that a `SnapshotJob` controls. Every other Job in the cluster is cached
-  as metadata (minus `managedFields`). A controller that needs the spec or
-  status of such a Job reads it through the API reader.
+  as metadata (minus `managedFields`). A controller that reads the spec or
+  status of such a Job from the cache gets a zero value. Read that Job through
+  the API reader, or extend the transform and its test in the same change.
 - The operator's Pod informer cache is trimmed. `TrimPodForCache` in
   `operator/internal/controller/pod_cache.go` keeps metadata (minus
   `managedFields`), `spec.nodeName`, `status.phase` and the container and
