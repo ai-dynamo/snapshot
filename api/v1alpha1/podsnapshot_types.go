@@ -26,6 +26,9 @@ import (
 // PodSnapshot and PodSnapshotContent status condition types. Both objects share this
 // vocabulary; the operator and node agent set them via meta.SetStatusCondition.
 const (
+	// PodSnapshotConditionStarted is True on content once the agent has begun
+	// checkpoint execution. It lets the operator wait for a result after source loss.
+	PodSnapshotConditionStarted = "Started"
 	// PodSnapshotConditionReady is True when the checkpoint and binding completed and
 	// the snapshot is usable for restore.
 	PodSnapshotConditionReady = "Ready"

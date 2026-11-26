@@ -803,6 +803,12 @@ func TestRunCheckpoint_WritesReady(t *testing.T) {
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
 	artifactPath := filepath.Join(w.config.Storage.BasePath, "artifacts", string(content.UID), "containers", "main")
 
+	w.checkpointFn = func(ctx context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		assert.True(t, meta.IsStatusConditionTrue(getContent(t, w, content.Name).Status.Conditions,
+			snapshotv1alpha1.PodSnapshotConditionStarted), "Started must be durable before execution")
+		return fc.fn(ctx, params)
+	}
+
 	require.NoError(t, w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, false, string(content.UID), artifactPath))
 
 	assert.True(t, fc.wasCalled())
@@ -810,6 +816,22 @@ func TestRunCheckpoint_WritesReady(t *testing.T) {
 		getContent(t, w, content.Name).Status.Conditions,
 		snapshotv1alpha1.PodSnapshotConditionReady,
 	), "a successful dump must end with a durable Ready condition")
+}
+
+func TestRunCheckpoint_StartedWriteFailurePreventsExecution(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content)
+	w.client = crfake.NewClientBuilder().WithScheme(contentScheme(t)).WithObjects(content).
+		WithStatusSubresource(&snapshotv1alpha1.PodSnapshotContent{}).WithInterceptorFuncs(interceptor.Funcs{
+		SubResourcePatch: func(context.Context, client.Client, string, client.Object, client.Patch, ...client.SubResourcePatchOption) error {
+			return errors.New("status write unavailable")
+		},
+	}).Build()
+	err := w.runCheckpoint(context.Background(), content, makeSourcePod(), "main", "abc123", 7, false, string(content.UID), t.TempDir())
+	require.ErrorContains(t, err, "record checkpoint started")
+	assert.False(t, fc.wasCalled(), "a failed Started write must not begin checkpoint execution")
+	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
 }
 
 func TestRunCheckpoint_WritesFailedOnError(t *testing.T) {

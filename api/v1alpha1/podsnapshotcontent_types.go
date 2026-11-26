@@ -94,7 +94,7 @@ type PodSnapshotContentSource struct {
 // PodSnapshotContentStatus defines the observed state of PodSnapshotContent.
 type PodSnapshotContentStatus struct {
 	// Conditions reflect the latest observations of the PodSnapshotContent's state.
-	// Standard types are Ready and Failed.
+	// Standard types are Started, Ready and Failed.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 

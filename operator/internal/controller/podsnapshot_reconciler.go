@@ -161,6 +161,12 @@ func (sr *PodSnapshotReconciler) mirrorBoundContent(ctx context.Context, snap *s
 // Pending is reversible. Only a cached terminal or missing source needs authoritative confirmation
 // before it can cause a permanent capture failure.
 func (sr *PodSnapshotReconciler) resolvePendingBoundContent(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, cachedContent *snapshotv1alpha1.PodSnapshotContent) (ctrl.Result, error) {
+	// Once source loss is confirmed, a stale live Pod in the cache must not
+	// clear the recorded clock and give the same work order another grace.
+	if ready := meta.FindStatusCondition(snap.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady); ready != nil &&
+		ready.Status == metav1.ConditionUnknown && ready.Reason == podSnapshotReasonCheckpointResultPending {
+		return sr.confirmPendingCaptureTerminal(ctx, snap, cachedContent)
+	}
 	pod, err := sr.getSourcePod(ctx, snap)
 	if err == nil {
 		if _, cause := pendingCaptureSourceFailure(snap, cachedContent, pod); cause == nil {
@@ -173,9 +179,9 @@ func (sr *PodSnapshotReconciler) resolvePendingBoundContent(ctx context.Context,
 	return sr.confirmPendingCaptureTerminal(ctx, snap, cachedContent)
 }
 
-// confirmPendingCaptureTerminal bypasses the informer cache before writing sticky failure. The
-// pod is read before the content: the agent persists content Ready before releasing the source
-// process, so a pod observed terminal guarantees the content read cannot miss a raced Ready.
+// confirmPendingCaptureTerminal bypasses the informer cache before deciding
+// what became of a source. The dump ends its source before the agent commits
+// the artifact and publishes Ready, so source loss alone is not a result.
 func (sr *PodSnapshotReconciler) confirmPendingCaptureTerminal(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, cachedContent *snapshotv1alpha1.PodSnapshotContent) (ctrl.Result, error) {
 	pod, podErr := sr.readAuthoritativeSourcePod(ctx, snap)
 	if podErr != nil && !apierrors.IsNotFound(podErr) {
@@ -193,58 +199,63 @@ func (sr *PodSnapshotReconciler) confirmPendingCaptureTerminal(ctx context.Conte
 		return sr.propagateStatus(ctx, snap, content)
 	}
 
+	var reason string
+	var cause error
 	if apierrors.IsNotFound(podErr) {
 		key := client.ObjectKey{Namespace: snap.Namespace, Name: snap.Spec.Source.PodRef.Name}
-		return sr.failPodSnapshot(ctx, snap, "SourcePodNotFound",
-			fmt.Errorf("source pod %q disappeared before checkpoint success or failure was recorded", key.String()))
+		reason = "SourcePodNotFound"
+		cause = fmt.Errorf("source pod %q disappeared before checkpoint success or failure was recorded", key.String())
+	} else {
+		reason, cause = pendingCaptureSourceFailure(snap, content, pod)
 	}
-
-	reason, cause := pendingCaptureSourceFailure(snap, content, pod)
 	if cause == nil {
 		return sr.propagateStatus(ctx, snap, content)
 	}
-	if reason == podSnapshotReasonSourcePodGone {
-		// A checkpoint that terminates its source fails the pod before the agent
-		// writes content Ready; wait out the grace window instead of racing it.
-		if wait := sourcePodTerminalGraceRemaining(pod, time.Now()); wait > 0 {
-			return ctrl.Result{RequeueAfter: wait}, nil
-		}
+	// Keep the existing grace for a failed/deleting Pod that is still present,
+	// including captures run by older agents. Only the newly supported source
+	// loss paths need Started to distinguish execution from an abandoned request.
+	if reason != podSnapshotReasonSourcePodGone &&
+		!meta.IsStatusConditionTrue(content.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionStarted) {
+		return sr.failPodSnapshot(ctx, snap, reason, cause)
 	}
-	return sr.failPodSnapshot(ctx, snap, reason, cause)
+	return sr.waitForCaptureResult(ctx, snap, reason, cause, time.Now())
 }
 
-// sourcePodTerminalGrace is how long a pending capture may stay unresolved
-// after its source pod turned terminal before the pod's state becomes the
-// capture failure — the backstop for an agent that never publishes a result.
+// sourcePodTerminalGrace bounds the wait for the agent's result after a bound
+// work order's source ends, disappears or is replaced.
 const sourcePodTerminalGrace = 5 * time.Minute
 
-// sourcePodTerminalGraceRemaining returns how much of the grace window is left
-// for a terminal source pod. An unknown transition time returns zero — failing
-// immediately — rather than requeueing on a clock that can never expire.
-func sourcePodTerminalGraceRemaining(pod *corev1.Pod, now time.Time) time.Duration {
-	terminalAt := podTerminalTime(pod)
-	if terminalAt.IsZero() {
-		return 0
-	}
-	return sourcePodTerminalGrace - now.Sub(terminalAt)
-}
+const podSnapshotReasonCheckpointResultPending = "CheckpointResultPending"
 
-// podTerminalTime returns the latest observable time at which the source pod
-// turned terminal: the newest container termination, else the deletion stamp.
-// Zero means the transition time is not observable from pod status.
-func podTerminalTime(pod *corev1.Pod) time.Time {
-	var latest time.Time
-	for _, statuses := range [][]corev1.ContainerStatus{pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses} {
-		for i := range statuses {
-			if terminated := statuses[i].State.Terminated; terminated != nil && terminated.FinishedAt.Time.After(latest) {
-				latest = terminated.FinishedAt.Time
-			}
+// waitForCaptureResult records the beginning of a bounded wait on Ready's
+// Unknown transition. Keeping the clock in status survives operator restarts
+// and source deletion; neither a missing Pod nor a replacement can reset it.
+// The caller requires Started for source-loss paths that previously failed at once.
+func (sr *PodSnapshotReconciler) waitForCaptureResult(
+	ctx context.Context, snap *snapshotv1alpha1.PodSnapshot,
+	reason string, cause error, now time.Time,
+) (ctrl.Result, error) {
+	ready := meta.FindStatusCondition(snap.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady)
+	waiting := ready != nil && ready.Status == metav1.ConditionUnknown && ready.Reason == podSnapshotReasonCheckpointResultPending
+	since := now
+	if waiting {
+		since = ready.LastTransitionTime.Time
+	}
+	remaining := sourcePodTerminalGrace - now.Sub(since)
+	if remaining <= 0 {
+		return sr.failPodSnapshot(ctx, snap, reason, cause)
+	}
+	if !waiting {
+		sr.setCondition(snap, snapshotv1alpha1.PodSnapshotConditionReady, metav1.ConditionUnknown,
+			podSnapshotReasonCheckpointResultPending, "Source pod is unavailable; waiting for the node agent's checkpoint result")
+		// SetStatusCondition preserves the old timestamp if Ready was already
+		// Unknown for another reason; this transition starts a different wait.
+		meta.FindStatusCondition(snap.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady).LastTransitionTime = metav1.NewTime(since)
+		if err := sr.Status().Update(ctx, snap); err != nil {
+			return ctrl.Result{}, fmt.Errorf("record pending checkpoint result: %w", err)
 		}
 	}
-	if latest.IsZero() && pod.DeletionTimestamp != nil {
-		latest = pod.DeletionTimestamp.Time
-	}
-	return latest
+	return ctrl.Result{RequeueAfter: remaining}, nil
 }
 
 func (sr *PodSnapshotReconciler) readAuthoritativeBoundContent(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, cachedContent *snapshotv1alpha1.PodSnapshotContent) (*snapshotv1alpha1.PodSnapshotContent, error) {
@@ -484,7 +495,8 @@ func (sr *PodSnapshotReconciler) setCondition(snap *snapshotv1alpha1.PodSnapshot
 }
 
 // Ready and Failed are kept as a coherent, mutually-exclusive pair: at most one is True. Both
-// False is the in-progress (Pending) state. markReady/markFailed set both ends so the snapshot can
+// False is the normal in-progress state; Ready=Unknown waits for a result after
+// source loss. markReady/markFailed set both ends so the snapshot can
 // never report Ready=True and Failed=True simultaneously.
 
 // markReady records terminal success: Ready=True, Failed=False.

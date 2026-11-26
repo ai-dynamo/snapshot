@@ -208,7 +208,8 @@ file out of the container and checks that it lists every GPU.
 ### configuring CRIU dump and writing checkpoint manifest
 
 The agent builds CRIU's dump options from the inspected container and writes
-`manifest.json` into the staging directory.
+`manifest.yaml` into the staging directory. It updates the manifest after the
+dump succeeds.
 
 **Likely causes:**
 
@@ -261,11 +262,12 @@ The agent log carries the CRIU error. Check the source pod against the
 
 ### capturing rootfs diff
 
-After the dump, the agent records the container's upper directory as a rootfs
-diff, keeping every file the dump references even when an exclusion pattern
+Once CRIU has written its images, the agent records the container's upper
+directory as a rootfs diff in CRIU's post-dump callback, while the source remains
+frozen. It keeps every file the dump references even when an exclusion pattern
 matches it. Other diff problems are logged and the checkpoint goes on without
-them; the dump has already stopped the source, so a failure here means
-re-taking the checkpoint from a fresh replica.
+them. An error returned by the callback fails the dump and follows the
+checkpoint failure rules.
 
 **Likely causes:**
 
