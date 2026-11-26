@@ -204,7 +204,7 @@ Check the PageBroker container's variables with the command above: no
 
 PageBroker reads the S3 settings once at startup, so changing one restarts
 PageBroker on each node. A PageBroker that starts before the operator has
-rewritten its configuration runs with the previous settings.
+rewritten its configuration runs with the previous configuration.
 
 After changing the endpoint, bucket, region, prefix, `storage.s3.addressing`,
 the CA bundle, or `pageBroker.s3.limits`, restart the agent DaemonSet once the

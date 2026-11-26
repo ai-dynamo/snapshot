@@ -45,9 +45,9 @@ rejected setting.
 
 A change to `storage.s3.addressing` or the CA bundle does not stop PageBroker.
 A PageBroker pod that starts before the operator has rewritten its
-configuration runs with the previous configuration. The addressing and any CA
-bundle that configuration names take precedence over the variables on the
-container. See
+configuration runs with the previous configuration. PageBroker takes its
+addressing from that configuration, and its CA bundle when the configuration
+names one, not from the variables on the container. See
 [Change S3 Settings](../operate/configure-storage.md#change-s3-settings).
 
 ## CRIU Reports `Unable to create tun`
