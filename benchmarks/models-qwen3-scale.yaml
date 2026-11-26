@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Single-H100 scale sweep. Keep runtime settings fixed so model size is the
+# intentional independent variable. Snapshot artifact size is measured by the
+# benchmark; reported_weights_bytes is omitted where no reviewed value exists.
+
+models:
+  - label: "Qwen3 0.6B"
+    hf_id_or_path: "Qwen/Qwen3-0.6B"
+    reported_weights_bytes: 1500000000
+    env:
+      VLLM_MAX_MODEL_LEN: "2048"
+      VLLM_GPU_MEMORY_UTILIZATION: "0.50"
+
+  - label: "Qwen3 1.7B"
+    hf_id_or_path: "Qwen/Qwen3-1.7B"
+    env:
+      VLLM_MAX_MODEL_LEN: "2048"
+      VLLM_GPU_MEMORY_UTILIZATION: "0.50"
+
+  - label: "Qwen3 4B"
+    hf_id_or_path: "Qwen/Qwen3-4B"
+    env:
+      VLLM_MAX_MODEL_LEN: "2048"
+      VLLM_GPU_MEMORY_UTILIZATION: "0.50"
+
+  - label: "Qwen3 8B"
+    hf_id_or_path: "Qwen/Qwen3-8B"
+    reported_weights_bytes: 16400000000
+    env:
+      VLLM_MAX_MODEL_LEN: "2048"
+      VLLM_GPU_MEMORY_UTILIZATION: "0.50"
+
+  - label: "Qwen3 14B"
+    hf_id_or_path: "Qwen/Qwen3-14B"
+    reported_weights_bytes: 29500000000
+    env:
+      VLLM_MAX_MODEL_LEN: "2048"
+      VLLM_GPU_MEMORY_UTILIZATION: "0.50"

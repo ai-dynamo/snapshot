@@ -29,7 +29,7 @@ from kubernetes.client import ApiException
 from snapshot_e2e import k8s
 from snapshot_e2e import lifecycle
 
-from snapshot_benchmarks import logs, metadata, measurement, results
+from snapshot_benchmarks import image, logs, metadata, measurement, results
 from snapshot_benchmarks.workload import app_configmap, instrument_pod
 from snapshot_e2e.infra.preflight import load_config
 from snapshot_benchmarks.engines import Engine, ModelSpec
@@ -37,6 +37,8 @@ from snapshot_benchmarks.schema import (
     SCHEMA_VERSION,
     AgentLogPhases,
     BenchmarkEngine,
+    CheckpointAgentLog,
+    CheckpointImage,
     CheckpointTiming,
     ColdStartTiming,
     GpuIdentity,
@@ -340,6 +342,10 @@ def run_benchmark(
             )
             result.model.checkpoint_artifact_bytes = checkpoint_bytes
             result.checkpoint.agent_seconds = checkpoint_seconds
+            result.checkpoint_agent_log = _collect_checkpoint_agent_log(
+                cfg, capture_node, content_name=content_name
+            )
+            result.checkpoint_image = _collect_checkpoint_image(cfg, capture_node, content_uid)
 
             progress(f"[{run_id}] deleting source pod {source_name} to free the GPU")
             k8s.delete_pod(cfg.workload_namespace, source_name)
@@ -607,6 +613,56 @@ def _custom_object_condition_time(
 ) -> datetime.datetime | None:
     cond = lifecycle.condition(obj, condition_type)
     return _parse_iso(cond.get("lastTransitionTime")) if cond else None
+
+
+def _collect_checkpoint_agent_log(
+    cfg: BenchmarkConfig, capture_node: str | None, *, content_name: str
+) -> CheckpointAgentLog:
+    """Best-effort parse of the capture-node agent's checkpoint summary.
+
+    The checkpoint has already succeeded. A missing agent or an unparsed log
+    degrades to warnings on the returned object, same as restore phase collection.
+    """
+    if not capture_node:
+        return CheckpointAgentLog(parse_warnings=["source pod had no node_name; cannot locate agent"])
+    snapshot_cfg = cfg.snapshot_e2e_config()
+    try:
+        agent_pod = lifecycle.checkpoint_agent_pod(snapshot_cfg, capture_node)
+        log_text = k8s.pod_logs(
+            cfg.snapshot_namespace, agent_pod, tail_lines=2000, container="agent"
+        )
+        return logs.parse_checkpoint_agent_log(
+            log_text, log_source_pod=agent_pod, content=content_name
+        )
+    except AssertionError as exc:
+        return CheckpointAgentLog(parse_warnings=[str(exc)])
+    except Exception as exc:  # noqa: BLE001 - log fetch/parse fails in many untyped ways
+        return CheckpointAgentLog(parse_warnings=[f"checkpoint_agent_log unavailable: {exc}"])
+
+
+def _collect_checkpoint_image(
+    cfg: BenchmarkConfig, capture_node: str | None, content_uid: str
+) -> CheckpointImage:
+    """Lists the artifact and reads dump.log markers before cleanup deletes it.
+
+    Best-effort: the checkpoint has already succeeded, so an exec failure
+    becomes a warning on the returned object rather than a failed run.
+    """
+    if not capture_node:
+        return CheckpointImage(parse_warnings=["source pod had no node_name; cannot list the artifact"])
+    snapshot_cfg = cfg.snapshot_e2e_config()
+    try:
+        agent_pod = lifecycle.checkpoint_agent_pod(snapshot_cfg, capture_node)
+        output = k8s.exec_payload(
+            cfg.snapshot_namespace,
+            agent_pod,
+            image.inventory_command(lifecycle.checkpoint_artifact_root(content_uid)),
+        )
+        return image.parse_inventory(output)
+    except AssertionError as exc:
+        return CheckpointImage(parse_warnings=[str(exc)])
+    except Exception as exc:  # noqa: BLE001 - exec-over-websocket fails in many untyped ways
+        return CheckpointImage(parse_warnings=[f"checkpoint image inventory unavailable: {exc}"])
 
 
 def _collect_agent_log_phases(

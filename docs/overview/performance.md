@@ -5,6 +5,8 @@ Restore was 8.1–35.9 times faster than cold start. Both measurements end when 
 is ready, before inference. Read the [Limitations](#limitations) before you compare
 these results with another setup.
 
+Capture is not in the tables below. The [benchmark tool](benchmarks-guide.md#capture-breakdown) records it for each run: agent wall time, the CUDA lock versus device-to-host copy, and CRIU's freeze and memdump timers, with memwrite (the page-write time inside memdump) shown separately.
+
 > [!TIP]
 > See the [benchmark guide](../development/benchmarks-guide.md) for setup and commands, and the
 > [runner README](../../benchmarks/README.md) for the code layout.

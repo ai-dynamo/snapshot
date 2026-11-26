@@ -121,6 +121,76 @@ class ColdStartTiming:
 
 
 @dataclass
+class CheckpointAgentLog:
+    """Capture breakdown from the agent's ``Checkpoint timing summary``.
+
+    ``phases`` are the additive pieces of ``duration``. ``cuda_*`` splits
+    ``phases["cuda_checkpoint"]`` into lock, device-to-host copy, and job-file
+    refresh when the helper path measured them. PageBroker CustomStorage leaves
+    those fields unset. ``criu_memdump`` and ``criu_memwrite`` are CRIU's own
+    timers from ``stats-dump``. They overlap ``phases["criu_dump"]`` and are
+    not added to it. memwrite runs inside memdump, so memdump includes the
+    page-write time and ``criu_read`` (memdump minus memwrite) is the time
+    spent reading the frozen process. Do not add the two. CRIU's double-counted
+    last write interval exists only in its pre-dump path, which the agent does
+    not use.
+
+    ``checkpoint_dir_bytes_before_overlay`` is the apparent size of the staging
+    directory after CRIU returns and before the rootfs diff is written. It
+    includes the manifest, dump.log, CUDA job file, and criu.conf. It is not
+    the CRIU image and not the final checkpoint size.
+    """
+
+    log_line_found: bool = False
+    log_source_pod: str | None = None
+    parse_warnings: list[str] = field(default_factory=list)
+
+    duration: float | None = None
+    started_to_complete: float | None = None
+    phases: dict[str, float] = field(default_factory=dict)
+
+    cuda_lock: float | None = None
+    cuda_copy: float | None = None
+    cuda_job_file: float | None = None
+
+    criu_freezing: float | None = None
+    criu_frozen: float | None = None
+    criu_memdump: float | None = None
+    criu_memwrite: float | None = None
+    criu_pages_written: int | None = None
+    criu_pages_written_bytes: int | None = None
+    criu_pages_scanned: int | None = None
+    checkpoint_dir_bytes_before_overlay: int | None = None
+    overlay_diff_bytes: int | None = None
+
+    @property
+    def criu_read(self) -> float | None:
+        """Time CRIU spent reading the frozen process: memdump minus memwrite.
+
+        None when either timer is missing or memwrite exceeds memdump, which
+        would mean the timers are not nested the way CRIU nests them.
+        """
+        if self.criu_memdump is None or self.criu_memwrite is None:
+            return None
+        if self.criu_memwrite > self.criu_memdump:
+            return None
+        return self.criu_memdump - self.criu_memwrite
+
+    @property
+    def memwrite_gigabytes_per_second(self) -> float | None:
+        """Page payload divided by CRIU's memwrite timer.
+
+        This uses ``pages_written``, not the size of the staging directory.
+        The directory also holds metadata and pages that ``pages_written``
+        does not count, so dividing it by the dump wall overstates the write
+        rate.
+        """
+        if not self.criu_pages_written_bytes or not self.criu_memwrite:
+            return None
+        return self.criu_pages_written_bytes / self.criu_memwrite / 1e9
+
+
+@dataclass
 class CheckpointTiming:
     """Checkpoint timing boundaries.
 
@@ -249,6 +319,185 @@ class AgentLogPhases:
 
 
 @dataclass
+class ArtifactFile:
+    """One file in the checkpoint artifact, relative to the content directory.
+
+    `bytes` is the apparent size (`st_size`), which counts sparse holes.
+    `allocated_bytes` is `st_blocks * 512`, the space the filesystem has
+    actually reserved. A page image whose apparent size is far above its
+    allocated size is mostly holes.
+    """
+
+    path: str
+    bytes: int
+    allocated_bytes: int | None = None
+
+
+@dataclass
+class ImageCategory:
+    """Bytes in the artifact grouped by CRIU image kind (pages, core, mm, ...).
+
+    `bytes` sums apparent sizes. `allocated_bytes` sums allocated sizes, or
+    is None when the inventory did not report blocks.
+    """
+
+    name: str
+    bytes: int
+    file_count: int
+    allocated_bytes: int | None = None
+
+
+@dataclass
+class DumpLogEvent:
+    """One CRIU dump.log line. offset_seconds is CRIU's own clock."""
+
+    offset_seconds: float
+    message: str
+    path: str
+
+
+@dataclass
+class CheckpointImage:
+    """File inventory and dump.log markers for one captured artifact.
+
+    Collected by listing the artifact before the benchmark deletes it. The
+    category totals name bytes that CRIU's pages_written counter does not.
+    dump.log offsets are CRIU's own log clock.
+    """
+
+    files: list[ArtifactFile] = field(default_factory=list)
+    categories: list[ImageCategory] = field(default_factory=list)
+    file_count: int = 0
+    dump_log: list[DumpLogEvent] = field(default_factory=list)
+    parse_warnings: list[str] = field(default_factory=list)
+    # Summaries of the high-volume dump.log lines. Kept off the event list so
+    # "Dumping finished" is not dropped behind hundreds of pagemap lines.
+    pagemap_count: int = 0
+    pagemap_pages: int = 0
+    # Pages CRIU skipped because a parent image holds them (pages_skipped_parent),
+    # zero without --prev-images-dir. A count only: converting it to bytes needs
+    # the host page size, which the report derives from the agent log.
+    pagemap_holes: int = 0
+    pagemap_first_seconds: float | None = None
+    pagemap_last_seconds: float | None = None
+    thread_core_count: int = 0
+    thread_core_first_seconds: float | None = None
+    thread_core_last_seconds: float | None = None
+
+    @property
+    def pages_bytes(self) -> int:
+        return _category_bytes(self.categories, "pages")
+
+    @property
+    def pages_allocated_bytes(self) -> int | None:
+        return _category_allocated(self.categories, "pages")
+
+    @property
+    def pages_sparse_bytes(self) -> int | None:
+        """Apparent page-image size minus allocated size.
+
+        This is file sparseness (``st_size`` minus ``st_blocks * 512``). It is
+        not CRIU's parent-image pagemap hole count.
+        """
+        allocated = self.pages_allocated_bytes
+        if allocated is None:
+            return None
+        return self.pages_bytes - allocated
+
+    @property
+    def non_page_bytes(self) -> int:
+        return sum(category.bytes for category in self.categories if category.name != "pages")
+
+    @property
+    def first_dumping_pages_seconds(self) -> float | None:
+        return _first_event(self.dump_log, "Dumping pages (")
+
+    @property
+    def last_pagemap_seconds(self) -> float | None:
+        return self.pagemap_last_seconds
+
+    @property
+    def first_dumping_core_seconds(self) -> float | None:
+        """First task's core dump. Not the end of the page write.
+
+        CRIU finishes each task (pages, then core, then threads and mm) before
+        the next, so on a multi-process tree such as vLLM this line can come
+        before the last ``Pagemap generated``.
+        """
+        return _first_event(self.dump_log, "Dumping core (pid:")
+
+    @property
+    def core_after_last_pagemap_seconds(self) -> float | None:
+        """The first ``Dumping core (pid:`` at or after the last pagemap.
+
+        That is the earliest point where every task's private pages are
+        written. It falls back to the first core line when there is no pagemap
+        summary. Shared anonymous memory is written later, after
+        ``Dumping pstree``.
+        """
+        last = self.pagemap_last_seconds
+        if last is None:
+            return self.first_dumping_core_seconds
+        for event in self.dump_log:
+            if event.message.startswith("Dumping core (pid:") and event.offset_seconds >= last:
+                return event.offset_seconds
+        return None
+
+    @property
+    def dumping_mm_seconds(self) -> float | None:
+        return _first_event(self.dump_log, "Dumping mm (")
+
+    @property
+    def dumping_pstree_seconds(self) -> float | None:
+        return _first_event(self.dump_log, "Dumping pstree")
+
+    @property
+    def namespaces_complete_seconds(self) -> float | None:
+        return _first_event(self.dump_log, "Namespaces dump complete")
+
+    @property
+    def unfreezing_seconds(self) -> float | None:
+        return _first_event(self.dump_log, "Unfreezing tasks")
+
+    @property
+    def writing_stats_seconds(self) -> float | None:
+        return _first_event(self.dump_log, "Writing stats")
+
+    @property
+    def dumping_finished_seconds(self) -> float | None:
+        return _last_event(self.dump_log, "Dumping finished")
+
+
+def _category_bytes(categories: list[ImageCategory], name: str) -> int:
+    for category in categories:
+        if category.name == name:
+            return category.bytes
+    return 0
+
+
+def _category_allocated(categories: list[ImageCategory], name: str) -> int | None:
+    for category in categories:
+        if category.name == name:
+            return category.allocated_bytes
+    return None
+
+
+def _first_event(events: list[DumpLogEvent], prefix: str) -> float | None:
+    for event in events:
+        if event.message.startswith(prefix):
+            return event.offset_seconds
+    return None
+
+
+def _last_event(events: list[DumpLogEvent], prefix: str) -> float | None:
+    found: float | None = None
+    for event in events:
+        if event.message.startswith(prefix):
+            found = event.offset_seconds
+    return found
+
+
+@dataclass
 class RunResult:
     schema_version: int
     run_id: str
@@ -260,6 +509,8 @@ class RunResult:
     git_sha: str | None = None
     cold_start: ColdStartTiming | None = None
     checkpoint: CheckpointTiming | None = None
+    checkpoint_agent_log: CheckpointAgentLog | None = None
+    checkpoint_image: CheckpointImage | None = None
     restore: RestoreTiming | None = None
     agent_log_phases: AgentLogPhases | None = None
     restore_attempts: list[RestoreTiming] = field(default_factory=list)
