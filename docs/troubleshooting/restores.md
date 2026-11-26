@@ -50,13 +50,13 @@ symlink.
 ```bash
 kubectl get podsnapshot <name> -n <ns>
 kubectl get podsnapshotcontent
-kubectl rollout status daemonset/snapshot-agent -n <ns>
-kubectl get pvc -n <ns>
+kubectl rollout status daemonset/snapshot-agent -n <snapshot-ns>
+kubectl get pvc -n <snapshot-ns>
 ```
 
 ### reading checkpoint manifest
 
-The agent reads `manifest.json` from the artifact directory.
+The agent reads `manifest.yaml` from the artifact directory.
 
 **Likely causes:**
 
@@ -308,8 +308,9 @@ them.
 - A kernel or CRIU version that cannot recreate a resource the dump recorded
 - An AppArmor profile CRIU cannot apply
 
-Look past CRIU's nonfatal probes, such as the TUN message above, to the final
-errors in the agent log. Check the restore pod against the
+Look past CRIU's nonfatal probes, such as the TUN message in
+[Troubleshoot the Agent](agent.md#criu-reports-unable-to-create-tun), to the
+final errors in the agent log. Check the restore pod against the
 [supported frameworks](../using-snapshot/README.md).
 
 ### restoring CUDA state
