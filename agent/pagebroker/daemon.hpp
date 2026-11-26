@@ -22,6 +22,8 @@ struct DaemonOptions {
   bool enable_gpu = true;
   std::filesystem::path storage_config;
   std::filesystem::path model_streamer_config;
+  // Node-local directory holding checkpoint copies under artifacts/. Empty: off.
+  std::filesystem::path node_cache_root;
 };
 
 DaemonOptions ParseDaemonOptions(std::span<const std::string_view> arguments);

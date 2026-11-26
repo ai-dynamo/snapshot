@@ -131,23 +131,37 @@ jobs:
           set -euo pipefail
           uv run --locked --project e2e pytest e2e/tests -m environment -vv
 
-      - name: Run snapshot lifecycle tests
-        timeout-minutes: 35
+      - name: Run snapshot and SnapshotJob lifecycle tests
+        timeout-minutes: 55
         run: |
           set -euo pipefail
-          uv run --locked --project e2e pytest e2e/tests/test_snapshot_lifecycle.py -vv -s
-
-      - name: Run SnapshotJob lifecycle tests
-        timeout-minutes: 20
-        run: |
-          set -euo pipefail
-          uv run --locked --project e2e pytest e2e/tests/test_snapshotjob.py -vv -s
+          tests=(e2e/tests/test_snapshot_lifecycle.py e2e/tests/test_snapshotjob.py)
+          rc=0
+          # Each test owns its Pods and snapshot roots. Keep GPU and shared
+          # storage load bounded while overlapping independent waits.
+          uv run --locked --project e2e pytest "${tests[@]}" \
+            -m "not serial" -n 2 -vv --durations=20 \
+            --junitxml="${RUNNER_TEMP}/gpu-e2e-junit.xml" || rc=$?
+          # Operator restarts and the node-wide orphan sweep must run alone,
+          # after every worker has finished, even if a parallel case failed.
+          uv run --locked --project e2e pytest "${tests[@]}" \
+            -m serial -vv -s --durations=20 \
+            --junitxml="${RUNNER_TEMP}/gpu-e2e-serial-junit.xml" || rc=$?
+          exit "${rc}"
 
       - name: Run workload script tests
         timeout-minutes: 5
         run: |
           set -euo pipefail
           uv run --locked --project e2e pytest e2e/tests/test_workload_scripts.py -vv -s
+
+      - name: Upload lifecycle test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gpu-e2e-tests-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gpu-e2e*-junit.xml
+          if-no-files-found: warn
 
       - name: Cleanup e2e vCluster
         if: ${{ always() }}
