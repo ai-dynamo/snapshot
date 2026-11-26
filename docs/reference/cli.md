@@ -16,8 +16,8 @@ and how to run `snapshotctl checkpoint` and `snapshotctl restore`.
   (`PodSnapshotReconciler`) running. See
   [Installation](../get-started/installation.md)
 - A `snapshot-agent` pod must be running on the node that runs the source Pod
-- The target namespace needs nothing from the chart. The operator, the agent,
-  and the snapshot volume stay in the installation namespace
+- The target namespace needs nothing from the chart. The operator, the node
+  agent, and the snapshot volume stay in the installation namespace
 
 `snapshotctl checkpoint` runs the pod manifest as a Job and creates a
 `PodSnapshot` CR for the Job's pod, which the operator's
