@@ -459,6 +459,21 @@ TEST_F(BrokerTransferTest, InvalidPreparationReleasesAdmissionAndAllowsCorrected
   EXPECT_EQ(resources->reserved, 0u);
 }
 
+TEST_F(BrokerTransferTest, InsufficientStagingDoesNotReserveTransaction)
+{
+  Broker broker(staging_, storage_);
+  const auto restore = Restore();
+
+  SetReservedStaging(broker, fs::space(staging_).capacity);
+  const auto response = broker.HandleRequest(restore);
+  ASSERT_TRUE(response.has_failure()) << response.DebugString();
+  EXPECT_EQ(response.failure().code(), Failure::INSUFFICIENT_STORAGE);
+
+  SetReservedStaging(broker, 0);
+  const auto retry = broker.HandleRequest(restore);
+  EXPECT_TRUE(retry.has_staged_restore_directory()) << retry.DebugString();
+}
+
 TEST_F(BrokerTransferTest, SpaceRejectionAbortsHeldTransactionAndReleasesAdmission)
 {
   std::ofstream(source_ / "image") << "data";

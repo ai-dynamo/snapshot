@@ -443,27 +443,6 @@ TEST_F(BrokerTest, RejectsUnsafeCheckpointDestinationPaths)
   EXPECT_TRUE(fs::exists(source_ / "image"));
 }
 
-TEST_F(BrokerTest, InsufficientStagingDoesNotReserveTransaction)
-{
-  const fs::path large = root_ / "storage" / "large";
-  fs::create_directories(large);
-  std::ofstream file(large / "image");
-  file.seekp(1LL << 40);
-  file.put('\0');
-  file.close();
-
-  auto insufficient = RequestFor("restore");
-  Configure(
-      insufficient.mutable_staged_restore()->mutable_source(), insufficient.mutable_staged_restore()->mutable_io_engine(),
-      large);
-  EXPECT_EQ(broker().HandleRequest(insufficient).failure().code(), Failure::INSUFFICIENT_STORAGE);
-
-  auto retry = RequestFor("restore");
-  Configure(
-      retry.mutable_staged_restore()->mutable_source(), retry.mutable_staged_restore()->mutable_io_engine(), source_);
-  EXPECT_TRUE(broker().HandleRequest(retry).has_staged_restore_directory());
-}
-
 TEST_F(BrokerTest, RejectsInvalidStagedRestore)
 {
   auto restore = RequestFor("restore");
