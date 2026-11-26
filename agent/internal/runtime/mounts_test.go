@@ -4,11 +4,14 @@
 package runtime
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
+	"github.com/moby/sys/mountinfo"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
@@ -345,5 +348,109 @@ func TestNormalizeOCIPath(t *testing.T) {
 				t.Errorf("normalizeOCIPath(%q, %q) = %q, want %q", tc.raw, tc.rootFS, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRemountProcSys(t *testing.T) {
+	const remount = uintptr(syscall.MS_BIND | syscall.MS_REMOUNT)
+	checkFailed := errors.New("mountinfo unreadable")
+
+	tests := []struct {
+		name       string
+		rw         bool
+		isMount    bool
+		checkErr   error
+		mountErr   error
+		wantFlags  []uintptr
+		wantErr    error
+		wantErrMsg string
+	}{
+		{
+			name:      "the runtime's read-only bind is remounted read-write",
+			rw:        true,
+			isMount:   true,
+			wantFlags: []uintptr{remount},
+		},
+		{
+			name:      "the runtime's bind is remounted read-only again",
+			isMount:   true,
+			wantFlags: []uintptr{remount | syscall.MS_RDONLY},
+		},
+		{
+			name: "a privileged container has no bind to remount read-write",
+			rw:   true,
+		},
+		{
+			name: "a privileged container has no bind to remount read-only",
+		},
+		{
+			name:       "a failed remount is reported",
+			rw:         true,
+			isMount:    true,
+			mountErr:   syscall.EPERM,
+			wantFlags:  []uintptr{remount},
+			wantErr:    syscall.EPERM,
+			wantErrMsg: "failed to remount /proc/sys rw",
+		},
+		{
+			name:       "a mount that cannot be checked is not guessed at",
+			rw:         true,
+			checkErr:   checkFailed,
+			wantErr:    checkFailed,
+			wantErrMsg: "failed to check whether /proc/sys is a mount",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotFlags []uintptr
+			err := remountProcSys(tc.rw,
+				func(path string) (bool, error) {
+					if path != "/proc/sys" {
+						t.Errorf("checked %q, want /proc/sys", path)
+					}
+					return tc.isMount, tc.checkErr
+				},
+				func(source, target, fstype string, flags uintptr, data string) error {
+					if source != "proc" || target != "/proc/sys" || fstype != "" || data != "" {
+						t.Errorf("mount(%q, %q, %q, %q), want a remount of /proc/sys", source, target, fstype, data)
+					}
+					gotFlags = append(gotFlags, flags)
+					return tc.mountErr
+				},
+			)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("remountProcSys() error = %v, want %v", err, tc.wantErr)
+			}
+			if tc.wantErrMsg != "" && !strings.Contains(err.Error(), tc.wantErrMsg) {
+				t.Fatalf("remountProcSys() error = %q, want it to contain %q", err, tc.wantErrMsg)
+			}
+			if len(gotFlags) != len(tc.wantFlags) {
+				t.Fatalf("mount called with flags %v, want %v", gotFlags, tc.wantFlags)
+			}
+			for i := range gotFlags {
+				if gotFlags[i] != tc.wantFlags[i] {
+					t.Fatalf("mount called with flags %v, want %v", gotFlags, tc.wantFlags)
+				}
+			}
+		})
+	}
+}
+
+// Runs against the real /proc/sys wherever it is not a mount of its own: a
+// privileged container, or a host. Nothing is remounted there, so the test
+// changes nothing.
+func TestRemountProcSysWithoutAMountOfItsOwn(t *testing.T) {
+	isMount, err := mountinfo.Mounted(procSysPath)
+	if err != nil {
+		t.Skipf("cannot tell whether %s is a mount: %v", procSysPath, err)
+	}
+	if isMount {
+		t.Skipf("%s is a mount of its own here", procSysPath)
+	}
+	for _, rw := range []bool{true, false} {
+		if err := RemountProcSys(rw); err != nil {
+			t.Errorf("RemountProcSys(%t) = %v, want nil", rw, err)
+		}
 	}
 }
