@@ -66,8 +66,10 @@ storage CRD" was to add a reference beside it. This proposal is that CRD.
 ### Non-Goals
 
 - Provisioning storage. A store points at a PVC or bucket that already exists.
-- Mounting a PVC the chart did not mount. In this iteration a PVC store must name a claim already
-  mounted on the operator and every agent.
+- Mounting a PVC at runtime. In this iteration a PVC store must name a claim that is already
+  mounted on the operator and on every agent, and that both list in their configuration: the
+  operator's `--pvc-claim-names` flag and the agent's `config.yaml`. Changing that list is a
+  restart; see [Configuration](#configuration).
 - Moving snapshots between stores.
 - Restoring in one cluster a snapshot taken in another. A shared store only keeps the clusters'
   snapshots side by side; `.origin` and `Retain` leave room for it, and
@@ -112,10 +114,11 @@ whether deleting content also deletes its snapshots: `Delete` removes them, `Ret
 marks them in the store so cleanup never removes them. The policy is copied onto the content at
 binding and does not change afterwards.
 
-**The default.** The operator's configuration names the default store: `storage.defaultStoreName` in
-the chart, `default` unless changed. When the cluster has no store, the operator creates that store
-from the chart's `storage.*` values, so an upgraded installation needs no manual step. It never
-overwrites a store. The default moves by changing the value; bound content keeps its binding. See
+**The default.** The operator's configuration names the default store, `default` unless changed.
+When the cluster has no store, the operator creates that store from its storage configuration, the
+same values that described the single store before, so an upgraded installation needs no manual
+step. It never overwrites a store. The default moves by changing the configured name; bound content
+keeps its binding. See
 [Default store](#default-store).
 
 ### User Stories
@@ -140,9 +143,9 @@ overwrites a store. The default moves by changing the value; bound content keeps
 
 | Risk | What goes wrong | How the design handles it |
 | --- | --- | --- |
-| PVC not mounted | A PVC store names a claim the agents cannot see; captures would fail on every node. | The operator marks the store `Ready=False`, reason `ClaimNotMounted`, by checking the claim against the mounted set the chart renders. Adding a claim is a Helm upgrade (`storage.pvc.claimNames`). Documented limitation for this iteration. |
-| Agent without the claim | The store is `Ready`, because the operator reads the chart's mounted set, but a particular agent does not have the claim: it still runs the previous pod spec during a rolling upgrade, or the claim is missing on its node. | The agent maps `claimName` to a mount path from its own `config.yaml` and checks, before any I/O, that the path is a mount point and not only an existing directory. A listed claim's directory can exist with nothing mounted on it, because Kubernetes creates it inside the shared default claim when another pod mounts the claim there. A claim it cannot map, or a path that is not a mount point, fails the operation with `StoreUnavailable`, and nothing is retried against another store. Once the retry is implemented, the agent retries `StoreUnavailable` and the operation succeeds when the node's agent has the mount; until then it fails and needs a new attempt. |
-| Listed claim cannot mount | A pod starts only when all its volumes mount. A listed claim that cannot mount keeps a restarted operator or agent pod from starting, which stops snapshots on every store that pod serves, not only the broken one. | Three things limit it. The chart fails the upgrade when a listed claim does not exist or is not bound. A rollout replaces one agent at a time and stops at the first pod that cannot start, so the other nodes and the running operator keep working; the chart keeps those rolling-update defaults. Kubernetes does not remove a claim while a pod mounts it. What remains: the storage behind a working claim fails and a pod then restarts. Recovery is to remove the claim from `storage.pvc.claimNames` and upgrade; its stores go `Ready=False` with `ClaimNotMounted`. Isolation per claim is out of scope for this iteration. |
+| PVC not mounted | A PVC store names a claim the agents cannot see; captures would fail on every node. | The operator marks the store `Ready=False`, reason `ClaimNotMounted`, when the claim is not in its own `--pvc-claim-names` list, which names the claims mounted on it and on the agents. Adding a claim changes that list and the mounts, so it is a restart of both; see [Configuration](#configuration). Documented limitation for this iteration. |
+| Agent without the claim | The store is `Ready`, because the operator's list has the claim, but a particular agent does not have it: it still runs the previous pod spec during a rolling upgrade, or the claim is missing on its node. | The agent maps `claimName` to a mount path from its own `config.yaml` and checks, before any I/O, that the path is a mount point and not only an existing directory. A listed claim's directory can exist with nothing mounted on it, because Kubernetes creates it inside the shared default claim when another pod mounts the claim there. A claim it cannot map, or a path that is not a mount point, fails the operation with `StoreUnavailable`, and nothing is retried against another store. Once the retry is implemented, the agent retries `StoreUnavailable` and the operation succeeds when the node's agent has the mount; until then it fails and needs a new attempt. |
+| Listed claim cannot mount | A pod starts only when all its volumes mount. A listed claim that cannot mount keeps a restarted operator or agent pod from starting, which stops snapshots on every store that pod serves, not only the broken one. | Three things limit it. A claim that does not exist or is not bound is refused before any pod restarts; see [Configuration](#configuration). The agent DaemonSet replaces one pod at a time and stops at the first that cannot start, so the other nodes and the running operator keep working. Kubernetes does not remove a claim while a pod mounts it. What remains: the storage behind a working claim fails and a pod then restarts. Recovery is to remove the claim from `storage.pvc.claimNames` and upgrade; its stores go `Ready=False` with `ClaimNotMounted`. Isolation per claim is out of scope for this iteration. |
 | Store edited after binding | The location fields change; content bound to the old `storeID` would read or delete in the wrong place. Or `reclaimPolicy` flips and existing content loses data it was meant to keep. | Location fields are immutable through CEL, and the policy is frozen on the content at binding. Credentials and TLS settings stay editable because they are not identity inputs. The agent and maintenance compare the store's `status.storeID` with the content's binding before any I/O and refuse a mismatch. |
 | Store deleted under content | Content loses the only description of where its snapshots are. | Protection finalizer; a terminating store still resolves for existing content. Force-removing the finalizer leaves content with the existing `StoreInactive` handling from SNEP-237. |
 | Secret missing or revoked | An S3 store's Secret is deleted or rotated to an invalid key. | The store goes `Ready=False`, reason `CredentialsUnavailable`, and new bindings stop. In-flight operations fail with the existing credential errors; nothing is deleted on an access error. |
@@ -331,11 +334,12 @@ type CheckpointStorageBinding struct {
 
 #### Default store
 
-The default store is named in the operator's configuration, not on the store: the chart value
-`storage.defaultStoreName`, passed to the operator as `--default-snapshot-store`, `default` unless
-changed. A request with no `snapshotStoreName` resolves to that name and then follows the same rules
-as a request that names a store. One configured name means there is never more than one default, so
-the store carries no default field and nothing has to arbitrate between stores.
+The default store is named in the operator's configuration, not on the store: the flag
+`--default-snapshot-store`, `default` unless changed, set from `storage.defaultStoreName` in
+[Configuration](#configuration). A request with no `snapshotStoreName` resolves to that name and
+then follows the same rules as a request that names a store. One configured name means there is
+never more than one default, so the store carries no default field and nothing has to arbitrate
+between stores.
 
 - **Moving the default.** Create the new store, change the value and run `helm upgrade`. Only the
   operator restarts: the agents never read the default, so their configuration checksum leaves the
@@ -385,12 +389,15 @@ snapshots. Between clusters a location may be shared.
 Nothing at the location marks it as taken, so stores in several clusters can point at one location.
 What keeps them apart is recorded per content:
 
-- **`.origin`.** When the operator binds a content it writes `artifacts/<uid>/.origin`, a JSON file
+- **`.origin`.** Every directory this cluster writes carries `artifacts/<uid>/.origin`, a JSON file
   with a `version`, the cluster ID (the UID of the `kube-system` namespace, fixed for the life of
-  the cluster), the time, and the namespace and name of the `PodSnapshot`. It is written once and
-  never changed. PageBroker publishes below it, under `containers/`, so the two do not conflict. The
-  operator also writes it for content bound before this proposal, so every directory the cluster
-  owns is marked.
+  the cluster), the time, and the namespace and name of the `PodSnapshot`. The agent builds the
+  record and passes it in `ArtifactTarget.origin`; PageBroker writes it before the first object of
+  every publication, when the file is absent, so a publication that lands after cleanup recreates
+  the directory marked and the next sweep removes it, as SNEP-237 intends. The operator writes the
+  same record at binding, so the directory is marked before any publication, and for content bound
+  before this proposal. The file is never changed once present. PageBroker publishes below it, under
+  `containers/`, so the two do not conflict.
 - **`.retained`.** Written beside it when content is deleted under `Retain`; see
   [Maintenance](#maintenance).
 
@@ -425,7 +432,10 @@ message S3Storage {
   bytes ca_bundle = 8;    // PEM, from the store's ConfigMap. Empty: system roots.
 }
 
-message ArtifactTarget    { StorageBackend storage = 3; }  // Resolved store.
+message ArtifactTarget {
+  StorageBackend storage = 3;  // Resolved store.
+  bytes origin = 4;            // The .origin record; written before the first object if absent.
+}
 message PublishedArtifact { StorageBackend storage = 3; }  // Restore and metadata reads.
 ```
 
@@ -485,8 +495,8 @@ waiting transaction can expire.
 
 The engine's addressing mode and CA bundle are fixed at start and shared by every session, so an S3
 store that differs in either could checkpoint but never restore. The operator refuses such a store:
-it reads the startup settings from its storage configuration file, the same values the chart gives
-PageBroker, compares them with the store's `addressing` and `caBundleConfigMapRef`, and sets
+it reads the startup settings from its storage configuration file, the same values PageBroker
+starts with, compares them with the store's `addressing` and `caBundleConfigMapRef`, and sets
 `Ready=False` with `RestoreSettingsMismatch`, naming the setting and the value PageBroker runs with.
 The check is part of every reconcile, so a store becomes Ready after a restart that changes the
 settings. In an installation whose default store is a PVC, PageBroker starts with no S3 settings,
@@ -548,7 +558,9 @@ its `.origin` names this cluster. The sweep checks the content first and reads `
 before deleting, after `delete-content` has written it. Only the content check exists today, when
 every directory there with a safe name and no matching content is an orphan. So leftovers from
 before the upgrade, which have no `.origin`, are never swept and need a one-time manual cleanup.
-Content whose store is gone keeps its finalizer and gets `StoreInactive`; SNEP-237 defines that
+Directories this release writes always have it, including one a late publication recreates after
+cleanup, because PageBroker writes the marker before the data. Content whose store is gone keeps
+its finalizer and gets `StoreInactive`; SNEP-237 defines that
 [handling](../237-s3-storage/README.md#limitations-risks-and-mitigations), and this proposal does
 not change it.
 
@@ -568,7 +580,8 @@ not change it.
   ConfigMaps that stores reference; every node can still read every store's credentials. An empty
   `resourceNames` list allows every object of the kind, so when no store references a Secret the
   operator removes the Secret rule from the Role, and likewise the ConfigMap rule. The agent's
-  ClusterRole gains `get`/`list`/`watch` on `snapshotstores`. A store without a Secret uses
+  ClusterRole gains `get`/`list`/`watch` on `snapshotstores`, and `get` on the `kube-system`
+  namespace for the cluster ID it puts in `.origin`. A store without a Secret uses
   the service accounts' workload identity. The agent holds a Secret only in memory and sends it only
   over the local socket; neither process writes it to a volume or a log.
 - **PageBroker.** No Kubernetes client, RBAC or long-lived credentials; it trusts the agent on the
@@ -592,6 +605,17 @@ storage:
     # Claims that PVC stores may use, in the Snapshot namespace.
     claimNames: []
 ```
+
+The contract is three things: the operator's `--pvc-claim-names` flag, which names the claims it
+may mark Ready; the claim list in the agent's `config.yaml`, which the agent maps to
+`/checkpoints/.claims/<claimName>`; and the volume mounts at those paths on the operator and the
+agent pods. The chart sets all three from `storage.pvc.claimNames`; an installation that does not
+use the chart sets them the same way. Changing the list is a restart of both, because mounts are
+fixed at pod start. The order that matters is that every agent and the operator have the mount
+before a store names the claim: the operator marks a store Ready from its own list, so a store
+created while agents still roll out fails captures on the nodes that lack the mount until the
+retry lands. Add the claim, upgrade, wait for the agent DaemonSet and the operator Deployment to
+finish rolling, then create the store.
 
 A claim name is all `claimNames` needs, because the chart derives the rest. For each name it adds a
 volume and a mount at `/checkpoints/.claims/<claimName>` to the operator and to the agent pod's
@@ -688,6 +712,8 @@ run with the previous values:
 
 Create stores other than the default only after the agent rollout finishes. An agent from the
 previous release knows one store, and a checkpoint it receives for another store fails for good.
+The same order applies to every later change of the claim list; see
+[Configuration](#configuration).
 
 Rollback to the previous chart leaves the CRD and `default` object in place; the old operator
 ignores both and reads `storage.yaml`.
@@ -759,11 +785,13 @@ other stores are not touched.
   mismatch, or a claim with no mount.
 - **Maintenance:** a sweep looks only inside `artifacts/` and deletes only UUID-named orphans whose
   `.origin` names this cluster, on S3 and on a PVC. Directories with another cluster's `.origin`,
-  with none, or with `.retained` survive. Deleting content under `Delete` keeps a directory with
+  with none, or with `.retained` survive. A publication that lands after cleanup leaves a directory
+  with `.origin` that the next sweep removes. Deleting content under `Delete` keeps a directory with
   `.retained` and skips a directory that names another cluster. A nested store's data survives its
   parent's sweep.
-- **PageBroker:** per-request `StorageBackend`, client cache, two stores live; credentials from the
-  request are not written to disk or a transaction record; restores from stores that differ in
+- **PageBroker:** per-request `StorageBackend`, client cache, two stores live; `.origin` is written
+  before the first object and never overwritten; credentials from the request are not written to
+  disk or a transaction record; restores from stores that differ in
   endpoint, region or credentials queue and run in turn; stores that share them restore in parallel;
   with a store that has no Secret, an upload and a restore each run past one token lifetime.
 - **End to end:** two S3 and one PVC store in one cluster, checkpoint and cross-node restore through
@@ -772,7 +800,8 @@ other stores are not touched.
 
 ### Graduation Criteria
 
-- **Alpha:** CRD and fields as above; PVC and S3 stores; default store from the chart's values;
+- **Alpha:** CRD and fields as above; PVC and S3 stores; default store from the operator's storage
+  configuration;
   protection finalizer; `Retain`; shared stores; PVC mount limitation documented. Alpha needs store
   binding in the operator and artifact addressing in PageBroker turned on, both off by default; see
   [Configuration](#configuration). Turning them on by default is planned with their removal.
