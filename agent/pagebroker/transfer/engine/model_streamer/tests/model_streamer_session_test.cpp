@@ -1110,13 +1110,16 @@ TEST_F(ModelStreamerSessionTest, LaterBatchFailureReleasesMappingsAndStopsInvent
       {}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(kDefaultRestoreBatchBytes, 2));
   auto result = std::async(std::launch::async, [&] { restore.Stage(inventory, root_ / "partial"); });
   {
+    // The caller, not the worker, unmaps A, and does so before it allocates C.
     std::unique_lock lock(state.mutex);
-    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.ends_entered == 1; }));
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] {
+      return state.ends_entered == 1 && state.allocation_entered == 3;
+    }));
   }
   EXPECT_EQ(result.wait_for(0ms), std::future_status::timeout);
   EXPECT_FALSE(HasMapping(root_ / "partial/0"));
   EXPECT_TRUE(HasMapping(root_ / "partial/1"));
-  // C may already be preparing; hold it until B's failed native session ends.
+  // C is held in its allocation; keep it there until B's failed native session ends.
   EXPECT_FALSE(fs::exists(root_ / "partial/3"));
   auto worker_progress = ModelStreamerRestoreTestPeer::QueueCancelledBarrier(restore);
   ReleaseEnd();
