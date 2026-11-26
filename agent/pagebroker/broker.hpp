@@ -28,7 +28,8 @@ class Broker {
  public:
   Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engine = nullptr,
       std::optional<S3Config> config = std::nullopt,
-      std::chrono::seconds lifetime = kDefaultTransactionLifetime, model_streamer::settings::Options model_streamer = {});
+      std::chrono::seconds lifetime = kDefaultTransactionLifetime, model_streamer::settings::Options model_streamer = {},
+      Path node_cache_root = {});
   ~Broker();
   Response HandleGpuRequest(const Request& request, CancellationPtr cancellation,
                             std::vector<FileDescriptor> target_descriptors);

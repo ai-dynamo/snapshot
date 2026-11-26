@@ -91,6 +91,9 @@ func main() {
 	if storeID != "" {
 		ctrl.Log.Info("configured storage store", "storeID", storeID)
 	}
+	if artifactCleanupConfig.S3 != nil {
+		ctrl.Log.Info("configured S3 cleanup credentials", "source", artifactCleanupConfig.S3.CredentialSource())
+	}
 
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
