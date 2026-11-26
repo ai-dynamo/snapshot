@@ -187,10 +187,10 @@ commit-level history for each release is on its
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 - A checkpoint fails with `CheckpointTimeout` only when
-  `config.checkpoint.timeoutSeconds` has passed. A commit that PageBroker
-  stopped answering used to report it once the commit's 30-second retry budget
-  ran out. It now fails with `CheckpointFailed`, and the message names the step
-  that gave up.
+  `config.checkpoint.timeoutSeconds` has passed. A checkpoint whose commit lost
+  its connection to PageBroker and got no answer for 30 seconds failed with
+  `CheckpointTimeout`. It now fails with `CheckpointFailed`, and the message
+  names the failed step.
 
 ### Deprecated
 
