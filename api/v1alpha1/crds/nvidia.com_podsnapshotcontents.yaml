@@ -357,6 +357,21 @@ spec:
                   content; the producer will start writing it with artifact-flow integration.
                   Like the rest of spec it cannot be added, removed or changed after creation.
                 properties:
+                  reclaimPolicy:
+                    description: |-
+                      ReclaimPolicy is copied from the store when the content is bound. It does
+                      not change afterwards.
+                    enum:
+                    - Delete
+                    - Retain
+                    type: string
+                  snapshotStoreName:
+                    description: |-
+                      SnapshotStoreName is the SnapshotStore the content was bound to.
+                      StoreID says where the data is; the store says how to reach it.
+                    maxLength: 63
+                    minLength: 1
+                    type: string
                   storeID:
                     description: StoreID is the versioned canonical storage identity
                       shared with PageBroker.
@@ -366,6 +381,9 @@ spec:
                 required:
                 - storeID
                 type: object
+                x-kubernetes-validations:
+                - message: reclaimPolicy is required when snapshotStoreName is set
+                  rule: '!has(self.snapshotStoreName) || has(self.reclaimPolicy)'
             required:
             - snapshotRef
             - source

@@ -216,6 +216,12 @@ type PodSnapshotTemplate struct {
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=1
 	Containers []ContainerSnapshotConfig `json:"containers,omitempty"`
+
+	// SnapshotStoreName is the SnapshotStore that holds the snapshot. It
+	// is copied to the PodSnapshot. Empty means the default store.
+	// +kubebuilder:validation:MaxLength=63
+	// +optional
+	SnapshotStoreName string `json:"snapshotStoreName,omitempty"`
 }
 
 // PodSnapshotTemplateMetadata is the caller-owned metadata propagated to a

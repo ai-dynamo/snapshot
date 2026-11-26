@@ -277,6 +277,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
+              snapshotStoreName:
+                description: |-
+                  SnapshotStoreName is the SnapshotStore that holds the snapshot.
+                  Empty means the default store.
+                maxLength: 63
+                type: string
               source:
                 description: |-
                   Source identifies the checkpointed workload. It is a struct (rather than an

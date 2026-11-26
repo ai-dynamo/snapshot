@@ -244,6 +244,7 @@ def test_every_generated_crd_has_a_schema_to_compare() -> None:
         "nvidia.com_podsnapshotcontents.yaml",
         "nvidia.com_podsnapshots.yaml",
         "nvidia.com_snapshotjobs.yaml",
+        "nvidia.com_snapshotstores.yaml",
     ]
     for path in files:
         schemas = checks.crd_version_schemas(yaml.safe_load(Path(path).read_text(encoding="utf-8")))

@@ -79,6 +79,7 @@ func TestNamedAccessorsAreEmbedded(t *testing.T) {
 		"podsnapshots.nvidia.com":        PodSnapshotCRD(),
 		"podsnapshotcontents.nvidia.com": PodSnapshotContentCRD(),
 		"snapshotjobs.nvidia.com":        SnapshotJobCRD(),
+		"snapshotstores.nvidia.com":      SnapshotStoreCRD(),
 	} {
 		if !strings.Contains(manifest, "kind: CustomResourceDefinition") {
 			t.Errorf("%s: not a CustomResourceDefinition", name)

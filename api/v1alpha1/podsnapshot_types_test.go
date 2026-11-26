@@ -34,7 +34,10 @@ func TestSchemeRegistersSnapshotKinds(t *testing.T) {
 	if err := AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme failed: %v", err)
 	}
-	for _, kind := range []string{"PodSnapshot", "PodSnapshotList", "PodSnapshotContent", "PodSnapshotContentList"} {
+	for _, kind := range []string{
+		"PodSnapshot", "PodSnapshotList", "PodSnapshotContent", "PodSnapshotContentList",
+		"SnapshotStore", "SnapshotStoreList",
+	} {
 		if !scheme.Recognizes(GroupVersion.WithKind(kind)) {
 			t.Errorf("scheme does not recognize kind %q in %s", kind, GroupVersion.String())
 		}
