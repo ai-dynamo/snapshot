@@ -95,7 +95,7 @@ func (r *SnapshotStorageClassReconciler) SetupWithManager(mgr ctrl.Manager) erro
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("snapshotstorageclass").
-		For(&snapshotv1alpha1.SnapshotStorageClass{}).
+		For(&snapshotv1alpha1.SnapshotStorageClass{}, builder.WithPredicates(classSpecOrDeletionChanged)).
 		Watches(&snapshotv1alpha1.SnapshotStorageClass{},
 			handler.EnqueueRequestsFromMapFunc(r.classesWithTheSameStore), builder.WithPredicates(createOrDelete)).
 		Watches(&snapshotv1alpha1.PodSnapshotContent{},
@@ -103,6 +103,19 @@ func (r *SnapshotStorageClassReconciler) SetupWithManager(mgr ctrl.Manager) erro
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.classesUsingSecret), builder.OnlyMetadata).
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.classesUsingConfigMap), builder.OnlyMetadata).
 		Complete(r)
+}
+
+// classSpecOrDeletionChanged drops updates that change only status or
+// metadata, so the controller's own status write does not queue the class
+// ahead of its retry delay.
+var classSpecOrDeletionChanged = predicate.Funcs{
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		if e.ObjectOld == nil || e.ObjectNew == nil {
+			return false
+		}
+		return e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() ||
+			e.ObjectOld.GetDeletionTimestamp().IsZero() != e.ObjectNew.GetDeletionTimestamp().IsZero()
+	},
 }
 
 func (r *SnapshotStorageClassReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
