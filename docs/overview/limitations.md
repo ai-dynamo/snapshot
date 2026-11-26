@@ -6,6 +6,11 @@ Snapshot currently focuses on inference cold-start; further use cases are on the
 ## Current Limitations
 
 - Linux nodes on x86_64 or arm64.
+- IPv6 Pod IPs are not supported. A snapshot taken with the default
+  `config.criu.tcpEstablished: true` does not restore when the source or
+  restore Pod's IP is IPv6. The restore fails at
+  [preparing CRIU restore](../troubleshooting/restores.md#preparing-criu-restore)
+  with `only supports IPv4 pod IPs`.
 - Workloads, including multi-GPU workloads, must run on a single node.
   Multi-node is on the [roadmap](../roadmap.md).
 - vGPU is not supported.
