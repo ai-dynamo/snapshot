@@ -11,6 +11,21 @@
           "minLength": 1,
           "maxLength": 63,
           "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "pvc": {
+          "type": "object",
+          "properties": {
+            "claimNames": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253,
+                "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+              }
+            }
+          }
         }
       }
     },

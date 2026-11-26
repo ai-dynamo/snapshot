@@ -39,7 +39,7 @@ func TestKubeSystemUIDFailsWhenTheNamespaceCannotBeRead(t *testing.T) {
 }
 
 func TestMountedClaimsKnowsOnlyTheConfiguredClaim(t *testing.T) {
-	mounted := mountedClaims(storage.Config{PVC: &storage.PVC{ClaimName: "snapshot-pvc"}}, "/checkpoints")
+	mounted := mountedClaims(storage.Config{PVC: &storage.PVC{ClaimName: "snapshot-pvc"}}, "/checkpoints", nil)
 
 	path, ok := mounted("snapshot-pvc")
 	assert.True(t, ok)
@@ -49,6 +49,46 @@ func TestMountedClaimsKnowsOnlyTheConfiguredClaim(t *testing.T) {
 }
 
 func TestMountedClaimsKnowsNothingWithoutAPVCStore(t *testing.T) {
-	_, ok := mountedClaims(storage.Config{}, "/checkpoints")("snapshot-pvc")
+	_, ok := mountedClaims(storage.Config{}, "/checkpoints", nil)("snapshot-pvc")
 	assert.False(t, ok)
+}
+
+func TestMountedClaimsPutsEachListedClaimBelowTheMountPath(t *testing.T) {
+	mounted := mountedClaims(storage.Config{PVC: &storage.PVC{ClaimName: "snapshot-pvc"}}, "/checkpoints",
+		[]string{"team-a", "team-b"})
+
+	for claim, want := range map[string]string{
+		"snapshot-pvc": "/checkpoints",
+		"team-a":       "/checkpoints/.claims/team-a",
+		"team-b":       "/checkpoints/.claims/team-b",
+	} {
+		got, ok := mounted(claim)
+		assert.True(t, ok, claim)
+		assert.Equal(t, want, got)
+	}
+	_, ok := mounted("team-c")
+	assert.False(t, ok)
+}
+
+func TestMountedClaimsServesListedClaimsWithoutAPVCStore(t *testing.T) {
+	mounted := mountedClaims(storage.Config{}, "/checkpoints", []string{"team-a"})
+
+	got, ok := mounted("team-a")
+	assert.True(t, ok)
+	assert.Equal(t, "/checkpoints/.claims/team-a", got)
+}
+
+func TestParseClaimNames(t *testing.T) {
+	names, err := parseClaimNames("team-a, team-b,,")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"team-a", "team-b"}, names)
+
+	names, err = parseClaimNames("")
+	require.NoError(t, err)
+	assert.Empty(t, names)
+
+	for _, value := range []string{"team-a,team-a", "a/b", ".."} {
+		_, err := parseClaimNames(value)
+		assert.Error(t, err, value)
+	}
 }

@@ -369,3 +369,43 @@ absolute, normalized path, so a typo cannot mount an unintended directory.
 {{- end -}}
 {{- $path -}}
 {{- end -}}
+
+{{/* Volume name of a listed claim. A claim name may be longer than a volume
+     name, so the volume is named by a digest of it. */}}
+{{- define "snapshot.pvcClaimVolumeName" -}}
+{{- printf "claim-%s" (sha256sum . | trunc 16) -}}
+{{- end -}}
+
+{{/* Mount path of a listed claim: (dict "root" $ "claimName" $name). */}}
+{{- define "snapshot.pvcClaimMountPath" -}}
+{{- printf "%s/.claims/%s" .root.Values.storage.pvc.basePath .claimName -}}
+{{- end -}}
+
+{{/* Fails the render on a claim list the pods could not mount. A claim that
+     does not exist or is not bound is refused only when the cluster can be
+     read, so `helm template` and a dry run skip that part. */}}
+{{- define "snapshot.validatePVCClaimNames" -}}
+{{- $names := .Values.storage.pvc.claimNames | default list -}}
+{{- range $names -}}
+{{- if and (eq $.Values.storage.type "pvc") (eq . $.Values.storage.pvc.name) -}}
+{{- fail (printf "storage.pvc.claimNames cannot contain storage.pvc.name (%q): the claim is already mounted at %s" . $.Values.storage.pvc.basePath) -}}
+{{- end -}}
+{{- end -}}
+{{- if $names -}}
+{{- $claims := lookup "v1" "PersistentVolumeClaim" .Release.Namespace "" -}}
+{{- if hasKey $claims "items" -}}
+{{- $phases := dict -}}
+{{- range $claims.items -}}
+{{- $_ := set $phases .metadata.name ((.status | default dict).phase | default "") -}}
+{{- end -}}
+{{- range $names -}}
+{{- if not (hasKey $phases .) -}}
+{{- fail (printf "storage.pvc.claimNames: claim %q does not exist in namespace %q" . $.Release.Namespace) -}}
+{{- end -}}
+{{- if ne (get $phases .) "Bound" -}}
+{{- fail (printf "storage.pvc.claimNames: claim %q in namespace %q is not bound" . $.Release.Namespace) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

@@ -18,6 +18,10 @@ import (
 // helper independently enforces the same path.
 const CheckpointBasePath = "/checkpoints"
 
+// ListedClaimsDirectory is the directory in CheckpointBasePath that holds the
+// mounts of the listed claims.
+const ListedClaimsDirectory = ".claims"
+
 // NodeCacheBasePath is the fixed agent-side mount of the node cache. The
 // privileged mount helper enforces the same path.
 const NodeCacheBasePath = "/node-cache"
@@ -55,6 +59,9 @@ func (c *AgentConfig) Validate() error {
 		return &ConfigError{Field: "storage.basePath", Message: fmt.Sprintf("storage.basePath must be %q", CheckpointBasePath)}
 	}
 	c.Storage.BasePath = basePath
+	if err := c.Storage.validateClaimNames(); err != nil {
+		return err
+	}
 	if strings.TrimSpace(c.PageBroker.ControlSocketPath) == "" {
 		return &ConfigError{Field: "pageBroker.controlSocketPath", Message: "pageBroker.controlSocketPath is required"}
 	}
@@ -94,6 +101,24 @@ type StorageSpec struct {
 	// NodeCacheEnabled turns on restores from the node cache, which is always
 	// mounted at NodeCacheBasePath.
 	NodeCacheEnabled bool `yaml:"nodeCacheEnabled"`
+
+	// ClaimNames lists the claims mounted below ListedClaimsDirectory in
+	// BasePath, each in a directory of its name.
+	ClaimNames []string `yaml:"claimNames"`
+}
+
+func (s *StorageSpec) validateClaimNames() error {
+	seen := map[string]bool{}
+	for _, claim := range s.ClaimNames {
+		if claim == "" || claim == "." || claim == ".." || strings.ContainsAny(claim, "/\\") {
+			return &ConfigError{Field: "storage.claimNames", Message: fmt.Sprintf("claim name %q cannot be a directory name", claim)}
+		}
+		if seen[claim] {
+			return &ConfigError{Field: "storage.claimNames", Message: fmt.Sprintf("claim name %q is listed twice", claim)}
+		}
+		seen[claim] = true
+	}
+	return nil
 }
 
 type PageBrokerSpec struct {

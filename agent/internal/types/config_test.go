@@ -57,6 +57,23 @@ func TestAgentConfigValidateRequiresFixedStorageBasePath(t *testing.T) {
 	}
 }
 
+func TestStorageSpecParsesTheClaimNamesTheChartWrites(t *testing.T) {
+	cfg := validAgentConfig()
+	document := "storage:\n  type: pvc\n  basePath: /checkpoints\n  claimNames:\n    - \"team-a\"\n    - \"team-b\"\n"
+	require.NoError(t, yaml.Unmarshal([]byte(document), cfg))
+
+	require.NoError(t, cfg.Validate())
+	assert.Equal(t, []string{"team-a", "team-b"}, cfg.Storage.ClaimNames)
+}
+
+func TestAgentConfigValidateRequiresClaimNamesThatAreDirectoryNames(t *testing.T) {
+	for _, claims := range [][]string{{""}, {"a/b"}, {".."}, {"."}, {"team-a", "team-a"}} {
+		cfg := validAgentConfig()
+		cfg.Storage.ClaimNames = claims
+		assert.Error(t, cfg.Validate(), "claims %q", claims)
+	}
+}
+
 func TestAgentConfigValidateRequiresPageBrokerControlSocket(t *testing.T) {
 	cfg := validAgentConfig()
 	cfg.PageBroker.ControlSocketPath = ""

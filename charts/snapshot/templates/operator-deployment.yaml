@@ -95,6 +95,9 @@ spec:
             - {{ printf "--cuinterpose-image-pull-policy=%s" .Values.image.agent.pullPolicy | quote }}
             - --snapshot-storage-config=/etc/snapshot/storage.yaml
             - {{ printf "--default-snapshot-store=%s" .Values.storage.defaultStoreName | quote }}
+            {{- with .Values.storage.pvc.claimNames }}
+            - {{ printf "--pvc-claim-names=%s" (join "," .) | quote }}
+            {{- end }}
             {{- if .Values.operator.bindNewContents }}
             - --bind-new-contents=true
             {{- end }}
@@ -127,6 +130,10 @@ spec:
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath | quote }}
             {{- end }}
+            {{- range .Values.storage.pvc.claimNames }}
+            - name: {{ include "snapshot.pvcClaimVolumeName" . }}
+              mountPath: {{ include "snapshot.pvcClaimMountPath" (dict "root" $ "claimName" .) | quote }}
+            {{- end }}
             - name: storage-config
               mountPath: /etc/snapshot
               readOnly: true
@@ -148,6 +155,11 @@ spec:
         - name: checkpoints
           persistentVolumeClaim:
             claimName: {{ .Values.storage.pvc.name }}
+        {{- end }}
+        {{- range .Values.storage.pvc.claimNames }}
+        - name: {{ include "snapshot.pvcClaimVolumeName" . }}
+          persistentVolumeClaim:
+            claimName: {{ . | quote }}
         {{- end }}
         - name: storage-config
           configMap:

@@ -569,3 +569,20 @@ func TestStoreWatchIgnoresStatusOnlyUpdates(t *testing.T) {
 	assert.True(t, storeSpecOrDeletionChanged.Create(event.CreateEvent{Object: store}))
 	assert.True(t, storeSpecOrDeletionChanged.Delete(event.DeleteEvent{Object: store}))
 }
+
+func TestStoreOnAListedClaimIsCheckedAtItsMountPath(t *testing.T) {
+	store := pvcStoreObject("team-a", baseTime)
+	store.Spec.PVC.ClaimName = "team-a-snapshots"
+	f := newStoreFixture(t, store)
+	f.r.MountPath = func(claim string) (string, bool) {
+		if claim == "team-a-snapshots" {
+			return "/checkpoints/.claims/team-a-snapshots", true
+		}
+		return "", false
+	}
+
+	f.reconcile(t, "team-a")
+
+	assert.Equal(t, metav1.ConditionTrue, f.ready(t, "team-a").Status)
+	assert.Equal(t, &storageprobe.PVC{MountPath: "/checkpoints/.claims/team-a-snapshots", BasePath: "/team-a"}, f.prober.targets[0].PVC)
+}

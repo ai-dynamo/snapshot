@@ -44,6 +44,8 @@ func main() {
 		"Bind new content to the configured store after all agents support artifact addressing")
 	defaultSnapshotStore := flag.String("default-snapshot-store", "default",
 		"Name of the SnapshotStore that is reconciled while new contents are not bound to a store")
+	pvcClaimNames := flag.String("pvc-claim-names", "",
+		"Comma-separated claims mounted below the storage base path, each in a directory of its name")
 	pageBrokerS3ConfigNamespace := flag.String("pagebroker-s3-config-namespace", "",
 		"Namespace of the ConfigMap PageBroker reads its S3 configuration from; defaults to POD_NAMESPACE")
 	pageBrokerS3ConfigName := flag.String("pagebroker-s3-config-name", DefaultPageBrokerS3ConfigName,
@@ -197,7 +199,7 @@ func main() {
 			ClusterID:        clusterID,
 			DefaultStoreName: *defaultSnapshotStore,
 			BindingEnabled:   *bindNewContents,
-			MountPath:        mountedClaims(storageCfg, artifactCleanupConfig.BasePath),
+			MountPath:        mountedClaims(storageCfg, artifactCleanupConfig.BasePath, mustClaimNames(*pvcClaimNames)),
 		}
 		if err := snapshotStoreReconciler.SetupWithManager(mgr); err != nil {
 			ctrl.Log.Error(err, "unable to set up SnapshotStore controller")
