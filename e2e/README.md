@@ -55,9 +55,9 @@ and pagebroker images are built from the mirrored commit and pushed to GHCR as
 framework suites in `e2e-frameworks.yaml` run only once both succeed, and
 install those images rather than main's. Each suite receives the digests the
 build recorded in `SNAPSHOT_E2E_IMAGE_DIGESTS`, a JSON object keyed `operator`,
-`agent`, and `pagebroker`. With it set, `setup.py` pulls every image instead of
-reusing a node's cached copy, and fails the install unless each running
-Snapshot container has the recorded digest.
+`agent`, and `pagebroker`. With it set, `setup.py` uses `imagePullPolicy: Always` and verifies the running content against the recorded image's platform manifest. Registry mirrors and provenance-only differences do not cause a mismatch. Registry reads allow three attempts for transient failures; different content or a failed lookup fails setup.
+
+The native GPU workflow runs independent lifecycle tests with two workers, then runs `serial` tests alone. Both phases report test durations and upload JUnit results.
 
 The `PR E2E` check passes only when every suite the change needed passed, or
 when the change needed none of them. The scheduled registry prune deletes
@@ -65,11 +65,9 @@ pull request images seven days after they are pushed.
 
 ### CPU Mode (k3d)
 
-`e2e-cpu.yaml` runs from `e2e-pr.yaml`, where no GPU cluster is available. It
-builds the operator, agent, and PageBroker images from the pull request, creates
-a k3d cluster, pushes the images to its disposable registry, installs the chart
-through the same `setup.py` phases the GPU workflow uses, and runs
-`pytest -m cpu`.
+`e2e-cpu.yaml` builds the operator, agent, and PageBroker images while creating a k3d cluster. It pushes the images to the cluster's disposable registry and waits for all four tasks before installing the chart and running `pytest -m cpu`. Ordinary CPU tests use three workers; serial tests run alone. Older-runtime tests without the restore proxy run afterwards.
+
+`hack/ci-prepare-cpu-e2e.sh` reports a failed worker's name and exit status, stops its peers, and retains logs on failure or cancellation. The phase summary counts preparation once and lists overlapping image builds separately. Image builds share `hack/ci-build-image.sh` with the build action and only read the standard image caches.
 
 The CPU workflow and local runner set `SNAPSHOT_E2E_CPU_ONLY=true`. This
 explicit mode requires direct setup and exactly one ready, schedulable node.
@@ -91,6 +89,10 @@ What the script does contribute is `hack/k3d-cpu-e2e.sh helm-set`, which prints
 the chart values this cluster needs (k3s keeps containerd outside the
 conventional paths, and a single node has to fit the workload pods) in the
 newline-separated form `SNAPSHOT_E2E_HELM_SET` accepts.
+
+Those values also turn on the node cache (`storage.nodeCache`), with a node
+directory the script bind-mounts into the cluster. The node cache tests place
+and remove their copies there, and skip on an install without the setting.
 
 `make cpu-e2e` runs the whole sequence on a linux/amd64 Docker host — build,
 cluster, install, tests — and deletes the cluster afterwards:

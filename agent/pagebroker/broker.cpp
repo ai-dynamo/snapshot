@@ -271,14 +271,19 @@ class GpuCompletion {
 }  // namespace
 
 Broker::Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engine,
-    std::optional<S3Config> config, std::chrono::seconds lifetime, model_streamer::settings::Options model_streamer)
+    std::optional<S3Config> config, std::chrono::seconds lifetime, model_streamer::settings::Options model_streamer,
+    Path node_cache_root)
     : lifetime_(config ? config->transaction_lifetime : lifetime), staging_root_(fs::weakly_canonical(std::move(staging_root))), gpu_engine_(std::move(gpu_engine))
 {
   if (config) {
     resources_ = std::make_shared<TransactionResources>(config->staging_bytes, config->active_transactions);
     io_engines_.push_back(std::make_unique<ModelStreamerTransferEngine>(std::move(*config), std::move(model_streamer)));
+    // An object store has no filesystem root, but a restore may still read a
+    // checkpoint copy from the node cache, which only the POSIX engine opens.
+    if (!node_cache_root.empty())
+      io_engines_.push_back(std::make_unique<PosixCopyEngine>(Path{}, std::move(node_cache_root)));
   } else {
-    io_engines_.push_back(std::make_unique<PosixCopyEngine>(std::move(storage_root)));
+    io_engines_.push_back(std::make_unique<PosixCopyEngine>(std::move(storage_root), std::move(node_cache_root)));
   }
   // A new daemon starts with no transactions; discard staging from the previous
   // instance without changing published artifacts.

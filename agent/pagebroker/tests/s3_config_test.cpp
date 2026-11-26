@@ -90,8 +90,26 @@ TEST_F(S3CredentialsTest, RejectsMissingMalformedAndOversizedCredentialsWithoutF
   }
   setenv("AWS_SHARED_CREDENTIALS_FILE", root_.path().c_str(), 1);
   EXPECT_THROW(Load(), std::invalid_argument);
+}
+
+TEST_F(S3CredentialsTest, SelectsDefaultCredentialChainWithoutCredentialsFile)
+{
+  setenv("AWS_ACCESS_KEY_ID", "environment-key", 1);
+  setenv("AWS_SECRET_ACCESS_KEY", "environment-secret", 1);
+  setenv("AWS_SESSION_TOKEN", "environment-token", 1);
   unsetenv("AWS_SHARED_CREDENTIALS_FILE");
-  EXPECT_THROW(Load(), std::invalid_argument);
+  auto connection = Load();
+  EXPECT_TRUE(connection.UsesDefaultCredentialChain());
+  EXPECT_TRUE(connection.secret_access_key.empty());
+  EXPECT_TRUE(connection.session_token.empty());
+  setenv("AWS_SHARED_CREDENTIALS_FILE", "", 1);
+  EXPECT_TRUE(Load().UsesDefaultCredentialChain());
+  auto stale = ParseS3Config(kConfig).transfer.connection;
+  stale.access_key_id = "stale-key";
+  stale.secret_access_key = "stale-secret";
+  EXPECT_TRUE(LoadS3Credentials(stale).UsesDefaultCredentialChain());
+  setenv("AWS_CA_BUNDLE", "/mounted/ca.pem", 1);
+  EXPECT_EQ(Load().ca_file, "/mounted/ca.pem");
 }
 
 TEST_F(S3CredentialsTest, PreservesCaValidationAndBoundedRead)
