@@ -1,0 +1,155 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""CLI argument validation for benchmark repetitions."""
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from snapshot_benchmarks.cli import (
+    CleanupError,
+    _reject_keep_with_repeats,
+    build_parser,
+    cmd_run,
+    cmd_sweep,
+    main,
+)
+
+
+# The required flags every run/sweep invocation needs. Without them argparse
+# exits 2 before the flag under test is read, so a test that omits them proves
+# nothing about that flag.
+_REQUIRED = [
+    "--context", "ctx",
+    "--node", "gpu-node",
+    "--model-pvc", "models",
+    "--work-pvc", "work",
+    "--image", "example/image",
+]
+
+
+def test_sweep_repeats() -> None:
+    args = build_parser().parse_args(["sweep", *_REQUIRED, "--repeats", "3"])
+
+    assert args.repeats == 3
+
+
+def test_keep_with_repeats_is_rejected(capsys: pytest.CaptureFixture[str]) -> None:
+    commands = (
+        ["run", *_REQUIRED, "--model-label", "model", "--repeats", "2", "--keep"],
+        ["sweep", *_REQUIRED, "--repeats", "2", "--keep"],
+    )
+    for command in commands:
+        assert main(command) == 2
+        assert "--keep" in capsys.readouterr().err
+
+
+def test_single_run_keep_is_allowed() -> None:
+    args = build_parser().parse_args(["run", *_REQUIRED, "--model-label", "model", "--keep"])
+
+    assert _reject_keep_with_repeats(args) is None
+
+
+def test_repeats_must_be_positive(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        build_parser().parse_args(
+            ["run", *_REQUIRED, "--model-label", "model", "--repeats", "0"]
+        )
+
+    assert excinfo.value.code == 2
+    assert "must be at least 1" in capsys.readouterr().err
+
+
+def _sweep_args(*, repeats: int = 2, fail_fast: bool = False) -> MagicMock:
+    args = MagicMock()
+    args.repeats = repeats
+    args.fail_fast = fail_fast
+    args.keep = False
+    args.output_dir = "/tmp/benchmark-results"
+    args.models = "models.yaml"
+    return args
+
+
+def _model(label: str = "Qwen3 0.6B") -> MagicMock:
+    model = MagicMock()
+    model.label = label
+    return model
+
+
+def test_sweep_aborts_after_cleanup_error() -> None:
+    args = _sweep_args()
+    run_calls: list[str] = []
+
+    def run_one(_cfg, _engine, model, _args, _out_dir):
+        run_calls.append(model.label)
+        raise CleanupError("cleanup failed")
+
+    with (
+        patch("snapshot_benchmarks.cli._setup", return_value=(MagicMock(), MagicMock())),
+        patch("snapshot_benchmarks.cli._load_models", return_value=[_model(), _model("Qwen3 14B")]),
+        patch("snapshot_benchmarks.cli._run_one", side_effect=run_one),
+    ):
+        assert cmd_sweep(args) == 1
+    assert run_calls == ["Qwen3 0.6B"]
+
+
+def test_sweep_continues_after_run_failure() -> None:
+    args = _sweep_args(repeats=1)
+    success = MagicMock(git_sha="abc")
+    outcomes = iter([RuntimeError("boom"), success])
+    run_calls: list[str] = []
+
+    def run_one(_cfg, _engine, model, _args, _out_dir):
+        run_calls.append(model.label)
+        outcome = next(outcomes)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    write_result = MagicMock(return_value="/tmp/out/run.json")
+    with (
+        patch("snapshot_benchmarks.cli._setup", return_value=(MagicMock(), MagicMock())),
+        patch(
+            "snapshot_benchmarks.cli._load_models",
+            return_value=[_model("first"), _model("second")],
+        ),
+        patch("snapshot_benchmarks.cli._run_one", side_effect=run_one),
+        patch("snapshot_benchmarks.cli.results.invocation_dir", return_value="/tmp/out"),
+        patch("snapshot_benchmarks.cli.results.write_result", write_result),
+    ):
+        assert cmd_sweep(args) == 1
+    assert run_calls == ["first", "second"]
+    write_result.assert_called_once_with(success, "/tmp/out")
+
+
+def test_sweep_fail_fast_reraises() -> None:
+    args = _sweep_args(repeats=2, fail_fast=True)
+
+    with (
+        patch("snapshot_benchmarks.cli._setup", return_value=(MagicMock(), MagicMock())),
+        patch("snapshot_benchmarks.cli._load_models", return_value=[_model()]),
+        patch("snapshot_benchmarks.cli._run_one", side_effect=RuntimeError("stop here")),
+    ):
+        with pytest.raises(RuntimeError, match="stop here"):
+            cmd_sweep(args)
+
+
+def test_dry_run_renders_every_repeat() -> None:
+    args = build_parser().parse_args(
+        ["run", *_REQUIRED, "--model", "org/model", "--repeats", "3", "--dry-run"]
+    )
+    calls: list[int] = []
+
+    def run_one(*_args):
+        calls.append(1)
+        return None
+
+    with (
+        patch("snapshot_benchmarks.cli._setup", return_value=(MagicMock(), MagicMock())),
+        patch("snapshot_benchmarks.cli._run_one", side_effect=run_one),
+        patch("snapshot_benchmarks.cli.results.invocation_dir", return_value="/tmp/out"),
+    ):
+        assert cmd_run(args) == 0
+
+    assert len(calls) == 3

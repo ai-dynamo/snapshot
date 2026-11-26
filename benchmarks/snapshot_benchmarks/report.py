@@ -105,6 +105,155 @@ def _cold_phases(measured):
     return raw
 
 
+def _spread(values: list[float | None], digits: int = 3) -> str:
+    """Mean ± sample standard deviation, or the raw value when there is one."""
+    present = [value for value in values if value is not None]
+    if not present:
+        return "-"
+    if len(present) == 1:
+        return _fmt(present[0], digits)
+    return f"{_fmt(mean(present), digits)} ± {_fmt(stdev(present), digits)}"
+
+
+def _spread_bytes(values: list[int | None]) -> str:
+    present = [value for value in values if value is not None]
+    if not present:
+        return "-"
+    if len(present) == 1:
+        return _fmt_bytes(present[0])
+    return f"{mean(present) / 1e9:.2f} ± {stdev(present) / 1e9:.2f} GB"
+
+
+def _capture_groups(results: list[dict]) -> list[tuple[str, list[dict]]]:
+    """Repeats of one model, in the order the models first appear."""
+    groups: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for result in results:
+        if not result.get("checkpoint_agent_log"):
+            continue
+        label = (result.get("model") or {}).get("label", "-")
+        if label not in groups:
+            order.append(label)
+            groups[label] = []
+        groups[label].append(result)
+    return [(label, groups[label]) for label in order]
+
+
+def _criu_read(capture: dict) -> float | None:
+    """memdump minus memwrite, computed here so results saved before the
+    ``criu_read`` property existed still render it."""
+    memdump, memwrite = capture.get("criu_memdump"), capture.get("criu_memwrite")
+    if memdump is None or memwrite is None or memwrite > memdump:
+        return None
+    return memdump - memwrite
+
+
+def _capture_field(result: dict, name: str) -> float | None:
+    return (result.get("checkpoint_agent_log") or {}).get(name)
+
+
+def _capture_phase(result: dict, name: str) -> float | None:
+    return ((result.get("checkpoint_agent_log") or {}).get("phases") or {}).get(name)
+
+
+def _staging_bytes(result: dict) -> int | None:
+    capture = result.get("checkpoint_agent_log") or {}
+    return capture.get("checkpoint_dir_bytes_before_overlay", capture.get("criu_image_bytes"))
+
+
+def _capture_sections(results: list[dict]) -> list[str]:
+    """Capture breakdown. Skips results that have no checkpoint agent log."""
+    lines = [
+        "## Where the capture time goes",
+        "",
+        "Wall, CUDA, CRIU, and overlay come from the capture-node agent's "
+        "Checkpoint timing summary. CUDA lock is the device freeze; CUDA copy "
+        "moves device state into host memory before CRIU runs. Those CUDA "
+        "columns are blank when the capture used PageBroker CustomStorage, "
+        "which records the CUDA total and does not measure the split. CRIU "
+        "memdump is CRIU's page-dump timer and it includes memwrite, the time "
+        "spent writing pages. CRIU read is memdump minus memwrite. memdump "
+        "and memwrite overlap the CRIU wall; they are not added to it or to "
+        "each other. Checkpoint (API) is the one-second Kubernetes Ready "
+        "timestamp and is coarser than Wall. Repeated runs of the same model "
+        "are one row, the mean ± the sample standard deviation. A single run "
+        "is the raw value.",
+        "",
+        "| Model | Wall (s) | CUDA lock | CUDA copy | CRIU wall | CRIU freeze | "
+        "CRIU memdump | of which memwrite | CRIU read | Overlay | Checkpoint (API) |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for label, group in _capture_groups(results):
+        lines.append(
+            "| {label} | {wall} | {lock} | {copy} | {criu} | {freeze} | {memdump} | "
+            "{memwrite} | {read} | {overlay} | {api} |".format(
+                label=label,
+                wall=_spread([_capture_field(result, "duration") for result in group]),
+                lock=_spread([_capture_field(result, "cuda_lock") for result in group]),
+                copy=_spread([_capture_field(result, "cuda_copy") for result in group]),
+                criu=_spread([_capture_phase(result, "criu_dump") for result in group]),
+                freeze=_spread([_capture_field(result, "criu_freezing") for result in group]),
+                memdump=_spread([_capture_field(result, "criu_memdump") for result in group]),
+                memwrite=_spread([_capture_field(result, "criu_memwrite") for result in group]),
+                read=_spread([_criu_read(result.get("checkpoint_agent_log") or {}) for result in group]),
+                overlay=_spread([_capture_phase(result, "overlay_capture") for result in group]),
+                api=_spread(
+                    [
+                        (result.get("checkpoint") or {}).get("checkpoint_seconds")
+                        for result in group
+                    ]
+                ),
+            )
+        )
+    lines.append("")
+    lines.extend(
+        [
+            "## How the pages were written",
+            "",
+            "Memwrite GB/s divides CRIU's written page bytes (`pages_written`) "
+            "by CRIU's memwrite timer. The staging directory column is the "
+            "apparent size of the checkpoint directory after CRIU returns and "
+            "before the rootfs diff is added. It includes the manifest, "
+            "dump.log, CUDA job file, and criu.conf, so it is neither the CRIU "
+            "image nor the final checkpoint size, and it is not turned into a "
+            "rate against the dump wall. Repeated runs of the same model are "
+            "one row, the mean ± the sample standard deviation.",
+            "",
+            "| Model | Pages written | Staging dir before overlay | Overlay diff | Memwrite GB/s |",
+            "|---|---:|---:|---:|---:|",
+        ]
+    )
+    for label, group in _capture_groups(results):
+        lines.append(
+            "| {label} | {pages} | {staging} | {overlay} | {memwrite_rate} |".format(
+                label=label,
+                pages=_spread_bytes(
+                    [_capture_field(result, "criu_pages_written_bytes") for result in group]
+                ),
+                staging=_spread_bytes([_staging_bytes(result) for result in group]),
+                overlay=_spread_bytes(
+                    [_capture_field(result, "overlay_diff_bytes") for result in group]
+                ),
+                memwrite_rate=_spread(
+                    [_capture_field(result, "memwrite_gigabytes_per_second") for result in group]
+                ),
+            )
+        )
+    lines.append("")
+    return lines
+
+
+def _agent_log_warnings(results: list[dict]) -> list[tuple[str, str]]:
+    return [
+        (r.get("model", {}).get("label", "?"), w)
+        for r in results
+        for w in (
+            ((r.get("agent_log_phases") or {}).get("parse_warnings") or [])
+            + ((r.get("checkpoint_agent_log") or {}).get("parse_warnings") or [])
+        )
+    ]
+
+
 def render(results: list[dict]) -> str:
     if not results:
         return "no results found\n"
@@ -246,11 +395,13 @@ def render(results: list[dict]) -> str:
         )
         + "\n"
     )
+    if any(r.get("checkpoint_agent_log") for r in current):
+        text += "\n" + "\n".join(_capture_sections(current))
     warnings = [
         f"- {r['model']['label']}: {warning}"
         for r in current
         for warning in r.get("warnings", [])
-    ]
+    ] + [f"- {label}: {warning}" for label, warning in _agent_log_warnings(current)]
     if warnings:
         text += "\n## Warnings\n\n" + "\n".join(warnings) + "\n"
     if legacy:
@@ -332,6 +483,10 @@ def _render_legacy(results: list[dict]) -> str:
         )
     lines.append("")
 
+    if any(r.get("checkpoint_agent_log") for r in results):
+        lines.extend(_capture_sections(results))
+
+
     lines.append("## Where the restore time goes")
     lines.append("")
     lines.append(
@@ -371,11 +526,7 @@ def _render_legacy(results: list[dict]) -> str:
         for r in results
         for w in (r.get("warnings") or [])
     ]
-    agent_log_warnings = [
-        (r.get("model", {}).get("label", "?"), w)
-        for r in results
-        for w in ((r.get("agent_log_phases") or {}).get("parse_warnings") or [])
-    ]
+    agent_log_warnings = _agent_log_warnings(results)
     if warnings or agent_log_warnings:
         lines.append("## Warnings")
         lines.append("")

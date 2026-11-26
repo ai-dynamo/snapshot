@@ -207,6 +207,41 @@ Before the checkpoint, the application pauses requests and asks the engine to re
 memory. Weights remain on the GPU. SGLang requests KV-only release without a CPU
 weight backup. TRT-LLM uses its KV sleep/wakeup RPC.
 
+### Capture breakdown
+
+The published tables in [performance.md](../overview/performance.md) cover restore only.
+Each run also records capture. `checkpoint.checkpoint_seconds` is the
+Kubernetes `PodSnapshot` Ready time, at one-second resolution. The precise
+split is `checkpoint_agent_log`, parsed from the capture-node agent's
+`Checkpoint timing summary`:
+
+- `duration` — agent wall time for the whole capture
+- `phases.cuda_checkpoint` — CUDA lock + device-to-host copy + job file
+- `cuda_lock`, `cuda_copy`, `cuda_job_file` — that CUDA total, split. Absent
+  when PageBroker CustomStorage captured the GPU: that path records
+  `phases.cuda_checkpoint` and does not measure lock, copy, and job file
+- `phases.criu_dump` — CRIU dump RPC wall time, including the page write
+- `criu_freezing`, `criu_memdump`, `criu_memwrite` — CRIU's own timers.
+  memwrite runs inside memdump, so memdump includes the page-write time and
+  `criu_read` (memdump minus memwrite) is the time spent reading the frozen
+  process. Both overlap the CRIU wall. Do not add them to each other or to
+  the CRIU wall. CRIU's double-counted last write interval exists only in
+  its pre-dump path, which the agent does not use
+- `criu_pages_written_bytes` — page payload. `memwrite_gigabytes_per_second`
+  divides it by CRIU's memwrite timer
+- `checkpoint_dir_bytes_before_overlay` — apparent size of the staging
+  directory after CRIU returns and before the rootfs diff is written. It
+  includes the manifest, dump.log, CUDA job file, and criu.conf, so it is not
+  the CRIU image and not the final checkpoint size, and it is not turned into
+  a rate. Results written before the rename call this `criu_image_bytes`
+- `phases.overlay_capture` and `overlay_diff_bytes` — writable-layer tar
+
+`report` prints this as **Where the capture time goes** and **How the pages
+were written** when a result has `checkpoint_agent_log`. Repeated runs of the
+same model are one row, mean ± sample standard deviation. An agent built
+before this split still produces phase totals; the result then warns that
+the CRIU memwrite split is absent.
+
 ## Interpreting Results
 
 Compare your settings with the [reference setup](../overview/performance.md#benchmarking-setup).

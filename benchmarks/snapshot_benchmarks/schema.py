@@ -121,6 +121,76 @@ class ColdStartTiming:
 
 
 @dataclass
+class CheckpointAgentLog:
+    """Capture breakdown from the agent's ``Checkpoint timing summary``.
+
+    ``phases`` are the additive pieces of ``duration``. ``cuda_*`` splits
+    ``phases["cuda_checkpoint"]`` into lock, device-to-host copy, and job-file
+    refresh when the helper path measured them. PageBroker CustomStorage leaves
+    those fields unset. ``criu_memdump`` and ``criu_memwrite`` are CRIU's own
+    timers from ``stats-dump``. They overlap ``phases["criu_dump"]`` and are
+    not added to it. memwrite runs inside memdump, so memdump includes the
+    page-write time and ``criu_read`` (memdump minus memwrite) is the time
+    spent reading the frozen process. Do not add the two. CRIU's double-counted
+    last write interval exists only in its pre-dump path, which the agent does
+    not use.
+
+    ``checkpoint_dir_bytes_before_overlay`` is the apparent size of the staging
+    directory after CRIU returns and before the rootfs diff is written. It
+    includes the manifest, dump.log, CUDA job file, and criu.conf. It is not
+    the CRIU image and not the final checkpoint size.
+    """
+
+    log_line_found: bool = False
+    log_source_pod: str | None = None
+    parse_warnings: list[str] = field(default_factory=list)
+
+    duration: float | None = None
+    started_to_complete: float | None = None
+    phases: dict[str, float] = field(default_factory=dict)
+
+    cuda_lock: float | None = None
+    cuda_copy: float | None = None
+    cuda_job_file: float | None = None
+
+    criu_freezing: float | None = None
+    criu_frozen: float | None = None
+    criu_memdump: float | None = None
+    criu_memwrite: float | None = None
+    criu_pages_written: int | None = None
+    criu_pages_written_bytes: int | None = None
+    criu_pages_scanned: int | None = None
+    checkpoint_dir_bytes_before_overlay: int | None = None
+    overlay_diff_bytes: int | None = None
+
+    @property
+    def criu_read(self) -> float | None:
+        """Time CRIU spent reading the frozen process: memdump minus memwrite.
+
+        None when either timer is missing or memwrite exceeds memdump, which
+        would mean the timers are not nested the way CRIU nests them.
+        """
+        if self.criu_memdump is None or self.criu_memwrite is None:
+            return None
+        if self.criu_memwrite > self.criu_memdump:
+            return None
+        return self.criu_memdump - self.criu_memwrite
+
+    @property
+    def memwrite_gigabytes_per_second(self) -> float | None:
+        """Page payload divided by CRIU's memwrite timer.
+
+        This uses ``pages_written``, not the size of the staging directory.
+        The directory also holds metadata and pages that ``pages_written``
+        does not count, so dividing it by the dump wall overstates the write
+        rate.
+        """
+        if not self.criu_pages_written_bytes or not self.criu_memwrite:
+            return None
+        return self.criu_pages_written_bytes / self.criu_memwrite / 1e9
+
+
+@dataclass
 class CheckpointTiming:
     """Checkpoint timing boundaries.
 
@@ -260,6 +330,7 @@ class RunResult:
     git_sha: str | None = None
     cold_start: ColdStartTiming | None = None
     checkpoint: CheckpointTiming | None = None
+    checkpoint_agent_log: CheckpointAgentLog | None = None
     restore: RestoreTiming | None = None
     agent_log_phases: AgentLogPhases | None = None
     restore_attempts: list[RestoreTiming] = field(default_factory=list)
