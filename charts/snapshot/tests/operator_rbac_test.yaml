@@ -66,3 +66,15 @@ tests:
     asserts:
       - notExists:
           path: metadata.annotations
+
+  - it: lets the operator block SnapshotJob deletion on its source Job where owner references are enforced
+    documentSelector:
+      path: kind
+      value: ClusterRole
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["nvidia.com"]
+            resources: ["snapshotjobs/finalizers"]
+            verbs: ["update"]
