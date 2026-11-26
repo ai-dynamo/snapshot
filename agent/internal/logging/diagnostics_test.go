@@ -49,6 +49,53 @@ func TestLastCRIUError(t *testing.T) {
 			want: "7 killed by signal 9: Killed",
 		},
 		{
+			name: "names the file, not the descriptor CRIU could not reopen",
+			log: `(00.003879) Error (criu/tun.c:85): tun: Unable to create tun: No such file or directory
+(00.044215)      1: Error (criu/mount.c:2274): mnt: Unable to remove /tmp/cr-tmpfs.q2iQ0G: Device or resource busy
+(00.063008)      1: Error (criu/files-reg.c:2175): File etc/legal has bad size 267 (expect 291)
+(00.063017)      1: Error (criu/files.c:1235): Unable to open fd=3 id=0x8
+(00.063764)      1: async: daemon stopped
+(00.064668) mnt: Switching to new ns to clean ghosts
+(00.064871) Error (criu/cr-restore.c:2419): Restoring FAILED.
+(00.065831) Error (criu/cgroup.c:2247): cg: cgroupd: recv req error: No such file or directory
+`,
+			want: "File etc/legal has bad size 267 (expect 291)",
+		},
+		{
+			name: "names why a kernel probe failed, not only which one",
+			log: `(00.003948) Error (criu/tun.c:85): tun: Unable to create tun: No such file or directory
+(00.023802) Error (criu/kerndat.c:874): Can't create inotify: Too many open files
+(00.023806) Error (criu/kerndat.c:2162): kerndat_has_inotify_setnextwd failed when initializing kerndat.
+`,
+			want: "Can't create inotify: Too many open files",
+		},
+		{
+			name: "keeps a wrapper error with no error on the line before it",
+			log: `(00.003879) Error (criu/tun.c:85): tun: Unable to create tun: No such file or directory
+(00.063001)      1: Restoring fd 3
+(00.063017)      1: Error (criu/files.c:1235): Unable to open fd=3 id=0x8
+(00.064871) Error (criu/cr-restore.c:2419): Restoring FAILED.
+`,
+			want: "Unable to open fd=3 id=0x8",
+		},
+		{
+			name: "keeps a wrapper error when another task logged the line before it",
+			log: `(00.063008)     37: Error (criu/files-reg.c:2175): File etc/legal has bad size 267 (expect 291)
+(00.063017)      1: Error (criu/files.c:1235): Unable to open fd=3 id=0x8
+(00.064871) Error (criu/cr-restore.c:2419): Restoring FAILED.
+`,
+			want: "Unable to open fd=3 id=0x8",
+		},
+		{
+			name: "names the cause in a log without timestamps",
+			log: `Error (criu/tun.c:85): tun: Unable to create tun: No such file or directory
+     1: Error (criu/files-reg.c:2175): File etc/legal has bad size 267 (expect 291)
+     1: Error (criu/files.c:1235): Unable to open fd=3 id=0x8
+Error (criu/cr-restore.c:2419): Restoring FAILED.
+`,
+			want: "File etc/legal has bad size 267 (expect 291)",
+		},
+		{
 			name: "summary alone is not a cause",
 			log:  "(00.083487) Error (criu/cr-restore.c:2390): Restoring FAILED.\n",
 		},

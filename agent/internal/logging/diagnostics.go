@@ -80,7 +80,7 @@ var criuFollowOnError = regexp.MustCompile(`^(Restoring FAILED\.|\d+ exited, sta
 
 // lastCRIUError returns the message of the last "Error (file:line): msg" line
 // logged before the restore summary, skipping follow-on errors unless nothing
-// else was logged.
+// else was logged. For a wrapper error it returns the cause logged before it.
 func lastCRIUError(content string) string {
 	lines := strings.Split(content, "\n")
 	summary := len(lines)
@@ -97,7 +97,7 @@ func lastCRIUError(content string) string {
 			continue
 		}
 		if !criuFollowOnError.MatchString(msg) {
-			return msg
+			return criuCause(lines, i, msg)
 		}
 		if fallback == "" {
 			fallback = msg
@@ -126,6 +126,37 @@ func criuErrorMessage(line string) string {
 		return ""
 	}
 	return strings.TrimSpace(msg)
+}
+
+// criuWrapperError matches an error that only names what gave up. CRIU logs it
+// right after the error that says why:
+//   - A descriptor it could not reopen: "Unable to open fd=<fd> id=<id>"
+//   - A kernel probe: "<probe> failed when initializing kerndat."
+var criuWrapperError = regexp.MustCompile(`^(Unable to open fd=\d+ id=(0x)?[0-9a-f]+|\w+ (has )?failed when initializing kerndat\.)$`)
+
+// criuCause returns msg, the message of lines[i], unless it is a wrapper error
+// and the same task logged an error on the line before: then that one is the
+// cause. Only the line directly before counts. An error further back, or from
+// another task, may have nothing to do with this one.
+func criuCause(lines []string, i int, msg string) string {
+	if i == 0 || !criuWrapperError.MatchString(msg) {
+		return msg
+	}
+	cause := criuErrorMessage(lines[i-1])
+	if cause == "" || criuTask(lines[i-1]) != criuTask(lines[i]) {
+		return msg
+	}
+	return cause
+}
+
+// criuTask returns what an error line carries between its timestamp and
+// "Error (": the task that logged it, or "" for CRIU's main process.
+func criuTask(line string) string {
+	prefix, _, _ := strings.Cut(line, "Error (")
+	if _, task, found := strings.Cut(prefix, ")"); found {
+		prefix = task
+	}
+	return strings.TrimSpace(prefix)
 }
 
 // findRestoreLog returns the CRIU restore.log path, trying the work dir first
