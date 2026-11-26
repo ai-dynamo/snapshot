@@ -31,6 +31,8 @@ operator:
   serviceAccount:
     # Annotations for the operator's service account (e.g., for IRSA).
     annotations: {}
+  # The manager gives Go 90% of limits.memory as a soft limit. This leaves
+  # headroom but cannot prevent an OOM. Without a limit it leaves Go unchanged.
   resources:
     limits:
       cpu: 500m
