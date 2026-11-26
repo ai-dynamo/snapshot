@@ -38,7 +38,7 @@ The namespaced binding for one container's snapshot; consumed by restore.
 
 | Field                      | Type        | Description                                                                                                              |
 |----------------------------|-------------|--------------------------------------------------------------------------------------------------------------------------|
-| `boundSnapshotContentName` | string      | Name of the bound cluster-scoped `PodSnapshotContent`; unset until the agent binds it.                                   |
+| `boundSnapshotContentName` | string      | Name of the bound cluster-scoped `PodSnapshotContent`; unset until the operator binds it.                                |
 | `conditions`               | []Condition | `Ready` (checkpoint and binding complete, snapshot usable for restore) and `Failed` (checkpoint or binding failed terminally). |
 
 ### PodSnapshotContent
@@ -201,7 +201,7 @@ workload and the node agent share.
 
 | Item        | Value                  | Description                                                                                         |
 |-------------|------------------------|-----------------------------------------------------------------------------------------------------|
-| Volume name | `snapshot-control`     | Per-pod `emptyDir`. With multiple target containers, each mounts it with `subPath=<containerName>`. |
+| Volume name | `snapshot-control`     | Per-pod `emptyDir`. Every target or destination container mounts it with `subPath=<containerName>`. |
 | Mount path  | `/snapshot-control`    | Where the workload sees the control directory.                                                      |
 | Environment | `SNAPSHOT_CONTROL_DIR` | Exposes the mount path to the workload (legacy name: `DYN_SNAPSHOT_CONTROL_DIR`).                   |
 
