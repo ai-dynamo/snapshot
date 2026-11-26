@@ -11,8 +11,11 @@ listed per feature. If a feature is not listed, the baseline is all it needs.
 
 ## Baseline Prerequisites
 
-- A Kubernetes cluster with NVIDIA GPU nodes on x86_64 or arm64, running Linux
-  kernel 5.13 or newer.
+- A Kubernetes 1.32 or newer cluster with NVIDIA GPU nodes on x86_64 or arm64,
+  running Linux kernel 5.13 or newer. An older API server refuses the
+  `SnapshotJob` CRD, whose validation rules use the Common Expression Language
+  (CEL) `format` library: `helm install` fails on
+  `crds/nvidia.com_snapshotjobs.yaml` with `undeclared reference to 'format'`.
 - containerd or CRI-O as the container runtime. The chart defaults to
   containerd. For CRI-O and OpenShift, see [Installation](installation.md).
 - [NVIDIA GPU Operator](https://github.com/NVIDIA/gpu-operator) 26.3 or newer,
