@@ -136,6 +136,23 @@ def test_a_newer_prerelease_does_not_hold_latest(step, tmp_path):
 
 
 @pytest.mark.parametrize(
+    "tags",
+    [
+        # The first release of a repository: no tag yet, or only its own.
+        (),
+        ("v0.3.1",),
+        # Only vMAJOR.MINOR.PATCH names a stable release.
+        ("v0.4", "v1", "vnext", "v0.4.0.1", "v0.3.2-civalidation"),
+    ],
+)
+def test_only_stable_release_tags_count(step, tmp_path, tags):
+    result, outputs, _ = compute(step, tmp_path, version="v0.3.1", tags=tags)
+
+    assert result.returncode == 0, result.stderr
+    assert outputs["tags"] == "v0.3.1 latest"
+
+
+@pytest.mark.parametrize(
     ("version", "tags", "release"),
     [("v0.4.0-rc.1", "v0.4.0-rc.1", "true"), ("", "v0.0.0-g12345678", "false")],
 )
