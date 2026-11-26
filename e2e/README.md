@@ -119,6 +119,10 @@ the chart values this cluster needs (k3s keeps containerd outside the
 conventional paths, and a single node has to fit the workload pods) in the
 newline-separated form `SNAPSHOT_E2E_HELM_SET` accepts.
 
+Those values also turn on the node cache (`storage.nodeCache`), with a node
+directory the script bind-mounts into the cluster. The node cache tests place
+and remove their copies there, and skip on an install without the setting.
+
 `make cpu-e2e` runs the whole sequence on a linux/amd64 Docker host — build,
 cluster, install, tests — and deletes the cluster afterwards:
 

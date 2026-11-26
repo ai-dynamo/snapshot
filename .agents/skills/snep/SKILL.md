@@ -1,6 +1,6 @@
 ---
 name: snep
-description: Guide users through creating or revising a Snapshot Enhancement Proposal (SNEP), including an interactive section-by-section draft. Use for significant Snapshot design changes, not ordinary implementation or small documentation changes.
+description: Guide users through creating or revising a Snapshot Enhancement Proposal (SNEP), including an interactive section-by-section draft and ASD-STE100 clarity rewrites. Use for significant Snapshot design changes or SNEP rewrites, not ordinary implementation or other small documentation changes.
 license: Apache-2.0
 metadata:
   SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
@@ -18,6 +18,10 @@ Read [the SNEP process](../../../docs/design/README.md) and [the SNEP
 template](../../../docs/design/NNNN-template/README.md) before starting.
 They are the source of truth when they differ from this skill.
 
+Follow [Writing Documentation](../../../docs/development/writing-docs.md) for
+general writing rules and
+[Naming Conventions](../../../docs/development/naming.md) for terms and names.
+
 ## Working style
 
 - Lead the conversation one topic at a time; do not present every question at
@@ -31,6 +35,31 @@ They are the source of truth when they differ from this skill.
 - Preserve the user's decisions and distinguish them from open questions or
   follow-up work. Do not invent product commitments, issue numbers, APIs, or
   maturity dates.
+
+## Clarity and ASD-STE100
+
+Target 80-100% adherence to ASD-STE100 Simplified Technical English in all new
+and rewritten SNEP prose. Treat this range as a writing target, not a measured
+score. Do not claim measured or certified compliance without validation.
+
+Apply these rules before you ask the user to confirm each section:
+
+- Use short, active sentences with one main idea. Keep descriptive sentences
+  to 25 words or fewer and instructions to 20 words or fewer.
+- Use simple, direct words. Follow ASD-STE100 vocabulary and grammar where
+  possible. Remove idioms, filler, and vague claims.
+- Use one term for each concept. Define technical terms and acronyms at first
+  use. Keep necessary technical names instead of replacing them with vague
+  words.
+- Name the actor. Make conditions, actions, and results explicit. Replace
+  pronouns when their meaning is not clear.
+- Keep one topic per paragraph. Use lists for separate requirements and
+  numbered steps for ordered actions.
+- Preserve technical meaning, requirement strength, scope, decisions, and
+  failure behavior. Do not remove necessary detail to meet a word limit.
+- For a clarity-only rewrite, keep identifiers, code, commands, values, links,
+  and required template headings unchanged. Rewrite the requested prose,
+  not only its summary. Leave sections outside the requested scope unchanged.
 
 ## Identify or continue the SNEP
 
@@ -111,6 +140,7 @@ would interrupt the main narrative.
 
 ## Finish
 
+Review the complete SNEP against the clarity rules before final confirmation.
 Run `make update-toc` after all heading changes, then run `make verify-toc`.
 Review and commit the proposal and generated TOC with DCO sign-off before
 running `make check`, which requires a clean working tree. Then run `make

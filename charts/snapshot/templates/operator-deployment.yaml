@@ -101,16 +101,23 @@ spec:
             - {{ printf "--pagebroker-s3-config-namespace=%s" .Release.Namespace | quote }}
             - {{ printf "--pagebroker-s3-config-name=%s" (include "snapshot.pageBrokerS3ConfigName" .) | quote }}
             - {{ printf "--release-name=%s" .Release.Name | quote }}
+            {{- if .Values.storage.s3.credentialsSecretRef }}
             - {{ printf "--artifact-cleanup-s3-credentials-path=%s/%s" (include "snapshot.s3CredentialsMountDir" .) .Values.storage.s3.credentialsSecretKey | quote }}
+            {{- end }}
             - --pagebroker-s3-settings=/etc/snapshot/pagebroker-s3.yaml
             {{- if .Values.storage.s3.caBundleConfigMapRef }}
             - {{ printf "--artifact-cleanup-s3-ca-bundle-path=%s" (include "snapshot.s3CABundlePath" .) | quote }}
             {{- end }}
             {{- end }}
-          {{- if .Values.operator.testFailCaptureSourceAnnotation }}
+          {{- if or .Values.operator.testFailCaptureSourceAnnotation (include "snapshot.s3CredentialEndpointEnabled" .) }}
           env:
+            {{- if .Values.operator.testFailCaptureSourceAnnotation }}
             - name: SNAPSHOT_E2E_TEST_FAIL_CAPTURE_SOURCE_ANNOTATION
               value: {{ .Values.operator.testFailCaptureSourceAnnotation | quote }}
+            {{- end }}
+            {{- if include "snapshot.s3CredentialEndpointEnabled" . }}
+            {{- include "snapshot.s3CredentialEndpointEnv" . | nindent 12 }}
+            {{- end }}
           {{- end }}
           volumeMounts:
             {{- if eq .Values.storage.type "pvc" }}
@@ -120,10 +127,13 @@ spec:
             - name: storage-config
               mountPath: /etc/snapshot
               readOnly: true
-            {{- if eq .Values.storage.type "s3" }}
+            {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
             - name: s3-credentials
               mountPath: {{ include "snapshot.s3CredentialsMountDir" . }}
               readOnly: true
+            {{- end }}
+            {{- if include "snapshot.s3CredentialEndpointEnabled" . }}
+            {{- include "snapshot.s3IdentityTokenVolumeMount" . | nindent 12 }}
             {{- end }}
             {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.caBundleConfigMapRef }}
             - name: s3-ca-bundle
@@ -146,13 +156,16 @@ spec:
               - key: pagebroker-s3.yaml
                 path: pagebroker-s3.yaml
               {{- end }}
-        {{- if eq .Values.storage.type "s3" }}
+        {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
         - name: s3-credentials
           secret:
             secretName: {{ .Values.storage.s3.credentialsSecretRef }}
             items:
               - key: {{ .Values.storage.s3.credentialsSecretKey }}
                 path: {{ .Values.storage.s3.credentialsSecretKey }}
+        {{- end }}
+        {{- if include "snapshot.s3CredentialEndpointEnabled" . }}
+        {{- include "snapshot.s3IdentityTokenVolume" . | nindent 8 }}
         {{- end }}
         {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.caBundleConfigMapRef }}
         - name: s3-ca-bundle

@@ -106,7 +106,13 @@ With `storage.type: s3`, set these values:
 - `storage.s3.endpoint` - S3-compatible endpoint
 - `storage.s3.region` - Bucket region
 - `storage.s3.bucket` - Bucket that holds the snapshots
-- `storage.s3.credentialsSecretRef` - Secret that holds the credentials file
+
+Credentials come from one of two places:
+
+- `storage.s3.credentialsSecretRef` - Secret that holds a credentials file with
+  static keys
+- No Secret - the workload identity of the Snapshot pods; see
+  [Use Workload Identity for S3](#use-workload-identity-for-s3)
 
 See [Helm Chart Values](../reference/helm-values.md#storage) for all S3 values,
 including the key prefix and the credentials key.
@@ -130,6 +136,99 @@ staging volume cap, so PageBroker refuses a staged restore the volume cannot
 hold instead of filling it. An explicit `stagingBytes` is not checked against
 the volume.
 
+### Use Workload Identity for S3
+
+Leave `storage.s3.credentialsSecretRef` empty to reach the bucket without static
+keys. No Secret is mounted. PageBroker and the operator then resolve credentials
+through the default credential chain of their S3 clients. Unlike a mounted
+credentials file, which PageBroker reads once at startup, these credentials are
+renewed by the chain itself in both components, without a restart.
+
+Two identities need access to the bucket, because uploads and restores run in
+PageBroker and cleanup runs in the operator:
+
+| Component | Service account | Annotations value | Access under the store's prefix |
+|-----------|-----------------|-------------------|---------------------------------|
+| PageBroker, in the agent pod | The agent's: the release's full name, for example `snapshot`, unless `serviceAccount.name` sets another. With `serviceAccount.create: false` and no name, it is `default` | `serviceAccount.annotations` | Read, write and list |
+| Operator | The operator's, the agent's default name with `-operator` appended | `operator.serviceAccount.annotations` | List and delete |
+
+Bind each to an identity with that access. How the pods get that identity
+depends on the platform:
+
+- **The platform injects it.** Bind both service accounts in the way your
+  platform defines: with an annotation on the service account, or with an
+  association that names the service account and is created on the platform
+  side. Set the annotation values only in the first case. The platform adds the
+  token and its variables to the pods
+- **A credential endpoint issues it.** Set `storage.s3.credentialEndpoint.url`
+  to the endpoint's `https` URL. The chart then mounts a service-account token
+  into PageBroker and the operator, which present it to the endpoint and renew
+  the credentials before they expire. Also set
+  `storage.s3.credentialEndpoint.tokenAudience` to the audience the endpoint
+  expects; it is required, because a token without an audience is also valid
+  for the Kubernetes API. This cannot be combined with
+  `storage.s3.credentialsSecretRef`
+
+Use one of the two. If the platform also injects an identity into these pods,
+PageBroker and the operator use it and ignore the credential endpoint.
+
+The endpoint must implement the container-credentials protocol of the S3
+clients: a `GET` request that carries the token as the `Authorization` header,
+answered with JSON credentials and their expiry.
+
+Kubernetes rotates the token before `tokenExpirationSeconds` runs out, so an
+upload or a restore that outlasts one token keeps working.
+
+The chart applies the annotation values only to the service accounts it
+creates: the agent's with `serviceAccount.create: true`, the operator's with
+`rbac.create: true`. With either set to `false`, annotate the existing service
+account directly. The platform injects an identity when a pod is created, and
+changing an annotation alone does not restart a pod, so after adding or changing
+one restart the agent DaemonSet and the operator Deployment.
+
+Instance metadata is excluded from the chain. A workload identity that does not
+resolve therefore fails the operation and never falls back to the node's role,
+which every pod on the node shares.
+
+With `storage.s3.caBundleConfigMapRef` set, PageBroker and the operator trust
+only that bundle, for the store and for the service that issues the credentials.
+The bundle must therefore also contain the CA of the token or credential
+service.
+
+A credential endpoint behind a private CA works for uploads, restores and
+cleanup. With `storage.s3.credentialEndpoint.url` set, the chart also mounts the
+bundle as the system certificate file of the PageBroker container, which
+restores use for the credential request. That mount does not follow a change to
+the ConfigMap; restart the agent pods after you replace the bundle.
+
+A token service that the platform runs behind a private CA works for uploads
+and cleanup. Restores cannot reach it yet.
+
+To check it, list the variables your platform injected into the PageBroker
+container, then take a snapshot:
+
+```bash
+kubectl get pod <agent-pod> -n <snapshot-ns> \
+  -o jsonpath='{range .spec.containers[?(@.name=="pagebroker")].env[*]}{.name}{"\n"}{end}'
+```
+
+When credentials do not resolve, a checkpoint fails with a storage error on the
+`PodSnapshotContent`, and a restore fails on the restore pod's
+`nvidia.com/Restored` condition; see
+[Find the Message](../troubleshooting/reading-a-failure-message.md#find-the-message).
+The operator logs the failed cleanup request.
+
+An empty `storage.s3.credentialsSecretRef` is not an error for the chart. If a
+Secret was meant to be set and no identity is bound, the install succeeds and
+the first checkpoint fails with:
+
+```text
+PageBroker STORAGE_UNAVAILABLE: S3 checkpoint operation failed
+```
+
+Check the PageBroker container's variables with the command above: no
+`AWS_SHARED_CREDENTIALS_FILE` means no Secret is mounted.
+
 ### Change S3 Settings
 
 PageBroker reads the S3 settings once at startup, so changing one restarts
@@ -140,6 +239,240 @@ rewritten its configuration. See
 After changing the endpoint, bucket, region or prefix, restart the agent
 DaemonSet once the operator pod is Ready, so PageBroker reads the operator's
 current configuration. PageBroker does not re-read it while running.
+
+## Node Cache
+
+The node cache is a directory on a node's local disk that holds copies of
+checkpoints. With `storage.nodeCache.enabled: true`, a restore reads a copy
+found on its node, and reads the snapshot store when the node holds none. With
+the setting off, which is the default, nothing changes.
+
+Snapshot never writes to the node cache. An administrator places and removes
+the copies with their own tools.
+
+A restore from a copy does not read the snapshot store. It therefore also
+works after the installation is pointed at another store. Remove the copies
+when that is not wanted.
+
+The sections below describe how to place, check and remove copies of a
+checkpoint on a node.
+
+Place the copy before the workloads that restore from that checkpoint are
+scheduled to the node. A copy can also be added while such workloads are
+running. In that case it must appear in the node cache in a single step, by a
+rename of a complete directory, as [Place a Copy](#place-a-copy) describes. A
+restore that starts while the copy is still being written then reads the
+snapshot store, and never a partial copy.
+
+The examples use `/mnt/nvme/snapshot-cache` as the directory.
+
+### Prepare the Nodes
+
+Set these Helm values when you install or [upgrade](upgrade.md) Snapshot.
+They apply to both `pvc` and `s3` stores:
+
+```yaml
+storage:
+  nodeCache:
+    enabled: true
+    path: /mnt/nvme/snapshot-cache
+    createIfMissing: true
+```
+
+The default path is `/var/lib/snapshot/cache`. The same path is used on every
+node that runs the agent. Any local filesystem that supports direct I/O works,
+as for the snapshot store.
+
+With `createIfMissing: true`, the default, a node that does not have the
+directory gets an empty one, and restores on that node read the snapshot
+store.
+
+With `createIfMissing: false`, Snapshot does not create the directory. Create
+it yourself on every node that runs the agent, before you install or upgrade.
+On a node without the directory, the agent Pod does not start. It stays in
+`ContainerCreating` with a `FailedMount` event, and that node runs no
+checkpoints or restores until you create the directory.
+
+A directory that Snapshot created is on the node's root disk, unless a disk
+is mounted at that path. Check on each node that the directory is on the
+intended disk before you place copies:
+
+```bash
+df -h /mnt/nvme/snapshot-cache
+```
+
+If you mount a disk at the path after the agent Pod started, restart the
+agent Pod on that node. The Pod otherwise keeps the directory it started with:
+
+```bash
+kubectl delete pod --namespace <snapshot-namespace> \
+  --selector app.kubernetes.io/component=snapshot-agent \
+  --field-selector spec.nodeName=<node>
+```
+
+### Place a Copy
+
+A copy lives at `<path>/artifacts/<uid>/containers/<container>/`. `<uid>`
+is the UID of the snapshot's `PodSnapshotContent`, and `<container>` is the
+name of the checkpointed container. The directory holds the same files as the
+checkpoint in the store, including `manifest.yaml`.
+
+Find the UID of a snapshot with these commands:
+
+```bash
+content=$(kubectl get podsnapshot <snapshot> --namespace <namespace> \
+  --output jsonpath='{.status.boundSnapshotContentName}')
+kubectl get podsnapshotcontent "$content" --output jsonpath='{.metadata.uid}'
+```
+
+The agent treats an existing directory as complete. Build the copy beside
+`artifacts/` on the same filesystem, then rename it into place. `<source>` is
+the directory of the snapshot store, such as the mounted snapshot volume:
+
+```bash
+cd /mnt/nvme/snapshot-cache &&
+  cp -a <source>/artifacts/<uid>/containers/<container> \
+    .incoming-<uid>-<container> &&
+  mkdir -p artifacts/<uid>/containers &&
+  mv -T .incoming-<uid>-<container> artifacts/<uid>/containers/<container>
+```
+
+`mv -T` fails when a non-empty copy is already there. Remove the existing
+copy first, as in [Remove a Copy](#remove-a-copy).
+
+After a failed `cp`, remove the `.incoming-` directory before you copy again.
+
+Keep the file modes and owners of the checkpoint, as `cp -a` does. A copy must
+be a directory, not a symbolic link, and its manifest must name the same
+snapshot and container. Otherwise the restore reads the snapshot store.
+
+Snapshot checks only the manifest of a copy, not its files. A restore from a
+damaged or partial copy fails; it does not fall back to the snapshot store.
+
+### Fill Nodes from the Snapshot Volume
+
+With `storage.type: pvc`, the checkpoint in the snapshot volume is already a
+directory with this layout. Run the commands in [Place a Copy](#place-a-copy)
+on each node to fill, with the snapshot volume as `<source>`. For example, run
+them in a Pod on the node that mounts the snapshot volume's claim and the node
+cache directory. The claim is in the Helm release namespace.
+
+### Fill Nodes from an S3 Store
+
+With `storage.type: s3`, a checkpoint is stored under
+`<prefix>/artifacts/<uid>/containers/<container>/` in the bucket. Its files
+are the objects below `data/`. Objects carry no file modes and no empty
+directories, so `index.json` beside `data/` records both, and it lists empty
+files that have no object.
+
+Build the copy from the objects and the index with a script. Save the
+following script on the node, set the five values at its top, and run it as
+root. It needs `jq` and the AWS CLI, with credentials that can read the
+bucket. The script stops at the first failed command, and it places the copy
+only after every file has the size that the index records. A failed download
+therefore never leaves a copy in place. The script assumes file names without
+a newline, and it does not check objects under `data/` that the index does not
+list.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# The bucket with the key prefix of the store, or only the bucket if the
+# store has no prefix.
+store=s3://<bucket>/<prefix>
+snapshot_uid=<uid>
+container=<container>
+cache=/mnt/nvme/snapshot-cache
+aws=(aws)  # For a store that is not Amazon S3: (aws --endpoint-url <endpoint>)
+
+src="$store/artifacts/$snapshot_uid/containers/$container"
+copy="$cache/artifacts/$snapshot_uid/containers/$container"
+tmp="$cache/.incoming-$snapshot_uid-$container"
+index="$tmp.index.json"
+
+mkdir "$tmp"
+"${aws[@]}" s3 cp "$src/index.json" "$index"
+"${aws[@]}" s3 sync "$src/data/" "$tmp/"
+
+# Directories, including empty ones, with their modes.
+jq -r '.directories[] | "\(.mode) \(.path)"' "$index" |
+  while read -r mode path; do
+    mkdir -p "$tmp/$path"
+    chmod "$(printf '%o' "$mode")" "$tmp/$path"
+  done
+
+# Files. An empty file has no object, so create it. Every other file must
+# have been downloaded in full.
+jq -r '.files[] | "\(.mode) \(.size) \(.path)"' "$index" |
+  while read -r mode size path; do
+    file="$tmp/$path"
+    if [ "$size" -eq 0 ] && [ ! -e "$file" ]; then
+      : > "$file"
+    fi
+    if [ ! -f "$file" ] || [ "$(stat -c %s "$file")" -ne "$size" ]; then
+      echo "incomplete download: $path" >&2
+      exit 1
+    fi
+    chmod "$(printf '%o' "$mode")" "$file"
+  done
+
+chmod "$(printf '%o' "$(jq -r .rootMode "$index")")" "$tmp"
+rm "$index"
+mkdir -p "$(dirname "$copy")"
+mv -T "$tmp" "$copy"
+```
+
+The modes in the index are decimal numbers, which `printf` converts to the
+octal form that `chmod` takes. After a failed run, remove the `.incoming-`
+directory and its `.index.json` file before you run the script again.
+
+### Check Which Source a Restore Used
+
+With the node cache enabled, each restore Pod gets a `RestoreSourceSelected`
+event. It says which source the restore reads. Read it with this command:
+
+```bash
+kubectl get events --namespace <namespace> \
+  --field-selector \
+  involvedObject.name=<restore-pod>,reason=RestoreSourceSelected
+```
+
+The message is `Restoring from the node cache`, or
+`Restoring from the snapshot store:` followed by one of these reasons:
+
+- `this node holds no copy`
+- `the copy on this node could not be read`
+- `the copy on this node has no readable manifest`
+- `the copy on this node belongs to another checkpoint`
+
+### Remove a Copy
+
+Snapshot does not remove a copy, including when its snapshot is deleted.
+Remove a copy in two steps. First rename it out of `artifacts/`, so that new
+restores read the snapshot store. The rename covers every container of that
+snapshot:
+
+```bash
+cd /mnt/nvme/snapshot-cache && mv artifacts/<uid> .removing-<uid>
+```
+
+Then wait for restores on the node to finish, and remove it:
+
+```bash
+rm -rf /mnt/nvme/snapshot-cache/.removing-<uid>
+```
+
+A restore that selected the copy just before the rename can still fail.
+
+Snapshot does not limit the size of the directory, so remove copies that are
+no longer needed.
+
+### Restrict Access
+
+A copy determines the state of the restored process, and it contains process
+memory that can hold secrets. Restrict read and write access to the directory
+as you restrict the snapshot store.
 
 ## PageBroker Staging
 
@@ -172,7 +505,8 @@ the sidecar:
   staging. Setting `pageBroker.restoreMode: staged` has PageBroker copy the
   artifact into staging first, and CRIU restores from memory instead.
 
-`pageBroker.restoreMode` selects the restore source for every restore:
+A copy in the [node cache](#node-cache) is always read in place. For every
+other restore, `pageBroker.restoreMode` selects the restore source:
 
 - `direct` (default) prepares a PageBroker transaction and mounts the original
   snapshot directory read-only for CRIU. It does not copy CPU images into staging.
@@ -290,11 +624,11 @@ together after upgrading, or pass all three explicitly.
 
 ## Store Identity and Artifact Addressing
 
-Snapshot ties each snapshot to the store it was written to. Every restore and
-delete checks this link first, so a snapshot cannot be read or deleted through a
-different store, for example after the installation is pointed at another
-bucket. This is called artifact addressing. It is off by default, and
-`storage.type: s3` requires it.
+Snapshot ties each snapshot to the store it was written to. Every restore from
+the snapshot store and every delete checks this link first, so a snapshot cannot
+be read or deleted through a different store, for example after the installation
+is pointed at another bucket. This is called artifact addressing. It is off by
+default, and `storage.type: s3` requires it.
 
 - **Artifact:** the stored data of one checkpointed container
 - **Content:** the `PodSnapshotContent` object that records one snapshot

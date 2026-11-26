@@ -1343,6 +1343,141 @@ def test_orphan_sweep_reclaims_uid_root(
         raise
 
 
+RESTORE_SOURCE_SELECTED = "RestoreSourceSelected"
+# A UID no PodSnapshotContent has, for a copy that names another checkpoint.
+OTHER_CONTENT_UID = "00000000-0000-4000-8000-000000000000"
+
+
+def require_node_cache(config: k8s.E2EConfig) -> None:
+    # The CPU workflow installs with the node cache on and lists these tests as
+    # required, so a skip here fails that job instead of passing quietly.
+    if snap.node_cache_host_path(config) is None:
+        pytest.skip("storage.nodeCache.enabled is off in this install")
+
+
+def restore_from_snapshot(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+    source_node: str,
+    checkpoint_observations: int,
+) -> str:
+    """Restore the run's snapshot, check the state, and return the source event."""
+    k8s.delete_pod(config.namespace, run.source_pod)
+    snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+    k8s.create_pod(
+        snap.restore_pod(config=config, run=run, gpu=False, source_node=source_node)
+    )
+    snap.wait_for_restored_condition(
+        config.namespace, run.restore_pod, "True", "RestoreSucceeded"
+    )
+    snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
+    snap.assert_restored_state(
+        config.namespace,
+        run.restore_pod,
+        source_token=run.source_token,
+        restore_token=run.restore_token,
+        checkpoint_observations=checkpoint_observations,
+        gpu=False,
+    )
+    event = snap.wait_for_pod_event(
+        config.namespace, run.restore_pod, RESTORE_SOURCE_SELECTED, timeout=60
+    )
+    return event.message or ""
+
+
+def remove_node_cache_copy_after_restore(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+    node: str,
+    content_uid: str,
+) -> None:
+    # The order the guide gives an administrator: no restore may still read a
+    # copy when it is removed.
+    if k8s.delete_pod(config.namespace, run.restore_pod):
+        snap.wait_for_pod_deleted(config.namespace, run.restore_pod)
+    snap.remove_node_cache_copy(config, run, node, content_uid)
+
+
+def restore_with_node_cache_copy(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+    *,
+    manifest_content_uid: str | None = None,
+    damage_store: bool = False,
+) -> str:
+    """Checkpoint, place a copy in the node cache, restore, return the source event.
+
+    ``damage_store`` makes the store's checkpoint unreadable first.
+    """
+    placed: tuple[str, str] | None = None
+    try:
+        _, source_node, checkpoint_observations = create_valid_checkpoint(
+            config, run, gpu=False
+        )
+        _, content = snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
+        content_uid = content["metadata"]["uid"]
+        placed = (source_node, content_uid)
+        snap.place_node_cache_copy(
+            config, run, source_node, content_uid, manifest_content_uid=manifest_content_uid
+        )
+        if damage_store:
+            snap.corrupt_checkpoint_image(config, source_node, content_uid)
+        return restore_from_snapshot(config, run, source_node, checkpoint_observations)
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+    finally:
+        if placed:
+            remove_node_cache_copy_after_restore(config, run, *placed)
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_success
+def test_restore_reads_a_node_cache_copy_instead_of_the_snapshot_store(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    """The event names the source; the damaged store proves it."""
+    require_node_cache(config)
+    message = restore_with_node_cache_copy(config, run, damage_store=True)
+    assert message == "Restoring from the node cache"
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_success
+def test_restore_without_a_node_cache_copy_reads_the_snapshot_store(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    require_node_cache(config)
+    try:
+        _, source_node, checkpoint_observations = create_valid_checkpoint(
+            config, run, gpu=False
+        )
+        message = restore_from_snapshot(config, run, source_node, checkpoint_observations)
+        assert message == "Restoring from the snapshot store: this node holds no copy"
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_success
+def test_restore_ignores_a_node_cache_copy_of_another_checkpoint(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    """A copy at the right path whose manifest names another checkpoint."""
+    require_node_cache(config)
+    message = restore_with_node_cache_copy(
+        config, run, manifest_content_uid=OTHER_CONTENT_UID
+    )
+    assert message == (
+        "Restoring from the snapshot store: "
+        "the copy on this node belongs to another checkpoint"
+    )
+
+
 def create_valid_checkpoint(
     config: k8s.E2EConfig,
     run: snap.TestRun,

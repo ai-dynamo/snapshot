@@ -10,11 +10,17 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 // CheckpointBasePath is the fixed agent-side checkpoint mount. The privileged
 // helper independently enforces the same path.
 const CheckpointBasePath = "/checkpoints"
+
+// NodeCacheBasePath is the fixed agent-side mount of the node cache. The
+// privileged mount helper enforces the same path.
+const NodeCacheBasePath = "/node-cache"
 
 // AgentConfig holds static checkpoint settings plus runtime fields populated at startup.
 type AgentConfig struct {
@@ -84,6 +90,10 @@ func (c *AgentConfig) Validate() error {
 type StorageSpec struct {
 	Type     string `yaml:"type"`
 	BasePath string `yaml:"basePath"`
+
+	// NodeCacheEnabled turns on restores from the node cache, which is always
+	// mounted at NodeCacheBasePath.
+	NodeCacheEnabled bool `yaml:"nodeCacheEnabled"`
 }
 
 type PageBrokerSpec struct {
@@ -116,18 +126,24 @@ type CheckpointSpec struct {
 	// ConfigMap has to start — with the guard on.
 	TimeoutSeconds *int `yaml:"timeoutSeconds"`
 
-	// RetryLimit is how many times a failed capture may be retried, beyond the first attempt.
-	// Absent is read as DefaultCheckpointRetryLimit. The limit is cluster-wide: a capture cannot
-	// ask for its own, so one node's answer holds for every request it serves.
-	RetryLimit *int `yaml:"retryLimit"`
+	// DefaultRetryLimit is how many times a failed capture may be retried, beyond the first
+	// attempt, for a request that asks for no particular number. It is the default a request
+	// falls back to, not a ceiling on what one may ask for: a request may set its own up to
+	// MaxCheckpointRetryLimit, and so may this. Absent is read as DefaultCheckpointRetryLimit.
+	DefaultRetryLimit *int `yaml:"defaultRetryLimit"`
 }
 
-// ResolveRetryLimit reports the retries a capture may take, defaulting when the config omits it.
-func (c *CheckpointSpec) ResolveRetryLimit() int {
-	if c.RetryLimit == nil {
+// ResolveRetryLimit reports the retries a capture may take. The request's own value wins when it
+// has one — including an explicit 0, which asks for no retry — and absent defers to the cluster
+// default. Absent and zero are different answers, which is why the request's value is a pointer.
+func (c *CheckpointSpec) ResolveRetryLimit(requested *int32) int {
+	if requested != nil {
+		return int(*requested)
+	}
+	if c.DefaultRetryLimit == nil {
 		return DefaultCheckpointRetryLimit
 	}
-	return *c.RetryLimit
+	return *c.DefaultRetryLimit
 }
 
 // CheckpointTimeout bounds one dump, defaulting when the config omits it.
@@ -139,8 +155,13 @@ func (c *CheckpointSpec) CheckpointTimeout() time.Duration {
 }
 
 func (c *CheckpointSpec) Validate() error {
-	if c.RetryLimit != nil && *c.RetryLimit < 0 {
-		return &ConfigError{Field: "checkpoint.retryLimit", Message: "checkpoint.retryLimit must not be negative"}
+	// Bounded the same as the spec fields, so the cluster default cannot hand a
+	// request more attempts than the request could have asked for itself.
+	if c.DefaultRetryLimit != nil && (*c.DefaultRetryLimit < 0 || *c.DefaultRetryLimit > snapshotv1alpha1.MaxCheckpointRetryLimit) {
+		return &ConfigError{
+			Field:   "checkpoint.defaultRetryLimit",
+			Message: fmt.Sprintf("checkpoint.defaultRetryLimit must be between 0 and %d", snapshotv1alpha1.MaxCheckpointRetryLimit),
+		}
 	}
 	if c.TimeoutSeconds == nil {
 		return nil

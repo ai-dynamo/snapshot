@@ -31,6 +31,10 @@ Snapshot currently focuses on inference cold-start; further use cases are on the
 - [Lifecycle Hooks](../reference/workload-contract.md#lifecycle-hooks) support a
   file or plain HTTP, without authentication or redirects. File hooks need
   a shell in the image.
+- An S3 store that uses [workload identity](../operate/configure-storage.md#use-workload-identity-for-s3)
+  supports a platform token service behind a private CA for uploads and
+  cleanup only. Restores cannot reach such a service. A credential endpoint
+  set with `storage.s3.credentialEndpoint` is not affected.
 
 ## GPU Device Selection and Restore Paths
 

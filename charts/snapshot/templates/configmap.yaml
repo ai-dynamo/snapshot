@@ -12,9 +12,6 @@ kind: ConfigMap
 {{- if and .Values.operator.bindNewContents (eq .Values.storage.type "pvc") (not .Values.pageBroker.artifactAddressing) }}
 {{- fail "operator.bindNewContents requires pageBroker.artifactAddressing and a completed compatible agent rollout" }}
 {{- end }}
-{{- if and (eq .Values.storage.type "s3") (not .Values.storage.s3.credentialsSecretRef) }}
-{{- fail "storage.s3.credentialsSecretRef is required when storage.type=s3" }}
-{{- end }}
 {{- if and (eq .Values.storage.type "s3") (not .Values.operator.bindNewContents) }}
 {{- fail "storage.type=s3 requires operator.bindNewContents: S3 has no legacy local-path checkpoint mode" }}
 {{- end }}
@@ -79,6 +76,9 @@ data:
     storage:
       type: "pvc"
       basePath: "/checkpoints"
+      {{- if (.Values.storage.nodeCache | default dict).enabled }}
+      nodeCacheEnabled: true
+      {{- end }}
 
     overlay:
       exclusions: {{ toYaml .Values.config.overlay.exclusions | nindent 8 }}
@@ -96,7 +96,7 @@ data:
     checkpoint:
       timeoutSeconds: {{ .Values.config.checkpoint.timeoutSeconds }}
       checkpointTimeoutSeconds: {{ .Values.config.checkpoint.timeoutSeconds }}
-      retryLimit: {{ .Values.config.checkpoint.retryLimit | default 0 }}
+      defaultRetryLimit: {{ .Values.config.checkpoint.defaultRetryLimit | default 0 }}
 
     restore:
       timeoutSeconds: {{ .Values.config.restore.timeoutSeconds }}

@@ -299,16 +299,291 @@ tests:
                 - key: credentials
                   path: credentials
 
-  - it: rejects an S3 install missing the shared credentials secret
+  - it: renders an S3 install without a credentials secret
     template: templates/configmap.yaml
     set:
       storage.type: s3
       storage.s3.endpoint: https://s3.example.com
       storage.s3.region: us-east-1
       storage.s3.bucket: snapshot-bucket
+      operator.bindNewContents: true
+    asserts:
+      - matchRegex:
+          path: data["storage.yaml"]
+          pattern: 'bucket: "snapshot-bucket"'
+
+  - it: gives the operator no credentials file without a credentials secret
+    template: templates/operator-deployment.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      operator.bindNewContents: true
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --artifact-cleanup-s3-credentials-path=/etc/snapshot-s3-credentials/credentials
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: s3-credentials
+          any: true
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: s3-credentials
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --pagebroker-s3-settings=/etc/snapshot/pagebroker-s3.yaml
+
+  - it: gives PageBroker no credentials file without a credentials secret
+    template: templates/daemonset.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      operator.bindNewContents: true
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].env
+          content:
+            name: AWS_SHARED_CREDENTIALS_FILE
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            name: s3-credentials
+          any: true
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: s3-credentials
+          any: true
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            name: pagebroker-s3-config
+          any: true
+
+  - it: gives PageBroker a projected token and the credential endpoint
+    template: templates/daemonset.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      operator.bindNewContents: true
+      storage.s3.credentialEndpoint.url: https://credentials.example.com/v1
+      storage.s3.credentialEndpoint.tokenAudience: credentials.example.com
+      storage.s3.credentialEndpoint.tokenExpirationSeconds: 900
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].env
+          content:
+            name: AWS_CONTAINER_CREDENTIALS_FULL_URI
+            value: https://credentials.example.com/v1
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].env
+          content:
+            name: AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE
+            value: /var/run/secrets/snapshot/s3-identity/token
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            name: s3-identity-token
+            mountPath: /var/run/secrets/snapshot/s3-identity
+            readOnly: true
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
+          content:
+            name: s3-identity-token
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "agent")].env
+          content:
+            name: AWS_CONTAINER_CREDENTIALS_FULL_URI
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "agent")].env
+          content:
+            name: AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE
+          any: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: s3-identity-token
+            projected:
+              sources:
+                - serviceAccountToken:
+                    path: token
+                    expirationSeconds: 900
+                    audience: credentials.example.com
+
+  - it: gives PageBroker the CA bundle as its system certificate file with a credential endpoint
+    template: templates/daemonset.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      operator.bindNewContents: true
+      storage.s3.credentialEndpoint.url: https://credentials.example.com/v1
+      storage.s3.credentialEndpoint.tokenAudience: credentials.example.com
+      storage.s3.caBundleConfigMapRef: snapshot-s3-ca
+      storage.s3.caBundleConfigMapKey: bundle.pem
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            name: s3-ca-bundle
+            mountPath: /etc/ssl/certs/ca-certificates.crt
+            subPath: bundle.pem
+            readOnly: true
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            name: s3-ca-bundle
+            mountPath: /etc/snapshot-s3-ca
+            readOnly: true
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
+          content:
+            mountPath: /etc/ssl/certs/ca-certificates.crt
+          any: true
+
+  - it: leaves PageBroker's system certificate file alone without a credential endpoint
+    template: templates/daemonset.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      operator.bindNewContents: true
+      storage.s3.caBundleConfigMapRef: snapshot-s3-ca
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            mountPath: /etc/ssl/certs/ca-certificates.crt
+          any: true
+
+  - it: gives the operator a projected token and the credential endpoint
+    template: templates/operator-deployment.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      operator.bindNewContents: true
+      storage.s3.credentialEndpoint.url: https://credentials.example.com/v1
+      storage.s3.credentialEndpoint.tokenAudience: credentials.example.com
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: AWS_CONTAINER_CREDENTIALS_FULL_URI
+            value: https://credentials.example.com/v1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE
+            value: /var/run/secrets/snapshot/s3-identity/token
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: s3-identity-token
+            mountPath: /var/run/secrets/snapshot/s3-identity
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: s3-identity-token
+            projected:
+              sources:
+                - serviceAccountToken:
+                    path: token
+                    expirationSeconds: 3600
+                    audience: credentials.example.com
+
+  - it: adds no projected token without a credential endpoint
+    template: templates/daemonset.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      operator.bindNewContents: true
+    asserts:
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: s3-identity-token
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].env
+          content:
+            name: AWS_CONTAINER_CREDENTIALS_FULL_URI
+          any: true
+
+  - it: rejects a credential endpoint together with a credentials secret
+    template: templates/configmap.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      operator.bindNewContents: true
+      storage.s3.credentialsSecretRef: s3-creds
+      storage.s3.credentialEndpoint.url: https://credentials.example.com/v1
+      storage.s3.credentialEndpoint.tokenAudience: credentials.example.com
     asserts:
       - failedTemplate:
-          errorMessage: storage.s3.credentialsSecretRef is required when storage.type=s3
+          errorMessage: storage.s3.credentialEndpoint.url and storage.s3.credentialsSecretRef are two credential sources; set one
+
+  - it: rejects a credential endpoint that is not https
+    template: templates/configmap.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      operator.bindNewContents: true
+      storage.s3.credentialEndpoint.url: http://credentials.example.com/v1
+      storage.s3.credentialEndpoint.tokenAudience: credentials.example.com
+    asserts:
+      - failedTemplate:
+          errorMessage: storage.s3.credentialEndpoint.url must be an https URL
+
+  - it: rejects a credential endpoint without a token audience
+    template: templates/configmap.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      operator.bindNewContents: true
+      storage.s3.credentialEndpoint.url: https://credentials.example.com/v1
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.credentialEndpoint.tokenAudience is required with storage.s3.credentialEndpoint.url: a token without an audience is also valid for the Kubernetes API"
+
+  - it: rejects a token lifetime below the cluster minimum
+    template: templates/configmap.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      operator.bindNewContents: true
+      storage.s3.credentialEndpoint.url: https://credentials.example.com/v1
+      storage.s3.credentialEndpoint.tokenAudience: credentials.example.com
+      storage.s3.credentialEndpoint.tokenExpirationSeconds: 300
+    asserts:
+      - failedTemplate:
+          errorMessage: storage.s3.credentialEndpoint.tokenExpirationSeconds must be at least 600
 
   - it: honours a custom shared credentials secret key
     template: templates/operator-deployment.yaml

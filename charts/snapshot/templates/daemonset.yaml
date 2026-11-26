@@ -142,6 +142,13 @@ spec:
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath }}
             {{- end }}
+            {{- if (.Values.storage.nodeCache | default dict).enabled }}
+            # Checkpoint copies an administrator placed on this node. Read only:
+            # Snapshot never writes to or removes from the node cache.
+            - name: node-cache
+              mountPath: {{ include "snapshot.nodeCacheMountPath" . }}
+              readOnly: true
+            {{- end }}
             # Mount the runtime socket directory. Derived from runtime.socketPath
             # so overrides stay reachable inside the container.
             - name: runtime-run
@@ -192,9 +199,12 @@ spec:
             runAsUser: 0
             runAsGroup: 0
           env:
-            {{- if eq .Values.storage.type "s3" }}
+            {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
             - name: AWS_SHARED_CREDENTIALS_FILE
               value: {{ printf "%s/%s" (include "snapshot.s3CredentialsMountDir" .) .Values.storage.s3.credentialsSecretKey | quote }}
+            {{- end }}
+            {{- if include "snapshot.s3CredentialEndpointEnabled" . }}
+            {{- include "snapshot.s3CredentialEndpointEnv" . | nindent 12 }}
             {{- end }}
             {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.addressing }}
             # PageBroker refuses to start unless this agrees with the JSON's addressing.
@@ -235,6 +245,10 @@ spec:
             - --model-streamer-config
             - {{ include "snapshot.modelStreamerConfigPath" . }}
             {{- end }}
+            {{- if (.Values.storage.nodeCache | default dict).enabled }}
+            - --node-cache-root
+            - {{ include "snapshot.nodeCacheMountPath" . }}
+            {{- end }}
           resources:
             {{- toYaml .Values.pageBroker.resources | nindent 12 }}
           volumeMounts:
@@ -247,19 +261,33 @@ spec:
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath }}
             {{- end }}
+            {{- if (.Values.storage.nodeCache | default dict).enabled }}
+            - name: node-cache
+              mountPath: {{ include "snapshot.nodeCacheMountPath" . }}
+              readOnly: true
+            {{- end }}
             {{- if eq .Values.storage.type "s3" }}
             - name: pagebroker-s3-config
               mountPath: /etc/snapshot-s3
               readOnly: true
             {{- end }}
-            {{- if eq .Values.storage.type "s3" }}
+            {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
             - name: s3-credentials
               mountPath: {{ include "snapshot.s3CredentialsMountDir" . }}
               readOnly: true
             {{- end }}
+            {{- if include "snapshot.s3CredentialEndpointEnabled" . }}
+            {{- include "snapshot.s3IdentityTokenVolumeMount" . | nindent 12 }}
+            {{- end }}
             {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.caBundleConfigMapRef }}
             - name: s3-ca-bundle
               mountPath: {{ include "snapshot.s3CABundleMountDir" . }}
+              readOnly: true
+            {{- end }}
+            {{- if and (include "snapshot.s3CredentialEndpointEnabled" .) .Values.storage.s3.caBundleConfigMapRef }}
+            - name: s3-ca-bundle
+              mountPath: {{ include "snapshot.pageBrokerSystemCABundlePath" . }}
+              subPath: {{ required "storage.s3.caBundleConfigMapKey is required with storage.s3.caBundleConfigMapRef" .Values.storage.s3.caBundleConfigMapKey | quote }}
               readOnly: true
             {{- end }}
             {{- if and (eq .Values.storage.type "s3") .Values.pageBroker.transferEngine.modelStreamer }}
@@ -301,6 +329,14 @@ spec:
           persistentVolumeClaim:
             claimName: {{ .Values.storage.pvc.name }}
         {{- end }}
+        {{- if (.Values.storage.nodeCache | default dict).enabled }}
+        # By default a node without the directory gets an empty one, so its
+        # agent still starts and its restores read the snapshot store.
+        - name: node-cache
+          hostPath:
+            path: {{ include "snapshot.nodeCacheHostPath" . | quote }}
+            type: {{ ternary "DirectoryOrCreate" "Directory" .Values.storage.nodeCache.createIfMissing }}
+        {{- end }}
         {{- if eq .Values.storage.type "s3" }}
         # Written by the operator (ensurePageBrokerS3Config), not this chart:
         # its storeId field needs the Go identity computation. Fails closed if
@@ -310,13 +346,16 @@ spec:
           configMap:
             name: {{ include "snapshot.pageBrokerS3ConfigName" . | quote }}
         {{- end }}
-        {{- if eq .Values.storage.type "s3" }}
+        {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
         - name: s3-credentials
           secret:
             secretName: {{ .Values.storage.s3.credentialsSecretRef }}
             items:
               - key: {{ .Values.storage.s3.credentialsSecretKey }}
                 path: {{ .Values.storage.s3.credentialsSecretKey }}
+        {{- end }}
+        {{- if include "snapshot.s3CredentialEndpointEnabled" . }}
+        {{- include "snapshot.s3IdentityTokenVolume" . | nindent 8 }}
         {{- end }}
         {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.caBundleConfigMapRef }}
         - name: s3-ca-bundle
