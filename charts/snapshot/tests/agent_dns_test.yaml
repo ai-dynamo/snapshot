@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: agent pod DNS
+templates:
+  - templates/daemonset.yaml
+tests:
+  # A host-network pod resolves names through the node unless it asks for
+  # cluster DNS, and the node does not know Service names. PageBroker needs
+  # them to reach an S3 store that runs in the cluster.
+  - it: resolves cluster Service names from the host network
+    asserts:
+      - equal:
+          path: spec.template.spec.hostNetwork
+          value: true
+      - equal:
+          path: spec.template.spec.dnsPolicy
+          value: ClusterFirstWithHostNet
