@@ -186,6 +186,11 @@ commit-level history for each release is on its
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
+- A `helm upgrade` that changes only an agent setting, a `config.*` value or
+  `pageBroker.restoreMode`, now restarts the agent pod on each node. The agent
+  reads these settings at startup, so the change used to reach the ConfigMap
+  and no running agent. See
+  [Helm Chart Values](docs/reference/helm-values.md#agent-config-config).
 
 ### Deprecated
 

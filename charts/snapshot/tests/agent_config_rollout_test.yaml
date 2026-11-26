@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: agent configuration rollout
+templates:
+  - templates/daemonset.yaml
+tests:
+  # The agent reads config.yaml once at startup, so a changed setting reaches a
+  # running agent only when the pod template changes with it.
+  - it: stamps the agent pod with a checksum of the agent configuration
+    asserts:
+      - matchRegex:
+          path: spec.template.metadata.annotations["checksum/agent-config"]
+          pattern: ^[0-9a-f]{64}$
+
+  - it: does not let podAnnotations override the agent configuration checksum
+    set:
+      daemonset.podAnnotations:
+        checksum/agent-config: hijacked
+        example.com/team: platform
+    asserts:
+      - matchRegex:
+          path: spec.template.metadata.annotations["checksum/agent-config"]
+          pattern: ^[0-9a-f]{64}$
+      - equal:
+          path: spec.template.metadata.annotations["example.com/team"]
+          value: platform
+
+  - it: keeps the agent configuration checksum alongside the OpenShift SCC pin
+    set:
+      openshift.enabled: true
+      daemonset.podAnnotations:
+        checksum/agent-config: hijacked
+    asserts:
+      - matchRegex:
+          path: spec.template.metadata.annotations["checksum/agent-config"]
+          pattern: ^[0-9a-f]{64}$
+      - equal:
+          path: spec.template.metadata.annotations["openshift.io/required-scc"]
+          value: privileged

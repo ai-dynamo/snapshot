@@ -142,7 +142,9 @@ payload checksums.
 
 ## Agent Config (`config.*`)
 
-`config.*` renders into the agent ConfigMap.
+`config.*` renders into the agent ConfigMap. The agent reads it at startup, so
+a `helm upgrade` that changes a `config.*` value or `pageBroker.restoreMode`
+restarts the agent pod on each node.
 
 - `config.overlay.exclusions` - Rootfs-diff tar exclusions. Default: `/proc`, `/sys`, `/dev`, `*/.cache/huggingface`, `*/__pycache__`, `*.pyc`. A file the checkpointed processes hold open or mapped at dump time is archived even when an exclusion matches it, so CRIU can reopen it. Other excluded files are not restored; the workload must recreate them if needed.
 - `config.checkpoint.timeoutSeconds` - Maximum seconds for a checkpoint before the agent marks it failed. Default `3600`.

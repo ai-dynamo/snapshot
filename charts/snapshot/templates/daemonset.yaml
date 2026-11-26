@@ -42,16 +42,20 @@ spec:
         # change, so an upgrade doesn't leave it running on stale config.
         # User-supplied podAnnotations cannot override this key.
         checksum/config: {{ include "snapshot.operatorConfigChecksum" . }}
+        # Rolls the agent when the settings in its config.yaml change: it reads
+        # them once at startup, so a running agent would keep the old ones.
+        # User-supplied podAnnotations cannot override this key.
+        checksum/agent-config: {{ include "snapshot.agentConfigChecksum" . }}
         {{- if .Values.openshift.enabled }}
         # Pin this DS to the built-in "privileged" SCC even if a higher-priority
         # custom SCC is added later. See openshift/enhancements custom-scc-preemption-prevention.
-        # User-supplied podAnnotations cannot override this key or checksum/config.
+        # User-supplied podAnnotations cannot override this key or the checksums.
         openshift.io/required-scc: privileged
-        {{- with omit (.Values.daemonset.podAnnotations | default dict) "openshift.io/required-scc" "kubectl.kubernetes.io/default-container" "checksum/config" }}
+        {{- with omit (.Values.daemonset.podAnnotations | default dict) "openshift.io/required-scc" "kubectl.kubernetes.io/default-container" "checksum/config" "checksum/agent-config" }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- else }}
-        {{- with omit (.Values.daemonset.podAnnotations | default dict) "kubectl.kubernetes.io/default-container" "checksum/config" }}
+        {{- with omit (.Values.daemonset.podAnnotations | default dict) "kubectl.kubernetes.io/default-container" "checksum/config" "checksum/agent-config" }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- end }}

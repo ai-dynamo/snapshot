@@ -235,6 +235,17 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 {{- end -}}
 {{- define "snapshot.modelStreamerConfigPath" -}}{{ include "snapshot.modelStreamerMountDir" . }}/model-streamer.json{{- end -}}
 
+{{/* Rolls the agent when the values behind its config.yaml change. The agent
+     reads that file once at startup, so without this a helm upgrade that only
+     changes one of them updates the ConfigMap and leaves every running agent
+     on the old setting. Hashes the raw values for the reason given above, and
+     stays apart from operatorConfigChecksum so that an agent-only setting does
+     not restart the operator. storage.nodeCache.enabled, the one other value
+     config.yaml renders, already changes the pod template. */}}
+{{- define "snapshot.agentConfigChecksum" -}}
+{{- toYaml (dict "config" .Values.config "restoreMode" .Values.pageBroker.restoreMode) | sha256sum -}}
+{{- end -}}
+
 {{/* PageBroker's S3 limits object: the configured limits, with the staging
      volume cap as stagingBytes unless one was given. Values pass through
      int64 so floats never reach the rendered YAML. */}}
