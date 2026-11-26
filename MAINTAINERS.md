@@ -28,9 +28,9 @@ Maintainers are recorded as GitHub teams, referenced from
 for membership, so this file links to them instead of duplicating the names.
 
 - [@ai-dynamo/snapshot-codeowners](https://github.com/orgs/ai-dynamo/teams/snapshot-codeowners)
-  — code and configuration
+  — code, configuration, `docs/design/`, and Markdown files outside `docs/`
 - [@ai-dynamo/snapshot-docs-codeowners](https://github.com/orgs/ai-dynamo/teams/snapshot-docs-codeowners)
-  — `docs/` and every Markdown file
+  — `docs/`, apart from `docs/design/`
 
 Every pull request requires review from at least one member of the team that
 owns the paths it touches.
