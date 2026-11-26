@@ -256,6 +256,7 @@ func TestCleanupRestoreMountsRetainsLibrariesOnlyAfterSuccess(t *testing.T) {
 // runtimes return PIDs that do not exist on the test machine.
 func TestMain(m *testing.M) {
 	readInitCmdline = func(int) (string, error) { return podcontract.RestoreProxyPath, nil }
+	readInitNamespacePID = func(int) (int, error) { return 1, nil }
 	os.Exit(m.Run())
 }
 
@@ -586,6 +587,68 @@ func TestInspectRestoreRequiresTheRestoreProxy(t *testing.T) {
 			}
 			if readPID != 123 {
 				t.Fatalf("read PID %d, want the container's PID 1, 123", readPID)
+			}
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("inspectRestore: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestInspectRestoreRequiresTheProxyToBePID1(t *testing.T) {
+	manifest := types.NewCheckpointManifest(
+		"content-uid-123",
+		"main",
+		types.CRIUDumpManifest{},
+		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
+		types.OverlayManifest{},
+		types.HostManifest{},
+	)
+	for name, tc := range map[string]struct {
+		nsPID        int
+		readErr      error
+		withoutProxy bool
+		wantErr      string
+	}{
+		"PID 1 of its own namespace":       {nsPID: 1},
+		"a Pod that shares its namespace":  {nsPID: 7, wantErr: "PID 7 in its process namespace, not PID 1"},
+		"a Pod in the host's namespace":    {nsPID: 123, wantErr: "must not set shareProcessNamespace or hostPID"},
+		"a node without the proxy":         {nsPID: 7, withoutProxy: true},
+		"the namespace PID cannot be read": {readErr: errors.New("no such process"), wantErr: "no such process"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var readPID int
+			original := readInitNamespacePID
+			readInitNamespacePID = func(pid int) (int, error) {
+				readPID = pid
+				return tc.nsPID, tc.readErr
+			}
+			t.Cleanup(func() { readInitNamespacePID = original })
+
+			_, _, err := inspectRestore(context.Background(), &restoreFakeRuntime{}, testr.New(t), RestoreRequest{
+				ContentUID:               "content-uid-123",
+				ContainerID:              "placeholder-id",
+				PodName:                  "restore-pod",
+				PodNamespace:             "default",
+				ArtifactContainerName:    "main",
+				DestinationContainerName: "main",
+				WithoutProxy:             tc.withoutProxy,
+			}, manifest)
+
+			if tc.withoutProxy {
+				if err != nil || readPID != 0 {
+					t.Fatalf("inspectRestore: %v, read PID %d; want no error and no PID 1 check", err, readPID)
+				}
+				return
+			}
+			if readPID != 123 {
+				t.Fatalf("read PID %d, want the container's first process, 123", readPID)
 			}
 			if tc.wantErr == "" {
 				if err != nil {

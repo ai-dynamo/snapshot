@@ -24,6 +24,10 @@ Snapshot currently focuses on inference cold-start; further use cases are on the
   under `restartPolicy: Always` after the restored process exits, it ends in
   `CrashLoopBackOff`. Delete the Pod to restore again. Retrying a restore in
   the same Pod is on the [roadmap](../roadmap.md).
+- A restore Pod cannot share a process namespace. On a node with the restore
+  proxy, the agent fails the restore of a Pod that sets
+  `shareProcessNamespace: true` or `hostPID: true`. See
+  [Restore Pod Contract](../reference/restore-pod-contract.md).
 - Several Snapshot installations whose clusters share nodes, such as vCluster
   tenants, work only when each sets `daemonset.nriHostNamespace` to its own host
   namespace. An installation with it empty acts on every restore Pod on its

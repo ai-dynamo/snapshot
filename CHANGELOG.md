@@ -186,6 +186,11 @@ commit-level history for each release is on its
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
+- A restore Pod with `shareProcessNamespace: true` no longer reports
+  `RestoreSucceeded` before its container ends with exit code 113. The agent
+  fails the restore of a Pod that shares a process namespace, and the
+  `nvidia.com/Restored` condition gives the cause. See
+  [Restore Pod Contract](docs/reference/restore-pod-contract.md).
 
 ### Deprecated
 

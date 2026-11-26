@@ -155,6 +155,10 @@ command in restore Pods; it never runs. Other containers in the Pod, such as
 sidecars, are left alone. Nodes whose runtime cannot run the proxy restore
 without it; see [Nodes Without the Restore Proxy](#nodes-without-the-restore-proxy).
 
+Do not set `shareProcessNamespace: true` or `hostPID: true` on a restore Pod.
+The proxy is then not PID 1 of its process namespace, and the agent fails the
+restore.
+
 The plugin decides which containers get the proxy when each container is
 created. Without `restore-container-map`, it reads the PodSnapshot that
 `restore-from` names, for the checkpointed container's name. Create the restore Pod
