@@ -18,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
@@ -866,6 +867,36 @@ func TestSnapshotReconciler_EnsureFinalizerAddsThenProceeds(t *testing.T) {
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, bound))
 	require.NotNil(t, bound.Status.BoundPodSnapshotContentName)
 	assert.Equal(t, "podsnapshotcontent-snap-uid", *bound.Status.BoundPodSnapshotContentName)
+}
+
+// TestSnapshotReconciler_FinalizerNeverSendsTheSpecBack: the spec is immutable, and the Go types
+// drop an optional field that was written as an empty value, such as uid: "". A full Update
+// would send that changed spec back, and the API server would refuse it on every reconcile. The
+// fake client knows no immutability rule, so the interceptor refuses any full Update here.
+func TestSnapshotReconciler_FinalizerNeverSendsTheSpecBack(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	funcs := interceptor.Funcs{Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+		if _, ok := obj.(*snapshotv1alpha1.PodSnapshot); ok {
+			return apierrors.NewInvalid(snapshotv1alpha1.GroupVersion.WithKind(snapshotv1alpha1.KindPodSnapshot).GroupKind(),
+				obj.GetName(), field.ErrorList{field.Invalid(field.NewPath("spec"), "object", "spec is immutable")})
+		}
+		return c.Update(ctx, obj, opts...)
+	}}
+	snap := makeSnapshotForReconcile()
+	snap.Finalizers = nil
+	r := makeSnapshotReconcilerWithInterceptor(s, funcs, snap)
+	key := types.NamespacedName{Namespace: "inference", Name: snap.Name}
+
+	reconcileSnapshot(t, r, snap.Name)
+	added := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), key, added))
+	require.True(t, controllerutil.ContainsFinalizer(added, podSnapshotFinalizer))
+
+	// Nothing is bound yet, so the delete only has the finalizer to drop.
+	require.NoError(t, r.Delete(context.Background(), added))
+	reconcileSnapshot(t, r, snap.Name)
+	err := r.Get(context.Background(), key, &snapshotv1alpha1.PodSnapshot{})
+	assert.True(t, apierrors.IsNotFound(err), "the PodSnapshot must be gone once its finalizer is dropped: %v", err)
 }
 
 func TestSnapshotReconciler_DeleteWithNoFinalizerIsNoop(t *testing.T) {
