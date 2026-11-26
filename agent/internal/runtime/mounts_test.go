@@ -372,7 +372,7 @@ func TestRemountProcSys(t *testing.T) {
 			wantFlags: []uintptr{remount},
 		},
 		{
-			name:      "and read-only again",
+			name:      "the runtime's bind is remounted read-only again",
 			isMount:   true,
 			wantFlags: []uintptr{remount | syscall.MS_RDONLY},
 		},
@@ -381,7 +381,7 @@ func TestRemountProcSys(t *testing.T) {
 			rw:   true,
 		},
 		{
-			name: "or to remount read-only",
+			name: "a privileged container has no bind to remount read-only",
 		},
 		{
 			name:       "a failed remount is reported",
