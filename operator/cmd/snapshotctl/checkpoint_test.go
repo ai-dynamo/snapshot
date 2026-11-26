@@ -23,7 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
-	clientgotesting "k8s.io/client-go/testing"
+	clienttesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -352,7 +352,7 @@ func TestWaitForSourcePodOutlastsUnansweredRequest(t *testing.T) {
 		Spec: corev1.PodSpec{NodeName: "node-a", Containers: []corev1.Container{{Name: "main", Image: "test"}}},
 	})
 	calls := 0
-	clientset.PrependReactor("list", "pods", func(clientgotesting.Action) (bool, runtime.Object, error) {
+	clientset.PrependReactor("list", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
 		calls++
 		if calls == 1 {
 			return true, nil, unansweredRequest()
