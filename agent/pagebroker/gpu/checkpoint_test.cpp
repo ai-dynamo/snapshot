@@ -259,7 +259,7 @@ using namespace snapshot::pagebroker;
 // All scenarios share one engine to verify reuse after failed operations.
 class BrokerGpuTest {
  public:
-  enum class Interruption { Abort, Expiry };
+  enum class Interruption { Abort, Expiry, Request };
 
   BrokerGpuTest(const fs::path& root, std::string visible_device, gpu::GpuEnginePtr engine)
       : root_(root), visible_device_(std::move(visible_device)),
@@ -293,11 +293,13 @@ class BrokerGpuTest {
       const auto response = abort.get();
       ASSERT_TRUE(response.has_failure()) << response.DebugString();
       EXPECT_EQ(response.failure().message(), "GPU cleanup is still running");
-    } else {
+    } else if (interruption == Interruption::Expiry) {
       broker_.ReapExpiredTransactions(std::chrono::steady_clock::now() + kExpiryAdvance);
+    } else {
+      cancellation->Cancel();
     }
-    // Transaction cancellation stops GPU work without cancelling the request scope.
-    EXPECT_FALSE(cancellation->IsCancelled());
+    // Either scope stops GPU work without cancelling the other.
+    EXPECT_EQ(cancellation->IsCancelled(), interruption == Interruption::Request);
     EXPECT_EQ(work.wait_for(std::chrono::seconds{0}), std::future_status::timeout);
     EXPECT_TRUE(fs::exists(restore.staging / "image"));
     EXPECT_TRUE(fs::exists(restore.source / gpu::kDataDirectory));
@@ -307,8 +309,8 @@ class BrokerGpuTest {
     ASSERT_TRUE(rejected.has_failure()) << rejected.DebugString();
     EXPECT_EQ(rejected.failure().code(), interruption == Interruption::Expiry
         ? Failure::TRANSACTION_EXPIRED : Failure::TRANSACTION_CONFLICT);
-    EXPECT_EQ(rejected.failure().message(), interruption == Interruption::Expiry
-        ? "transaction expired" : "transaction is aborting");
+    EXPECT_EQ(rejected.failure().message(), interruption == Interruption::Expiry ? "transaction expired"
+        : interruption == Interruption::Abort ? "transaction is aborting" : "GPU operation has not succeeded");
 
     copy_pause.Release();
     ASSERT_EQ(work.wait_for(kGpuTestWait), std::future_status::ready);
@@ -317,7 +319,7 @@ class BrokerGpuTest {
     EXPECT_EQ(failed.failure().code(), Failure::INTERNAL_ERROR);
     EXPECT_EQ(poll(&target_state, 1, 0), 1) << "failed restore target is still running";
     EXPECT_NE(target_state.revents & (POLLIN | POLLHUP), 0);
-    if (interruption == Interruption::Abort) {
+    if (interruption != Interruption::Expiry) {
       finish.mutable_abort();
       const auto drained = broker_.HandleRequest(finish);
       EXPECT_TRUE(drained.has_abort_complete()) << drained.DebugString();
@@ -504,11 +506,13 @@ TEST(GpuCheckpoint, RestoresAllocationThroughRealCustomStorage)
   // Broker failure cases also fork before the parent initializes CUDA.
   Target cancelled_target;
   Target expired_target;
+  Target request_target;
   Target late_target;
   target.Ready();
   next_target.Ready();
   cancelled_target.Ready();
   expired_target.Ready();
+  request_target.Ready();
   late_target.Ready();
   CheckpointAPI api;
   api.RequireCustomStorage();
@@ -614,8 +618,10 @@ TEST(GpuCheckpoint, RestoresAllocationThroughRealCustomStorage)
         cancelled_target, "cancel-active", BrokerGpuTest::Interruption::Abort));
     ASSERT_NO_FATAL_FAILURE(broker.InterruptedRestore(
         expired_target, "expire-active", BrokerGpuTest::Interruption::Expiry));
+    ASSERT_NO_FATAL_FAILURE(broker.InterruptedRestore(
+        request_target, "cancel-request", BrokerGpuTest::Interruption::Request));
     ASSERT_NO_FATAL_FAILURE(broker.LateSuccessCannotCommit(late_target));
-    // Prove that the same engine and buffers still work after both failures.
+    // Prove that the same engine and buffers still work after these failures.
     ASSERT_NO_FATAL_FAILURE(broker.BatchRoundTrip(target, next_target));
   }
   engine.reset();

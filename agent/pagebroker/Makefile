@@ -33,6 +33,7 @@ FILESYSTEM_SOURCES := transfer/filesystem/filesystem_storage.cpp
 BROKER_TEST_SOURCES := tests/broker_transfer_test.cpp tests/broker_checkpoint_test.cpp tests/broker_cleanup_test.cpp tests/broker_transfer_fixture.cpp tests/broker_gpu_test.cpp
 # Wrap mkdir and GPU calls to inject failures without requiring CUDA.
 BROKER_TEST_WRAP_FLAGS := -Wl,--wrap=mkdir \
+	-Wl,--wrap=_ZNK8snapshot10pagebroker3gpu9GpuEngine9AvailableEv \
 	-Wl,--wrap=_ZN8snapshot10pagebroker3gpu9GpuEngine10CheckpointERNS1_8ArtifactERKSt6vectorINS1_11ParticipantESaIS6_EERNS0_12CancellationE \
 	-Wl,--wrap=_ZN8snapshot10pagebroker3gpu9GpuEngine7RestoreERNS1_8ArtifactERKSt6vectorINS1_11ParticipantESaIS6_EERNS0_12CancellationE
 COMMON_SOURCES := file_descriptor.cpp $(FILESYSTEM_SOURCES)
