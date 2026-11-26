@@ -77,9 +77,11 @@ type PodSnapshotReconciler struct {
 	NonCacheReadClient    client.Reader
 	Recorder              record.EventRecorder
 	TestFailureAnnotation string
-	// StoreID binds every new PodSnapshotContent to the configured store. Empty
-	// keeps producing legacy, path-addressed content.
-	StoreID string
+	// BindNewContents binds every new PodSnapshotContent to a store through the
+	// class its PodSnapshot names. Off, new content stays legacy and path-addressed.
+	BindNewContents bool
+	// DefaultClassName is the class used by a PodSnapshot that names none.
+	DefaultClassName string
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;update;patch
@@ -87,6 +89,7 @@ type PodSnapshotReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshotcontents,verbs=create;get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshotcontents/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=nvidia.com,resources=snapshotstorageclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
@@ -322,12 +325,27 @@ func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap 
 		return sr.failPodSnapshot(ctx, snap, "TestCaptureFailure",
 			fmt.Errorf("test-only checkpoint failure requested by source pod annotation %q", annotation))
 	}
-	content, err := sr.ensurePodSnapshotContent(ctx, snap, podSnapshotContentName(snap), pod)
+	resolution, err := resolveStorageClass(ctx, sr.Client, snap.Spec.StorageClassName, sr.DefaultClassName, sr.BindNewContents)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !resolution.Usable() {
+		return sr.recordPendingReason(ctx, snap, resolution.Reason, resolution.Message)
+	}
+	content, created, err := sr.ensurePodSnapshotContent(ctx, snap, podSnapshotContentName(snap), pod, resolution.Class)
 	if err != nil {
 		if errors.Is(err, errContentConflict) {
 			return sr.failPodSnapshot(ctx, snap, "ContentConflict", err)
 		}
 		return ctrl.Result{}, err
+	}
+	if created && resolution.Class != nil {
+		if err := sr.confirmClassStillUsable(ctx, resolution.Class.Name, content); err != nil {
+			if errors.Is(err, errStorageClassTerminating) {
+				return sr.failPodSnapshot(ctx, snap, ReasonStorageClassTerminating, err)
+			}
+			return ctrl.Result{}, err
+		}
 	}
 	return sr.bindContent(ctx, snap, content.Name)
 }
@@ -381,33 +399,61 @@ func validateSourcePod(snap *snapshotv1alpha1.PodSnapshot, pod *corev1.Pod) erro
 // so the content almost never exists here — assume it does not and Create it. The only way it can
 // already exist is a prior reconcile that created it but crashed before the status write, surfaced as
 // AlreadyExists; only then do we re-fetch, confirm it is ours (the spec is immutable), and adopt it.
-func (sr *PodSnapshotReconciler) ensurePodSnapshotContent(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, contentName string, pod *corev1.Pod) (*snapshotv1alpha1.PodSnapshotContent, error) {
-	content := sr.buildPodSnapshotContent(snap, contentName, pod)
+func (sr *PodSnapshotReconciler) ensurePodSnapshotContent(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, contentName string, pod *corev1.Pod, class *snapshotv1alpha1.SnapshotStorageClass) (*snapshotv1alpha1.PodSnapshotContent, bool, error) {
+	content := sr.buildPodSnapshotContent(snap, contentName, pod, class)
 	if err := sr.Create(ctx, content); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			existing := &snapshotv1alpha1.PodSnapshotContent{}
 			// A NotFound here is a benign delete/recreate race; the returned error just requeues and the
 			// next Create succeeds.
 			if err := sr.Get(ctx, client.ObjectKey{Name: contentName}, existing); err != nil {
-				return nil, fmt.Errorf("get existing PodSnapshotContent %q: %w", contentName, err)
+				return nil, false, fmt.Errorf("get existing PodSnapshotContent %q: %w", contentName, err)
 			}
 			if err := verifyContentBacklink(snap, existing); err != nil {
 				// %v on the inner: only errContentConflict needs to be unwrappable by the caller.
-				return nil, fmt.Errorf("%w: %v", errContentConflict, err)
+				return nil, false, fmt.Errorf("%w: %v", errContentConflict, err)
 			}
-			return existing, nil
+			return existing, false, nil
 		}
 		sr.Recorder.Event(snap, corev1.EventTypeWarning, "SnapshotContentCreateFailed", err.Error())
-		return nil, fmt.Errorf("create PodSnapshotContent %q: %w", contentName, err)
+		return nil, false, fmt.Errorf("create PodSnapshotContent %q: %w", contentName, err)
 	}
-	return content, nil
+	return content, true, nil
+}
+
+// errStorageClassTerminating marks a class that began terminating while its content was being created.
+var errStorageClassTerminating = errors.New("storage class is being deleted or is gone")
+
+// confirmClassStillUsable reads the class from the API server after the content exists. The class
+// finalizer counts content with a live list, so a class that is still there once the content is
+// visible cannot be released before the content goes. A class that is terminating or gone is not
+// bound: the new content is deleted.
+func (sr *PodSnapshotReconciler) confirmClassStillUsable(ctx context.Context, className string, content *snapshotv1alpha1.PodSnapshotContent) error {
+	class := &snapshotv1alpha1.SnapshotStorageClass{}
+	err := sr.NonCacheReadClient.Get(ctx, client.ObjectKey{Name: className}, class)
+	switch {
+	case err == nil && class.DeletionTimestamp.IsZero():
+		return nil
+	case err != nil && !apierrors.IsNotFound(err):
+		return fmt.Errorf("re-read SnapshotStorageClass %q: %w", className, err)
+	}
+	if err := sr.Delete(ctx, content); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete PodSnapshotContent %q of a terminating class: %w", content.Name, err)
+	}
+	return fmt.Errorf("%w: class %q", errStorageClassTerminating, className)
 }
 
 // buildPodSnapshotContent constructs the desired cluster-scoped PodSnapshotContent for a PodSnapshot.
-func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *snapshotv1alpha1.PodSnapshot, contentName string, pod *corev1.Pod) *snapshotv1alpha1.PodSnapshotContent {
+func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *snapshotv1alpha1.PodSnapshot, contentName string, pod *corev1.Pod, class *snapshotv1alpha1.SnapshotStorageClass) *snapshotv1alpha1.PodSnapshotContent {
 	var storage *snapshotv1alpha1.CheckpointStorageBinding
-	if sr.StoreID != "" {
-		storage = &snapshotv1alpha1.CheckpointStorageBinding{StoreID: sr.StoreID}
+	labels := map[string]string{snapshotv1alpha1.SnapshotNodeLabel: pod.Spec.NodeName}
+	if class != nil {
+		storage = &snapshotv1alpha1.CheckpointStorageBinding{
+			StoreID:          class.Status.StoreID,
+			StorageClassName: class.Name,
+			ReclaimPolicy:    class.Spec.ReclaimPolicy,
+		}
+		labels[snapshotv1alpha1.SnapshotStorageClassLabel] = class.Name
 	}
 	return &snapshotv1alpha1.PodSnapshotContent{
 		TypeMeta: metav1.TypeMeta{
@@ -417,9 +463,7 @@ func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *snapshotv1alpha1.
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       contentName,
 			Finalizers: []string{maintenance.PodSnapshotContentArtifactCleanupFinalizer},
-			Labels: map[string]string{
-				snapshotv1alpha1.SnapshotNodeLabel: pod.Spec.NodeName,
-			},
+			Labels:     labels,
 		},
 		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
 			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{
@@ -599,7 +643,40 @@ func (sr *PodSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(sr.sourcePodToPodSnapshots),
 			builder.WithPredicates(sourcePodCapturePredicate()),
 		).
+		Watches(
+			&snapshotv1alpha1.SnapshotStorageClass{},
+			handler.EnqueueRequestsFromMapFunc(sr.classToWaitingPodSnapshots),
+		).
 		Complete(sr)
+}
+
+// classToWaitingPodSnapshots wakes the PodSnapshots that have not been bound yet and resolve to the
+// class that changed, so one that waited for the class to become Ready proceeds without a timer.
+func (sr *PodSnapshotReconciler) classToWaitingPodSnapshots(ctx context.Context, obj client.Object) []reconcile.Request {
+	class, ok := obj.(*snapshotv1alpha1.SnapshotStorageClass)
+	if !ok {
+		return nil
+	}
+	snaps := &snapshotv1alpha1.PodSnapshotList{}
+	if err := sr.List(ctx, snaps); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list PodSnapshots for a SnapshotStorageClass change", "class", class.Name)
+		return nil
+	}
+	var requests []reconcile.Request
+	for i := range snaps.Items {
+		snap := &snaps.Items[i]
+		if ptr.Deref(snap.Status.BoundPodSnapshotContentName, "") != "" || isPodSnapshotTerminal(snap) {
+			continue
+		}
+		name := snap.Spec.StorageClassName
+		if name == "" {
+			name = sr.DefaultClassName
+		}
+		if name == class.Name {
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(snap)})
+		}
+	}
+	return requests
 }
 
 func podSnapshotSourcePodIndexValues(obj client.Object) []string {

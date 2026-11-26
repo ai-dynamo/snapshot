@@ -15,6 +15,10 @@ const (
 	// object so the per-node agent's cache can label-select work for its node.
 	SnapshotNodeLabel = "nvidia.com/snapshot-node"
 
+	// SnapshotStorageClassLabel names the SnapshotStorageClass a PodSnapshotContent was
+	// bound through. It only serves queries: the content's spec fields decide.
+	SnapshotStorageClassLabel = "nvidia.com/snapshot-storage-class"
+
 	CheckpointVolumeName = "checkpoint-storage"
 
 	// MaxCheckpointRetryLimit bounds every way a retry limit is asked for: the
