@@ -329,6 +329,11 @@ jobs:
 
   deploy:
     needs: build
+    # A scheduled run, a push and a manual dispatch all skip prepare-preview.
+    # GitHub skips every job downstream of a skipped job, at any depth, unless
+    # the job's own `if` calls a status function, so `needs: build` alone
+    # deployed only the runs that published a preview.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     # Only the Pages deployment mutates shared state. Queue rather than cancel
