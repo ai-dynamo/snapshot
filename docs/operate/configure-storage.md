@@ -149,14 +149,35 @@ PageBroker and cleanup runs in the operator:
 
 | Component | Service account | Annotations value | Access under the store's prefix |
 |-----------|-----------------|-------------------|---------------------------------|
-| PageBroker, in the agent pod | The agent's: the release's full name, for example `snapshot`, unless `serviceAccount.name` sets another | `serviceAccount.annotations` | Read, write and list |
+| PageBroker, in the agent pod | The agent's: the release's full name, for example `snapshot`, unless `serviceAccount.name` sets another. With `serviceAccount.create: false` and no name, it is `default` | `serviceAccount.annotations` | Read, write and list |
 | Operator | The operator's, the agent's default name with `-operator` appended | `operator.serviceAccount.annotations` | List and delete |
 
-Bind each to an identity with that access. Platforms bind in one of two ways:
-with an annotation on the service account, or with an association that names the
-service account and is created on the platform side. Set the annotation values
-only in the first case. The platform must inject the identity's token and
-variables into the pods; the chart does not add them.
+Bind each to an identity with that access. How the pods get that identity
+depends on the platform:
+
+- **The platform injects it.** Bind both service accounts in the way your
+  platform defines: with an annotation on the service account, or with an
+  association that names the service account and is created on the platform
+  side. Set the annotation values only in the first case. The platform adds the
+  token and its variables to the pods
+- **A credential endpoint issues it.** Set `storage.s3.credentialEndpoint.url`
+  to the endpoint's `https` URL. The chart then mounts a service-account token
+  into PageBroker and the operator, which present it to the endpoint and renew
+  the credentials before they expire. Also set
+  `storage.s3.credentialEndpoint.tokenAudience` to the audience the endpoint
+  expects; it is required, because a token without an audience is also valid
+  for the Kubernetes API. This cannot be combined with
+  `storage.s3.credentialsSecretRef`
+
+Use one of the two. If the platform also injects an identity into these pods,
+PageBroker and the operator use it and ignore the credential endpoint.
+
+The endpoint must implement the container-credentials protocol of the S3
+clients: a `GET` request that carries the token as the `Authorization` header,
+answered with JSON credentials and their expiry.
+
+Kubernetes rotates the token before `tokenExpirationSeconds` runs out, so an
+upload or a restore that outlasts one token keeps working.
 
 The chart applies the annotation values only to the service accounts it
 creates: the agent's with `serviceAccount.create: true`, the operator's with
@@ -172,8 +193,16 @@ which every pod on the node shares.
 With `storage.s3.caBundleConfigMapRef` set, PageBroker and the operator trust
 only that bundle, for the store and for the service that issues the credentials.
 The bundle must therefore also contain the CA of the token or credential
-service. When that service uses a private CA, uploads and cleanup work. Restores
-do not: they cannot reach a token or credential service behind a private CA yet.
+service.
+
+A credential endpoint behind a private CA works for uploads, restores and
+cleanup. With `storage.s3.credentialEndpoint.url` set, the chart also mounts the
+bundle as the system certificate file of the PageBroker container, which
+restores use for the credential request. That mount does not follow a change to
+the ConfigMap; restart the agent pods after you replace the bundle.
+
+A token service that the platform runs behind a private CA works for uploads
+and cleanup. Restores cannot reach it yet.
 
 To check it, list the variables your platform injected into the PageBroker
 container, then take a snapshot:

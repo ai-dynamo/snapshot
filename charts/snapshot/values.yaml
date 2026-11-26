@@ -151,6 +151,20 @@ storage:
     credentialsSecretRef: ""
     # Key inside credentialsSecretRef holding the credentials file.
     credentialsSecretKey: credentials
+    # Workload identity through a credential endpoint: PageBroker and the
+    # operator present a service-account token to the endpoint and receive
+    # temporary credentials, which they renew before expiry. Use it where the
+    # platform does not inject an identity into the pods by itself. Cannot be
+    # combined with credentialsSecretRef.
+    credentialEndpoint:
+      # https URL of the endpoint. Empty disables this. The endpoint must
+      # implement the container-credentials protocol of the S3 clients.
+      url: ""
+      # Audience the endpoint expects in the token. Required with url: a token
+      # without an audience is also valid for the Kubernetes API.
+      tokenAudience: ""
+      # Lifetime of the token; kubelet rotates it before it expires. At least 600.
+      tokenExpirationSeconds: 3600
     # Bucket addressing PageBroker uses against the endpoint: "virtual"
     # (bucket.endpoint/key, PageBroker's default when empty) or "path"
     # (endpoint/bucket/key), which most self-hosted S3-compatible stores need.
