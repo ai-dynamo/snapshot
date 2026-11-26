@@ -7,9 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 Use this page when a restore is slow, is refused, or fails. It starts with a
 restore that is slower than expected, a restore that is refused because a
-mount is missing, and a restore from a Lustre snapshot store that fails in
-CRIU. Then it lists each step a restore can fail at, with the likely causes and
-what to check. To find which step failed, see
+mount is missing, and a restore from Lustre that fails in CRIU. Then it lists
+each step a restore can fail at, with the likely causes and what to check. To
+find which step failed, see
 [Reading a Failure Message](reading-a-failure-message.md).
 
 ## A Restore Is Slower Than Expected
@@ -49,9 +49,9 @@ Search the agent log on the restore Pod's node for the message:
 kubectl logs $agent -n <snapshot-ns> -c agent | grep 'Invalid ELF magic'
 ```
 
-To confirm the filesystem, run `findmnt` as in the
-[restore-node checks](slow-restores.md#check-the-restore-node). It reports
-`lustre` as the `FSTYPE` of the snapshot path.
+To check the filesystem of the snapshot store, run `findmnt` as in the
+[restore-node checks](slow-restores.md#check-the-restore-node) and read the
+`FSTYPE` column.
 
 Set `config.criu.imageIoMode: writeback` and take a new snapshot. A restore
 uses the mode saved in the snapshot, so changing the value does not fix a
