@@ -223,7 +223,7 @@ Secret was meant to be set and no identity is bound, the install succeeds and
 the first checkpoint fails with:
 
 ```text
-PageBroker STORAGE_UNAVAILABLE: S3 checkpoint operation failed
+PageBroker STORAGE_UNAVAILABLE: S3 checkpoint operation failed: S3 credentials did not resolve
 ```
 
 Check the PageBroker container's variables with the command above: no
