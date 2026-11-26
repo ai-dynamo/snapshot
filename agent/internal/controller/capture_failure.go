@@ -92,6 +92,19 @@ func classifyCaptureFailure(err error) captureFailure {
 	}
 }
 
+// classifyAttemptFailure classifies a failed attempt of a checkpoint bounded by
+// captureCtx. A deadline error means the checkpoint ran out of time only when
+// that deadline has passed. PageBroker's client bounds its own retries with much
+// shorter ones, and one of those passing means PageBroker stopped answering,
+// which a longer checkpoint timeout does not fix.
+func classifyAttemptFailure(captureCtx context.Context, err error) captureFailure {
+	failure := classifyCaptureFailure(err)
+	if failure.reason == reasonCheckpointTimeout && !errors.Is(captureCtx.Err(), context.DeadlineExceeded) {
+		failure.reason = reasonCheckpointFailed
+	}
+	return failure
+}
+
 // captureCause strips the cleanup failures the executor reports alongside a
 // capture error, so a code from a failed Abort is not read as why the capture
 // failed — an abort reporting TRANSACTION_NOT_FOUND would otherwise look like

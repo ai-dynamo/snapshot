@@ -290,7 +290,7 @@ func (w *NodeController) runCheckpoint(
 		onDumpRepeat := func(repeat int, dumpErr error) {
 			// Refined like the outer loop's, so one cause does not read as two
 			// problems under two reasons.
-			refined, _ := w.refineFullStaging(ctx, classifyCaptureFailure(dumpErr), dumpErr, containerPID)
+			refined, _ := w.refineFullStaging(ctx, classifyAttemptFailure(captureCtx, dumpErr), dumpErr, containerPID)
 			w.reportAttemptFailed(ctx, logger, pod, refined.reason, spent+repeat, budget, dumpErr)
 		}
 		artifact, err := w.attemptCheckpoint(captureCtx, content, pod, containerName, containerID, containerPID,
@@ -302,7 +302,7 @@ func (w *NodeController) runCheckpoint(
 		// Measured while the source is still suspended, so the tree the dump was
 		// sizing is the one still there to size. Naming the shortage comes first
 		// and settling the retry last, so neither can quietly undo the other.
-		failure, err := w.refineFullStaging(ctx, classifyCaptureFailure(err), err, containerPID)
+		failure, err := w.refineFullStaging(ctx, classifyAttemptFailure(captureCtx, err), err, containerPID)
 		attempt := settleAttempt(failure, err)
 		// Repeats of the dump come out of the same budget as fresh attempts, so a
 		// caller asking for two retries gets two, however they were spent.

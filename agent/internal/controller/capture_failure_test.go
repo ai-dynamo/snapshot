@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -72,6 +73,40 @@ func TestClassifyCaptureFailure(t *testing.T) {
 			if got.retryable != tc.wantRetryable {
 				t.Errorf("retryable = %v, want %v", got.retryable, tc.wantRetryable)
 			}
+		})
+	}
+}
+
+// An attempt runs under more deadlines than the checkpoint's. PageBroker's client
+// gives up on a commit nobody answers after a retry deadline of its own, and
+// only the checkpoint's deadline passing is the checkpoint running out of time.
+func TestClassifyAttemptFailureKeepsTimeoutForTheCheckpointsDeadline(t *testing.T) {
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	running, cancelRunning := context.WithTimeout(context.Background(), time.Hour)
+	defer cancelRunning()
+	stopping, stop := context.WithCancel(running)
+	stop()
+	// How a commit PageBroker stopped answering comes back from the executor.
+	unanswered := &executor.StepError{Step: executor.StepCommitCheckpoint, Err: context.DeadlineExceeded}
+
+	for _, tc := range []struct {
+		name          string
+		captureCtx    context.Context
+		err           error
+		wantReason    string
+		wantRetryable bool
+	}{
+		{"the checkpoint's deadline passed", expired, context.DeadlineExceeded, reasonCheckpointTimeout, false},
+		{"a deadline inside the attempt passed", running, unanswered, reasonCheckpointFailed, false},
+		{"the agent is stopping", stopping, unanswered, reasonCheckpointFailed, false},
+		{"any other failure reads as before", running,
+			pagebroker.NewFailureError(pagebroker.Failure_INSUFFICIENT_STORAGE, ""), reasonStagingUnavailable, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyAttemptFailure(tc.captureCtx, tc.err)
+			assert.Equal(t, tc.wantReason, got.reason)
+			assert.Equal(t, tc.wantRetryable, got.retryable)
 		})
 	}
 }
