@@ -59,7 +59,7 @@ def issued_to(config: k8s.E2EConfig, service_account: str) -> bool:
         container="endpoint",
     )
     subject = credential_endpoint.subject(config.namespace, service_account)
-    return f"{credential_endpoint.ISSUED} {subject}" in logs
+    return f"{credential_endpoint.ISSUED} {subject} until" in logs
 
 
 def test_pagebroker_gets_the_endpoint_and_no_credentials_file(config: k8s.E2EConfig) -> None:
