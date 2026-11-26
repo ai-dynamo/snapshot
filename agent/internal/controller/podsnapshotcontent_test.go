@@ -216,7 +216,7 @@ func makeSourcePod() *corev1.Pod {
 			UID:       types.UID("pod-uid"),
 			Labels:    map[string]string{},
 		},
-		Spec: corev1.PodSpec{NodeName: "node-a"},
+		Spec: corev1.PodSpec{NodeName: "node-a", Containers: []corev1.Container{{Name: "main"}}},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
 			ContainerStatuses: []corev1.ContainerStatus{
@@ -283,6 +283,90 @@ func TestReconcileCapture_InvalidTargetContainerFails(t *testing.T) {
 			assert.Equal(t, "InvalidTargetContainer", cond.Reason)
 		})
 	}
+}
+
+// TestReconcileCapture_TargetMissingFromTheSourcePodFails covers a request naming a container
+// the source Pod does not have, such as a typo. A Pod's containers never change, so the wait for
+// that target to report Ready would never end and the PodSnapshot would stay Pending.
+func TestReconcileCapture_TargetMissingFromTheSourcePodFails(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(pod *corev1.Pod)
+	}{
+		{name: "a name the pod does not have", mutate: func(*corev1.Pod) {}},
+		{
+			// An init container's status is not among the Pod's container statuses,
+			// where the checkpoint looks for its target.
+			name: "an init container",
+			mutate: func(pod *corev1.Pod) {
+				pod.Spec.InitContainers = []corev1.Container{{Name: "worker"}}
+				pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "worker", Ready: true,
+					ContainerID: "containerd://init123",
+					State:       corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+			content.Spec.Source.PodRef.Containers = []string{"worker"}
+			pod := makeSourcePod()
+			tc.mutate(pod)
+			fc := &fakeCheckpointer{}
+			w := makeNodeController(t, fc, content, pod)
+
+			require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
+
+			cond := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+			require.NotNil(t, cond, "a target the pod does not have must fail the work order, not wait for it")
+			assert.Equal(t, "InvalidTargetContainer", cond.Reason)
+			assert.Contains(t, cond.Message, `has no container "worker"`)
+			assert.False(t, fc.wasCalled())
+			_, labeled := getPod(t, w, pod.Namespace, pod.Name).Labels[snapshotv1alpha1.CaptureEligibleLabel]
+			assert.False(t, labeled, "a pod that cannot be checkpointed must not be promoted")
+		})
+	}
+}
+
+// TestReconcileCapture_MissingTargetDoesNotBlockTheNextWorkOrder covers what the wait cost
+// beyond its own request: the oldest pending work order owns the source Pod, so one that could
+// never run kept every later checkpoint of that Pod waiting behind it.
+func TestReconcileCapture_MissingTargetDoesNotBlockTheNextWorkOrder(t *testing.T) {
+	mistyped := makeWorkOrder("podsnapshotcontent-old", "node-a", "old")
+	mistyped.CreationTimestamp = metav1.Unix(1000, 0)
+	mistyped.Spec.Source.PodRef.Containers = []string{"worker"}
+	next := makeWorkOrder("podsnapshotcontent-new", "node-a", "new")
+	next.CreationTimestamp = metav1.Unix(2000, 0)
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, mistyped, next, makeSourcePod())
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
+
+	require.NoError(t, w.reconcileCapture(context.Background(), mistyped.Name))
+	// The content informer delivers whatever the first reconcile wrote.
+	require.NoError(t, w.contentIndexer.Update(mustUnstructured(t, getContent(t, w, mistyped.Name))))
+	require.NoError(t, w.reconcileCapture(context.Background(), next.Name))
+
+	assert.True(t, fc.wasCalled(), "a work order that can never run must not keep the pod from the next one")
+	assert.True(t, isContentReady(getContent(t, w, next.Name)))
+}
+
+// TestReconcileCapture_MissingTargetDoesNotSweepThePod covers the other thing the wait cost. A
+// work order that owns its Pod reaches the container-exit sweep before the readiness wait, so
+// one that could never run turned a crash of any container into a SIGKILL of the whole Pod.
+func TestReconcileCapture_MissingTargetDoesNotSweepThePod(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	content.Spec.Source.PodRef.Containers = []string{"worker"}
+	rt := &fakeRuntime{} // PID 0 → ResolveContainer errors → no real signal is sent
+	w := makeNodeController(t, &fakeCheckpointer{}, content, podWithFailedSibling())
+	w.runtime = rt
+
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
+
+	cond := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "InvalidTargetContainer", cond.Reason)
+	assert.Empty(t, rt.resolvedContainerIDs, "a request that cannot run must not resolve or signal the pod's containers")
+	assert.False(t, sawEventReason(w.clientset.(*k8sfake.Clientset), "CheckpointFailed"))
 }
 
 // getContent reads a PodSnapshotContent back from the fake client.
@@ -433,7 +517,7 @@ func TestReconcileCapture_FailedContainerUnsticksAndFails(t *testing.T) {
 			UID:       types.UID("pod-uid"),
 			Labels:    map[string]string{},
 		},
-		Spec: corev1.PodSpec{NodeName: "node-a"},
+		Spec: corev1.PodSpec{NodeName: "node-a", Containers: []corev1.Container{{Name: "main"}, {Name: "helper"}}},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
 			ContainerStatuses: []corev1.ContainerStatus{
@@ -748,7 +832,7 @@ func TestReconcileCapture_PodFailedFails(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")},
-		Spec:       corev1.PodSpec{NodeName: "node-a"},
+		Spec:       corev1.PodSpec{NodeName: "node-a", Containers: []corev1.Container{{Name: "main"}}},
 		Status:     corev1.PodStatus{Phase: corev1.PodFailed},
 	}
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
@@ -1001,7 +1085,7 @@ func podWithFailedSibling() *corev1.Pod {
 			UID:       types.UID("pod-uid"),
 			Labels:    map[string]string{},
 		},
-		Spec: corev1.PodSpec{NodeName: "node-a"},
+		Spec: corev1.PodSpec{NodeName: "node-a", Containers: []corev1.Container{{Name: "main"}, {Name: "helper"}}},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
 			ContainerStatuses: []corev1.ContainerStatus{

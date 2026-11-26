@@ -56,6 +56,21 @@ If a `SnapshotJob` created it, create a new `SnapshotJob` with the probe fixed
 in `podSnapshotTemplate.containers` instead: the `SnapshotJob` copies its
 template into the `PodSnapshot` it creates.
 
+## A Checkpoint Fails with `InvalidTargetContainer`
+
+The `PodSnapshot` names a target container the source pod does not have. The
+message gives both names. An init container or an ephemeral container cannot be
+the target container.
+
+The following command lists the containers the source pod has:
+
+```bash
+kubectl get pod <source-pod> -n <ns> -o jsonpath='{.spec.containers[*].name}'
+```
+
+The `PodSnapshot`'s spec cannot change, so create a new one that names one of
+them in `spec.source.podRef.containers`.
+
 ## A Checkpoint Fails with `RetriesExhausted`
 
 The checkpoint was retried as often as its retry limit allows and failed every
