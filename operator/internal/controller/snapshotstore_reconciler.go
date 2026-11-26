@@ -95,7 +95,7 @@ func (r *SnapshotStoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("snapshotstore").
-		For(&snapshotv1alpha1.SnapshotStore{}).
+		For(&snapshotv1alpha1.SnapshotStore{}, builder.WithPredicates(storeSpecOrDeletionChanged)).
 		Watches(&snapshotv1alpha1.SnapshotStore{},
 			handler.EnqueueRequestsFromMapFunc(r.storesAtTheSameLocation), builder.WithPredicates(createOrDelete)).
 		Watches(&snapshotv1alpha1.PodSnapshotContent{},
@@ -103,6 +103,19 @@ func (r *SnapshotStoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.storesUsingSecret), builder.OnlyMetadata).
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.storesUsingConfigMap), builder.OnlyMetadata).
 		Complete(r)
+}
+
+// storeSpecOrDeletionChanged drops updates that change only status or
+// metadata, so the controller's own status write does not queue the store
+// ahead of its retry delay.
+var storeSpecOrDeletionChanged = predicate.Funcs{
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		if e.ObjectOld == nil || e.ObjectNew == nil {
+			return false
+		}
+		return e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() ||
+			e.ObjectOld.GetDeletionTimestamp().IsZero() != e.ObjectNew.GetDeletionTimestamp().IsZero()
+	},
 }
 
 func (r *SnapshotStoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {

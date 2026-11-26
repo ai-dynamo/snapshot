@@ -20,6 +20,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	"github.com/ai-dynamo/snapshot/api/storage"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -550,4 +551,21 @@ func TestDeletedContentRechecksTheStoreItWasHoldingBack(t *testing.T) {
 		namesOf(f.r.storesOfContent(t.Context(), contentFor("c2", "", storeID))))
 	assert.Empty(t, f.r.storesOfContent(t.Context(), &snapshotv1alpha1.PodSnapshotContent{}))
 	assert.Empty(t, f.r.storesOfContent(t.Context(), &corev1.Pod{}))
+}
+
+func TestStoreWatchIgnoresStatusOnlyUpdates(t *testing.T) {
+	store := &snapshotv1alpha1.SnapshotStore{ObjectMeta: metav1.ObjectMeta{Name: "fast", Generation: 1}}
+	statusChanged := store.DeepCopy()
+	statusChanged.Status.StoreID = "store-v1-changed"
+	specChanged := store.DeepCopy()
+	specChanged.Generation = 2
+	deleting := store.DeepCopy()
+	now := metav1.Now()
+	deleting.DeletionTimestamp = &now
+
+	assert.False(t, storeSpecOrDeletionChanged.Update(event.UpdateEvent{ObjectOld: store, ObjectNew: statusChanged}))
+	assert.True(t, storeSpecOrDeletionChanged.Update(event.UpdateEvent{ObjectOld: store, ObjectNew: specChanged}))
+	assert.True(t, storeSpecOrDeletionChanged.Update(event.UpdateEvent{ObjectOld: store, ObjectNew: deleting}))
+	assert.True(t, storeSpecOrDeletionChanged.Create(event.CreateEvent{Object: store}))
+	assert.True(t, storeSpecOrDeletionChanged.Delete(event.DeleteEvent{Object: store}))
 }
