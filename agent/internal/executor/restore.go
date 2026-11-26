@@ -551,10 +551,25 @@ var readInitCmdline = func(pid int) (string, error) {
 	return details.Cmdline, nil
 }
 
+// readInitNamespacePID returns the PID that the container's first process has
+// in its own PID namespace, given its host PID. Tests replace it.
+var readInitNamespacePID = func(pid int) (int, error) {
+	details, err := snapshotruntime.ReadProcessDetails(snapshotruntime.HostProcPath, pid)
+	if err != nil {
+		return 0, err
+	}
+	return details.InnermostPID, nil
+}
+
 // checkRestoreProxy refuses a container whose PID 1 is not the restore proxy.
 // The agent's NRI plugin makes the proxy PID 1 when the container is created.
 // Without the proxy, nothing in the container waits for the restore, and the
 // container does not end when the restored workload does.
+//
+// The container's first process can be the proxy and still not be PID 1. In a
+// Pod that shares its process namespace, PID 1 is the Pod's pause process. The
+// restored workload becomes a child of PID 1, so the proxy could not wait for
+// it, and would end the container as soon as the restore completed.
 func checkRestoreProxy(pid int) error {
 	cmdline, err := readInitCmdline(pid)
 	if err != nil {
@@ -563,6 +578,13 @@ func checkRestoreProxy(pid int) error {
 	if cmdline != podcontract.RestoreProxyPath {
 		return fmt.Errorf("the container's PID 1 is %q, not %s: the agent's NRI plugin did not set up this container; check that NRI is enabled in the container runtime",
 			cmdline, podcontract.RestoreProxyPath)
+	}
+	nsPID, err := readInitNamespacePID(pid)
+	if err != nil {
+		return fmt.Errorf("read the restore proxy's PID in its process namespace: %w", err)
+	}
+	if nsPID != 1 {
+		return fmt.Errorf("the restore proxy is PID %d in its process namespace, not PID 1: the Pod shares a process namespace; a restore Pod must not set shareProcessNamespace or hostPID", nsPID)
 	}
 	return nil
 }
