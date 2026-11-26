@@ -6,11 +6,15 @@ package backends
 import (
 	"context"
 	"encoding/pem"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -220,6 +224,207 @@ func TestNewS3BackendReachesEndpointWithoutCABundle(t *testing.T) {
 	assert.Contains(t, (*requests)[0].Header.Get("Authorization"), "Credential=FAKEACCESSKEY/")
 }
 
+// clearAmbientS3Credentials removes every credential source the default chain
+// would otherwise pick up from the machine running the test.
+func clearAmbientS3Credentials(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY", "AWS_SECRET_KEY",
+		"AWS_SESSION_TOKEN", "AWS_PROFILE",
+		"AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE",
+		"AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+		"AWS_CONTAINER_AUTHORIZATION_TOKEN", "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+		"AWS_EC2_METADATA_DISABLED", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_STS", "AWS_CA_BUNDLE",
+	} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("HOME", t.TempDir())
+}
+
+func TestNewS3BackendUsesContainerCredentialsWithoutCredentialsPath(t *testing.T) {
+	clearAmbientS3Credentials(t)
+	server, requests := newListObjectsServer(t, httptest.NewServer)
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(tokenPath, []byte("fake-projected-token"), 0o600))
+	var presentedTokens []string
+	credentialEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		presentedTokens = append(presentedTokens, r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"AccessKeyId":"FAKECONTAINERKEY","SecretAccessKey":"fake-secret","Token":"fake-session","Expiration":%q}`,
+			time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+	}))
+	t.Cleanup(credentialEndpoint.Close)
+	t.Setenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", credentialEndpoint.URL)
+	t.Setenv("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE", tokenPath)
+
+	b, err := NewS3Backend(context.Background(), S3Config{Bucket: "checkpoints", Region: "us-east-1", Endpoint: server.URL})
+	require.NoError(t, err)
+
+	_, err = b.Candidates(context.Background(), logr.Discard())
+	require.NoError(t, err)
+	require.Len(t, *requests, 1)
+	assert.Contains(t, (*requests)[0].Header.Get("Authorization"), "Credential=FAKECONTAINERKEY/")
+	assert.Equal(t, []string{"fake-projected-token"}, presentedTokens)
+}
+
+func TestNewS3BackendTrustsCustomCABundleForContainerCredentials(t *testing.T) {
+	clearAmbientS3Credentials(t)
+	server, requests := newListObjectsServer(t, httptest.NewServer)
+	credentialEndpoint := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"AccessKeyId":"FAKECONTAINERKEY","SecretAccessKey":"fake-secret","Token":"fake-session","Expiration":%q}`,
+			time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+	}))
+	t.Cleanup(credentialEndpoint.Close)
+	caBundlePath := filepath.Join(t.TempDir(), "ca.pem")
+	require.NoError(t, os.WriteFile(caBundlePath,
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: credentialEndpoint.Certificate().Raw}), 0o600))
+	t.Setenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", credentialEndpoint.URL)
+
+	b, err := NewS3Backend(context.Background(), S3Config{
+		Bucket: "checkpoints", Region: "us-east-1", Endpoint: server.URL, CABundlePath: caBundlePath,
+	})
+	require.NoError(t, err)
+
+	_, err = b.Candidates(context.Background(), logr.Discard())
+	require.NoError(t, err)
+	require.Len(t, *requests, 1)
+	assert.Contains(t, (*requests)[0].Header.Get("Authorization"), "Credential=FAKECONTAINERKEY/")
+}
+
+func TestNewS3BackendRecoversFromACredentialEndpointThatDoesNotAnswer(t *testing.T) {
+	clearAmbientS3Credentials(t)
+	previous := s3CredentialRequestTimeout
+	s3CredentialRequestTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { s3CredentialRequestTimeout = previous })
+	server, requests := newListObjectsServer(t, httptest.NewServer)
+	var silent atomic.Bool
+	silent.Store(true)
+	credentialEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if silent.Load() {
+			<-r.Context().Done()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"AccessKeyId":"FAKECONTAINERKEY","SecretAccessKey":"fake-secret","Token":"fake-session","Expiration":%q}`,
+			time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+	}))
+	t.Cleanup(credentialEndpoint.Close)
+	t.Setenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", credentialEndpoint.URL)
+
+	b, err := NewS3Backend(context.Background(), S3Config{Bucket: "checkpoints", Region: "us-east-1", Endpoint: server.URL})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, err = b.Candidates(ctx, logr.Discard())
+	require.Error(t, err)
+	assert.Empty(t, *requests)
+
+	silent.Store(false)
+	require.Eventually(t, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, err := b.Candidates(ctx, logr.Discard())
+		return err == nil
+	}, 30*time.Second, 100*time.Millisecond)
+	assert.Contains(t, (*requests)[len(*requests)-1].Header.Get("Authorization"), "Credential=FAKECONTAINERKEY/")
+}
+
+func TestNewS3BackendRecoversFromAnSTSThatDoesNotAnswer(t *testing.T) {
+	clearAmbientS3Credentials(t)
+	previous := s3CredentialRequestTimeout
+	s3CredentialRequestTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { s3CredentialRequestTimeout = previous })
+	server, requests := newListObjectsServer(t, httptest.NewServer)
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(tokenPath, []byte("fake-projected-token"), 0o600))
+	var silent atomic.Bool
+	silent.Store(true)
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if silent.Load() {
+			<-r.Context().Done()
+			return
+		}
+		w.Header().Set("Content-Type", "text/xml")
+		_, _ = fmt.Fprintf(w, `<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+<AssumeRoleWithWebIdentityResult>
+<Credentials><AccessKeyId>FAKESTSKEY</AccessKeyId><SecretAccessKey>fake-secret</SecretAccessKey><SessionToken>fake-session</SessionToken><Expiration>%s</Expiration></Credentials>
+<SubjectFromWebIdentityToken>fake-subject</SubjectFromWebIdentityToken>
+<AssumedRoleUser><Arn>arn:aws:sts::123456789012:assumed-role/fake/fake</Arn><AssumedRoleId>AROAFAKE:fake</AssumedRoleId></AssumedRoleUser>
+<Provider>fake</Provider><Audience>sts.amazonaws.com</Audience>
+</AssumeRoleWithWebIdentityResult>
+<ResponseMetadata><RequestId>fake-request</RequestId></ResponseMetadata>
+</AssumeRoleWithWebIdentityResponse>`, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+	}))
+	t.Cleanup(sts.Close)
+	t.Setenv("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/fake")
+	t.Setenv("AWS_WEB_IDENTITY_TOKEN_FILE", tokenPath)
+	t.Setenv("AWS_ENDPOINT_URL_STS", sts.URL)
+
+	b, err := NewS3Backend(context.Background(), S3Config{Bucket: "checkpoints", Region: "us-east-1", Endpoint: server.URL})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, err = b.Candidates(ctx, logr.Discard())
+	require.Error(t, err)
+	assert.Empty(t, *requests)
+
+	silent.Store(false)
+	require.Eventually(t, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, err := b.Candidates(ctx, logr.Discard())
+		return err == nil
+	}, 30*time.Second, 100*time.Millisecond)
+	assert.Contains(t, (*requests)[len(*requests)-1].Header.Get("Authorization"), "Credential=FAKESTSKEY/")
+}
+
+func TestNewS3BackendDoesNotBoundS3RequestsByTheCredentialTimeout(t *testing.T) {
+	previous := s3CredentialRequestTimeout
+	s3CredentialRequestTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { s3CredentialRequestTimeout = previous })
+	server, requests := newListObjectsServer(t, func(h http.Handler) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(3 * s3CredentialRequestTimeout)
+			h.ServeHTTP(w, r)
+		}))
+	})
+	credentialsPath := filepath.Join(t.TempDir(), "credentials")
+	writeS3Credentials(t, credentialsPath, "FAKEACCESSKEY")
+
+	b, err := NewS3Backend(context.Background(), S3Config{
+		Bucket: "checkpoints", Region: "us-east-1", Endpoint: server.URL, CredentialsPath: credentialsPath,
+	})
+	require.NoError(t, err)
+
+	_, err = b.Candidates(context.Background(), logr.Discard())
+	require.NoError(t, err)
+	require.Len(t, *requests, 1)
+}
+
+func TestNewS3BackendNeverUsesInstanceMetadata(t *testing.T) {
+	clearAmbientS3Credentials(t)
+	server, requests := newListObjectsServer(t, httptest.NewServer)
+	metadataRequests := 0
+	metadata := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		metadataRequests++
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(metadata.Close)
+	t.Setenv("AWS_EC2_METADATA_SERVICE_ENDPOINT", metadata.URL)
+
+	b, err := NewS3Backend(context.Background(), S3Config{Bucket: "checkpoints", Region: "us-east-1", Endpoint: server.URL})
+	require.NoError(t, err)
+
+	_, err = b.Candidates(context.Background(), logr.Discard())
+	require.Error(t, err)
+	assert.Empty(t, *requests)
+	assert.Zero(t, metadataRequests)
+}
+
 func TestNewS3BackendTrustsCustomCABundle(t *testing.T) {
 	server, requests := newListObjectsServer(t, httptest.NewTLSServer)
 	dir := t.TempDir()
@@ -236,6 +441,25 @@ func TestNewS3BackendTrustsCustomCABundle(t *testing.T) {
 	_, err = b.Candidates(context.Background(), logr.Discard())
 	require.NoError(t, err)
 	assert.Len(t, *requests, 1)
+}
+
+func TestNewS3BackendTrustsTheEnvironmentCABundleForS3(t *testing.T) {
+	server, requests := newListObjectsServer(t, httptest.NewTLSServer)
+	caBundlePath := filepath.Join(t.TempDir(), "ca.pem")
+	require.NoError(t, os.WriteFile(caBundlePath,
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600))
+	t.Setenv("AWS_CA_BUNDLE", caBundlePath)
+	credentialsPath := filepath.Join(t.TempDir(), "credentials")
+	writeS3Credentials(t, credentialsPath, "FAKEACCESSKEY")
+
+	b, err := NewS3Backend(context.Background(), S3Config{
+		Bucket: "checkpoints", Region: "us-east-1", Endpoint: server.URL, CredentialsPath: credentialsPath,
+	})
+	require.NoError(t, err)
+
+	_, err = b.Candidates(context.Background(), logr.Discard())
+	require.NoError(t, err)
+	require.Len(t, *requests, 1)
 }
 
 func TestNewS3BackendRejectsCABundleWithoutCertificates(t *testing.T) {

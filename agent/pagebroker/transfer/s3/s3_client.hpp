@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <mutex>
 #include <optional>
@@ -20,6 +21,19 @@ namespace snapshot::pagebroker {
 inline constexpr char kHttpsEndpointPrefix[] = "https://";
 inline constexpr char kHttpEndpointPrefix[] = "http://";
 inline constexpr char kAwsCaBundleEnv[] = "AWS_CA_BUNDLE";
+inline constexpr char kAwsRegionEnv[] = "AWS_REGION";
+inline constexpr char kAwsDefaultRegionEnv[] = "AWS_DEFAULT_REGION";
+inline constexpr char kAwsSharedCredentialsFileEnv[] = "AWS_SHARED_CREDENTIALS_FILE";
+inline constexpr char kAwsConfigFileEnv[] = "AWS_CONFIG_FILE";
+// The inputs of web identity and container credentials. Under the default
+// credential chain these are the only ambient AWS_* variables that rclone and
+// the native reader receive; the region is chosen by TokenExchangeRegion.
+inline constexpr const char* kWorkloadIdentityVariables[] = {"AWS_ROLE_ARN",
+                                                             "AWS_WEB_IDENTITY_TOKEN_FILE",
+                                                             "AWS_ROLE_SESSION_NAME",
+                                                             "AWS_STS_REGIONAL_ENDPOINTS",
+                                                             "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+                                                             "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE"};
 inline constexpr std::uint64_t kDefaultS3PartSize = 64ULL * 1024 * 1024;
 
 // Connection settings shared by rclone clients and native restore configuration.
@@ -29,15 +43,38 @@ struct S3Connection {
   std::string endpoint;
   bool use_virtual_addressing = true;
   std::string ca_file;
-  // Resolved startup credentials. Never log these values.
+  // Static credentials resolved at startup. Never log these values. All empty
+  // selects the default credential chain, which resolves and refreshes
+  // workload identity credentials on its own.
   std::string access_key_id;
   std::string secret_access_key;
   std::string session_token;
+
+  bool UsesDefaultCredentialChain() const { return access_key_id.empty(); }
+  void ClearCredentials()
+  {
+    access_key_id.clear();
+    secret_access_key.clear();
+    session_token.clear();
+  }
 
   // Checks text, endpoint scheme, absolute CA path and credential completeness without network I/O.
   void Validate() const;
   bool operator==(const S3Connection&) const = default;
 };
+
+// Region of the workload identity token exchange, for rclone and the native
+// reader alike: AWS_REGION, else AWS_DEFAULT_REGION, else the store's region.
+inline std::string
+TokenExchangeRegion(const S3Connection& connection)
+{
+  for (const auto* name : {kAwsRegionEnv, kAwsDefaultRegionEnv}) {
+    const auto* value = std::getenv(name);
+    if (value != nullptr && *value != '\0')
+      return value;
+  }
+  return connection.region;
+}
 
 // Identifies one object using a bucket and its literal key, rather than a URL.
 struct S3ObjectLocation {
@@ -100,7 +137,8 @@ class S3ResponseError : public std::runtime_error {
 // Keep the client alive until all calls return; concurrent calls share resource limits.
 class S3Client {
  public:
-  // Requires the resolved startup credential snapshot; never discovers credentials.
+  // Static credentials are passed to rclone as given. Without them rclone runs
+  // the default credential chain on the workload identity variables captured here.
   explicit S3Client(S3Connection connection, S3Limits limits = {});
   S3Client(const S3Client&) = delete;
   S3Client& operator=(const S3Client&) = delete;

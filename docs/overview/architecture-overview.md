@@ -264,11 +264,13 @@ ambiguous:
   committed snapshot before it attributes the pod's death to the checkpoint.
 - A restore that already completed is detected from its sentinel rather than
   replayed through CRIU.
-
-What is *not* yet automatic is retrying a failed checkpoint: today it ends
-and the caller must request a new one, paying the full model load again.
-[SNEP-394](../design/394-capture-retry/README.md) proposes retrying in
-place against the still-running workload.
+- A failed checkpoint is retried against the workload it already suspended,
+  rather than ending and charging the caller a full model load to ask again.
+  Retry is off by default. The limit is the request's own
+  `checkpointRetryLimit`, or `config.checkpoint.defaultRetryLimit` when it sets
+  none. [SNEP-394](../design/394-capture-retry/README.md) has the design, and
+  [Checkpoint retries](../troubleshooting/checkpoints.md#a-checkpoint-fails-with-retriesexhausted)
+  what an exhausted one reports.
 
 ## Security Boundaries
 

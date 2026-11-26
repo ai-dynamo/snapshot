@@ -54,6 +54,7 @@ using snapshot::pagebroker::Response;
 namespace {
 constexpr char kStorageConfigOption[] = "--storage-config";
 constexpr char kModelStreamerConfigOption[] = "--model-streamer-config";
+constexpr char kNodeCacheRootOption[] = "--node-cache-root";
 constexpr uint32_t kMaxMessageSize = 64 << 10;  // 64 KB
 constexpr size_t kMaxPassedFiles = 253;  // Linux SCM_RIGHTS per-message limit.
 constexpr timeval kConnectionTimeout{30, 0};
@@ -748,6 +749,13 @@ ParseDaemonOptions(std::span<const std::string_view> arguments)
       options.storage_config = input;
     } else if (option == kModelStreamerConfigOption) {
       options.model_streamer_config = input;
+    } else if (option == kNodeCacheRootOption) {
+      // Restore sources are compared lexically against this root, so it must
+      // be absolute and normalized for that comparison to mean containment.
+      const std::filesystem::path root(input);
+      if (!root.is_absolute() || root.lexically_normal() != root)
+        throw std::invalid_argument("invalid value for " + std::string(option) + ": " + std::string(input));
+      options.node_cache_root = root;
     } else {
       throw std::invalid_argument("unknown option: " + std::string(option));
     }
@@ -783,6 +791,12 @@ RunDaemon(const DaemonOptions& options)
     return ExitCode::INVALID_ARGUMENTS;
   }
   model_streamer::settings::ConfigureEnvironment(model_streamer, config ? &*config : nullptr);
+  if (config) {
+    std::cerr << "S3 credentials: "
+              << (config->transfer.connection.UsesDefaultCredentialChain() ? "default credential chain"
+                                                                           : "credentials file")
+              << '\n';
+  }
 
   if (!RaiseFileDescriptorLimit())
     return ExitCode::FAILURE;
@@ -814,7 +828,7 @@ RunDaemon(const DaemonOptions& options)
   }
   try {
     Broker broker(options.staging_directory, options.storage_root, std::move(gpu_engine), std::move(config),
-        kDefaultTransactionLifetime, std::move(model_streamer));
+        kDefaultTransactionLifetime, std::move(model_streamer), options.node_cache_root);
     Serve(listener, broker, options.max_concurrent_requests);
   } catch (const std::exception& failure) {
     std::cerr << "PageBroker: " << failure.what() << '\n';
