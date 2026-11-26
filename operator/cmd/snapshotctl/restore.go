@@ -18,10 +18,11 @@ import (
 )
 
 type restoreOptions struct {
-	ManifestPath string
-	Namespace    string
-	KubeContext  string
-	SnapshotName string
+	ManifestPath   string
+	Namespace      string
+	KubeContext    string
+	SnapshotName   string
+	SeccompProfile string
 }
 
 func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
@@ -41,35 +42,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 	if len(containers) != 1 || strings.TrimSpace(containers[0]) == "" {
 		return nil, fmt.Errorf("PodSnapshot %s/%s must checkpoint exactly one container", namespace, snapshotName)
 	}
-	mappings, err := podcontract.ContainerMappingsFromAnnotations(pod.Annotations, containers[0])
-	if err != nil {
-		return nil, err
-	}
-
-	candidate := &corev1.Pod{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:         pod.Name,
-			GenerateName: pod.GenerateName,
-			Namespace:    namespace,
-			Labels:       pod.Labels,
-			Annotations:  pod.Annotations,
-		},
-		Spec: *pod.Spec.DeepCopy(),
-	}
-	candidate.Spec.RestartPolicy = corev1.RestartPolicyNever
-	restorePod, err := podcontract.Build(
-		candidate,
-		podcontract.Request{
-			SnapshotName:    snapshotName,
-			SourceContainer: containers[0],
-			Mappings:        mappings,
-		},
-		podcontract.Options{
-			SeccompProfile:    podcontract.DefaultSeccompLocalhostProfile,
-			EnableStartupGate: true,
-		},
-	)
+	restorePod, err := buildRestorePod(pod, namespace, snapshotName, containers[0], opts.SeccompProfile)
 	if err != nil {
 		return nil, err
 	}
@@ -87,4 +60,35 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 		RestorePod:  restorePod.Name,
 		Status:      "requested",
 	}, nil
+}
+
+func buildRestorePod(pod *corev1.Pod, namespace, snapshotName, sourceContainer, seccompProfile string) (*corev1.Pod, error) {
+	mappings, err := podcontract.ContainerMappingsFromAnnotations(pod.Annotations, sourceContainer)
+	if err != nil {
+		return nil, err
+	}
+	candidate := &corev1.Pod{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:         pod.Name,
+			GenerateName: pod.GenerateName,
+			Namespace:    namespace,
+			Labels:       pod.Labels,
+			Annotations:  pod.Annotations,
+		},
+		Spec: *pod.Spec.DeepCopy(),
+	}
+	candidate.Spec.RestartPolicy = corev1.RestartPolicyNever
+	return podcontract.Build(
+		candidate,
+		podcontract.Request{
+			SnapshotName:    snapshotName,
+			SourceContainer: sourceContainer,
+			Mappings:        mappings,
+		},
+		podcontract.Options{
+			SeccompProfile:    seccompProfile,
+			EnableStartupGate: true,
+		},
+	)
 }

@@ -128,6 +128,10 @@ sets itself stays, so remove it from the template to get the cluster default.
 - `seccomp.deploy=false`
 - `seccomp.applyToSourcePods=false`
 
+`snapshotctl checkpoint` and `snapshotctl restore` set the same profile. Pass
+`--apply-seccomp-profile=false` to both to run them under `restricted-v2`. See
+[`snapshotctl` CLI](../reference/cli.md#checkpoint).
+
 To keep the profile on older nodes, create an SCC that allows it. This command
 copies `restricted-v2` and adds the profile:
 

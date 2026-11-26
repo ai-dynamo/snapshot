@@ -88,6 +88,12 @@ Checkpoint targets are part of the `PodSnapshot` request, not pod annotations.
 `snapshotctl checkpoint` requires `--container <name>` and records that one
 container in `PodSnapshot.spec.source.podRef.containers`.
 
+`snapshotctl checkpoint` sets the `profiles/block-iouring.json` seccomp profile
+on the source Pod, as the chart does for SnapshotJob source Pods. Pass
+`--apply-seccomp-profile=false` to leave the manifest's seccomp settings
+unchanged, for example under the OpenShift `restricted-v2` SCC. See
+[Install on OpenShift](../get-started/installation.md#install-on-openshift).
+
 `snapshotctl checkpoint` leaves the `PodSnapshot` CR in place as the capture
 record after the checkpoint completes. It is not deleted automatically. A
 `--cleanup` flag to remove it after a successful capture is planned as future
@@ -108,6 +114,11 @@ snapshotctl restore \
 The restore manifest must contain a container with the same name checkpointed by that
 `PodSnapshot`. `snapshotctl` returns once the restore is submitted. Watch the
 pod's `nvidia.com/Restored` status condition, readiness, and events for progress.
+
+`snapshotctl restore` sets the same seccomp profile on each restore destination
+container, and refuses a manifest whose destination container sets a different
+one. Pass `--apply-seccomp-profile=false` to leave the manifest's seccomp
+settings unchanged.
 
 To clone the same checkpoint into multiple containers, add a flat
 source-to-destination map:

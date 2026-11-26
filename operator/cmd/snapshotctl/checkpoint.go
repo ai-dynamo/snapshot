@@ -9,13 +9,13 @@ import (
 	"strings"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/validation"
 
-	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotprotocol "github.com/ai-dynamo/snapshot/operator/internal/protocol"
 )
 
@@ -26,6 +26,7 @@ type checkpointOptions struct {
 	SnapshotName       string
 	Container          string
 	CudaCheckpointWrap bool
+	SeccompProfile     string
 	Timeout            time.Duration
 }
 
@@ -64,19 +65,7 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 	}
 
 	checkpointJobName := captureJobName(snapshotName)
-	job, err := snapshotprotocol.NewSourceJob(&corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{
-			Labels:      pod.Labels,
-			Annotations: pod.Annotations,
-		},
-		Spec: *pod.Spec.DeepCopy(),
-	}, snapshotprotocol.SourceJobOptions{
-		Namespace:       namespace,
-		TargetContainer: containerName,
-		SeccompProfile:  podcontract.DefaultSeccompLocalhostProfile,
-		Name:            checkpointJobName,
-		WrapLaunchJob:   opts.CudaCheckpointWrap,
-	})
+	job, err := buildCheckpointJob(pod, namespace, containerName, checkpointJobName, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -125,6 +114,22 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 		res.BoundContent = strings.TrimSpace(*snap.Status.BoundPodSnapshotContentName)
 	}
 	return res, nil
+}
+
+func buildCheckpointJob(pod *corev1.Pod, namespace, containerName, jobName string, opts checkpointOptions) (*batchv1.Job, error) {
+	return snapshotprotocol.NewSourceJob(&corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels:      pod.Labels,
+			Annotations: pod.Annotations,
+		},
+		Spec: *pod.Spec.DeepCopy(),
+	}, snapshotprotocol.SourceJobOptions{
+		Namespace:       namespace,
+		TargetContainer: containerName,
+		SeccompProfile:  opts.SeccompProfile,
+		Name:            jobName,
+		WrapLaunchJob:   opts.CudaCheckpointWrap,
+	})
 }
 
 func captureJobName(snapshotName string) string {

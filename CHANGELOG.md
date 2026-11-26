@@ -105,6 +105,10 @@ commit-level history for each release is on its
   the block-iouring seccomp profile. The default, `true`, is unchanged. On
   OpenShift the profile needs an SCC that allows it (#1002). See
   [Install on OpenShift](docs/get-started/installation.md#install-on-openshift).
+- `snapshotctl checkpoint --apply-seccomp-profile=false` and
+  `snapshotctl restore --apply-seccomp-profile=false` leave the manifest's
+  seccomp settings unchanged. The default, `true`, is unchanged (#1002). See
+  [`snapshotctl` CLI](docs/reference/cli.md#checkpoint).
 
 ### Changed
 
