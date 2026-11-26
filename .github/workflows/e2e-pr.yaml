@@ -206,17 +206,21 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
-  # Records which manifests this run qualifies, and fails before any GPU time is
-  # spent if the tag no longer resolves to what was built here. The suites install
-  # by tag, then fail unless every running Snapshot container has these digests.
+  # Gives the manifests this attempt built a tag of their own, records them, and
+  # fails before any GPU time is spent if that tag does not resolve to them. The
+  # suites install this tag rather than the per-commit one, which a re-run moves
+  # to new images while some nodes keep resolving it to the earlier attempt's.
+  # They then fail unless every running Snapshot container has these digests.
   candidate:
     name: Verify candidate images
     needs: images
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      packages: read
+      # Adds a tag to the images built above. Runs none of the pull request's code.
+      packages: write
     outputs:
+      tag: ${{ steps.verify.outputs.tag }}
       digests: ${{ steps.verify.outputs.digests }}
     steps:
       - name: Download image digests
@@ -233,23 +237,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check each tag resolves to the digest built here
+      - name: Tag this attempt's images and check their digests
         id: verify
         env:
           REGISTRY: ghcr.io/ai-dynamo/snapshot
-          TAG: ${{ needs.images.outputs.tag }}
+          COMMIT_TAG: ${{ needs.images.outputs.tag }}
         run: |
           set -euo pipefail
+          tag="${COMMIT_TAG}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           record='{}'
           for image in operator agent pagebroker; do
             want="$(cat "digests/digest-${image}.txt")"
-            got="$(docker buildx imagetools inspect "${REGISTRY}/${image}:${TAG}" --format '{{.Manifest.Digest}}')"
+            # Without --prefer-index=false, a single-platform manifest would be
+            # wrapped in a new index with a different digest.
+            docker buildx imagetools create --prefer-index=false \
+              --tag "${REGISTRY}/${image}:${tag}" "${REGISTRY}/${image}@${want}"
+            got="$(docker buildx imagetools inspect "${REGISTRY}/${image}:${tag}" --format '{{.Manifest.Digest}}')"
             if [[ "${got}" != "${want}" ]]; then
-              echo "::error::${REGISTRY}/${image}:${TAG} resolves to ${got}, but this run built ${want}" >&2
+              echo "::error::${REGISTRY}/${image}:${tag} resolves to ${got}, but this run built ${want}" >&2
               exit 1
             fi
             record="$(jq -c --arg image "${image}" --arg digest "${want}" '.[$image] = $digest' <<< "${record}")"
           done
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
           echo "digests=${record}" >> "${GITHUB_OUTPUT}"
           jq -n \
             --arg sha "${GITHUB_SHA}" \
@@ -257,10 +267,11 @@ jobs:
             --arg run_id "${GITHUB_RUN_ID}" \
             --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
             --arg registry "${REGISTRY}" \
-            --arg tag "${TAG}" \
+            --arg tag "${tag}" \
+            --arg commit_tag "${COMMIT_TAG}" \
             --argjson digests "${record}" \
             '{source_commit: $sha, source_ref: $ref, run_id: $run_id, run_attempt: $run_attempt,
-              registry: $registry, tag: $tag, digests: $digests}' > pr-e2e-candidate.json
+              registry: $registry, tag: $tag, commit_tag: $commit_tag, digests: $digests}' > pr-e2e-candidate.json
           {
             echo "### Candidate images"
             echo '```json'
@@ -280,7 +291,7 @@ jobs:
     needs: [check, cpu, images, candidate]
     uses: ./.github/workflows/e2e.yaml
     with:
-      snapshot_tag: ${{ needs.images.outputs.tag }}
+      snapshot_tag: ${{ needs.candidate.outputs.tag }}
       image_digests: ${{ needs.candidate.outputs.digests }}
     permissions:
       contents: read
@@ -291,7 +302,7 @@ jobs:
     needs: [check, cpu, images, candidate]
     uses: ./.github/workflows/e2e-frameworks.yaml
     with:
-      snapshot_tag: ${{ needs.images.outputs.tag }}
+      snapshot_tag: ${{ needs.candidate.outputs.tag }}
       image_digests: ${{ needs.candidate.outputs.digests }}
     permissions:
       # Its benchmark comparison reads the result artifacts of this run.
