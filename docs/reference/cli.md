@@ -94,7 +94,7 @@ record after the checkpoint completes. It is not deleted automatically. A
 work.
 
 When a checkpoint fails or times out, `snapshotctl checkpoint` deletes the
-source Pod and the Job that ran it, and leaves the `PodSnapshot` CR in place for
+source Pod and the Job that ran it. It leaves the `PodSnapshot` CR in place for
 debugging.
 
 ## Restore
