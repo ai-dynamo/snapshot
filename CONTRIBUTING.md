@@ -230,8 +230,15 @@ labeled `lifecycle/stale` and closed 30 days later, as described below.
 
 ## Triage, priority, and inactivity
 
-Maintainers triage new issues weekly and set a priority label. Only maintainers
-apply labels and priorities.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:82828dddbb3310797b3fa92e8570c83ae21c34a6c9d0a588486c47b8977f9f7f -->
+
+Maintainers triage new issues weekly and set priority and approval labels.
+CodeRabbit automatically applies `bug`, `enhancement`, `documentation`, and
+`needs-info` labels according to [the issue labeling rules](.coderabbit.yaml).
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 | Label | Meaning | Target fix |
 | --- | --- | --- |
