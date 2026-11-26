@@ -275,3 +275,69 @@ def test_wait_refetches_package_listings(resolver: ModuleType, monkeypatch: pyte
 def test_wait_excludes_fallback_main(resolver: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(SystemExit):
         run_main(monkeypatch, resolver, "--fallback-main", "--wait-seconds", "60")
+
+
+def answer_after_errors(
+    resolver: ModuleType, monkeypatch: pytest.MonkeyPatch, errors: int, listing: list[dict], code: int = 502
+) -> list[str]:
+    calls: list[str] = []
+
+    def urlopen(request, timeout):
+        calls.append(request.full_url)
+        if len(calls) <= errors:
+            raise resolver.urllib.error.HTTPError(request.full_url, code, "error", None, io.BytesIO())
+        return io.BytesIO(json.dumps(listing if "page=1" in request.full_url else []).encode())
+
+    monkeypatch.setattr(resolver.urllib.request, "urlopen", urlopen)
+    return calls
+
+
+def test_wait_survives_a_server_error_on_a_package_listing(
+    resolver: ModuleType, monkeypatch: pytest.MonkeyPatch, clock: FakeClock, capsys: pytest.CaptureFixture[str]
+) -> None:
+    tag = "v0.0.0-g1a2b3c4d"
+    monkeypatch.setenv("GITHUB_SHA", "1a2b3c4d" + "0" * 32)
+    calls = answer_after_errors(resolver, monkeypatch, 1, [{"metadata": {"container": {"tags": [tag]}}}])
+
+    assert run_main(monkeypatch, resolver, "--wait-seconds", "1200") == 0
+
+    captured = capsys.readouterr()
+    assert f"Resolved Snapshot image tag: {tag}" in captured.out
+    assert f"{calls[0]} answered HTTP 502; retrying in 5s" in captured.err
+    assert calls[1] == calls[0]
+    assert clock.sleeps == [resolver.FETCH_RETRY_SECONDS]
+
+
+def test_release_listing_retries_server_errors(
+    resolver: ModuleType, monkeypatch: pytest.MonkeyPatch, clock: FakeClock
+) -> None:
+    calls = answer_after_errors(resolver, monkeypatch, 2, [{"tag_name": "v0.1.0"}], code=503)
+
+    assert resolver.release_tags({}) == ["v0.1.0"]
+    assert len(calls) == 3
+    assert clock.sleeps == [resolver.FETCH_RETRY_SECONDS, 2 * resolver.FETCH_RETRY_SECONDS]
+
+
+def test_listing_fails_when_the_server_error_persists(
+    resolver: ModuleType, monkeypatch: pytest.MonkeyPatch, clock: FakeClock
+) -> None:
+    calls = answer_after_errors(resolver, monkeypatch, resolver.FETCH_ATTEMPTS, [])
+
+    with pytest.raises(resolver.urllib.error.HTTPError, match="502"):
+        resolver.package_versions("snapshot/operator", {})
+
+    assert len(calls) == resolver.FETCH_ATTEMPTS
+    assert len(clock.sleeps) == resolver.FETCH_ATTEMPTS - 1
+
+
+@pytest.mark.parametrize("code", [401, 403, 404])
+def test_listing_does_not_retry_a_client_error(
+    resolver: ModuleType, monkeypatch: pytest.MonkeyPatch, clock: FakeClock, code: int
+) -> None:
+    calls = answer_after_errors(resolver, monkeypatch, 1, [], code=code)
+
+    with pytest.raises(resolver.urllib.error.HTTPError, match=str(code)):
+        resolver.package_versions("snapshot/operator", {})
+
+    assert len(calls) == 1
+    assert clock.sleeps == []
