@@ -153,10 +153,11 @@ func TestSnapshotReconciler_BindFailureOfALivePodSnapshotKeepsTheContent(t *test
 	assert.Equal(t, "podsnapshotcontent-snap-uid", *bound.Status.BoundPodSnapshotContentName)
 }
 
-// A content that holds this PodSnapshot's content name for another owner made
-// the PodSnapshot fail with ContentConflict. Deleting the PodSnapshot must not
-// delete it.
-func TestSnapshotReconciler_DeleteLeavesAContentOfAnotherOwnerAlone(t *testing.T) {
+// A content that holds this PodSnapshot's content name with another back
+// reference made the PodSnapshot fail with ContentConflict. The operator did
+// not create it for this PodSnapshot, so the lookup for an unrecorded content
+// must not return it.
+func TestSnapshotReconciler_DeleteLeavesTheContentOfAContentConflictAlone(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	now := metav1.Now()
 	snap := makeSnapshotForReconcile()
