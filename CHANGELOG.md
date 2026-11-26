@@ -101,6 +101,9 @@ commit-level history for each release is on its
   `example.com/pool DoesNotExist` keeps the agent off those nodes. An install
   that sets none is unchanged. See
   [Agent DaemonSet and Access](docs/reference/helm-values.md#agent-daemonset-and-access).
+- Triton Inference Server recipe: checkpoint and restore a stock Triton image
+  with no program added to the container. See
+  [Prepare a Triton Inference Server Workload](docs/using-snapshot/supported-frameworks/triton.md).
 
 ### Changed
 

@@ -29,8 +29,10 @@ is Ready when the workload writes the `ready-for-snapshot` file. The restored po
 Ready when the framework writes its post-restore file, such as `vllm-restore-ready`
 for vLLM. Each framework page lists its own under After the Restore:
 [vLLM](supported-frameworks/vllm.md#after-the-restore),
-[SGLang](supported-frameworks/sglang.md#after-the-restore) and
-[TensorRT-LLM](supported-frameworks/tensorrt-llm.md#after-the-restore).
+[SGLang](supported-frameworks/sglang.md#after-the-restore),
+[TensorRT-LLM](supported-frameworks/tensorrt-llm.md#after-the-restore), and
+[Triton](supported-frameworks/triton.md#after-the-restore). Triton writes no
+file. Its restored pod is Ready when its readiness endpoint answers.
 
 ## Choose the Restore Profile
 
@@ -40,8 +42,8 @@ leaves out what only the source pod needs: the init containers (the model downlo
 and, for eight GPUs, the copy of Snapshot's multi-GPU libraries), the container
 arguments and engine settings, and the multi-GPU launcher and annotation.
 
-Each framework ships two profiles under `restore/`, one for each GPU count. Your
-recipe already chose one: `$RESTORE_MANIFEST`, set in
+Each framework ships its profiles under `restore/`, one for each GPU count of
+its recipes. Your recipe already chose one: `$RESTORE_MANIFEST`, set in
 [Set the Names](README.md#set-the-names) from your `FRAMEWORK` and `GPUS`. The table
 lists all of them:
 
@@ -50,6 +52,7 @@ lists all of them:
 | vLLM | [1-gpu.yaml](vllm/restore/1-gpu.yaml) | [8-gpu.yaml](vllm/restore/8-gpu.yaml) |
 | SGLang | [1-gpu.yaml](sglang/restore/1-gpu.yaml) | [8-gpu.yaml](sglang/restore/8-gpu.yaml) |
 | TensorRT-LLM | [1-gpu.yaml](tensorrt-llm/restore/1-gpu.yaml) | [8-gpu.yaml](tensorrt-llm/restore/8-gpu.yaml) |
+| Triton | [1-gpu.yaml](triton/restore/1-gpu.yaml) | None |
 
 A profile works for every model of its framework and GPU count, because the
 model configuration comes from the snapshot. It also works after either

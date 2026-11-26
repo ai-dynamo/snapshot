@@ -28,6 +28,7 @@ This page lists every page in the Snapshot documentation, grouped by section.
 - [Prepare a vLLM Workload](using-snapshot/supported-frameworks/vllm.md) - Make a vLLM workload snapshot-ready.
 - [Prepare an SGLang Workload](using-snapshot/supported-frameworks/sglang.md) - Make an SGLang workload snapshot-ready.
 - [Prepare a TensorRT-LLM Workload](using-snapshot/supported-frameworks/tensorrt-llm.md) - Make a TensorRT-LLM workload snapshot-ready.
+- [Prepare a Triton Inference Server Workload](using-snapshot/supported-frameworks/triton.md) - Make a Triton Inference Server workload snapshot-ready from its stock image.
 - [Use Your Own Engine or Image](using-snapshot/supported-frameworks/use-your-own-engine-or-image.md) - Use an engine other than vLLM, SGLang, or TensorRT-LLM.
 - [Checkpoint a Pod](using-snapshot/checkpoint.md) - Save a running replica's state as a `PodSnapshot`.
 - [Restore a Pod](using-snapshot/restore.md) - Start a new replica from a snapshot.

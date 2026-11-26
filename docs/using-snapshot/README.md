@@ -9,7 +9,7 @@ and ready without cold-starting.
 
 | Phase | What you do | Page |
 |-------|-------------|------|
-| Prepare the workload | Create the ConfigMap with the framework's `app.py` and deploy the source replica | [vLLM](supported-frameworks/vllm.md), [SGLang](supported-frameworks/sglang.md), [TensorRT-LLM](supported-frameworks/tensorrt-llm.md) |
+| Prepare the workload | Create the ConfigMap with the framework's `app.py`, if it has one, and deploy the source replica | [vLLM](supported-frameworks/vllm.md), [SGLang](supported-frameworks/sglang.md), [TensorRT-LLM](supported-frameworks/tensorrt-llm.md), [Triton](supported-frameworks/triton.md) |
 | Checkpoint a running pod | Create a snapshot of the source replica, with a `PodSnapshot` or a `SnapshotJob` | [Checkpoint a Pod](checkpoint.md) |
 | Restore a new pod from the snapshot | Start a new replica from the snapshot | [Restore a Pod](restore.md) |
 
@@ -23,8 +23,9 @@ This page is the setup for the whole flow. You do it once, before you prepare th
 - [Choose Your Recipe](#choose-your-recipe) - Pick the framework, model and GPU
   count, and set the values the commands on the other pages use.
 
-The commands are the same for every inference framework (vLLM, SGLang and
-TensorRT-LLM) and every recipe. The recipe you choose here sets the values they use.
+The commands are the same for every inference framework (vLLM, SGLang,
+TensorRT-LLM, and Triton) and every recipe. The recipe you choose here sets the
+values they use.
 
 > [!NOTE]
 > This section uses `kubectl` to show the resources and the flow. In production, a
@@ -51,7 +52,7 @@ TensorRT-LLM) and every recipe. The recipe you choose here sets the values they 
    | File | What it is |
    |---|---|
    | `model-cache-pvc.yaml` | The model cache PVC, shared by all recipes. |
-   | `<framework>/app.py` | The program that prepares the framework for checkpoint and resumes it after restore. |
+   | `<framework>/app.py` | The program that prepares the framework for checkpoint and resumes it after restore. Triton has none. |
    | `<framework>/capture/<model>.yaml` | The source Deployment, for a `PodSnapshot`. |
    | `<framework>/capture/<model>-snapshotjob.yaml` | The `SnapshotJob`. |
    | `<framework>/restore/1-gpu.yaml`, `8-gpu.yaml` | The restore Deployments, by GPU count. |
@@ -80,6 +81,9 @@ V4.1 Flash, and later runs reuse the files. The model cache is a plain Kubernete
 volume, separate from the [snapshot volume](../get-started/installation.md#snapshot-volume) that
 Snapshot installs.
 
+The Triton recipe mounts the model cache at `/models`. Its first run downloads
+33 MB for DenseNet-121.
+
 The PVC requests 2 TiB with `ReadWriteMany` access from the default storage class,
 which holds all three models. Set `storageClassName` in
 [`model-cache-pvc.yaml`](model-cache-pvc.yaml) if the default does not support
@@ -106,6 +110,7 @@ Choose one row from the table. The commands on the other pages use it.
 | SGLang, DeepSeek V4.1 Flash | `sglang` | `deepseek-v4.1-flash` | `8` |
 | TensorRT-LLM, Qwen3 0.6B | `tensorrt-llm` | `qwen3-0.6b` | `1` |
 | TensorRT-LLM, GLM 5.3 NVFP4 | `tensorrt-llm` | `glm-5.3` | `8` |
+| Triton, DenseNet-121 ONNX | `triton` | `densenet-onnx` | `1` |
 
 ### Set the Recipe Values
 
@@ -172,8 +177,9 @@ export SNAPSHOT_AGENT_IMAGE=$(kubectl get daemonset snapshot-agent \
 
 ## Next Steps
 
-- [vLLM](supported-frameworks/vllm.md), [SGLang](supported-frameworks/sglang.md) or
-  [TensorRT-LLM](supported-frameworks/tensorrt-llm.md) - Prepare the workload for
-  your framework
+- [vLLM](supported-frameworks/vllm.md), [SGLang](supported-frameworks/sglang.md),
+  [TensorRT-LLM](supported-frameworks/tensorrt-llm.md), or
+  [Triton](supported-frameworks/triton.md) - Prepare the workload for your
+  framework
 - [Checkpoint a Pod](checkpoint.md) - Create a snapshot of the source replica
 - [Restore a Pod](restore.md) - Start a new pod from the snapshot

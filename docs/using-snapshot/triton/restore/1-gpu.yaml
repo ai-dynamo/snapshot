@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: triton-1gpu-restored
+spec:
+  replicas: 1
+  progressDeadlineSeconds: 1800
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: triton-1gpu-restored
+  template:
+    metadata:
+      labels:
+        app: triton-1gpu-restored
+      annotations:
+        nvidia.com/restore-from: ${SNAPSHOT_NAME}
+    spec:
+      terminationGracePeriodSeconds: 1
+      runtimeClassName: nvidia
+      securityContext:
+        seccompProfile:
+          type: Localhost
+          localhostProfile: profiles/block-iouring.json
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      containers:
+        - name: main
+          image: nvcr.io/nvidia/tritonserver:26.04-py3@sha256:2c124f26e386c1c817b6b4fdbcca4033145b8bb4510f36755cde749684e533df
+          imagePullPolicy: IfNotPresent
+          # The source's command. Snapshot replaces it with its restore proxy,
+          # which waits for the restore and then follows the restored process.
+          command:
+            - tritonserver
+          env:
+            - name: SNAPSHOT_CONTROL_DIR
+              value: /snapshot-control
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          readinessProbe:
+            httpGet:
+              path: /v2/health/ready
+              port: http
+            periodSeconds: 1
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+            - name: snapshot-control
+              mountPath: /snapshot-control
+              subPath: main
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        - name: snapshot-control
+          emptyDir: {}
