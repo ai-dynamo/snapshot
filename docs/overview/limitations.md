@@ -9,6 +9,11 @@ Snapshot currently focuses on inference cold-start; further use cases are on the
 - Workloads, including multi-GPU workloads, must run on a single node.
   Multi-node is on the [roadmap](../roadmap.md).
 - vGPU is not supported.
+- CUDA Multi-Process Service (MPS) is not supported. The driver refuses to
+  checkpoint a process that is an MPS client, and the checkpoint fails at
+  [checkpointing GPU state](../troubleshooting/checkpoints.md#checkpointing-gpu-state)
+  with `CUDA_ERROR_NOT_SUPPORTED`. Run a workload that you checkpoint without
+  MPS.
 - Runs only on NVIDIA GPUs supported by the required CUDA driver.
 - The checkpointed workload must not have tools that intercept `libcuda.so`
   calls (e.g. Datadog GPU monitoring). CUDA calls may fail or hang after

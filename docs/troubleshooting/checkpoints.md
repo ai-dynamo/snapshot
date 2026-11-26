@@ -228,6 +228,7 @@ it.
 - A kernel still running or a stream still busy when the lock was taken
 - A driver without checkpoint support for this GPU
 - Another process holding the device, such as a GPU monitoring agent
+- A process that is a CUDA MPS client, which the driver refuses with `CUDA_ERROR_NOT_SUPPORTED`
 
 ### waiting for the pod group's other members
 
