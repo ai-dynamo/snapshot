@@ -33,7 +33,7 @@ func ParseSharedCredentials(data []byte) (aws.Credentials, error) {
 		if !ok {
 			continue
 		}
-		value = strings.TrimSpace(value)
+		value = propertyValue(value)
 		switch strings.TrimSpace(key) {
 		case "aws_access_key_id":
 			credentials.AccessKeyID = value
@@ -47,4 +47,20 @@ func ParseSharedCredentials(data []byte) (aws.Credentials, error) {
 		return aws.Credentials{}, fmt.Errorf("the credentials file has no access key in its [default] profile")
 	}
 	return credentials, nil
+}
+
+// propertyValue drops an inline comment and surrounding quotes, as the SDK's
+// shared-credentials parser does.
+func propertyValue(value string) string {
+	for _, comment := range []string{" #", " ;", "\t#", "\t;"} {
+		value, _, _ = strings.Cut(value, comment)
+	}
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 {
+		first, last := value[0], value[len(value)-1]
+		if first == last && (first == '"' || first == '\'') {
+			return value[1 : len(value)-1]
+		}
+	}
+	return value
 }
