@@ -37,6 +37,16 @@ S3 backend. The chart ships the agent and PageBroker as a pair, so
 `image.agent.tag` selects both. With S3, you do not need a `ReadWriteMany`
 storage class. See [Other Backends](../operate/configure-storage.md#other-backends).
 
+With [GPU CustomStorage](#gpu-customstorage), an S3 store also requires Linux
+kernel 6.6 or newer on the node. PageBroker reads and writes the staged GPU data
+with direct I/O, and the memory-backed staging volume accepts direct I/O from
+kernel 6.6. Check with `kubectl get nodes -o wide`. On an older kernel, a
+checkpoint fails at
+[checkpointing GPU state](../troubleshooting/checkpoints.md#checkpointing-gpu-state)
+with `create GPU data file: Invalid argument`. A restore on such a node fails at
+[restoring CUDA state](../troubleshooting/restores.md#restoring-cuda-state)
+with `open GPU data file: Invalid argument`.
+
 ### GPU CustomStorage
 
 Requires CUDA driver API 13.4 or newer, which is user-mode driver (`libcuda.so`)
