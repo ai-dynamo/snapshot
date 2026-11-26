@@ -85,7 +85,7 @@ The Triton recipe mounts the model cache at `/models`. Its first run downloads
 33 MB for DenseNet-121.
 
 The PVC requests 2 TiB with `ReadWriteMany` access from the default storage class,
-which holds all three models. Set `storageClassName` in
+which holds all four models. Set `storageClassName` in
 [`model-cache-pvc.yaml`](model-cache-pvc.yaml) if the default does not support
 `ReadWriteMany`, then create it once:
 

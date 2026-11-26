@@ -28,7 +28,7 @@ spec:
         nvidia.com/gpu.present: "true"
       initContainers:
         - name: model-cache
-          image: nvcr.io/nvidia/tritonserver:26.04-py3@sha256:2c124f26e386c1c817b6b4fdbcca4033145b8bb4510f36755cde749684e533df
+          image: nvcr.io/nvidia/tritonserver:26.04-py3@sha256:6fff5c059ae548ad369f1dad2470522274f58f481858c5a4755e998357358f29
           imagePullPolicy: IfNotPresent
           command:
             - python3
@@ -68,7 +68,7 @@ spec:
               mountPath: /models
       containers:
         - name: main
-          image: nvcr.io/nvidia/tritonserver:26.04-py3@sha256:2c124f26e386c1c817b6b4fdbcca4033145b8bb4510f36755cde749684e533df
+          image: nvcr.io/nvidia/tritonserver:26.04-py3@sha256:6fff5c059ae548ad369f1dad2470522274f58f481858c5a4755e998357358f29
           imagePullPolicy: IfNotPresent
           command:
             - tritonserver
