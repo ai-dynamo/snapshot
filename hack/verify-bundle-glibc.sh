@@ -17,12 +17,18 @@
 # An image is read with `docker create`, which needs it in the local daemon --
 # fine locally, but CI pushes the agent image to a registry rather than loading
 # it, so CI passes the directory.
+#
+# The placeholder needs GNU tar and python3.
 
 set -eu
 
 BUNDLE_SRC=${1:?usage: verify-bundle-glibc.sh <agent-image-or-bundle-dir> [placeholder-image]}
-# Ubuntu 22.04 is glibc 2.35, below the GLIBC_2.38 the agent's tar needs.
-PLACEHOLDER=${2:-ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401}
+# The Python image on Debian 12 has glibc 2.36, below the GLIBC_2.38 the agent's
+# tar needs. Its python3 sets and reads the xattrs, so nothing is installed
+# from a package mirror that can be down or mid-sync.
+PLACEHOLDER=${2:-python:3.12-slim-bookworm@sha256:44cf1793efa7c7a476bb0f2cff81443f4a072c90c1cb127e2924933daa3e8c64}
+# cap_net_raw+ep, as the bytes setcap writes for it.
+CAP_NET_RAW_EP=0100000200200000000000000000000000000000
 
 workdir=$(mktemp -d)
 cleanup() {
@@ -60,18 +66,19 @@ fi
 # The assertions are on what the restore produces, not on the argv: the flags
 # below mirror runtime.ApplyRootfsDiff, and a capability or xattr lost here
 # means the extract-side mask regressed there.
-docker run --rm --platform "linux/$arch" -e DEBIAN_FRONTEND=noninteractive -e LOADER="$loader" \
+docker run --rm --network none --platform "linux/$arch" \
+    -e LOADER="$loader" -e CAPABILITY="$CAP_NET_RAW_EP" \
     -v "$workdir/bundle:/bundle:ro" "$PLACEHOLDER" sh -eu -c '
-    apt-get update -qq >/dev/null
-    apt-get install -y -qq attr libcap2-bin >/dev/null
-
     echo "placeholder: $(. /etc/os-release; echo "$PRETTY_NAME"), glibc $(ldd --version | head -1 | grep -o "[0-9]\+\.[0-9]\+$")"
 
     mkdir -p /src/app /dst
     echo payload > /src/app/prog
     chmod 0755 /src/app/prog
-    setcap cap_net_raw+ep /src/app/prog
-    setfattr -n user.snapshot.cached -v yes /src/app/prog
+    python3 - /src/app/prog <<"EOF"
+import os, sys
+os.setxattr(sys.argv[1], "security.capability", bytes.fromhex(os.environ["CAPABILITY"]))
+os.setxattr(sys.argv[1], "user.snapshot.cached", b"yes")
+EOF
     # As runtime.CaptureRootfsDiff writes it.
     tar --xattrs --xattrs-exclude="trusted.*" -C /src -cf /diff.tar .
 
@@ -87,7 +94,10 @@ docker run --rm --platform "linux/$arch" -e DEBIAN_FRONTEND=noninteractive -e LO
       -C /dst -xf /diff.tar
 
     [ "$(cat /dst/app/prog)" = payload ]
-    getfattr -d --absolute-names /dst/app/prog | grep -q "user.snapshot.cached=\"yes\""
-    getcap /dst/app/prog | grep -q cap_net_raw
+    python3 - /dst/app/prog <<"EOF"
+import os, sys
+assert os.getxattr(sys.argv[1], "user.snapshot.cached") == b"yes"
+assert os.getxattr(sys.argv[1], "security.capability") == bytes.fromhex(os.environ["CAPABILITY"])
+EOF
     echo "bundled tar extracted the rootfs diff with xattrs and capabilities intact"
 '
