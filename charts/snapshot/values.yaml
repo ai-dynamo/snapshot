@@ -301,11 +301,15 @@ daemonset:
 # Seccomp profile configuration
 # CRIU can't checkpoint io_uring; this gates the block-iouring ConfigMap and
 # the initContainer that writes the profile. Set to false on RHCOS 9.6+, which
-# already blocks io_uring at the kernel.
+# already blocks io_uring at the kernel, and set sourcePodProfile to "".
 seccomp:
   # Deploy seccomp profile for blocking io_uring (required for CRIU).
   # Use seccomp.deploy; seccomp.enabled is not a chart value.
   deploy: true
+  # Localhost seccomp profile the operator sets on SnapshotJob source Pods,
+  # relative to the kubelet seccomp directory. "" leaves the podTemplate's
+  # seccomp settings unchanged, so the cluster default applies.
+  sourcePodProfile: profiles/block-iouring.json
 
 # Service account configuration for the agent and PageBroker, which share a pod
 serviceAccount:

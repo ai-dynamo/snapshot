@@ -93,6 +93,7 @@ spec:
             # CuInterpose libraries for opted-in workloads.
             - {{ printf "--cuinterpose-image=%s" (include "snapshot.agentImage" .) | quote }}
             - {{ printf "--cuinterpose-image-pull-policy=%s" .Values.image.agent.pullPolicy | quote }}
+            - {{ printf "--source-pod-seccomp-profile=%s" (.Values.seccomp.sourcePodProfile | default "") | quote }}
             - --snapshot-storage-config=/etc/snapshot/storage.yaml
             {{- if .Values.operator.bindNewContents }}
             - --bind-new-contents=true

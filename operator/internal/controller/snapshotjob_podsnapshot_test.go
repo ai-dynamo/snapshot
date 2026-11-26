@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -132,7 +133,7 @@ func TestSnapshotJobReconcileCreatesPodSnapshotForUnscheduledPod(t *testing.T) {
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
 
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 
@@ -166,7 +167,7 @@ func TestSnapshotJobReconcileSetsPodPendingWhenPodDoesNotExistYet(t *testing.T) 
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
 
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 
@@ -197,7 +198,7 @@ func TestSnapshotJobReconcileObserveRecoversPodSnapshotIdentity(t *testing.T) {
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
 
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	pod := sourcePodForJob(job)
@@ -229,7 +230,7 @@ func TestSnapshotJobReconcileRecoversPendingCapturedCondition(t *testing.T) {
 		Reason: snapshotv1alpha1.ReasonCaptureCompleted, Message: "stale status",
 	})
 
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	pod := sourcePodForJob(job)
@@ -255,7 +256,7 @@ func TestSnapshotJobReconcileCapturedTrueOnPodSnapshotReady(t *testing.T) {
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
 
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	pod := sourcePodForJob(job)
@@ -284,7 +285,7 @@ func TestSnapshotJobReconcileFailedOnPodSnapshotFailed(t *testing.T) {
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
 
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	job.Status.Ready = ptr.To(int32(1))
@@ -326,7 +327,7 @@ func TestSnapshotJobReconcileRestartDoesNotOverwriteTerminalFailure(t *testing.T
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	pod := sourcePodForJob(job)
@@ -378,7 +379,7 @@ func TestSnapshotJobReconcileFailureTargetWinsOverCaptureFailure(t *testing.T) {
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
 
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	job.Status.Conditions = append(job.Status.Conditions, batchv1.JobCondition{
@@ -551,7 +552,7 @@ func TestSnapshotJobReconcileRecordedPodSnapshotMissingFailsWithoutRecreation(t 
 	sj.Status.PodSnapshotName = sj.Name
 	sj.Status.PodSnapshotUID = types.UID("original-snapshot-uid")
 
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	job.UID = sj.Status.SourceJobUID
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
@@ -579,7 +580,7 @@ func TestSnapshotJobReconcileRecordedPodSnapshotCacheMissUsesAuthoritativeReader
 	sj.Status.PodSnapshotName = sj.Name
 	sj.Status.PodSnapshotUID = types.UID("pod-snapshot-uid")
 
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	job.UID = sj.Status.SourceJobUID
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
@@ -610,7 +611,7 @@ func TestSnapshotJobReconcileRecordedPodSnapshotAuthoritativeReadErrorRetries(t 
 	sj.Status.PodSnapshotName = sj.Name
 	sj.Status.PodSnapshotUID = types.UID("pod-snapshot-uid")
 
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	job.UID = sj.Status.SourceJobUID
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
@@ -637,7 +638,7 @@ func TestSnapshotJobReconcileRejectsSameNamePodSnapshotReplacement(t *testing.T)
 	sj.Status.PodSnapshotName = sj.Name
 	sj.Status.PodSnapshotUID = types.UID("original-snapshot-uid")
 
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	job.UID = sj.Status.SourceJobUID
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
@@ -689,7 +690,7 @@ func TestSnapshotJobReconcileRejectsPodSnapshotSpecDriftBeforeUIDBinding(t *test
 			s := snapshotJobReconcilerScheme()
 			sj := minimalSnapshotJob()
 			sj.Status.SourceJobUID = types.UID("source-job-uid")
-			job, err := buildSourceJob(sj)
+			job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 			require.NoError(t, err)
 			job.UID = sj.Status.SourceJobUID
 			require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
@@ -722,7 +723,7 @@ func TestValidatePodSnapshotForAdoptionIgnoresMutableMetadata(t *testing.T) {
 		Labels:      map[string]string{"dynamo.nvidia.com/worker-generation": "abc123"},
 		Annotations: map[string]string{"dynamo.nvidia.com/gms-mode": "enabled"},
 	}
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	job.UID = types.UID("job-uid")
 	pod := sourcePodForJob(job)
@@ -742,7 +743,7 @@ func TestValidatePodSnapshotForAdoptionIgnoresMutableMetadata(t *testing.T) {
 func TestFindSourcePod(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	job.UID = types.UID("job-uid")
 
@@ -799,7 +800,7 @@ func TestSnapshotJobReconcileSourcePodLookupIsCacheFirst(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	pod := sourcePodForJob(job)

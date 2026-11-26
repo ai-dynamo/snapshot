@@ -54,7 +54,7 @@ func TestBuildSourceJobKeepsTheReadinessProbeForACheckpointReadinessProbe(t *tes
 			sj.Spec.PodTemplate.Spec.Containers[0].ReadinessProbe = serving
 			sj.Spec.PodSnapshotTemplate.Containers = tc.settings
 
-			job, err := buildSourceJob(sj)
+			job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 			require.NoError(t, err)
 
 			probe := requireContainer(t, job.Spec.Template.Spec.Containers, "worker").ReadinessProbe
@@ -78,7 +78,7 @@ func TestBuildSourceJobNonTargetArtifactContract(t *testing.T) {
 		return sj
 	}
 	sj := makeJob()
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	saver := requireContainer(t, job.Spec.Template.Spec.Containers, "saver")
 	assert.Contains(t, saver.Env, corev1.EnvVar{Name: podcontract.SnapshotJobUIDEnv, Value: "sj-uid"})
@@ -92,7 +92,7 @@ func TestBuildSourceJobNonTargetArtifactContract(t *testing.T) {
 	legacy := minimalSnapshotJob()
 	legacy.Spec.PodTemplate.Annotations = map[string]string{podcontract.NonTargetArtifactContainersAnnotation: "saver"}
 	legacy.Spec.PodTemplate.Spec.Containers = append(legacy.Spec.PodTemplate.Spec.Containers, corev1.Container{Name: "saver"})
-	legacyJob, err := buildSourceJob(legacy)
+	legacyJob, err := buildSourceJob(legacy, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err, "existing annotation-only jobs remain runnable after an operator upgrade")
 	assert.Equal(t, "saver", legacyJob.Spec.Template.Annotations[podcontract.NonTargetArtifactContainersAnnotation])
 	legacySnap, err := buildPodSnapshot(legacy, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "source", UID: "pod-uid"}})
@@ -103,7 +103,7 @@ func TestBuildSourceJobNonTargetArtifactContract(t *testing.T) {
 	withOutputPath.Spec.PodTemplate.Spec.Containers[1].Env = []corev1.EnvVar{{
 		Name: "OUT", Value: "/mnt/$(SNAPSHOT_NON_TARGET_ARTIFACT_SUBDIR)",
 	}}
-	outputJob, err := buildSourceJob(withOutputPath)
+	outputJob, err := buildSourceJob(withOutputPath, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	outputSaver := requireContainer(t, outputJob.Spec.Template.Spec.Containers, "saver")
 	require.Len(t, outputSaver.Env, 3)
@@ -145,7 +145,7 @@ func TestBuildSourceJobNonTargetArtifactContract(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			sj := makeJob()
 			tc.mutate(sj)
-			_, err := buildSourceJob(sj)
+			_, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 			require.Error(t, err)
 		})
 	}
@@ -155,7 +155,7 @@ func TestBuildSourceJob(t *testing.T) {
 	t.Run("wires identity, target, and options through to NewSourceJob", func(t *testing.T) {
 		sj := minimalSnapshotJob()
 
-		job, err := buildSourceJob(sj)
+		job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 		require.NoError(t, err)
 
 		assert.Equal(t, "warm-worker", job.Name)
@@ -177,7 +177,7 @@ func TestBuildSourceJob(t *testing.T) {
 		sj := minimalSnapshotJob()
 		sj.Spec.PodTemplate.Labels = map[string]string{"existing": "label"}
 
-		job, err := buildSourceJob(sj)
+		job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 		require.NoError(t, err)
 
 		assert.Equal(t, "warm-worker", job.Spec.Template.Labels[snapshotv1alpha1.SnapshotJobOwnerLabel])
@@ -193,7 +193,7 @@ func TestBuildSourceJob(t *testing.T) {
 		sj.Spec.PodTemplate.Spec.Containers = append(sj.Spec.PodTemplate.Spec.Containers,
 			corev1.Container{Name: "helper", Image: "test:latest"})
 
-		job, err := buildSourceJob(sj)
+		job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 		require.NoError(t, err)
 
 		var names []string
@@ -221,7 +221,7 @@ func TestBuildSourceJob(t *testing.T) {
 	t.Run("readiness probe reads the ready file from the control mount", func(t *testing.T) {
 		sj := minimalSnapshotJob()
 
-		job, err := buildSourceJob(sj)
+		job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 		require.NoError(t, err)
 
 		main := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
@@ -243,7 +243,7 @@ func TestBuildSourceJob(t *testing.T) {
 		sj := minimalSnapshotJob()
 		sj.Spec.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "worker"}
 
-		job, err := buildSourceJob(sj)
+		job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 		require.NoError(t, err)
 
 		main := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
@@ -257,7 +257,7 @@ func TestBuildSourceJob(t *testing.T) {
 		sj := minimalSnapshotJob()
 		sj.Name = strings.Repeat("a", 64)
 
-		_, err := buildSourceJob(sj)
+		_, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 		require.Error(t, err)
 	})
 
@@ -266,7 +266,7 @@ func TestBuildSourceJob(t *testing.T) {
 			sj := minimalSnapshotJob()
 			sj.Name = name
 
-			_, err := buildSourceJob(sj)
+			_, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 			require.NoError(t, err)
 		}
 	})
@@ -275,7 +275,7 @@ func TestBuildSourceJob(t *testing.T) {
 		sj := minimalSnapshotJob()
 		sj.Spec.PodSnapshotTemplate.TargetContainers = nil
 
-		_, err := buildSourceJob(sj)
+		_, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 		require.Error(t, err)
 	})
 
@@ -296,7 +296,7 @@ func TestBuildSourceJob(t *testing.T) {
 				sj := minimalSnapshotJob()
 				sj.Spec.PodSnapshotTemplate.Metadata = metadata
 
-				_, err := buildSourceJob(sj)
+				_, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 				require.Error(t, err)
 			})
 		}
@@ -311,7 +311,7 @@ func TestBuildSourceJob(t *testing.T) {
 			corev1.Container{Name: "helper", Image: "test:latest"})
 		sj.Spec.PodSnapshotTemplate.TargetContainers = []string{"worker", "helper"}
 
-		_, err := buildSourceJob(sj)
+		_, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 		require.Error(t, err)
 	})
 
@@ -319,7 +319,7 @@ func TestBuildSourceJob(t *testing.T) {
 		sj := minimalSnapshotJob()
 		sj.Spec.PodSnapshotTemplate.TargetContainers = []string{"does-not-exist"}
 
-		_, err := buildSourceJob(sj)
+		_, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 		require.Error(t, err)
 	})
 
@@ -327,9 +327,55 @@ func TestBuildSourceJob(t *testing.T) {
 		sj := minimalSnapshotJob()
 		sj.Spec.PodTemplate.Spec.Containers = nil
 
-		_, err := buildSourceJob(sj)
+		_, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 		require.Error(t, err)
 	})
+}
+
+func TestBuildSourceJobSeccompProfile(t *testing.T) {
+	runtimeDefault := &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}
+	for _, tc := range []struct {
+		name     string
+		profile  string
+		template *corev1.SeccompProfile
+		want     *corev1.SeccompProfile
+	}{
+		{
+			name:    "sets the configured profile",
+			profile: "profiles/custom.json",
+			want:    &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeLocalhost, LocalhostProfile: ptr.To("profiles/custom.json")},
+		},
+		{
+			name:     "replaces the Pod template's profile",
+			profile:  "profiles/custom.json",
+			template: runtimeDefault,
+			want:     &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeLocalhost, LocalhostProfile: ptr.To("profiles/custom.json")},
+		},
+		{
+			name: "empty sets no profile",
+		},
+		{
+			name:     "empty keeps the Pod template's profile",
+			template: runtimeDefault,
+			want:     runtimeDefault,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sj := minimalSnapshotJob()
+			if tc.template != nil {
+				sj.Spec.PodTemplate.Spec.SecurityContext = &corev1.PodSecurityContext{SeccompProfile: tc.template.DeepCopy()}
+			}
+
+			job, err := buildSourceJob(sj, tc.profile)
+			require.NoError(t, err)
+
+			var got *corev1.SeccompProfile
+			if sc := job.Spec.Template.Spec.SecurityContext; sc != nil {
+				got = sc.SeccompProfile
+			}
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }
 
 func requireContainer(t *testing.T, containers []corev1.Container, name string) *corev1.Container {

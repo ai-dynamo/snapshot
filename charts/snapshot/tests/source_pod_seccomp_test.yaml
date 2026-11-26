@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: SnapshotJob source Pod seccomp profile
+templates:
+  - templates/operator-deployment.yaml
+tests:
+  - it: defaults to the block-iouring profile
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "--source-pod-seccomp-profile=profiles/block-iouring.json"
+
+  - it: passes a custom profile to the operator
+    set:
+      seccomp.sourcePodProfile: profiles/custom.json
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "--source-pod-seccomp-profile=profiles/custom.json"
+
+  - it: passes an empty profile so the operator sets none
+    set:
+      seccomp.sourcePodProfile: ""
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "--source-pod-seccomp-profile="
