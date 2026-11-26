@@ -183,6 +183,10 @@ commit-level history for each release is on its
 
 ### Fixed
 
+- A restore of a GPU snapshot into a container without a GPU is now refused as
+  `RestoreIncompatible` with `gpu-count: source <n>, target 0`. It failed with
+  `nvidia-smi via nsenter (pid <pid>) failed: exit status 127`. See
+  [Restore troubleshooting](docs/troubleshooting/restores.md#inspecting-placeholder-container).
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).

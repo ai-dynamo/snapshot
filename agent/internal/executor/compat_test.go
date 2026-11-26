@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/testr"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/require"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/criu"
@@ -101,6 +102,65 @@ func TestRefuseMIGRestore(t *testing.T) {
 			}
 		})
 	}
+}
+
+// deviceRulesRuntime resolves a container whose OCI spec carries the device
+// cgroup rules a container runtime writes for a container without a GPU.
+type deviceRulesRuntime struct {
+	restoreFakeRuntime
+}
+
+func (r *deviceRulesRuntime) ResolveContainer(context.Context, string) (int, *specs.Spec, error) {
+	return 123, &specs.Spec{
+		Process: &specs.Process{},
+		Linux: &specs.Linux{Resources: &specs.LinuxResources{
+			Devices: []specs.LinuxDeviceCgroup{{Allow: false, Access: "rwm"}},
+		}},
+	}, nil
+}
+
+// A restore Pod that asks for no GPU gets no GPU device node, no nvidia-smi and
+// none of the files the NVIDIA runtime mounts beside a GPU. The refusal names
+// the GPU count, not nsenter's exit status and not each of those files.
+func TestInspectRestoreRefusesContainerWithoutGPU(t *testing.T) {
+	hostProc := t.TempDir()
+	root := filepath.Join(hostProc, "123", "root")
+	card := filepath.Join(root, "proc", "driver", "nvidia", "gpus", "0000:00:1e.0")
+	require.NoError(t, os.MkdirAll(card, 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "dev"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(card, "information"),
+		[]byte("Model: \t\t NVIDIA A10G\nGPU UUID: \t GPU-node\nDevice Minor: \t 0\n"), 0o644))
+	originalHostProc := hostProcPath
+	t.Cleanup(func() { hostProcPath = originalHostProc })
+	hostProcPath = hostProc
+
+	tools := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tools, "nsenter"), []byte("#!/bin/sh\nexit 127\n"), 0o755))
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	manifest := types.NewCheckpointManifest(
+		"content-uid-123",
+		"main",
+		types.CRIUDumpManifest{ExtMnt: map[string]string{"/usr/bin/nvidia-smi": "/usr/bin/nvidia-smi"}},
+		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
+		types.OverlayManifest{},
+		types.HostManifest{},
+	)
+	manifest.CUDA = types.CUDAManifest{PIDs: []int{1}, SourceGPUUUIDs: []string{"GPU-source"}}
+
+	// No Pod name, so discovery asks neither Kubernetes nor kubelet.
+	_, _, err := inspectRestore(context.Background(), &deviceRulesRuntime{}, testr.New(t), RestoreRequest{
+		ContentUID:               "content-uid-123",
+		ContainerID:              "placeholder-id",
+		ArtifactContainerName:    "main",
+		DestinationContainerName: "main",
+		WithoutProxy:             true,
+	}, manifest)
+
+	var incompatible *compat.IncompatibleError
+	require.ErrorAs(t, err, &incompatible)
+	require.Equal(t, compat.GateInspect, incompatible.Gate)
+	require.Equal(t, "restore refused as incompatible: gpu-count: source 1, target 0", err.Error())
 }
 
 func TestRefuseUnlabeledRestore(t *testing.T) {

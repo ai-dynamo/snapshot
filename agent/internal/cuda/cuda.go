@@ -185,6 +185,8 @@ func listProcfsGPUs(hostProcPath string, pid int, spec *specs.Spec) (VisibleGPUs
 	}
 	busIDs := make([]string, 0, len(entries))
 	devices := map[string]compat.GPUDevice{}
+	// noNode holds while no card that procfs lists has a node in the container.
+	noNode := len(entries) > 0
 	for _, entry := range entries {
 		information, err := os.ReadFile(filepath.Join(gpusDir, entry.Name(), "information"))
 		if err != nil {
@@ -196,8 +198,10 @@ func listProcfsGPUs(hostProcPath string, pid int, spec *specs.Spec) (VisibleGPUs
 			return VisibleGPUs{}, false
 		}
 		if _, err := os.Stat(filepath.Join(root, "dev", "nvidia"+minor)); err != nil {
+			noNode = noNode && os.IsNotExist(err)
 			continue
 		}
+		noNode = false
 		// A node can exist in the container's /dev while its device cgroup
 		// denies opening it. GPU Memory Service does not count such a GPU.
 		number, err := strconv.ParseInt(minor, 10, 64)
@@ -209,7 +213,11 @@ func listProcfsGPUs(hostProcPath string, pid int, spec *specs.Spec) (VisibleGPUs
 		devices[busID] = compat.GPUDevice{UUID: uuid, ProductName: fields["Model"]}
 	}
 	if len(busIDs) == 0 {
-		return VisibleGPUs{}, false
+		// With no node for any card the container can open none: it holds no
+		// GPU, and a container that was given none usually has no nvidia-smi
+		// to ask. Nodes that the rules do not allow come from a runtime that
+		// grants GPUs outside the spec, so only nvidia-smi can list those.
+		return VisibleGPUs{}, noNode
 	}
 	sort.Strings(busIDs)
 	var visible VisibleGPUs
