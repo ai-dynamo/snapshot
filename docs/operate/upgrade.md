@@ -11,8 +11,8 @@ resource definitions (CRDs) for you as part of the upgrade.
 ## Upgrade Snapshot
 
 Replace `<version>` with the release you want from the
-[releases page](https://github.com/ai-dynamo/snapshot/releases). Then upgrade in
-one of two ways:
+[releases page](https://github.com/ai-dynamo/snapshot/releases), without the
+leading `v`. For release `v0.3.0`, use `0.3.0`. Then upgrade in one of two ways:
 
 - **Pass your values again.** Run `helm upgrade` with the same `--set` values
   you installed with:
