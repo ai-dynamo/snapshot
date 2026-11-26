@@ -90,6 +90,19 @@ fn reply(connection: UnixStream, namespace_pid: NamespacePid, result: Result<Rep
     protocol::send(&connection, &response, None).unwrap();
 }
 
+/// Wait up to `timeout` for a descriptor in `descriptors` and return how many are ready.
+/// A signal can interrupt the wait, as it does under amd64 emulation on an arm64 host, so
+/// an interrupted wait starts again.
+fn poll_ready(descriptors: &mut [PollFd<'_>], timeout: Duration) -> usize {
+    let timeout = Timespec::try_from(timeout).unwrap();
+    loop {
+        match poll(descriptors, Some(&timeout)) {
+            Err(rustix::io::Errno::INTR) => {}
+            ready => return ready.unwrap(),
+        }
+    }
+}
+
 /// Pass `directory` to the coordinator as descriptor `CHECKPOINT_FD` and return the path
 /// that names it there, as the agent does.
 fn inherit(command: &mut Command, directory: &OwnedFd) -> PathBuf {
@@ -206,7 +219,7 @@ impl Harness {
             .values()
             .map(|listener| PollFd::new(listener, PollFlags::IN))
             .collect();
-        let pending = poll(&mut listeners, Some(&Timespec::try_from(timeout).unwrap())).unwrap();
+        let pending = poll_ready(&mut listeners, timeout);
         assert_eq!(pending, 0, "{message}");
     }
 
@@ -257,7 +270,7 @@ impl Harness {
         let timeout = HANG_TIMEOUT;
         let listener = &self.listeners[&pid];
         let mut pending = [PollFd::new(listener, PollFlags::IN)];
-        let ready = poll(&mut pending, Some(&Timespec::try_from(timeout).unwrap())).unwrap();
+        let ready = poll_ready(&mut pending, timeout);
         assert_eq!(ready, 1, "no {expected:?} request for {pid}");
         let (connection, _) = listener.accept().unwrap();
         connection.set_read_timeout(Some(timeout)).unwrap();
