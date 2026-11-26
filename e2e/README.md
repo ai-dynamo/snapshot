@@ -134,7 +134,8 @@ can iterate on one set of images; `k3d registry delete k3d-snapshot-registry`
 discards them.
 
 The suite builds the images for the platform of the Docker daemon, so it also
-runs with Docker Desktop on an Apple Silicon Mac.
+runs with Docker Desktop on an Apple Silicon Mac. It has not been run on a
+native Linux arm64 host, and CI runs it on linux/amd64 only.
 
 When running the stages separately against the k3d helper cluster, also export
 `SNAPSHOT_E2E_MODE=direct` and `SNAPSHOT_E2E_CPU_ONLY=true` for installation,
