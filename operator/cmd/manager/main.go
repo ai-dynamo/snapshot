@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -112,7 +113,8 @@ func main() {
 		LeaderElectionID:              "snapshot-operator.nvidia.com",
 		LeaderElectionReleaseOnCancel: true,
 		Cache: cache.Options{ByObject: map[client.Object]cache.ByObject{
-			&corev1.Pod{}: {Transform: controller.TrimPodForCache},
+			&corev1.Pod{}:  {Transform: controller.TrimPodForCache},
+			&batchv1.Job{}: {Transform: controller.TrimJobForCache},
 		}},
 	})
 	if err != nil {
