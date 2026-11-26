@@ -11,14 +11,16 @@ import (
 	"strings"
 )
 
-const directoryName = "artifacts"
+// DirectoryName is the directory, below a storage root, that holds all
+// checkpoint artifacts.
+const DirectoryName = "artifacts"
 
 // ResolveRoot returns the reserved directory containing all content roots.
 func ResolveRoot(basePath string) (string, error) {
 	if err := ValidateBasePath(basePath); err != nil {
 		return "", err
 	}
-	return filepath.Join(basePath, directoryName), nil
+	return filepath.Join(basePath, DirectoryName), nil
 }
 
 // ResolveContentRoot returns the complete filesystem root owned by one immutable content UID.

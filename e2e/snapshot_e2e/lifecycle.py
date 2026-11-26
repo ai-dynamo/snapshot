@@ -1174,6 +1174,143 @@ def create_artifact_staging_file(
     )
 
 
+NODE_CACHE_VOLUME = "node-cache"
+
+
+def node_cache_host_path(config: k8s.E2EConfig) -> str | None:
+    """The node directory the chart mounts as the node cache, or None when off.
+
+    Read from the agent DaemonSet, so a test follows the install it runs against.
+    """
+    for daemonset in k8s.list_snapshot_daemonsets(
+        config.namespace, config.release, "snapshot-agent"
+    ):
+        for volume in daemonset.spec.template.spec.volumes or []:
+            if volume.name == NODE_CACHE_VOLUME and volume.host_path:
+                return volume.host_path.path
+    return None
+
+
+def _node_cache_pod_spec(
+    config: k8s.E2EConfig, run: TestRun, node: str, script: str, host_path: str, name: str
+) -> dict:
+    """Pod that runs ``script`` on ``node`` with the store and the node cache mounted."""
+    return {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": name, "namespace": config.namespace, "labels": run.labels},
+        "spec": {
+            "nodeName": node,
+            "restartPolicy": "Never",
+            "containers": [
+                {
+                    "name": "copy",
+                    "image": run.image,
+                    "imagePullPolicy": "IfNotPresent",
+                    "command": ["/bin/bash", "-ec", script],
+                    # Checkpoint files belong to root and keep their modes.
+                    "securityContext": {"runAsUser": 0},
+                    "volumeMounts": [
+                        {"name": "store", "mountPath": "/store", "readOnly": True},
+                        {"name": "local", "mountPath": "/local"},
+                    ],
+                }
+            ],
+            "volumes": [
+                {
+                    "name": "store",
+                    "persistentVolumeClaim": {"claimName": config.pvc_name},
+                },
+                {"name": "local", "hostPath": {"path": host_path, "type": "Directory"}},
+            ],
+        },
+    }
+
+
+def run_node_cache_pod(
+    config: k8s.E2EConfig,
+    run: TestRun,
+    node: str,
+    script: str,
+    *,
+    timeout: int = 180,
+) -> None:
+    """Run a script on ``node``, as the administrator in the storage guide does.
+
+    The store is mounted read-only at /store and the node cache at /local.
+    """
+    host_path = node_cache_host_path(config)
+    if host_path is None:
+        raise AssertionError("the node cache is not enabled in this install")
+    name = f"{run.suffix}-copy"
+    k8s.create_pod(_node_cache_pod_spec(config, run, node, script, host_path, name))
+
+    def finished() -> str | None:
+        phase = k8s.read_pod(config.namespace, name).status.phase
+        return phase if phase in TERMINAL_POD_PHASES else None
+
+    try:
+        phase = wait_for(f"node cache pod {config.namespace}/{name}", finished, timeout)
+        if phase != "Succeeded":
+            raise AssertionError(
+                f"node cache pod {name} ended {phase}: "
+                f"{k8s.pod_logs(config.namespace, name)}"
+            )
+    finally:
+        if k8s.delete_pod(config.namespace, name):
+            wait_for_pod_deleted(config.namespace, name)
+
+
+def place_node_cache_copy(
+    config: k8s.E2EConfig,
+    run: TestRun,
+    node: str,
+    content_uid: str,
+    *,
+    manifest_content_uid: str | None = None,
+) -> None:
+    """Place a copy of one checkpoint in the node cache, as the guide says to.
+
+    ``manifest_content_uid`` makes the copy belong to another checkpoint.
+    """
+    source = f"/store/artifacts/{content_uid}/containers/{CONTAINER}"
+    parent = f"/local/artifacts/{content_uid}/containers"
+    incoming = f"/local/.incoming-{content_uid}-{CONTAINER}"
+    steps = [
+        f"rm -rf {shlex.quote(incoming)}",
+        f"cp -a {shlex.quote(source)} {shlex.quote(incoming)}",
+    ]
+    if manifest_content_uid is not None:
+        steps.append(
+            f"sed -i s/{shlex.quote(content_uid)}/{shlex.quote(manifest_content_uid)}/g "
+            f"{shlex.quote(incoming)}/manifest.yaml"
+        )
+    steps += [
+        f"mkdir -p {shlex.quote(parent)}",
+        # -T fails instead of moving the copy into one that is already there.
+        f"mv -T {shlex.quote(incoming)} {shlex.quote(parent)}/{CONTAINER}",
+    ]
+    run_node_cache_pod(config, run, node, " && ".join(steps))
+
+
+def remove_node_cache_copy(
+    config: k8s.E2EConfig,
+    run: TestRun,
+    node: str,
+    content_uid: str,
+) -> None:
+    """Remove a checkpoint's copy from the node cache, in the guide's two steps."""
+    copy = shlex.quote(f"/local/artifacts/{content_uid}")
+    removing = shlex.quote(f"/local/.removing-{content_uid}")
+    incoming = shlex.quote(f"/local/.incoming-{content_uid}-{CONTAINER}")
+    run_node_cache_pod(
+        config,
+        run,
+        node,
+        f"if [ -d {copy} ]; then mv {copy} {removing}; fi && rm -rf {removing} {incoming}",
+    )
+
+
 def host_monitoring_agents(config: k8s.E2EConfig, node: str) -> str:
     """Host-level monitoring agents (Datadog, DCGM) running on ``node``.
 
@@ -1283,8 +1420,14 @@ def assert_restored_state(
       exit 1
     fi
     before=$(awk '/^observation / {{count++}} END {{print count+0}}' {OBSERVATIONS})
-    sleep 12
-    after=$(awk '/^observation / {{count++}} END {{print count+0}}' {OBSERVATIONS})
+    after=$before
+    for ((attempt=0; attempt<12; attempt++)); do
+      sleep 1
+      after=$(awk '/^observation / {{count++}} END {{print count+0}}' {OBSERVATIONS})
+      if test "$after" -gt "$before"; then
+        break
+      fi
+    done
     echo "source_token=$source_token restore_token=$restore_token checkpoint_observations={checkpoint_observations} before=$before after=$after"
     test "$before" -ge "{checkpoint_observations}"
     test "$after" -gt "$before"
