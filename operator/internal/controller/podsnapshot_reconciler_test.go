@@ -228,41 +228,222 @@ func TestSnapshotReconciler_BuildPodSnapshotContentCopiesContainersVerbatim(t *t
 	snap.Spec.Source.PodRef.Containers = []string{"engine-0"}
 	pod := scheduledPod()
 
-	content := r.buildPodSnapshotContent(snap, "content-x", pod)
+	content := r.buildPodSnapshotContent(snap, "content-x", pod, nil)
 	assert.Equal(t, []string{"engine-0"}, content.Spec.Source.PodRef.Containers,
 		"containers are copied verbatim, never defaulted to main")
 }
 
-func TestSnapshotReconciler_BuildPodSnapshotContentBindsTheConfiguredStore(t *testing.T) {
+func readyStore(name string) *snapshotv1alpha1.SnapshotStore {
+	return &snapshotv1alpha1.SnapshotStore{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec:       snapshotv1alpha1.SnapshotStoreSpec{ReclaimPolicy: snapshotv1alpha1.ReclaimPolicyRetain},
+		Status: snapshotv1alpha1.SnapshotStoreStatus{
+			StoreID: "store-v1-" + strings.Repeat("a", 64),
+			Conditions: []metav1.Condition{{
+				Type: snapshotv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue, Reason: ReasonStoreReachable,
+			}},
+		},
+	}
+}
+
+func bindingReconciler(r *PodSnapshotReconciler) *PodSnapshotReconciler {
+	r.BindNewContents = true
+	r.DefaultStoreName = "default"
+	return r
+}
+
+func TestSnapshotReconciler_BuildPodSnapshotContentBindsTheStore(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap := makeSnapshotForReconcile()
 	pod := scheduledPod()
+	r := makeSnapshotReconciler(s)
 
-	legacy := makeSnapshotReconciler(s).buildPodSnapshotContent(snap, "content-x", pod)
-	assert.Nil(t, legacy.Spec.Storage, "no configured store keeps producing legacy content")
+	legacy := r.buildPodSnapshotContent(snap, "content-x", pod, nil)
+	assert.Nil(t, legacy.Spec.Storage, "no store keeps producing legacy content")
+	assert.NotContains(t, legacy.Labels, snapshotv1alpha1.SnapshotStoreLabel)
 
-	bound := makeSnapshotReconciler(s)
-	bound.StoreID = "store-v1-" + strings.Repeat("a", 64)
-	content := bound.buildPodSnapshotContent(snap, "content-x", pod)
+	store := readyStore("gold")
+	content := r.buildPodSnapshotContent(snap, "content-x", pod, store)
 	require.NotNil(t, content.Spec.Storage)
-	assert.Equal(t, bound.StoreID, content.Spec.Storage.StoreID)
+	assert.Equal(t, store.Status.StoreID, content.Spec.Storage.StoreID)
+	assert.Equal(t, "gold", content.Spec.Storage.SnapshotStoreName)
+	assert.Equal(t, snapshotv1alpha1.ReclaimPolicyRetain, content.Spec.Storage.ReclaimPolicy)
+	assert.Equal(t, "gold", content.Labels[snapshotv1alpha1.SnapshotStoreLabel])
+	assert.Equal(t, "node-a", content.Labels[snapshotv1alpha1.SnapshotNodeLabel])
 }
 
-func TestSnapshotReconciler_CreatedContentCarriesTheStoreBinding(t *testing.T) {
-	s := snapshotReconcilerScheme()
-	snap := makeSnapshotForReconcile()
-	r := makeSnapshotReconciler(s, snap, scheduledPod())
-	r.StoreID = "store-v1-" + strings.Repeat("b", 64)
-
-	reconcileSnapshot(t, r, snap.Name)
-
+func boundContentOf(t *testing.T, r *PodSnapshotReconciler, snapName string) *snapshotv1alpha1.PodSnapshotContent {
+	t.Helper()
 	updated := &snapshotv1alpha1.PodSnapshot{}
-	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snapName}, updated))
 	require.NotNil(t, updated.Status.BoundPodSnapshotContentName)
 	content := &snapshotv1alpha1.PodSnapshotContent{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: *updated.Status.BoundPodSnapshotContentName}, content))
+	return content
+}
+
+func readyReasonOf(t *testing.T, r *PodSnapshotReconciler, snapName string) string {
+	t.Helper()
+	snap := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snapName}, snap))
+	cond := meta.FindStatusCondition(snap.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady)
+	require.NotNil(t, cond)
+	return cond.Reason
+}
+
+func TestSnapshotReconciler_UnnamedRequestBindsToTheDefaultStore(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap := makeSnapshotForReconcile()
+	r := bindingReconciler(makeSnapshotReconciler(s, snap, scheduledPod(), readyStore("default")))
+
+	reconcileSnapshot(t, r, snap.Name)
+
+	content := boundContentOf(t, r, snap.Name)
 	require.NotNil(t, content.Spec.Storage)
-	assert.Equal(t, r.StoreID, content.Spec.Storage.StoreID)
+	assert.Equal(t, "default", content.Spec.Storage.SnapshotStoreName)
+	assert.Equal(t, snapshotv1alpha1.ReclaimPolicyRetain, content.Spec.Storage.ReclaimPolicy)
+}
+
+func TestSnapshotReconciler_NamedRequestBindsToThatStore(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap := makeSnapshotForReconcile()
+	snap.Spec.SnapshotStoreName = "gold"
+	r := bindingReconciler(makeSnapshotReconciler(s, snap, scheduledPod(), readyStore("default"), readyStore("gold")))
+
+	reconcileSnapshot(t, r, snap.Name)
+
+	assert.Equal(t, "gold", boundContentOf(t, r, snap.Name).Spec.Storage.SnapshotStoreName)
+}
+
+func TestSnapshotReconciler_WaitsForAStoreThatCannotBeUsed(t *testing.T) {
+	notReady := readyStore("default")
+	notReady.Status.Conditions[0].Status = metav1.ConditionFalse
+	notReady.Status.Conditions[0].Reason = ReasonStoreUnreachable
+	notReady.Status.Conditions[0].Message = "write: denied"
+	terminating := readyStore("default")
+	terminating.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	terminating.Finalizers = []string{SnapshotStoreProtectionFinalizer}
+
+	for _, tc := range []struct {
+		name    string
+		store   *snapshotv1alpha1.SnapshotStore
+		reason  string
+		message string
+	}{
+		{"missing", nil, ReasonStoreNotFound, `store "default" does not exist`},
+		{"not ready", notReady, ReasonStoreNotReady, "StoreUnreachable: write: denied"},
+		{"terminating", terminating, ReasonStoreTerminating, "is being deleted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := snapshotReconcilerScheme()
+			snap := makeSnapshotForReconcile()
+			objects := []client.Object{snap, scheduledPod()}
+			if tc.store != nil {
+				objects = append(objects, tc.store)
+			}
+			r := bindingReconciler(makeSnapshotReconciler(s, objects...))
+
+			reconcileSnapshot(t, r, snap.Name)
+
+			assert.Equal(t, tc.reason, readyReasonOf(t, r, snap.Name))
+			updated := &snapshotv1alpha1.PodSnapshot{}
+			require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
+			assert.Contains(t, meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady).Message, tc.message)
+			assert.Nil(t, updated.Status.BoundPodSnapshotContentName)
+			assert.False(t, snapshotv1alpha1.IsPodSnapshotFailed(updated), "waiting for a store is not a failure")
+			contents := &snapshotv1alpha1.PodSnapshotContentList{}
+			require.NoError(t, r.List(context.Background(), contents))
+			assert.Empty(t, contents.Items)
+		})
+	}
+}
+
+func TestSnapshotReconciler_BindingOffKeepsTheLegacyFlowForTheDefaultStore(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap := makeSnapshotForReconcile()
+	r := makeSnapshotReconciler(s, snap, scheduledPod())
+	r.DefaultStoreName = "default"
+
+	reconcileSnapshot(t, r, snap.Name)
+
+	assert.Nil(t, boundContentOf(t, r, snap.Name).Spec.Storage, "no store object is needed while binding is off")
+}
+
+func TestSnapshotReconciler_BindingOffWaitsForAnotherStore(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap := makeSnapshotForReconcile()
+	snap.Spec.SnapshotStoreName = "gold"
+	r := makeSnapshotReconciler(s, snap, scheduledPod(), readyStore("gold"))
+	r.DefaultStoreName = "default"
+
+	reconcileSnapshot(t, r, snap.Name)
+
+	assert.Equal(t, ReasonStoreNotReady, readyReasonOf(t, r, snap.Name))
+	updated := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
+	assert.Contains(t, meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady).Message,
+		"not bound to a store")
+}
+
+func TestSnapshotReconciler_StoreThatTerminatesDuringBindingFailsTheSnapshotAndDropsTheContent(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap := makeSnapshotForReconcile()
+	cached := makeSnapshotReconciler(s, snap, scheduledPod(), readyStore("default"))
+	terminating := readyStore("default")
+	terminating.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	terminating.Finalizers = []string{SnapshotStoreProtectionFinalizer}
+	live := fake.NewClientBuilder().WithScheme(s).WithObjects(terminating).Build()
+	r := bindingReconciler(cached)
+	r.NonCacheReadClient = live
+
+	reconcileSnapshot(t, r, snap.Name)
+
+	assert.Equal(t, ReasonStoreTerminating, readyReasonOf(t, r, snap.Name))
+	updated := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
+	assert.True(t, snapshotv1alpha1.IsPodSnapshotFailed(updated))
+	contents := &snapshotv1alpha1.PodSnapshotContentList{}
+	require.NoError(t, r.List(context.Background(), contents))
+	require.Len(t, contents.Items, 1, "the content carries a cleanup finalizer, so it stays until maintenance removes it")
+	assert.False(t, contents.Items[0].DeletionTimestamp.IsZero(), "the content that was created is being deleted")
+}
+
+func TestSnapshotReconciler_StoreThatIsGoneDuringBindingFailsTheSnapshot(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap := makeSnapshotForReconcile()
+	r := bindingReconciler(makeSnapshotReconciler(s, snap, scheduledPod(), readyStore("default")))
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).Build()
+
+	reconcileSnapshot(t, r, snap.Name)
+
+	assert.Equal(t, ReasonStoreTerminating, readyReasonOf(t, r, snap.Name))
+}
+
+func TestSnapshotReconciler_StoreChangeWakesOnlyTheSnapshotsWaitingForIt(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	unnamed := makeSnapshotForReconcile()
+	named := makeSnapshotForReconcile()
+	named.Name, named.UID, named.Spec.SnapshotStoreName = "named", "named-uid", "gold"
+	other := makeSnapshotForReconcile()
+	other.Name, other.UID, other.Spec.SnapshotStoreName = "other", "other-uid", "silver"
+	bound := makeSnapshotForReconcile()
+	bound.Name, bound.UID = "bound", "bound-uid"
+	bound.Status.BoundPodSnapshotContentName = ptr.To("content-bound")
+	failed := makeSnapshotForReconcile()
+	failed.Name, failed.UID = "failed", "failed-uid"
+	failed.Status.Conditions = []metav1.Condition{{
+		Type: snapshotv1alpha1.PodSnapshotConditionFailed, Status: metav1.ConditionTrue, Reason: "x",
+	}}
+	r := bindingReconciler(makeSnapshotReconciler(s, unnamed, named, other, bound, failed))
+
+	byDefault := r.storeToWaitingPodSnapshots(context.Background(), readyStore("default"))
+	byName := r.storeToWaitingPodSnapshots(context.Background(), readyStore("gold"))
+
+	require.Len(t, byDefault, 1)
+	assert.Equal(t, unnamed.Name, byDefault[0].Name)
+	require.Len(t, byName, 1)
+	assert.Equal(t, "named", byName[0].Name)
+	assert.Empty(t, r.storeToWaitingPodSnapshots(context.Background(), &corev1.Pod{}))
 }
 
 func TestSnapshotReconciler_StalePodReferenceFails(t *testing.T) {

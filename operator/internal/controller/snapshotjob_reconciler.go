@@ -22,7 +22,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -60,6 +62,10 @@ type SnapshotJobReconciler struct {
 	NonCacheReadClient   client.Reader
 	Recorder             record.EventRecorder
 	CuInterposeContainer operatortypes.CuInterposeContainerConfiguration
+	// BindNewContents and DefaultStoreName say which store a template without a
+	// snapshotStoreName resolves to, and whether stores are reconciled.
+	BindNewContents  bool
+	DefaultStoreName string
 }
 
 type snapshotJobFailure struct {
@@ -67,8 +73,16 @@ type snapshotJobFailure struct {
 	cause  error
 }
 
+// snapshotJobWait says why the source Pod has not been started, for a reason
+// that is expected to clear on its own.
+type snapshotJobWait struct {
+	reason  string
+	message string
+}
+
 type snapshotJobObservation struct {
 	job              *batchv1.Job
+	waiting          *snapshotJobWait
 	podSnapshot      *snapshotv1alpha1.PodSnapshot
 	sourcePodMissing bool
 	// sourceJobFinished is true once the capture is Ready AND the source Job
@@ -164,6 +178,17 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 		cuInterposeEnabled, err := podcontract.ParseCuInterposeAnnotation(sj.Spec.PodTemplate.Annotations)
 		if err != nil {
 			return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, err), ctrl.Result{}, nil
+		}
+		resolution, err := resolveSnapshotStore(ctx, r.Client, sj.Spec.PodSnapshotTemplate.SnapshotStoreName, r.DefaultStoreName, r.BindNewContents)
+		if err != nil {
+			return snapshotJobObservation{}, ctrl.Result{}, err
+		}
+		switch resolution.Reason {
+		case ReasonStoreNotFound, ReasonStoreTerminating:
+			return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec,
+				fmt.Errorf("%s: %s", resolution.Reason, resolution.Message)), ctrl.Result{}, nil
+		case ReasonStoreNotReady:
+			return snapshotJobObservation{waiting: &snapshotJobWait{reason: resolution.Reason, message: resolution.Message}}, ctrl.Result{}, nil
 		}
 		desiredJob, buildErr := buildSourceJob(sj)
 		if buildErr != nil {
@@ -465,9 +490,13 @@ func initializeConditions(next *snapshotv1alpha1.SnapshotJob, reconciliationTime
 
 func deriveRunningStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJobObservation, reconciliationTime metav1.Time) {
 	if observed.job == nil {
-		if observed.failure != nil {
+		switch {
+		case observed.failure != nil:
 			setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
 				observed.failure.reason, "source pod is unavailable: "+observed.failure.cause.Error())
+		case observed.waiting != nil:
+			setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
+				observed.waiting.reason, observed.waiting.message)
 		}
 		return
 	}
@@ -666,6 +695,38 @@ func (r *SnapshotJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				DeleteFunc:  func(event.DeleteEvent) bool { return true },
 				GenericFunc: func(event.GenericEvent) bool { return false },
 			})).
+		Watches(&snapshotv1alpha1.SnapshotStore{},
+			handler.EnqueueRequestsFromMapFunc(r.storeToWaitingSnapshotJobs)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
+}
+
+// storeToWaitingSnapshotJobs wakes the SnapshotJobs that have not started their source Pod and
+// resolve to the store that changed.
+func (r *SnapshotJobReconciler) storeToWaitingSnapshotJobs(ctx context.Context, obj client.Object) []reconcile.Request {
+	store, ok := obj.(*snapshotv1alpha1.SnapshotStore)
+	if !ok {
+		return nil
+	}
+	jobs := &snapshotv1alpha1.SnapshotJobList{}
+	if err := r.List(ctx, jobs); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list SnapshotJobs for a SnapshotStore change", "store", store.Name)
+		return nil
+	}
+	var requests []reconcile.Request
+	for i := range jobs.Items {
+		sj := &jobs.Items[i]
+		if sj.Status.SourceJobUID != "" || sj.Status.PodSnapshotName != "" ||
+			snapshotv1alpha1.IsSnapshotJobFailed(sj) || snapshotv1alpha1.IsSnapshotJobCompleted(sj) {
+			continue
+		}
+		name := sj.Spec.PodSnapshotTemplate.SnapshotStoreName
+		if name == "" {
+			name = r.DefaultStoreName
+		}
+		if name == store.Name {
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(sj)})
+		}
+	}
+	return requests
 }
