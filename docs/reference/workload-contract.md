@@ -288,9 +288,7 @@ custom image still has to meet these:
   example `VLLM_WORKER_MULTIPROC_METHOD=spawn`). This is a CUDA limitation:
   forking a process that already holds a CUDA context produces a child with an
   unreliable copy of that context, so a worker forked before checkpoint may not
-  restore correctly. The forked compiler workers of `torch.compile` are such
-  workers: they can inherit CUDA device mappings that CRIU cannot checkpoint.
-  Turn them off with `TORCHINDUCTOR_COMPILE_THREADS=1`.
+  restore correctly.
 
 ## Packaging Methods
 
