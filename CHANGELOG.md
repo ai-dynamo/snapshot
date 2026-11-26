@@ -180,18 +180,18 @@ commit-level history for each release is on its
   namespace rather than the restore container's (#593), so lookups by PID,
   such as UCX shared-memory endpoints (#802), work after a restore. Only
   checkpoints taken after the upgrade get it; take older ones again.
-
-### Fixed
-
-- GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
-  values used by the NVIDIA device plugin's `volume-mounts` strategy. See
-  [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 - Restore semantics: a restore no longer fails in CRIU, with
   `File <path> has bad size` in the agent log, when a checkpointed process holds
   open a file from the image that the workload changed. The restore replaces
   the restore container's copy of that file with the snapshot's. Other changes
   to files the restore container already has are still not restored. See
   [Limitations and Known Issues](docs/overview/limitations.md).
+
+### Fixed
+
+- GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
+  values used by the NVIDIA device plugin's `volume-mounts` strategy. See
+  [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 
 ### Deprecated
 
