@@ -14,6 +14,8 @@ Snapshot provides the checkpoint and restore primitives for GPU pods.
 Orchestration (which pods to checkpoint, when, and how the checkpoints are
 restored) is left to the systems that integrate it.
 
+See the [roadmap](docs/roadmap.md) for what has shipped and what is planned.
+
 > [!NOTE]
 > Snapshot's APIs may still change, so it is not yet recommended for
 > production-critical workloads.
@@ -67,7 +69,7 @@ For the experiment setup, the per stage breakdown, and the full results, see [Pe
   restart or a move to another node.
 
 Snapshot currently focuses on inference cold-start; further use cases are on the
-roadmap.
+[roadmap](docs/roadmap.md).
 
 ## Who It Is For
 
@@ -158,7 +160,7 @@ one or eight GPUs, make the workload snapshot-ready, checkpoint it, and restore 
 Current limitations:
 
 - Linux nodes on x86_64 or arm64.
-- Workloads, including multi-GPU workloads, must run on a single node. Multi-node is on the roadmap.
+- Workloads, including multi-GPU workloads, must run on a single node. Multi-node is on the [roadmap](docs/roadmap.md).
 - vGPU is not supported.
 - Runs only on NVIDIA GPUs supported by the required CUDA driver.
 
@@ -178,7 +180,7 @@ Current limitations:
 
 The full documentation set lives in [`docs/`](docs/README.md), in these sections:
 
-- [Overview](docs/README.md#overview) - What Snapshot is, core concepts, architecture, performance, and limitations.
+- [Overview](docs/README.md#overview) - What Snapshot is, core concepts, architecture, performance, limitations, and the [roadmap](docs/roadmap.md).
 - [Get Started](docs/README.md#get-started) - Prerequisites, installation, and a first checkpoint and restore.
 - [Using Snapshot](docs/README.md#using-snapshot) - The checkpoint and restore flow for each inference framework.
 - [Operate](docs/README.md#operate) - Configure and tune storage, and upgrade Snapshot.
@@ -190,7 +192,7 @@ The full documentation set lives in [`docs/`](docs/README.md), in these sections
 
 [NVIDIA Dynamo](https://github.com/ai-dynamo/dynamo), the open-source
 inference-serving stack, integrates Snapshot for GPU cold-start. On Dynamo, Snapshot is available through it directly. See
-[Snapshotting GPU Workers](https://docs.nvidia.com/dynamo/latest/kubernetes/operations/cold-start-optimizations/dynamo-snapshot)
+[Dynamo Snapshot (Experimental)](https://docs.nvidia.com/dynamo/latest/kubernetes/model-deployment/model-loading/dynamo-snapshot-experimental)
 in the Dynamo docs.
 
 ## Contributing

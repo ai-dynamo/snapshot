@@ -9,9 +9,10 @@
         "checkpoint": {
           "type": "object",
           "properties": {
-            "retryLimit": {
+            "defaultRetryLimit": {
               "type": "integer",
-              "minimum": 0
+              "minimum": 0,
+              "maximum": 10
             }
           }
         },

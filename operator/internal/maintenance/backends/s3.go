@@ -4,17 +4,21 @@
 package backends
 
 import (
-	"bytes"
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net/http"
 	"os"
 	"path"
 	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials/endpointcreds"
+	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/go-logr/logr"
@@ -30,6 +34,12 @@ const (
 
 	s3CredentialsRefreshInterval = 5 * time.Minute
 )
+
+// s3CredentialRequestTimeout bounds one request to a credential service: a
+// container credentials endpoint or STS. The SDK shields that request from the
+// caller's deadline, so without it a service that never answers would block
+// every later cleanup. S3 requests are not bound by it.
+var s3CredentialRequestTimeout = 30 * time.Second
 
 // s3API is the subset of the S3 client S3Backend depends on.
 type s3API interface {
@@ -67,27 +77,46 @@ type S3Backend struct {
 	artifactsPrefix string
 }
 
-// NewS3Backend constructs an S3Backend whose credentials are re-read from
-// cfg.CredentialsPath every s3CredentialsRefreshInterval.
+// NewS3Backend constructs an S3Backend. With cfg.CredentialsPath set, its
+// credentials are re-read from that file every s3CredentialsRefreshInterval.
+// With it empty, the SDK's default credential chain resolves and refreshes
+// them under the operator's workload identity. Instance metadata is excluded
+// from that chain, so a workload identity that does not resolve fails instead
+// of falling back to the node's role.
 func NewS3Backend(ctx context.Context, cfg S3Config) (*S3Backend, error) {
 	loadOptions := []func(*config.LoadOptions) error{
 		config.WithRegion(cfg.Region),
 		config.WithSharedConfigFiles([]string{}),
-		config.WithCredentialsProvider(aws.NewCredentialsCache(sharedCredentialsFileProvider(cfg.CredentialsPath))),
 	}
+	if cfg.CredentialsPath != "" {
+		loadOptions = append(loadOptions,
+			config.WithCredentialsProvider(aws.NewCredentialsCache(sharedCredentialsFileProvider(cfg.CredentialsPath))))
+	} else {
+		loadOptions = append(loadOptions,
+			config.WithSharedCredentialsFiles([]string{}),
+			config.WithEC2IMDSClientEnableState(imds.ClientDisabled))
+	}
+	s3HTTPClient := awshttp.NewBuildableClient()
 	if cfg.CABundlePath != "" {
-		caBundle, err := readCABundle(cfg.CABundlePath)
+		httpClient, err := caBundleHTTPClient(cfg.CABundlePath)
 		if err != nil {
 			return nil, err
 		}
-		loadOptions = append(loadOptions, config.WithCustomCABundle(bytes.NewReader(caBundle)))
+		s3HTTPClient = httpClient
 	}
+	credentialHTTPClient := s3HTTPClient.WithTimeout(s3CredentialRequestTimeout)
+	loadOptions = append(loadOptions,
+		config.WithHTTPClient(credentialHTTPClient),
+		config.WithEndpointCredentialOptions(func(o *endpointcreds.Options) { o.HTTPClient = credentialHTTPClient }))
 	awsCfg, err := config.LoadDefaultConfig(ctx, loadOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("load S3 client config: %w", err)
 	}
 	b := &S3Backend{}
 	b.client = s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+		if client, ok := awsCfg.HTTPClient.(*awshttp.BuildableClient); ok {
+			o.HTTPClient = client.WithTimeout(0)
+		}
 		if cfg.Endpoint != "" {
 			o.BaseEndpoint = aws.String(cfg.Endpoint)
 			o.UsePathStyle = true
@@ -122,15 +151,23 @@ func sharedCredentialsFileProvider(credentialsPath string) aws.CredentialsProvid
 	}
 }
 
-func readCABundle(caBundlePath string) ([]byte, error) {
+// caBundleHTTPClient returns the client for S3 requests and for credential
+// requests, trusting only the certificates in caBundlePath.
+func caBundleHTTPClient(caBundlePath string) (*awshttp.BuildableClient, error) {
 	pem, err := os.ReadFile(caBundlePath)
 	if err != nil {
 		return nil, fmt.Errorf("read CA bundle %q: %w", caBundlePath, err)
 	}
-	if !x509.NewCertPool().AppendCertsFromPEM(pem) {
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(pem) {
 		return nil, fmt.Errorf("CA bundle %q contains no usable certificates", caBundlePath)
 	}
-	return pem, nil
+	return awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
+		if tr.TLSClientConfig == nil {
+			tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		}
+		tr.TLSClientConfig.RootCAs = roots
+	}), nil
 }
 
 func (b *S3Backend) Name() string {
