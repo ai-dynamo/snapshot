@@ -101,10 +101,10 @@ one declarative object.
 `metadata.name` must be at most 63 characters (it is used as a label value).
 
 `podSnapshotTemplate.metadata.labels` cannot set `nvidia.com/snapshot-job` or
-`nvidia.com/snapshot-job-uid`, which the controller sets. A label value that
-Kubernetes does not accept for another reason, such as one with a space, is
-admitted. The `SnapshotJob` then fails with reason `InvalidSpec` before it
-starts the source Pod.
+`nvidia.com/snapshot-job-uid`, which the controller sets. The API server checks
+only the length of a label value. A value that is not a valid Kubernetes label
+value, such as one with a space, fails the `SnapshotJob` with reason
+`InvalidSpec` before it starts the source Pod.
 
 `status`:
 
