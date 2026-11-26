@@ -155,6 +155,11 @@ The feature's own page links to that row and does not repeat the number.
 
 ## Style
 
+Target 80-100% adherence to ASD-STE100 Simplified Technical English in all new
+and rewritten documentation, including SNEPs. Preserve technical meaning and
+necessary technical terms. Treat this range as a writing target, not a measured
+score. Do not claim measured or certified compliance without validation.
+
 - Give each paragraph one point, and make it as long as the point needs. A long
   paragraph is fine when the reasoning really needs it. Padding is not.
 - Ask of each sentence whether it helps the reader act, decide, or understand,
@@ -171,7 +176,8 @@ The feature's own page links to that row and does not repeat the number.
 - Write notes as `> [!NOTE]`, not as bold text.
 - Do not start a sentence with "Because" or "So". Write a direct statement.
 - Write full words instead of contractions: "do not", "cannot", "it is".
-- Keep sentences under 30 words.
+- Keep descriptive sentences to 25 words or fewer and instructions to 20 words
+  or fewer. Split long sentences without removing necessary technical detail.
 - Cut filler ("simply", "just", "in order to", "it is important to note") and
   marketing words ("seamless", "powerful", "leverage", "comprehensive").
 - Name the thing: write the field, flag, or command, not "configure the

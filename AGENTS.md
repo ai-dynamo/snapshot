@@ -233,6 +233,11 @@ and document the variable name — never the value.
 Before you add or change Markdown under `docs/`, a README, or `CHANGELOG.md`, or
 add a version requirement such as a minimum driver or CUDA version, read
 [docs/development/writing-docs.md](docs/development/writing-docs.md).
+For all new and rewritten documentation, including SNEPs, target 80-100%
+adherence to ASD-STE100 Simplified Technical English. Preserve technical
+meaning. Treat this range as a writing target, not a measured score. Do not
+claim measured or certified compliance without validation.
+
 Before you introduce a name (a field, Helm value, annotation, label,
 environment variable, event reason, flag, file, or a new term in prose), read
 [docs/development/naming.md](docs/development/naming.md). A name that a user
