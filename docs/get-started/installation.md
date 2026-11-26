@@ -174,8 +174,29 @@ and its PageBroker sidecar are running on each GPU node. Each agent pod reports
 
 ## Uninstall
 
+Only the operator can complete the deletion of a `PodSnapshot`, which also
+deletes its stored snapshot. To remove your snapshots, delete them before you
+uninstall:
+
+```bash
+kubectl delete podsnapshots --all --all-namespaces
+```
+
+Uninstall the release:
+
 ```bash
 helm uninstall snapshot --namespace snapshot
+```
+
+The uninstall keeps the Snapshot CRDs and every remaining `PodSnapshot` and
+`PodSnapshotContent`. Without the operator, a deleted `PodSnapshot` stays in
+`Terminating`, and so does a deleted namespace that contains one. To complete
+the deletion, install Snapshot again.
+
+To remove the CRDs, delete them after every `PodSnapshot` is gone:
+
+```bash
+kubectl delete crd podsnapshots.nvidia.com podsnapshotcontents.nvidia.com snapshotjobs.nvidia.com
 ```
 
 Chart-created snapshot volumes are retained on uninstall, so snapshots survive
