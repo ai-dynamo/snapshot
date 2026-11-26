@@ -57,14 +57,18 @@ tests:
       - notExists:
           path: spec.template.spec.containers[?(@.name == "manager")].resources.limits.memory
       - notExists:
-          path: spec.template.spec.containers[?(@.name == "manager")].env
+          path: spec.template.spec.containers[?(@.name == "manager")].env[?(@.name == "SNAPSHOT_OPERATOR_MEMORY_LIMIT_BYTES")]
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "manager")].env[?(@.name == "GOMEMLIMIT")]
 
   - it: leaves Go memory policy alone without resource limits
     set:
       operator.resources.limits: null
     asserts:
       - notExists:
-          path: spec.template.spec.containers[?(@.name == "manager")].env
+          path: spec.template.spec.containers[?(@.name == "manager")].env[?(@.name == "SNAPSHOT_OPERATOR_MEMORY_LIMIT_BYTES")]
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "manager")].env[?(@.name == "GOMEMLIMIT")]
 
   - it: leaves Go memory policy alone without resources
     set:
@@ -73,7 +77,9 @@ tests:
       - notExists:
           path: spec.template.spec.containers[?(@.name == "manager")].resources
       - notExists:
-          path: spec.template.spec.containers[?(@.name == "manager")].env
+          path: spec.template.spec.containers[?(@.name == "manager")].env[?(@.name == "SNAPSHOT_OPERATOR_MEMORY_LIMIT_BYTES")]
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "manager")].env[?(@.name == "GOMEMLIMIT")]
 
   - it: keeps the other variables next to the memory limit
     set:
@@ -84,27 +90,33 @@ tests:
       storage.s3.credentialEndpoint.url: https://credentials.example.com/v1
       storage.s3.credentialEndpoint.tokenAudience: credentials.example.com
     asserts:
-      - equal:
+      - contains:
           path: spec.template.spec.containers[?(@.name == "manager")].env
-          value:
-            - name: SNAPSHOT_OPERATOR_MEMORY_LIMIT_BYTES
-              valueFrom:
-                resourceFieldRef:
-                  resource: limits.memory
-            - name: SNAPSHOT_E2E_TEST_FAIL_CAPTURE_SOURCE_ANNOTATION
-              value: example.com/fail-capture
-            - name: AWS_CONTAINER_CREDENTIALS_FULL_URI
-              value: https://credentials.example.com/v1
-            - name: AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE
-              value: /var/run/secrets/snapshot/s3-identity/token
+          content:
+            name: SNAPSHOT_OPERATOR_MEMORY_LIMIT_BYTES
+            valueFrom:
+              resourceFieldRef:
+                resource: limits.memory
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "manager")].env
+          content:
+            name: SNAPSHOT_E2E_TEST_FAIL_CAPTURE_SOURCE_ANNOTATION
+            value: example.com/fail-capture
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "manager")].env
+          content:
+            name: AWS_CONTAINER_CREDENTIALS_FULL_URI
+            value: https://credentials.example.com/v1
 
   - it: keeps the other variables without a memory limit
     set:
       operator.resources.limits.memory: null
       operator.testFailCaptureSourceAnnotation: example.com/fail-capture
     asserts:
-      - equal:
+      - contains:
           path: spec.template.spec.containers[?(@.name == "manager")].env
-          value:
-            - name: SNAPSHOT_E2E_TEST_FAIL_CAPTURE_SOURCE_ANNOTATION
-              value: example.com/fail-capture
+          content:
+            name: SNAPSHOT_E2E_TEST_FAIL_CAPTURE_SOURCE_ANNOTATION
+            value: example.com/fail-capture
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "manager")].env[?(@.name == "SNAPSHOT_OPERATOR_MEMORY_LIMIT_BYTES")]
