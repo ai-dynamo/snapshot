@@ -323,6 +323,22 @@ def pod_logs(
         return f"<logs unavailable: {api_error_detail(exc)}>"
 
 
+def exec_stream(*args: Any, **kwargs: Any) -> Any:
+    """kubernetes.stream.stream, with a refused exec raised as what it is.
+
+    The client raises a refused exec, such as one into a container that has
+    not started, as an ApiException with no body, then fails with an
+    AttributeError while it decodes that body. The AttributeError says nothing
+    about the exec, so raise the ApiException it replaced.
+    """
+    try:
+        return stream(*args, **kwargs)
+    except AttributeError as exc:
+        if isinstance(exc.__context__, ApiException):
+            raise exc.__context__ from None
+        raise
+
+
 def exec_command(
     namespace: str,
     pod: str,
@@ -330,7 +346,7 @@ def exec_command(
     *,
     container: str | None = None,
 ) -> str:
-    return stream(
+    return exec_stream(
         client.CoreV1Api().connect_get_namespaced_pod_exec,
         pod,
         namespace,

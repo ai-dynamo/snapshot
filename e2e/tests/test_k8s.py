@@ -6,6 +6,8 @@
 from types import SimpleNamespace
 
 import pytest
+from kubernetes.client import ApiException
+from kubernetes.stream import ws_client
 
 from snapshot_e2e import k8s
 from snapshot_e2e import lifecycle
@@ -162,6 +164,22 @@ def test_file_present_executes_in_requested_container(monkeypatch) -> None:
             "main",
         )
     ]
+
+
+def test_exec_command_reports_a_refused_exec(monkeypatch) -> None:
+    # Everything up to the websocket is the real client. The kubelet refuses
+    # the exec this way for a container that has not started.
+    refusal = "Handshake status 500 Internal Server Error -+-+- b'container not found (\"main\")'"
+
+    def refuse(*_args, **_kwargs):
+        raise RuntimeError(refusal)
+
+    monkeypatch.setattr(ws_client, "create_websocket", refuse)
+
+    with pytest.raises(ApiException) as raised:
+        k8s.exec_command("snapshot-e2e", "pod", "true", container="main")
+
+    assert raised.value.reason == refusal
 
 
 def test_wait_for_container_running_accepts_running_without_ready(monkeypatch) -> None:
