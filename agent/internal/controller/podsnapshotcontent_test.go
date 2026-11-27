@@ -755,8 +755,8 @@ func TestReconcileCapture_EndedCaptureFreesItsSourcePod(t *testing.T) {
 		name string
 		// dump is how the dump of the first work order ends.
 		dump func() (*pagebroker.PublishedArtifact, error)
-		// rejectStatus fails the status writes of the first work order.
-		rejectStatus bool
+		// rejectResult fails the status write that follows the dump of the first work order.
+		rejectResult bool
 	}{
 		{
 			name: "the dump fails",
@@ -769,15 +769,17 @@ func TestReconcileCapture_EndedCaptureFreesItsSourcePod(t *testing.T) {
 		{
 			name:         "the result is not recorded",
 			dump:         func() (*pagebroker.PublishedArtifact, error) { return nil, nil },
-			rejectStatus: true,
+			rejectResult: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			first := makeWorkOrder("podsnapshotcontent-b", "node-a", "b")
 			first.CreationTimestamp = metav1.Unix(1000, 0)
+			var dumped []string
 			funcs := interceptor.Funcs{
 				SubResourcePatch: func(ctx context.Context, c client.Client, _ string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-					if tc.rejectStatus && obj.GetName() == first.Name {
+					// Only a write after the dump is the result: a write before it must land.
+					if tc.rejectResult && obj.GetName() == first.Name && len(dumped) > 0 {
 						return errors.New("apiserver unavailable")
 					}
 					return c.Status().Patch(ctx, obj, patch, opts...)
@@ -785,7 +787,6 @@ func TestReconcileCapture_EndedCaptureFreesItsSourcePod(t *testing.T) {
 			}
 			w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, first, makeSourcePod())
 			w.runtime = &fakeRuntime{resolveContainerPID: 7}
-			var dumped []string
 			w.checkpointFn = func(_ context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error) {
 				dumped = append(dumped, params.ContentUID)
 				if params.ContentUID == string(first.UID) {
