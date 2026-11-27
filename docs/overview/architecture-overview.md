@@ -256,6 +256,10 @@ and keeps mirroring it.
 The system is built so that an interruption is recoverable rather than
 ambiguous:
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:d11b4c8845d7a50da9edabe62c1c8c5b4f884a5df4a2bf51e587e0dec75f689e -->
+
 - Checkpoint and restore are both workqueue-driven, so a restarted agent replays
   the work order instead of losing it. A checkpoint that committed before the
   agent died is recognized from the published snapshot and promoted to `Ready`.
@@ -264,13 +268,14 @@ ambiguous:
   committed snapshot before it attributes the pod's death to the checkpoint.
 - A restore that already completed is detected from its sentinel rather than
   replayed through CRIU.
-- A failed checkpoint is retried against the workload it already suspended,
-  rather than ending and charging the caller a full model load to ask again.
-  Retry is off by default. The limit is the request's own
-  `checkpointRetryLimit`, or `config.checkpoint.defaultRetryLimit` when it sets
-  none. [SNEP-394](../design/394-capture-retry/README.md) has the design, and
-  [Checkpoint retries](../troubleshooting/checkpoints.md#a-checkpoint-fails-with-retriesexhausted)
-  what an exhausted one reports.
+- When retries are enabled, the agent can retry a recoverable checkpoint
+  failure against the same workload. If an attempt suspended the workload,
+  the agent resumes it before starting a fresh attempt. See
+  [A Checkpoint Fails with `RetriesExhausted`](../troubleshooting/checkpoints.md#a-checkpoint-fails-with-retriesexhausted)
+  for retry settings and [SNEP-394](../design/394-capture-retry/README.md)
+  for the design.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ## Security Boundaries
 
