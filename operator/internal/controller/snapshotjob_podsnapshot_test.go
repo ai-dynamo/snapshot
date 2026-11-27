@@ -472,12 +472,59 @@ func TestSnapshotJobReconcileLateDeadlineConditionWinsOverCaptureFailure(t *test
 	assert.Equal(t, snapshotv1alpha1.ReasonCaptureFailed, captured.Reason)
 }
 
+// ageCaptureFailure moves the time at which the fixture's capture failed into
+// the past.
+func ageCaptureFailure(t *testing.T, r *SnapshotJobReconciler, sj *snapshotv1alpha1.SnapshotJob, age time.Duration) {
+	t.Helper()
+	snap := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, snap))
+	failed := meta.FindStatusCondition(snap.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, failed)
+	failed.LastTransitionTime = metav1.NewTime(time.Now().Add(-age))
+	require.NoError(t, r.Update(context.Background(), snap))
+}
+
+// TestSnapshotJobReconcileDeadlineReportedLateWinsOverCaptureFailure covers a
+// Job controller that acts on the deadline late, after a restart or behind
+// other Jobs. It still deletes the source pod first, so the capture fails that
+// much after the deadline, and the condition follows.
+func TestSnapshotJobReconcileDeadlineReportedLateWinsOverCaptureFailure(t *testing.T) {
+	deadline := time.Duration(*minimalSnapshotJob().Spec.ActiveDeadlineSeconds) * time.Second
+	r, sj, job := sourceGoneSnapshotJobFixture(t, deadline+captureResolutionBackstop+10*time.Second)
+
+	res, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+	assert.Positive(t, res.RequeueAfter, "a capture that failed a moment ago must wait for the Job's verdict")
+	assert.LessOrEqual(t, res.RequeueAfter, captureResolutionBackstop)
+
+	waiting := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, waiting))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(waiting),
+		"the capture failure of a late pod deletion must not become the terminal reason before the Job reports")
+
+	storedJob := &batchv1.Job{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(job), storedJob))
+	setJobFailureCondition(storedJob, batchv1.JobFailureTarget, batchv1.JobReasonDeadlineExceeded, "Job was active longer than specified deadline")
+	require.NoError(t, r.Status().Update(context.Background(), storedJob))
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, metav1.ConditionTrue, failed.Status)
+	assert.Equal(t, snapshotv1alpha1.ReasonDeadlineExceeded, failed.Reason)
+}
+
 // TestSnapshotJobReconcileCaptureFailureIsFinalWhenDeadlineVerdictNeverComes
-// bounds the wait: a Job that stays silent past the backstop does not keep the
-// SnapshotJob open.
+// bounds the wait: a Job that stays silent for a backstop after the deadline
+// and after the capture failed does not keep the SnapshotJob open.
 func TestSnapshotJobReconcileCaptureFailureIsFinalWhenDeadlineVerdictNeverComes(t *testing.T) {
 	deadline := time.Duration(*minimalSnapshotJob().Spec.ActiveDeadlineSeconds) * time.Second
 	r, sj, _ := sourceGoneSnapshotJobFixture(t, deadline+captureResolutionBackstop+time.Second)
+	ageCaptureFailure(t, r, sj, captureResolutionBackstop+time.Second)
 
 	res, err := r.Reconcile(context.Background(), reconcileRequest(sj))
 	require.NoError(t, err)

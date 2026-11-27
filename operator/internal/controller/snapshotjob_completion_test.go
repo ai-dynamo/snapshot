@@ -125,8 +125,11 @@ func TestAwaitedSourceJobDeadlineVerdict(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*batchv1.Job)
-		now    time.Time
-		want   time.Duration
+		// failedAfter is how long after the deadline the capture failed. The
+		// zero value is a capture that failed at the deadline.
+		failedAfter time.Duration
+		now         time.Time
+		want        time.Duration
 	}{
 		{name: "long before the deadline the capture reason is final", now: deadline.Add(-time.Minute)},
 		{name: "outside the clock skew the capture reason is final", now: deadline.Add(-sourceJobDeadlineClockSkew - time.Second)},
@@ -134,6 +137,12 @@ func TestAwaitedSourceJobDeadlineVerdict(t *testing.T) {
 		{name: "at the deadline the Job verdict is awaited", now: deadline, want: captureResolutionBackstop},
 		{name: "after the deadline the remaining wait shrinks", now: deadline.Add(10 * time.Second), want: captureResolutionBackstop - 10*time.Second},
 		{name: "the wait ends one backstop after the deadline", now: deadline.Add(captureResolutionBackstop)},
+		{name: "a capture that failed before the deadline is awaited from the deadline", failedAfter: -3 * time.Second, now: deadline.Add(10 * time.Second), want: captureResolutionBackstop - 10*time.Second},
+		{name: "a capture that failed after the deadline is awaited from its failure", failedAfter: 50 * time.Second, now: deadline.Add(50 * time.Second), want: captureResolutionBackstop},
+		{name: "the wait from a late failure shrinks", failedAfter: 50 * time.Second, now: deadline.Add(60 * time.Second), want: captureResolutionBackstop - 10*time.Second},
+		{name: "the wait ends one backstop after a late failure", failedAfter: 50 * time.Second, now: deadline.Add(50*time.Second + captureResolutionBackstop)},
+		{name: "a failure time ahead of the clock does not extend the wait", failedAfter: time.Hour, now: deadline.Add(captureResolutionBackstop)},
+		{name: "a late failure is not awaited once the Job reports", failedAfter: 50 * time.Second, now: deadline.Add(50 * time.Second), mutate: condition(batchv1.JobFailureTarget, "BackoffLimitExceeded")},
 		{name: "a reported deadline needs no wait", now: deadline, mutate: condition(batchv1.JobFailureTarget, batchv1.JobReasonDeadlineExceeded)},
 		{name: "another reported failure needs no wait", now: deadline, mutate: condition(batchv1.JobFailureTarget, "BackoffLimitExceeded")},
 		{name: "a completed Job needs no wait", now: deadline, mutate: condition(batchv1.JobComplete, "CompletionsReached")},
@@ -150,7 +159,7 @@ func TestAwaitedSourceJobDeadlineVerdict(t *testing.T) {
 			if test.mutate != nil {
 				test.mutate(job)
 			}
-			assert.Equal(t, test.want, awaitedSourceJobDeadlineVerdict(job, test.now))
+			assert.Equal(t, test.want, awaitedSourceJobDeadlineVerdict(job, deadline.Add(test.failedAfter), test.now))
 		})
 	}
 }
