@@ -229,9 +229,13 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
      misattribute their errors to the including template. Includes the
      rendered stagingSizeLimit, not just pageBroker.staging.sizeLimit: the
      default stagingBytes is derived from it together with both containers'
-     memory limits, so a change to either limit must also roll both. */}}
+     memory limits, so a change to either limit must also roll both. Leaves
+     out storage.pvc.create, size and storageClass: they shape only the claim
+     object, and neither file nor a pod template reads them. A claim change
+     must not restart the agents, least of all one the API server refuses. */}}
 {{- define "snapshot.operatorConfigChecksum" -}}
-{{- toYaml (dict "storage" .Values.storage "pageBrokerS3" .Values.pageBroker.s3 "modelStreamer" .Values.pageBroker.transferEngine.modelStreamer "stagingSizeLimit" (include "snapshot.stagingSizeLimit" .)) | sha256sum -}}
+{{- $storage := set (omit .Values.storage "pvc") "pvc" (omit (.Values.storage.pvc | default dict) "create" "size" "storageClass") -}}
+{{- toYaml (dict "storage" $storage "pageBrokerS3" .Values.pageBroker.s3 "modelStreamer" .Values.pageBroker.transferEngine.modelStreamer "stagingSizeLimit" (include "snapshot.stagingSizeLimit" .)) | sha256sum -}}
 {{- end -}}
 {{- define "snapshot.modelStreamerConfigPath" -}}{{ include "snapshot.modelStreamerMountDir" . }}/model-streamer.json{{- end -}}
 
