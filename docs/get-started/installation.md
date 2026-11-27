@@ -113,6 +113,52 @@ helm install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
   --set openshift.enabled=true
 ```
 
+### Allow the Source Pod Seccomp Profile
+
+A SnapshotJob source Pod gets the `profiles/block-iouring.json` seccomp profile
+by default. The `restricted-v2` SCC, which OpenShift gives most workloads,
+allows only `runtime/default`. OpenShift then refuses the source Pod, and the
+source Job shows a `FailedCreate` event.
+
+To run source Pods under `restricted-v2` on RHCOS 9.6 or newer, set these
+values. These kernels already block io_uring, and source Pods get the cluster
+default profile instead. A seccomp profile that the SnapshotJob `podTemplate`
+sets itself stays, so remove it from the template to get the cluster default.
+
+- `seccomp.deploy=false`
+- `seccomp.applyToSourcePods=false`
+
+`snapshotctl checkpoint` and `snapshotctl restore` set the same profile. Pass
+`--apply-seccomp-profile=false` to both to run them under `restricted-v2`. See
+[`snapshotctl` CLI](../reference/cli.md#checkpoint).
+
+To keep the profile on older nodes, create an SCC that allows it. This command
+copies `restricted-v2` and adds the profile:
+
+```bash
+oc get scc restricted-v2 --output json \
+  | jq '.metadata = {name: "snapshot-workload"}
+      | .seccompProfiles += ["localhost/profiles/block-iouring.json"]' \
+  | oc apply --filename -
+```
+
+Grant it to the service account the SnapshotJob `podTemplate` runs as. That is
+`default` unless the template sets `serviceAccountName`:
+
+```bash
+export WORKLOAD_NAMESPACE=<namespace>
+
+oc adm policy add-scc-to-user snapshot-workload \
+  --serviceaccount default --namespace "${WORKLOAD_NAMESPACE}"
+```
+
+The [restore Pod examples](../reference/restore-pod-contract.md) set the same
+profile, but Snapshot does not require it on a restore Pod. On RHCOS 9.6 or
+newer, leave `seccompProfile` out, and the restore Pod runs under
+`restricted-v2`. A restore Pod that keeps the profile
+needs the same SCC. The `openshift.io/scc` annotation on a Pod names the SCC it
+runs under.
+
 ## Install on RKE2 and k3s
 
 RKE2 and k3s are Kubernetes distributions from Rancher. Both run containerd,

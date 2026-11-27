@@ -61,6 +61,8 @@ type SnapshotJobReconciler struct {
 	NonCacheReadClient   client.Reader
 	Recorder             record.EventRecorder
 	CuInterposeContainer operatortypes.CuInterposeContainerConfiguration
+	// Empty leaves the Pod template's seccomp settings unchanged.
+	SourcePodSeccompProfile string
 }
 
 type snapshotJobFailure struct {
@@ -166,7 +168,7 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 		if err != nil {
 			return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, err), ctrl.Result{}, nil
 		}
-		desiredJob, buildErr := buildSourceJob(sj)
+		desiredJob, buildErr := buildSourceJob(sj, r.SourcePodSeccompProfile)
 		if buildErr != nil {
 			return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, buildErr), ctrl.Result{}, nil
 		}

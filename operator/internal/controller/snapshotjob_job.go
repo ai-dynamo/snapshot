@@ -26,7 +26,7 @@ import (
 // WrapLaunchJob is always false (spec §5.4: PodSnapshotTemplate has no field to
 // source it from — a caller needing cuda-checkpoint --launch-job wrapping sets it
 // up themselves in spec.podTemplate).
-func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
+func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob, seccompProfile string) (*batchv1.Job, error) {
 	// sj.Name is also used as a SnapshotJobOwnerLabel value. Admission caps
 	// metadata.name at the label-value limit;
 	// retain this check for objects that predate or bypass that schema.
@@ -59,7 +59,7 @@ func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 		Namespace:             sj.Namespace,
 		Name:                  sj.Name,
 		TargetContainer:       targetContainer,
-		SeccompProfile:        podcontract.DefaultSeccompLocalhostProfile,
+		SeccompProfile:        seccompProfile,
 		ActiveDeadlineSeconds: sj.Spec.ActiveDeadlineSeconds,
 		TTLSecondsAfterFinish: nil,
 		WrapLaunchJob:         false,

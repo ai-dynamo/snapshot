@@ -115,6 +115,33 @@ func TestSnapshotJobReconcileFirstPass(t *testing.T) {
 	assert.Equal(t, types.UID("source-job-uid"), updated.Status.SourceJobUID)
 }
 
+func TestSnapshotJobReconcileAppliesTheSourcePodSeccompProfile(t *testing.T) {
+	for _, profile := range []string{podcontract.DefaultSeccompLocalhostProfile, "profiles/custom.json"} {
+		t.Run(profile, func(t *testing.T) {
+			sj := minimalSnapshotJob()
+			r := makeSnapshotJobReconciler(snapshotJobReconcilerScheme(), sj)
+			r.SourcePodSeccompProfile = profile
+
+			_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+			require.NoError(t, err)
+
+			sc := getSourceJob(t, r.Client, sj).Spec.Template.Spec.SecurityContext
+			require.NotNil(t, sc)
+			assert.Equal(t, &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeLocalhost, LocalhostProfile: ptr.To(profile)}, sc.SeccompProfile)
+		})
+	}
+
+	t.Run("empty", func(t *testing.T) {
+		sj := minimalSnapshotJob()
+		r := makeSnapshotJobReconciler(snapshotJobReconcilerScheme(), sj)
+
+		_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+		require.NoError(t, err)
+
+		assert.Nil(t, getSourceJob(t, r.Client, sj).Spec.Template.Spec.SecurityContext)
+	})
+}
+
 func TestSnapshotJobReconcileRecoversAfterSourceJobUIDStatusWriteFailure(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
@@ -252,7 +279,7 @@ func TestSnapshotJobReconcileRecordedJobCacheMissUsesNonCacheReadClient(t *testi
 	sj.UID = types.UID("sj-uid")
 	sj.Status.SourceJobUID = types.UID("source-job-uid")
 
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	job.UID = sj.Status.SourceJobUID
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
@@ -304,7 +331,7 @@ func TestSnapshotJobReconcileRecordedJobDirectReadRejectsReplacement(t *testing.
 	sj.UID = types.UID("sj-uid")
 	sj.Status.SourceJobUID = types.UID("original-job-uid")
 
-	replacement, err := buildSourceJob(sj)
+	replacement, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	replacement.UID = types.UID("replacement-job-uid")
 	require.NoError(t, controllerutil.SetControllerReference(sj, replacement, s))
@@ -334,7 +361,7 @@ func TestSnapshotJobReconcileAdoptsJobOnAlreadyExistsRace(t *testing.T) {
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
 
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	job.UID = types.UID("source-job-uid")
@@ -427,7 +454,7 @@ func TestSnapshotJobReconcileAdoptsOwnedJob(t *testing.T) {
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
 
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	job.UID = types.UID("source-job-uid")
@@ -450,7 +477,7 @@ func TestSnapshotJobReconcileRejectsOwnedJobWithoutImmutableUIDStamp(t *testing.
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	delete(job.Spec.Template.Labels, snapshotv1alpha1.SnapshotJobOwnerUIDLabel)
@@ -475,7 +502,7 @@ func TestSnapshotJobReconcileRejectsSameNameJobWithDifferentUID(t *testing.T) {
 	sj := minimalSnapshotJob()
 	sj.Status.SourceJobUID = types.UID("original-job-uid")
 
-	replacement, err := buildSourceJob(sj)
+	replacement, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, replacement, s))
 	replacement.UID = types.UID("replacement-job-uid")
@@ -501,7 +528,7 @@ func TestSnapshotJobReconcileObservesTerminalPodSnapshotFromAlreadyExistsRace(t 
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	pod := sourcePodForJob(job)
@@ -540,7 +567,7 @@ func TestSnapshotJobReconcileRunningTransitionsOnJobReady(t *testing.T) {
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
 
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	job.Status.Ready = ptr.To(int32(1))
@@ -603,7 +630,7 @@ func TestSnapshotJobReconcileSetsStartedAtWhenRunningAlreadyPersisted(t *testing
 	})
 	require.Nil(t, sj.Status.StartedAt, "precondition: StartedAt must start nil")
 
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	job.Status.Ready = ptr.To(int32(1))

@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	"github.com/ai-dynamo/snapshot/operator/internal/logging"
 )
 
@@ -52,6 +53,7 @@ func runCheckpoint(args []string) error {
 	container := flags.String("container", "", "Required. Name of the workload container inside the manifest to checkpoint")
 	cudaCheckpointWrap := flags.Bool("cuda-checkpoint-wrap", false, "Wrap the container command with cuda-checkpoint --launch-job (required for multi-GPU checkpoints; the placeholder image must have cuda-checkpoint at the same path as the source container)")
 	timeout := flags.Duration("timeout", 45*time.Minute, "Maximum time to wait for checkpoint completion")
+	applySeccompProfile := flags.Bool("apply-seccomp-profile", true, "Set the block-iouring seccomp profile on the source Pod; false leaves the manifest's seccomp settings unchanged")
 
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -74,6 +76,7 @@ func runCheckpoint(args []string) error {
 		SnapshotName:       *snapshotName,
 		Container:          *container,
 		CudaCheckpointWrap: *cudaCheckpointWrap,
+		SeccompProfile:     seccompProfile(*applySeccompProfile),
 		Timeout:            *timeout,
 	})
 	if err != nil {
@@ -100,6 +103,7 @@ func runRestore(args []string) error {
 	namespace := flags.String("namespace", "", "Namespace override; defaults to the manifest namespace or current kube context namespace")
 	kubeContext := flags.String("kube-context", "", "Kubernetes context override")
 	snapshotName := flags.String("snapshot", "", "Required. PodSnapshot name in the restore pod namespace")
+	applySeccompProfile := flags.Bool("apply-seccomp-profile", true, "Set the block-iouring seccomp profile on the restore containers; false leaves the manifest's seccomp settings unchanged")
 
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -116,10 +120,11 @@ func runRestore(args []string) error {
 
 	snapshotctlLog.Info("Running restore", "manifest", *manifest, "namespace", *namespace, "pod_snapshot", *snapshotName)
 	result, err := runRestoreFlow(context.Background(), restoreOptions{
-		ManifestPath: *manifest,
-		Namespace:    *namespace,
-		KubeContext:  *kubeContext,
-		SnapshotName: *snapshotName,
+		ManifestPath:   *manifest,
+		Namespace:      *namespace,
+		KubeContext:    *kubeContext,
+		SnapshotName:   *snapshotName,
+		SeccompProfile: seccompProfile(*applySeccompProfile),
 	})
 	if err != nil {
 		return err
@@ -132,6 +137,13 @@ func runRestore(args []string) error {
 	fmt.Printf("restore_pod=%s\n", result.RestorePod)
 	fmt.Printf("pod_snapshot=%s\n", result.PodSnapshot)
 	return nil
+}
+
+func seccompProfile(apply bool) string {
+	if apply {
+		return podcontract.DefaultSeccompLocalhostProfile
+	}
+	return ""
 }
 
 func printUsage() {

@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -159,7 +160,7 @@ func TestSnapshotJobReconcileCompletionGate(t *testing.T) {
 		s := snapshotJobReconcilerScheme()
 		sj := minimalSnapshotJob()
 		sj.UID = types.UID("sj-uid")
-		job, err := buildSourceJob(sj)
+		job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 		require.NoError(t, err)
 		require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 		pod := sourcePodForJob(job)
@@ -186,7 +187,7 @@ func TestSnapshotJobReconcileCompletionGate(t *testing.T) {
 		s := snapshotJobReconcilerScheme()
 		sj := minimalSnapshotJob()
 		sj.UID = types.UID("sj-uid")
-		job, err := buildSourceJob(sj)
+		job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 		require.NoError(t, err)
 		require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 		completeJob(job)
@@ -218,7 +219,7 @@ func TestSnapshotJobReconcileCompletionGate(t *testing.T) {
 		s := snapshotJobReconcilerScheme()
 		sj := minimalSnapshotJob()
 		sj.UID = types.UID("sj-uid")
-		job, err := buildSourceJob(sj)
+		job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 		require.NoError(t, err)
 		require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 		job.UID = types.UID("source-job-uid")
@@ -280,7 +281,7 @@ func TestSnapshotJobReconcileCompletedJobWithMissingSourcePodFailsWithoutPolling
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	completeJob(job)
@@ -302,7 +303,7 @@ func TestSnapshotJobReconcileCompletedJobWithRetainedPodFailsWithoutCreatingCapt
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	completeJob(job)
@@ -332,7 +333,7 @@ func TestSnapshotJobReconcileCompletedJobConfirmsCaptureAbsenceAuthoritatively(t
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	completeJob(job)
@@ -361,7 +362,7 @@ func TestSnapshotJobReconcileCaptureSuccessOverridesJobFailure(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	job.Status.Ready = ptr.To(int32(1))
@@ -404,7 +405,7 @@ func helperSnapshotJob(t *testing.T, s *runtime.Scheme, helperState corev1.Conta
 	sj.UID = types.UID("sj-uid")
 	sj.Spec.PodTemplate.Spec.Containers = append(sj.Spec.PodTemplate.Spec.Containers,
 		corev1.Container{Name: "helper", Image: "test:latest"})
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	pod := sourcePodForJob(job)
@@ -539,7 +540,7 @@ func sidecarSnapshotJob(t *testing.T, s *runtime.Scheme, sidecarState *corev1.Co
 	always := corev1.ContainerRestartPolicyAlways
 	sj.Spec.PodTemplate.Spec.InitContainers = append(sj.Spec.PodTemplate.Spec.InitContainers,
 		corev1.Container{Name: "sidecar", Image: "test:latest", RestartPolicy: &always})
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	pod := sourcePodForJob(job)
@@ -661,7 +662,7 @@ func TestSnapshotJobReconcileReadyCaptureWithDeadlineFails(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	pod := sourcePodForJob(job)
@@ -684,7 +685,7 @@ func TestSnapshotJobReconcileCapturedKeepsCaptureReasonUnderDeadline(t *testing.
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	pod := sourcePodForJob(job)
@@ -762,7 +763,7 @@ func TestSnapshotJobReconcileWaitsForCaptureWhenJobFailsDuringPendingCapture(t *
 			s := snapshotJobReconcilerScheme()
 			sj := minimalSnapshotJob()
 			sj.UID = types.UID("sj-uid")
-			job, err := buildSourceJob(sj)
+			job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 			require.NoError(t, err)
 			require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 			pod := sourcePodForJob(job)
@@ -817,7 +818,7 @@ func TestSnapshotJobReconcileDeadlineExceeded(t *testing.T) {
 			s := snapshotJobReconcilerScheme()
 			sj := minimalSnapshotJob()
 			sj.UID = types.UID("sj-uid")
-			job, err := buildSourceJob(sj)
+			job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 			require.NoError(t, err)
 			require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 			setJobFailureCondition(job, conditionType, batchv1.JobReasonDeadlineExceeded, "Job was active longer than specified deadline")
@@ -883,7 +884,7 @@ func TestSnapshotJobReconcileFailedPodSnapshotAndDeletedJobUsesJobDeleted(t *tes
 	sj.Status.PodSnapshotName = sj.Name
 	sj.Status.PodSnapshotUID = types.UID("pod-snapshot-uid")
 
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	job.UID = sj.Status.SourceJobUID
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
@@ -923,7 +924,7 @@ func TestSnapshotJobReconcileReadyCaptureStaysJobDeletedWhenJobGone(t *testing.T
 	sj.Status.PodSnapshotName = sj.Name
 	sj.Status.PodSnapshotUID = types.UID("pod-snapshot-uid")
 
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	pod := sourcePodForJob(job)
 	snap := readySnapshot(t, sj, pod)
@@ -955,7 +956,7 @@ func TestSnapshotJobReconcilePendingCaptureStaysJobDeletedWhenJobGone(t *testing
 	sj.Status.PodSnapshotName = sj.Name
 	sj.Status.PodSnapshotUID = types.UID("pod-snapshot-uid")
 
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	pod := sourcePodForJob(job)
 	snap, err := buildPodSnapshot(sj, pod) // pending: no capture result
@@ -980,7 +981,7 @@ func TestSnapshotJobReconcilePodSnapshotNameConflict(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	pod := sourcePodForJob(job)
@@ -1037,7 +1038,7 @@ func TestSnapshotJobReconcilePodSnapshotFailedReasonIsBindStage(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	pod := sourcePodForJob(job)
@@ -1069,7 +1070,7 @@ func TestSnapshotJobReconcileCompletedRetriesCleanupUntilJobGone(t *testing.T) {
 	meta.SetStatusCondition(&sj.Status.Conditions, metav1.Condition{
 		Type: snapshotv1alpha1.SnapshotJobConditionCompleted, Status: metav1.ConditionTrue, Reason: snapshotv1alpha1.ReasonJobCompleted,
 	})
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	job.UID = types.UID("source-job-uid")
@@ -1098,7 +1099,7 @@ func TestSnapshotJobReconcileFailedNeverDeletesTheJob(t *testing.T) {
 	meta.SetStatusCondition(&sj.Status.Conditions, metav1.Condition{
 		Type: snapshotv1alpha1.SnapshotJobConditionFailed, Status: metav1.ConditionTrue, Reason: snapshotv1alpha1.ReasonJobFailed,
 	})
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 
@@ -1122,7 +1123,7 @@ func TestSnapshotJobReconcileCompletionDoesNotDeleteReplacementJob(t *testing.T)
 		Reason: snapshotv1alpha1.ReasonJobCompleted,
 	})
 
-	replacement, err := buildSourceJob(sj)
+	replacement, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, replacement, s))
 	replacement.UID = types.UID("replacement-job-uid")
@@ -1140,7 +1141,7 @@ func TestSnapshotJobReconcileCompletionPersistsStatusBeforeDeleting(t *testing.T
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
-	job, err := buildSourceJob(sj)
+	job, err := buildSourceJob(sj, podcontract.DefaultSeccompLocalhostProfile)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	completeJob(job)

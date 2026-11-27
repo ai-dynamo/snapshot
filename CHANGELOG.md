@@ -103,6 +103,14 @@ commit-level history for each release is on its
   `example.com/pool DoesNotExist` keeps the agent off those nodes. An install
   that sets none is unchanged. See
   [Agent DaemonSet and Access](docs/reference/helm-values.md#agent-daemonset-and-access).
+- `seccomp.applyToSourcePods=false` stops a SnapshotJob source Pod from getting
+  the block-iouring seccomp profile. The default, `true`, is unchanged. On
+  OpenShift the profile needs an SCC that allows it (#1002). See
+  [Install on OpenShift](docs/get-started/installation.md#install-on-openshift).
+- `snapshotctl checkpoint --apply-seccomp-profile=false` and
+  `snapshotctl restore --apply-seccomp-profile=false` leave the manifest's
+  seccomp settings unchanged. The default, `true`, is unchanged (#1002). See
+  [`snapshotctl` CLI](docs/reference/cli.md#checkpoint).
 
 ### Changed
 

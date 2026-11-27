@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	"github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/controller"
 	"github.com/ai-dynamo/snapshot/operator/internal/maintenance"
@@ -49,6 +50,8 @@ func main() {
 		"Helm release name, used to label the PageBroker S3 configuration ConfigMap this binary writes outside Helm's own apply step")
 	pageBrokerS3SettingsPath := flag.String("pagebroker-s3-settings", "",
 		"Path to the PageBroker-only S3 settings (addressing, CA file, HTTP permission, limits) merged into the configuration ConfigMap")
+	sourcePodSeccompProfile := flag.String("source-pod-seccomp-profile", podcontract.DefaultSeccompLocalhostProfile,
+		"Kubelet-local seccomp profile set on SnapshotJob source Pods; empty leaves the Pod template's seccomp settings unchanged")
 	flag.Parse()
 	storageCfg, storeID := mustStorageConfig(*storageConfigPath)
 	captureStoreID, err := newContentStoreID(storeID, *bindNewContents)
@@ -182,10 +185,11 @@ func main() {
 	}
 
 	snapshotJobReconciler := &controller.SnapshotJobReconciler{
-		Client:               mgr.GetClient(),
-		NonCacheReadClient:   mgr.GetAPIReader(),
-		Recorder:             mgr.GetEventRecorderFor("snapshotjob-controller"),
-		CuInterposeContainer: *cuInterposeConfig,
+		Client:                  mgr.GetClient(),
+		NonCacheReadClient:      mgr.GetAPIReader(),
+		Recorder:                mgr.GetEventRecorderFor("snapshotjob-controller"),
+		CuInterposeContainer:    *cuInterposeConfig,
+		SourcePodSeccompProfile: *sourcePodSeccompProfile,
 	}
 	if err := snapshotJobReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up SnapshotJob controller")
