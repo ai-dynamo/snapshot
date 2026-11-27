@@ -400,6 +400,9 @@ class ModelStreamerSessionTest : public ::testing::Test {
     catch (const CancellationError& error) {
       EXPECT_EQ(error.reason, reason);
     }
+    catch (const std::exception& error) {
+      ADD_FAILURE() << "restore failed without cancellation: " << error.what();
+    }
   }
   test::TemporaryDirectory temporary_;
   Path root_;
