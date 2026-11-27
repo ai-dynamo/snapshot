@@ -18,6 +18,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ktypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -645,16 +646,19 @@ func (w *NodeController) labelCaptureEligible(ctx context.Context, pod *corev1.P
 	return w.client.Patch(ctx, updated, client.MergeFrom(base))
 }
 
+// captureEligibleLabelRemoval removes CaptureEligibleLabel and names no other key. A patch computed
+// from the agent's copy of the pod is "labels: null" when that copy has no other label, and that
+// removes every label the live pod has by then.
+var captureEligibleLabelRemoval = client.RawPatch(ktypes.MergePatchType,
+	[]byte(`{"metadata":{"labels":{"`+snapshotv1alpha1.CaptureEligibleLabel+`":null}}}`))
+
 // removeCaptureEligibleLabel drops CaptureEligibleLabel so the source-pod informer stops driving the
 // pod after a terminal cancellation. Best-effort: a failure is logged, not surfaced.
 func (w *NodeController) removeCaptureEligibleLabel(ctx context.Context, pod *corev1.Pod) {
 	if _, ok := pod.Labels[snapshotv1alpha1.CaptureEligibleLabel]; !ok {
 		return
 	}
-	base := podLabelPatchBase(pod)
-	updated := base.DeepCopy()
-	delete(updated.Labels, snapshotv1alpha1.CaptureEligibleLabel)
-	if err := w.client.Patch(ctx, updated, client.MergeFrom(base)); err != nil {
+	if err := w.client.Patch(ctx, podLabelPatchBase(pod), captureEligibleLabelRemoval); err != nil {
 		logr.FromContextOrDiscard(ctx).Error(err, "Failed to remove capture-eligible label", "pod", pod.Name)
 	}
 }

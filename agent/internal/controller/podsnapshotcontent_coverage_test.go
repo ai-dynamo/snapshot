@@ -185,6 +185,53 @@ func TestRemoveCaptureEligibleLabel_PatchErrorLeavesLabel(t *testing.T) {
 	assert.True(t, labeled)
 }
 
+// TestRemoveCaptureEligibleLabel_KeepsLabelsWrittenAfterTheRead pins the removal to its one key.
+// The agent's copy of a pod with no label of its own carries only CaptureEligibleLabel, so a patch
+// computed from that copy would delete the whole label map of the live pod.
+func TestRemoveCaptureEligibleLabel_KeepsLabelsWrittenAfterTheRead(t *testing.T) {
+	pod := makeSourcePod()
+	pod.Labels[snapshotv1alpha1.CaptureEligibleLabel] = "true"
+	w := makeNodeController(t, &fakeCheckpointer{}, pod)
+	live := getPod(t, w, "inference", "worker-0")
+	live.Labels["app"] = "web"
+	require.NoError(t, w.client.Update(context.Background(), live))
+
+	w.removeCaptureEligibleLabel(context.Background(), pod)
+
+	assert.Equal(t, map[string]string{"app": "web"}, getPod(t, w, "inference", "worker-0").Labels)
+}
+
+// TestReconcileCapture_SourcePodGoneKeepsLabelsWrittenDuringTheStatusWrite is the same case through
+// the reconcile: the label lands between the read of the source pod and the label removal, which
+// is where the terminal status write sits.
+func TestReconcileCapture_SourcePodGoneKeepsLabelsWrittenDuringTheStatusWrite(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	pod := makeSourcePod()
+	pod.Labels[snapshotv1alpha1.CaptureEligibleLabel] = "true"
+	pod.Status.Phase = corev1.PodSucceeded
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			live := &corev1.Pod{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(pod), live); err != nil {
+				return err
+			}
+			live.Labels["app"] = "web"
+			if err := c.Update(ctx, live); err != nil {
+				return err
+			}
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+		},
+	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content, pod)
+
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
+
+	cond := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "SourcePodGone", cond.Reason)
+	assert.Equal(t, map[string]string{"app": "web"}, getPod(t, w, "inference", "worker-0").Labels)
+}
+
 func TestSetSnapshotContentSucceeded_StatusPatchErrorReturnsError(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	funcs := interceptor.Funcs{

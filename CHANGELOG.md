@@ -189,6 +189,10 @@ commit-level history for each release is on its
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 
+- The node agent removes only its own `nvidia.com/snapshot-capture-eligible`
+  label from a source Pod. For a Pod with no other label, the request deleted
+  all labels, including one that another client wrote a moment before.
+
 ### Deprecated
 
 - `SNAPSHOT_RESTORE_STANDBY` (`podcontract.RestoreStandbyModeEnv`): restore
