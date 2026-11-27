@@ -188,6 +188,13 @@ commit-level history for each release is on its
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
+- A `PodSnapshot` that writes an optional field as an empty value, such as
+  `source.podRef.uid: ""`, `containers: []`, or an `httpGet` `path: ""`, no
+  longer keeps an empty status forever. The operator sent the whole object
+  back to add its finalizer, and the API server refused that as a change to
+  the immutable `spec`. After the upgrade, the operator also acts on such a
+  `PodSnapshot` that already exists, which can checkpoint a source Pod that
+  is still running. Delete any you no longer want before you upgrade.
 
 ### Deprecated
 

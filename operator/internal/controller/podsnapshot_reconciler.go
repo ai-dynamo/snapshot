@@ -131,11 +131,19 @@ func (sr *PodSnapshotReconciler) ensureFinalizer(ctx context.Context, snap *snap
 	if controllerutil.ContainsFinalizer(snap, podSnapshotFinalizer) {
 		return false, nil
 	}
-	controllerutil.AddFinalizer(snap, podSnapshotFinalizer)
-	if err := sr.Update(ctx, snap); err != nil {
+	if err := sr.patchFinalizer(ctx, snap, controllerutil.AddFinalizer); err != nil {
 		return false, fmt.Errorf("add snapshot finalizer: %w", err)
 	}
 	return true, nil
+}
+
+// patchFinalizer adds or removes the cleanup finalizer with a metadata-only patch. A full Update
+// would send the spec back without the optional fields a user wrote as empty values (uid: ""),
+// which the Go types omit, and the API server refuses that as a change to the immutable spec.
+func (sr *PodSnapshotReconciler) patchFinalizer(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, change func(client.Object, string) bool) error {
+	base := snap.DeepCopy()
+	change(snap, podSnapshotFinalizer)
+	return sr.Patch(ctx, snap, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
 // mirrorBoundContent loads the bound PodSnapshotContent and mirrors its status onto the PodSnapshot.
@@ -547,8 +555,7 @@ func (sr *PodSnapshotReconciler) handleDelete(ctx context.Context, snap *snapsho
 	// that downtime would leak. A future GC/cleanup policy will reclaim unbound content.
 	contentName := ptr.Deref(snap.Status.BoundPodSnapshotContentName, "")
 	if contentName == "" {
-		controllerutil.RemoveFinalizer(snap, podSnapshotFinalizer)
-		if err := sr.Update(ctx, snap); err != nil {
+		if err := sr.patchFinalizer(ctx, snap, controllerutil.RemoveFinalizer); err != nil {
 			return ctrl.Result{}, fmt.Errorf("remove snapshot finalizer: %w", err)
 		}
 		return ctrl.Result{}, nil
@@ -566,8 +573,7 @@ func (sr *PodSnapshotReconciler) handleDelete(ctx context.Context, snap *snapsho
 		return ctrl.Result{}, fmt.Errorf("confirm PodSnapshotContent %q deleted: %w", contentName, err)
 	}
 
-	controllerutil.RemoveFinalizer(snap, podSnapshotFinalizer)
-	if err := sr.Update(ctx, snap); err != nil {
+	if err := sr.patchFinalizer(ctx, snap, controllerutil.RemoveFinalizer); err != nil {
 		return ctrl.Result{}, fmt.Errorf("remove snapshot finalizer: %w", err)
 	}
 	return ctrl.Result{}, nil
