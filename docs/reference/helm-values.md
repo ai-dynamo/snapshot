@@ -70,9 +70,11 @@ The chart refuses these S3 values, and the error names the value:
   the endpoint.
 - A prefix with a leading slash.
 - A bucket or prefix that is not a string. Helm reads an unquoted value that
-  contains only digits, such as `20261127`, as a number. In a values file, put
-  such a value in quotes: `prefix: "20261127"`. On the command line, use
-  `--set-string` instead of `--set`.
+  contains only digits, such as `20261127`, as a number. For a new
+  installation, put such a value in quotes in a values file:
+  `prefix: "20261127"`. On the command line, use `--set-string` instead of
+  `--set`. For a release that already uses the S3 store, see
+  [Keep the Store of a Numeric Bucket or Prefix](../operate/configure-storage.md#keep-the-store-of-a-numeric-bucket-or-prefix).
 
 ## S3 Transfer Limits
 

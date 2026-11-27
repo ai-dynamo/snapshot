@@ -144,31 +144,56 @@ tests:
 
   # Helm reads an unquoted value made only of digits as a number. The chart
   # printed 123456789012 as 1.23456789012e+11, which the operator refuses.
-  - it: rejects a bucket that Helm read as a number
+  # --set gave the digits, so a release can run with them: the message sends
+  # it to the bucket in use.
+  - it: rejects a bucket that Helm read as a number and says where the bucket in use is
+    release:
+      name: snapshot
     set:
       storage.s3.bucket: 123456789012
     asserts:
       - failedTemplate:
-          errorPattern: "storage.s3.bucket must be a string, but Helm read it as the number 123456789012: quote the bucket in a values file, or pass it with --set-string"
+          errorMessage: 'storage.s3.bucket must be a string, but Helm read it as the number 123456789012: if this release already uses the S3 store, set the bucket that the operator uses now, which can differ from the value you wrote. Read it from "bucket" in key pagebroker-s3-config.json of ConfigMap snapshot-pagebroker-storage-config. For a new installation, set the bucket you want. Quote the value in a values file, or pass it with --set-string'
 
-  # The chart printed 20261127 as 2.0261127e+07 and the operator accepted it:
-  # another store than the text 20261127 names.
-  - it: rejects a prefix that Helm read as a number and says how to keep the snapshots
+  # The chart printed 20261127 as 2.0261127e+07 from a values file and as
+  # 20261127 from --set, and the operator accepted both: two stores. Quoting
+  # the digits is right for one of them only, so the message does not say it.
+  - it: rejects a prefix that Helm read as a number and says where the prefix in use is
     release:
       name: snapshot
     set:
       storage.s3.prefix: 20261127
     asserts:
       - failedTemplate:
-          errorPattern: "storage.s3.prefix must be a string, but Helm read it as the number 20261127: quote the prefix in a values file, or pass it with --set-string. To keep the snapshots of an installed release, give the prefix that storage.yaml in ConfigMap snapshot-config has"
+          errorMessage: 'storage.s3.prefix must be a string, but Helm read it as the number 20261127: if this release already uses the S3 store, set the prefix that the operator uses now, which can differ from the value you wrote. Read it from "prefix" in key pagebroker-s3-config.json of ConfigMap snapshot-pagebroker-storage-config (no "prefix" there: set ""). For a new installation, set the prefix you want. Quote the value in a values file, or pass it with --set-string'
 
-  # A prefix of 0 or false rendered as the empty prefix, the bucket root.
+  - it: names the ConfigMap of the release in the message
+    release:
+      name: acme
+    set:
+      storage.s3.prefix: 20261127
+    asserts:
+      - failedTemplate:
+          errorPattern: 'Read it from "prefix" in key pagebroker-s3-config.json of ConfigMap acme-snapshot-pagebroker-storage-config \(no "prefix" there: set ""\)'
+
+  # A prefix of 0 or false rendered as the empty prefix, the bucket root. The
+  # operator then writes no "prefix" for PageBroker, which the message covers.
   - it: rejects a prefix that Helm read as false
     set:
       storage.s3.prefix: false
     asserts:
       - failedTemplate:
-          errorPattern: "storage.s3.prefix must be a string, but Helm read it as false"
+          errorPattern: 'storage.s3.prefix must be a string, but Helm read it as false: if this release already uses the S3 store, .* \(no "prefix" there: set ""\)'
+
+  - it: rejects a prefix that is a list and does not print its content
+    release:
+      name: snapshot
+    set:
+      storage.s3.prefix:
+        - https://backup:not-a-real-password@s3.example.com
+    asserts:
+      - failedTemplate:
+          errorMessage: 'storage.s3.prefix must be a string, but Helm read it as a list or a map: if this release already uses the S3 store, set the prefix that the operator uses now, which can differ from the value you wrote. Read it from "prefix" in key pagebroker-s3-config.json of ConfigMap snapshot-pagebroker-storage-config (no "prefix" there: set ""). For a new installation, set the prefix you want. Quote the value in a values file, or pass it with --set-string'
 
   - it: renders a quoted bucket and prefix made only of digits
     set:
@@ -178,6 +203,16 @@ tests:
       - matchRegex:
           path: data["storage.yaml"]
           pattern: 'bucket: "123456789012"\s+prefix: "20261127"'
+
+  # The text that a release installed with prefix: 20261127 in a values file
+  # runs with. Given as a string, it renders as before and keeps the store.
+  - it: renders the text of a long number as the chart printed it before
+    set:
+      storage.s3.prefix: "2.0261127e+07"
+    asserts:
+      - matchRegex:
+          path: data["storage.yaml"]
+          pattern: 'prefix: "2.0261127e\+07"'
 
   - it: leaves the S3 values of a PVC installation alone
     set:

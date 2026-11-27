@@ -304,23 +304,30 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
      follow that code and refuse nothing it accepts; the operator enforces the
      rest. A bucket or prefix that Helm read as a number fails too: 0123 in a
      values file arrives as 83, a long number is printed with an exponent, and
-     a prefix changed that way names another store. No message prints the
-     endpoint: a URL can hold a credential, and this text goes to terminals,
-     CI logs and the status of GitOps controllers. */}}
+     a prefix changed that way names another store. A release that is
+     installed can already run with such a text, and the text depends on how
+     the number reached Helm. The message therefore sends an installed release
+     to the value in use, which the operator writes at each start into the
+     ConfigMap that PageBroker reads; quoting the number as written could name
+     another store. No message prints the endpoint, or a bucket or prefix that
+     is a list or a map: a URL can hold a credential, and this text goes to
+     terminals, CI logs and the status of GitOps controllers. */}}
 {{- define "snapshot.validateS3Store" -}}
 {{- $s3 := .Values.storage.s3 -}}
 {{- range $name := list "bucket" "prefix" -}}
 {{- $value := index $s3 $name -}}
 {{- if not (or (kindIs "string" $value) (kindIs "invalid" $value)) -}}
-{{- $read := toJson $value -}}
+{{- $read := "a list or a map" -}}
 {{- if or (kindIs "float64" $value) (kindIs "int64" $value) -}}
-{{- $read = printf "the number %s" $read -}}
+{{- $read = printf "the number %s" (toJson $value) -}}
+{{- else if kindIs "bool" $value -}}
+{{- $read = toJson $value -}}
 {{- end -}}
-{{- $remedy := printf "quote the %s in a values file, or pass it with --set-string" $name -}}
+{{- $inUse := printf "Read it from %q in key pagebroker-s3-config.json of ConfigMap %s" $name (include "snapshot.pageBrokerS3ConfigName" $) -}}
 {{- if eq $name "prefix" -}}
-{{- $remedy = printf "%s. To keep the snapshots of an installed release, give the prefix that storage.yaml in ConfigMap %s-config has" $remedy (include "snapshot.fullname" $) -}}
+{{- $inUse = printf "%s (no \"prefix\" there: set \"\")" $inUse -}}
 {{- end -}}
-{{- fail (printf "storage.s3.%s must be a string, but Helm read it as %s: %s" $name $read $remedy) -}}
+{{- fail (printf "storage.s3.%s must be a string, but Helm read it as %s: if this release already uses the S3 store, set the %s that the operator uses now, which can differ from the value you wrote. %s. For a new installation, set the %s you want. Quote the value in a values file, or pass it with --set-string" $name $read $name $inUse $name) -}}
 {{- end -}}
 {{- end -}}
 {{- $endpoint := $s3.endpoint | default "" | toString -}}

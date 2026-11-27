@@ -240,6 +240,29 @@ After changing the endpoint, bucket, region or prefix, restart the agent
 DaemonSet once the operator pod is Ready, so PageBroker reads the operator's
 current configuration. PageBroker does not re-read it while running.
 
+### Keep the Store of a Numeric Bucket or Prefix
+
+The chart refuses a `storage.s3.bucket` or `storage.s3.prefix` that Helm read as
+a number. Helm does not always print a number as you wrote it. For example, the
+chart rendered `prefix: 20261127` from a values file as `2.0261127e+07`, and
+from `--set` as `20261127`. Each text names a different store.
+
+If the release already uses the S3 store, keep the text that the operator uses
+now. To read it, run this command with the ConfigMap name from the error
+message:
+
+```bash
+kubectl get configmap <configmap-name> --namespace <namespace> \
+  --output jsonpath='{.data.pagebroker-s3-config\.json}'
+```
+
+Set `storage.s3.bucket` and `storage.s3.prefix` to the `bucket` and the `prefix`
+in the output. If the output has no `prefix`, set `storage.s3.prefix: ""`. Put
+each value in quotes in a values file, or pass it with `--set-string`.
+
+After the upgrade, run the command again. The `storeId` in the output must be
+the same as before.
+
 ## Node Cache
 
 The node cache is a directory on a node's local disk that holds copies of

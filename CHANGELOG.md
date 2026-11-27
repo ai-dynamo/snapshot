@@ -187,11 +187,15 @@ commit-level history for each release is on its
   chart refuses a `storage.s3.endpoint` with a path, a trailing slash, or no
   scheme, and a `storage.s3.prefix` with a leading slash. It also refuses a
   `storage.s3.bucket` or `storage.s3.prefix` that is not a string. Helm reads
-  an unquoted value made only of digits as a number, and the chart rendered
-  prefix `20261127` as `2.0261127e+07`, which names another store. Action on
-  upgrade: quote such a bucket or prefix, or pass it with `--set-string`. To
-  keep the snapshots, set the prefix that the error message tells you to read.
-  See [Helm Chart Values](docs/reference/helm-values.md#storage).
+  an unquoted value made only of digits as a number. The chart rendered
+  prefix `20261127` from a values file as `2.0261127e+07`, which names
+  another store. Action on upgrade, if the chart refuses your bucket or
+  prefix: do not quote the digits. Set the text that the operator uses now,
+  as a string. The error message says where to read it. The agent and
+  operator Pods restart once. A value that rendered correctly before, such as
+  `--set storage.s3.bucket=123456789012`, is refused too. A prefix of `0` or
+  `false`, which gave the bucket root, is refused too. See
+  [Keep the Store of a Numeric Bucket or Prefix](docs/operate/configure-storage.md#keep-the-store-of-a-numeric-bucket-or-prefix).
 
 ### Fixed
 
