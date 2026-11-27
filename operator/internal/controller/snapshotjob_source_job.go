@@ -248,8 +248,9 @@ func awaitedSourceJobDeadlineVerdict(job *batchv1.Job, captureFailedAt, now time
 		return 0
 	}
 	waitFrom := deadline
-	// A failure time ahead of the operator's clock would move the end of the
-	// wait with every reconcile, so only a past one counts.
+	// A failure time ahead of the operator's clock would make the wait longer
+	// than captureResolutionBackstop by that difference, so only a past one
+	// counts.
 	if captureFailedAt.After(deadline) && !captureFailedAt.After(now) {
 		waitFrom = captureFailedAt
 	}
