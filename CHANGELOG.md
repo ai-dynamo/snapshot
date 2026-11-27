@@ -130,6 +130,15 @@ commit-level history for each release is on its
   128 MiB. Explicit `s3Reader.maxInflightMiB` and
   `RUNAI_STREAMER_S3_MAX_INFLIGHT_MIB` overrides still take precedence.
   See [Model Streamer configuration](agent/pagebroker/MODEL_STREAMER.md).
+- The chart refuses an image tag that is not a string. Helm reads an unquoted
+  tag made only of digits as a number. The chart then rendered an image
+  reference that is not valid, such as `agent:%!s(int64=1234567)`, or another
+  tag: `0123` in a values file became `83`. `helm install` still succeeded.
+  Action on upgrade: quote such a tag in your values file, or pass it with
+  `--set-string`, also with `--reset-then-reuse-values`. An operator tag that
+  rendered correctly before, such as `--set image.operator.tag=1234567`, is
+  refused too. See
+  [Helm Chart Values](docs/reference/helm-values.md#images-and-rollout).
 
 - Checkpoint and restore failure messages open with the step they came from,
   as `while <step>: <cause>`, on the pod's `nvidia.com/Restored` condition, the
@@ -182,15 +191,6 @@ commit-level history for each release is on its
   namespace rather than the restore container's (#593), so lookups by PID,
   such as UCX shared-memory endpoints (#802), work after a restore. Only
   checkpoints taken after the upgrade get it; take older ones again.
-- The chart refuses an image tag that is not a string. Helm reads an unquoted
-  tag made only of digits as a number. The chart then rendered an image
-  reference that is not valid, such as `agent:%!s(int64=1234567)`, or another
-  tag: `0123` in a values file became `83`. `helm install` still succeeded.
-  Action on upgrade: quote such a tag in your values file, or pass it with
-  `--set-string`, also with `--reset-then-reuse-values`. An operator tag that
-  rendered correctly before, such as `--set image.operator.tag=1234567`, is
-  refused too. See
-  [Helm Chart Values](docs/reference/helm-values.md#images-and-rollout).
 
 ### Fixed
 

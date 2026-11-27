@@ -29,10 +29,10 @@ values, see [values.yaml](../../charts/snapshot/values.yaml).
 | `runtime.storageDir` | `""` | Host per-container storage dir, mounted at the identical path in the agent (empty = default for `runtime.type`). |
 | `openshift.enabled`           | `false`                                 | Enable OpenShift RBAC/SCC pieces. Keep `false` on vanilla Kubernetes.            |
 
-An image tag must be a string. Helm reads an unquoted tag that contains only
-digits, such as `20261127`, as a number, and the chart refuses it. In a values
-file, put the tag in quotes: `tag: "20261127"`. On the command line, use
-`--set-string` instead of `--set`.
+The chart refuses an image tag that is not a string, and the error names the
+value. Helm reads an unquoted tag that contains only digits, such as
+`20261127`, as a number. In a values file, put such a tag in quotes:
+`tag: "20261127"`. On the command line, use `--set-string` instead of `--set`.
 
 ## Storage
 
