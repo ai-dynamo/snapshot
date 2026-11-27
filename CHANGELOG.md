@@ -190,9 +190,12 @@ commit-level history for each release is on its
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 
 - A `SnapshotJob` that is deleted and created again under the same name no
-  longer fails with `JobNameConflict`. The operator found the source Job of the
-  deleted `SnapshotJob`, which Kubernetes had not removed yet. It now waits
-  until that Job is gone.
+  longer fails at once with `JobNameConflict`. The operator found the source
+  Job of the deleted `SnapshotJob`, which Kubernetes had not deleted yet. It
+  now waits for at most two minutes until that Job is gone, and the `Running`
+  condition has reason `WaitingForPreviousJobDeletion` during the wait. See
+  [Troubleshoot Checkpoints](docs/troubleshooting/checkpoints.md#a-snapshotjob-fails-with-jobnameconflict).
+  No action on upgrade.
 
 ### Deprecated
 

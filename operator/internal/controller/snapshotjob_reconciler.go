@@ -71,6 +71,9 @@ type snapshotJobObservation struct {
 	job              *batchv1.Job
 	podSnapshot      *snapshotv1alpha1.PodSnapshot
 	sourcePodMissing bool
+	// previousSourceJob is the source Job of an earlier SnapshotJob with this
+	// name, set while this SnapshotJob waits for Kubernetes to delete it.
+	previousSourceJob *batchv1.Job
 	// sourceJobFinished is true once the capture is Ready AND the source Job
 	// reached a terminal state with every non-target container exited 0 — the
 	// second stage of the completion gate.
@@ -114,10 +117,9 @@ func (r *SnapshotJobReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	observed, result, err := r.reconcileResources(ctx, sj)
-	if errors.Is(err, errSnapshotJobCacheBehind) || errors.Is(err, errSourceJobOfDeletedSnapshotJob) {
+	if errors.Is(err, errSnapshotJobCacheBehind) {
 		// Nothing was created or written. The watch event that carries the newer
-		// SnapshotJob, or the delete of the earlier SnapshotJob's Job, is the
-		// normal wake-up; the requeue is a backstop.
+		// SnapshotJob is the normal wake-up; the requeue is a backstop.
 		return ctrl.Result{RequeueAfter: snapshotJobCacheBehindRequeue}, nil
 	}
 	if err != nil {
@@ -505,6 +507,14 @@ func deriveRunningStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJo
 		if observed.failure != nil {
 			setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
 				observed.failure.reason, "source pod is unavailable: "+observed.failure.cause.Error())
+		}
+		if previous := observed.previousSourceJob; previous != nil {
+			// The message names the end of the wait and not the time left, so
+			// that every reconcile of the wait derives the same status.
+			setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
+				snapshotv1alpha1.ReasonWaitingForPreviousJobDeletion, fmt.Sprintf(
+					"waiting until %s for Kubernetes to delete source Job %q (uid %q) of an earlier SnapshotJob with this name",
+					next.CreationTimestamp.Add(previousSourceJobDeletionWait).UTC().Format(time.RFC3339), previous.Name, previous.UID))
 		}
 		return
 	}
