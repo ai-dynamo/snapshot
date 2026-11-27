@@ -183,7 +183,7 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 		}
 		// The create cannot be undone, and the cached SnapshotJob can be older than
 		// its own first status write. A source Job that was accepted and then
-		// deleted would otherwise be created again and run the workload twice.
+		// deleted would otherwise be created again and start the workload again.
 		behind, err := r.snapshotJobCacheBehind(ctx, sj)
 		if err != nil {
 			return snapshotJobObservation{}, ctrl.Result{}, err
