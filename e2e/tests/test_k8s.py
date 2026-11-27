@@ -261,9 +261,12 @@ def test_exec_command_does_not_repeat_an_exec_for_an_earlier_failure(monkeypatch
     monkeypatch.setattr(k8s.time, "sleep", lambda _: None)
 
     # A debug dump runs its execs while the failure of the test is handled, so
-    # that failure is the context of every error they raise.
+    # that failure is the context of every error they raise. Here it is a dial
+    # failure as the client raises one, with the websocket error as its context.
+    earlier = ApiException(status=0)
+    earlier.__context__ = refused_exec(EXEC_DIAL_FAILURE)
     try:
-        raise ApiException(status=0) from refused_exec(EXEC_DIAL_FAILURE)
+        raise earlier
     except ApiException:
         with pytest.raises((AttributeError, ApiException)):
             k8s.exec_command("namespace", "pod", "true", container="app")
