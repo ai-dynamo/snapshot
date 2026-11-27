@@ -6,10 +6,8 @@ name: CuInterpose GPU tests
 # GPU infrastructure accepts trusted mirror pushes, not pull_request events.
 on:
   push:
-    # No paths filter here. GitHub evaluates a filter on the commits a push
-    # carries. copy-pr-bot creates pull-request/<number> at a commit the
-    # repository already has, so that push carries none and a filtered workflow
-    # does not start. The changes job below decides instead.
+    # No paths filter: the push that creates a mirror branch adds no commit, so a
+    # filtered workflow never starts for it. The changes job decides instead.
     branches: ['pull-request/[0-9]+']
   schedule:
     - cron: '0 11 * * *'
@@ -22,9 +20,8 @@ concurrency:
   cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/pull-request/') }}
 
 jobs:
-  # Runs for every event and has no job-level condition: a skipped job would
-  # skip the jobs that need it, and the nightly run with them. Only its steps
-  # are limited to the mirror push. The nightly and manual runs always test.
+  # No job-level condition: a skipped job would skip the jobs that need it, and
+  # the nightly run with them. Only the steps are limited to mirror pushes.
   changes:
     name: Detect cuInterpose changes
     runs-on: ubuntu-24.04
@@ -36,10 +33,8 @@ jobs:
         if: ${{ github.event_name == 'push' }}
         with:
           persist-credentials: false
-      # No base, as in e2e-pr.yaml: the filter compares against the merge-base
-      # with the default branch. That is the whole pull request. The previous
-      # mirror push would be only the latest commits, and after a merge of main
-      # it would count what main changed.
+      # No base, as in e2e-pr.yaml: the whole pull request against its
+      # merge-base with main, not only the commits of the latest push.
       - name: Filter paths
         id: filter
         if: ${{ github.event_name == 'push' }}

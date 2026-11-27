@@ -30,9 +30,8 @@ def workflow() -> dict:
 
 
 def test_no_mirror_push_workflow_filters_paths_in_its_trigger():
-    # copy-pr-bot creates the mirror branch at a commit the repository already
-    # has. That push carries no commit, so a trigger filter finds no changed
-    # file and the workflow never starts for a pull request's first push.
+    # The push that creates a mirror branch adds no commit, so a trigger filter
+    # finds no changed file and the workflow never starts for it.
     mirrored = set()
     for path in sorted(WORKFLOWS.glob("*.y*ml")):
         push = triggers(load(path.name)).get("push") or {}
@@ -59,8 +58,7 @@ def test_changes_job_decides_from_the_whole_pull_request(workflow):
     assert checkout["uses"].startswith("actions/checkout@")
     assert checkout["with"] == {"persist-credentials": False}
     assert checkout["if"] == paths_filter["if"] == ON_PUSH
-    # The pinned action of PR E2E, with no base: it compares against the
-    # merge-base with the default branch, not against the previous push.
+    # As PR E2E: no base, so the merge-base with main and not the previous push.
     pr_e2e = load("e2e-pr.yaml")["jobs"]["changes"]["steps"]
     assert paths_filter["uses"] in {step.get("uses") for step in pr_e2e}
     assert set(paths_filter["with"]) == {"filters"}
