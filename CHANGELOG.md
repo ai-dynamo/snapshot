@@ -195,8 +195,9 @@ commit-level history for each release is on its
 
 - `snapshotctl checkpoint` deletes the Job and the source Pod when `SIGINT`
   (Ctrl+C) or `SIGTERM` interrupts it. It ended at once and left the source
-  Pod running and holding its GPU. A second signal ends the command at once.
-  See [`snapshotctl` CLI](docs/reference/cli.md).
+  Pod running and holding its GPU. The signal still ends the command after
+  the delete, and a second signal ends it at once. See
+  [`snapshotctl` CLI](docs/reference/cli.md).
 
 ### Deprecated
 
