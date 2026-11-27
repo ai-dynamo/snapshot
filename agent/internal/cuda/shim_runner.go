@@ -19,14 +19,12 @@ import (
 )
 
 var (
-	cudaLockTimeout    = 10 * time.Second
-	cudaLockKillMargin = 5 * time.Second
+	cudaLockTimeout       = 10 * time.Second
+	cudaLockKillMargin    = 5 * time.Second
+	cudaCheckpointTimeout = 10 * time.Minute
 )
 
-const (
-	cudaCheckpointTimeout = 10 * time.Minute
-	libcudaMapWait        = 2 * time.Second
-)
+const libcudaMapWait = 2 * time.Second
 
 func helperActionTimeout(action string) time.Duration {
 	switch action {
@@ -69,7 +67,14 @@ func runCheckpointHelper(ctx context.Context, targetPID int, action, helperPath 
 	}
 
 	start := time.Now()
-	libcudaPath, libcudaVersion := readMappedLibcudaAfterStart(cmd.Process.Pid)
+	// Wait concurrently so a helper that exits before mapping libcuda is not held for libcudaMapWait.
+	exited := make(chan struct{})
+	var err error
+	go func() {
+		err = cmd.Wait()
+		close(exited)
+	}()
+	libcudaPath, libcudaVersion := readMappedLibcudaAfterStart(cmd.Process.Pid, exited)
 	log.Info("cuda-checkpoint-helper command started",
 		"pid", cmd.Process.Pid,
 		"target_pid", targetPID,
@@ -83,7 +88,7 @@ func runCheckpointHelper(ctx context.Context, targetPID int, action, helperPath 
 		"libcuda_version", libcudaVersion,
 	)
 
-	err := cmd.Wait()
+	<-exited
 	duration := time.Since(start)
 	out := strings.TrimSpace(output.String())
 	if err != nil {
@@ -122,17 +127,20 @@ func runCheckpointHelper(ctx context.Context, targetPID int, action, helperPath 
 	return nil
 }
 
-func readMappedLibcudaAfterStart(pid int) (string, string) {
+func readMappedLibcudaAfterStart(pid int, exited <-chan struct{}) (string, string) {
 	deadline := time.Now().Add(libcudaMapWait)
 	for {
-		path, version := readMappedLibcuda("/proc", pid)
-		if path != "" || time.Now().After(deadline) {
-			if path == "" {
-				return "unavailable", "unavailable"
-			}
+		if path, version := readMappedLibcuda("/proc", pid); path != "" {
 			return path, version
 		}
-		time.Sleep(10 * time.Millisecond)
+		if time.Now().After(deadline) {
+			return "unavailable", "unavailable"
+		}
+		select {
+		case <-exited:
+			return "unavailable", "unavailable"
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
 
