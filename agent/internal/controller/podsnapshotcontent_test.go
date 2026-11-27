@@ -493,6 +493,82 @@ func TestReconcileCapture_RedeliveryDoesNotSweepACapturedPod(t *testing.T) {
 	assert.Equal(t, ready, getContent(t, w, content.Name).Status.Conditions)
 }
 
+// TestReconcileCapture_RecreatedWorkOrderIsCaptured covers a work order that is deleted and
+// created again under its name before a reconcile saw the first one end. The new one has its own
+// UID, and the record of the first must not hide it.
+func TestReconcileCapture_RecreatedWorkOrderIsCaptured(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := makeSourcePod()
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
+	captures := 0
+	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		captures++
+		if captures == 1 {
+			return nil, errors.New("staging refused")
+		}
+		return nil, nil
+	}
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
+	require.NoError(t, w.client.Delete(context.Background(), getContent(t, w, content.Name)))
+
+	recreated := makeWorkOrder(content.Name, "node-a", "abc")
+	recreated.UID = types.UID("recreated-uid")
+	require.NoError(t, w.client.Create(context.Background(), recreated))
+	require.NoError(t, w.contentIndexer.Update(mustUnstructured(t, getContent(t, w, content.Name))))
+
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
+
+	assert.Equal(t, 2, captures, "a work order with a new UID must be captured")
+	assert.NotNil(t, meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+}
+
+// TestReconcileCapture_UnwrittenTerminalStatusIsRetried keeps the retry contract of a terminal
+// write that did not land: nothing is remembered, and the next reconcile records the result.
+func TestReconcileCapture_UnwrittenTerminalStatusIsRetried(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	content.CreationTimestamp = metav1.Unix(1000, 0)
+	pod := podWithFailedSibling()
+	rejected := false
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if !rejected {
+				rejected = true
+				return errors.New("status patch rejected")
+			}
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+		},
+	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content, pod)
+
+	require.Error(t, w.reconcileCapture(context.Background(), content.Name))
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
+
+	failed := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, failed, "the reconcile after a rejected write must record the result")
+	assert.Equal(t, "CheckpointContainerFailed", failed.Reason)
+}
+
+// TestReconcileCapture_SettledRecordIsDroppedOnceTheCacheShowsTheResult keeps the record as long
+// as the cache is behind, and no longer.
+func TestReconcileCapture_SettledRecordIsDroppedOnceTheCacheShowsTheResult(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := makeSourcePod()
+	fc := &fakeCheckpointer{err: errors.New("staging refused")}
+	w := makeNodeController(t, fc, content, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
+
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
+	_, settled := w.settledCaptures.Load(content.Name)
+	require.True(t, settled)
+
+	require.NoError(t, w.contentIndexer.Update(mustUnstructured(t, getContent(t, w, content.Name))))
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
+	_, settled = w.settledCaptures.Load(content.Name)
+	assert.False(t, settled)
+}
+
 func TestReconcileCapture_FailedContainerUnsticksAndFails(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	pod := &corev1.Pod{
