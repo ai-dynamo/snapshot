@@ -6,11 +6,9 @@ name: CuInterpose GPU tests
 # GPU infrastructure accepts trusted mirror pushes, not pull_request events.
 on:
   push:
+    # No paths filter: the push that creates a mirror branch adds no commit, so a
+    # filtered workflow never starts for it. The changes job decides instead.
     branches: ['pull-request/[0-9]+']
-    paths:
-      - 'agent/cmd/cuinterpose/**'
-      - 'agent/Dockerfile'
-      - '.github/workflows/cuinterpose-gpu.yaml'
   schedule:
     - cron: '0 11 * * *'
   workflow_dispatch:
@@ -22,8 +20,36 @@ concurrency:
   cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/pull-request/') }}
 
 jobs:
+  # No job-level condition: a skipped job would skip the jobs that need it, and
+  # the nightly run with them. Only the steps are limited to mirror pushes.
+  changes:
+    name: Detect cuInterpose changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      cuinterpose: ${{ steps.filter.outputs.cuinterpose }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ github.event_name == 'push' }}
+        with:
+          persist-credentials: false
+      # No base, as in e2e-pr.yaml: the whole pull request against its
+      # merge-base with main, not only the commits of the latest push.
+      - name: Filter paths
+        id: filter
+        if: ${{ github.event_name == 'push' }}
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            cuinterpose:
+              - 'agent/cmd/cuinterpose/**'
+              - 'agent/Dockerfile'
+              - '.github/workflows/cuinterpose-gpu.yaml'
+
   check:
     name: Validate repository
+    needs: changes
+    if: ${{ github.event_name != 'push' || needs.changes.outputs.cuinterpose == 'true' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
