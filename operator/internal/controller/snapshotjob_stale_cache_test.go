@@ -119,13 +119,14 @@ func TestSnapshotJobReconcileRetriesWhenTheSnapshotJobCannotBeConfirmed(t *testi
 	assert.Zero(t, countSourceJobs(t, r.Client), "an unconfirmed SnapshotJob must not start the workload")
 }
 
-// staleCachePodSnapshotFixture returns a SnapshotJob whose source Job has its Pod and
-// whose PodSnapshot is the next thing to create.
+// staleCachePodSnapshotFixture returns a SnapshotJob that recorded its source Job, with that
+// Job and its Pod. The PodSnapshot is the next thing to create. The recorded UID is what
+// accepts the Job, so a bare Job is enough.
 func staleCachePodSnapshotFixture(t *testing.T, s *runtime.Scheme) (*snapshotv1alpha1.SnapshotJob, *batchv1.Job, *corev1.Pod) {
 	t.Helper()
 	sj := minimalSnapshotJob()
-	job, err := buildSourceJob(sj)
-	require.NoError(t, err)
+	sj.Status.SourceJobUID = types.UID("source-job-uid")
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: sj.Name, Namespace: sj.Namespace, UID: sj.Status.SourceJobUID}}
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	return sj, job, sourcePodForJob(job)
 }
