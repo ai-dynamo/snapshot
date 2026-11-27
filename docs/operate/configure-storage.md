@@ -156,16 +156,18 @@ all its objects. Replace `<prefix>` with the value of `storage.s3.prefix`. For
 an empty prefix, use `artifacts/`. Without this filter, a rule also applies to
 the data of other applications in the bucket.
 
-For Amazon S3, first print the lifecycle rules that the bucket has. The command
-reports `NoSuchLifecycleConfiguration` for a bucket that has none:
+For Amazon S3, first print the lifecycle configuration that the bucket has. The
+command reports `NoSuchLifecycleConfiguration` for a bucket that has none:
 
 ```bash
-aws s3api get-bucket-lifecycle-configuration --bucket <bucket> \
-  --query '{Rules: Rules}' --output json
+aws s3api get-bucket-lifecycle-configuration --bucket <bucket>
 ```
 
-Save the following configuration as `lifecycle.json`. Add the rules that the
-first command printed to `Rules`:
+Applying a configuration replaces the configuration that the bucket has. To
+keep the rules that the first command printed, add them to `Rules` in the file
+below. To keep a `TransitionDefaultMinimumObjectSize` value that it printed, see
+[Setting an S3 Lifecycle configuration on a bucket](https://docs.aws.amazon.com/AmazonS3/latest/userguide/how-to-set-lifecycle-configuration-intro.html).
+Save the following configuration as `lifecycle.json`:
 
 ```json
 {
@@ -187,20 +189,19 @@ first command printed to `Rules`:
 }
 ```
 
-Apply the file with the following command. The command replaces the lifecycle
-configuration of the bucket, and removes every rule that is not in the file:
+Apply the file with the following command. The command removes every rule that
+is not in the file:
 
 ```bash
 aws s3api put-bucket-lifecycle-configuration --bucket <bucket> \
   --lifecycle-configuration file://lifecycle.json
 ```
 
-To check the result, print the rules again. Amazon describes the two rules in
+To check the result, print the configuration again. Amazon describes the two
+rules in
 [Configuring a bucket lifecycle configuration to delete incomplete multipart uploads](https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpu-abort-incomplete-mpu-lifecycle-config.html)
 and
 [Examples of S3 Lifecycle configurations](https://docs.aws.amazon.com/AmazonS3/latest/userguide/lifecycle-configuration-examples.html).
-It describes how to change a configuration in
-[Setting an S3 Lifecycle configuration on a bucket](https://docs.aws.amazon.com/AmazonS3/latest/userguide/how-to-set-lifecycle-configuration-intro.html).
 
 For MinIO, add `--endpoint-url <endpoint>` to both commands, and remove the
 first rule from the file.
