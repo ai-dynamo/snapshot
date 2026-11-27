@@ -41,12 +41,14 @@ tests:
       - failedTemplate:
           errorPattern: "storage.s3.endpoint must be an absolute .* URL with no path, query, fragment or userinfo"
 
-  - it: rejects an endpoint with a user name
+  # The message goes to the terminal and to CI logs, so it does not repeat
+  # what stands before the "@".
+  - it: rejects an endpoint with a user name and a password, and does not print them
     set:
-      storage.s3.endpoint: https://backup@s3.example.com
+      storage.s3.endpoint: https://backup:hunter2@s3.example.com
     asserts:
       - failedTemplate:
-          errorPattern: "storage.s3.endpoint must be an absolute .* URL with no path, query, fragment or userinfo"
+          errorPattern: 'storage.s3.endpoint must be an absolute .* but Helm read it as "https://<userinfo>@s3.example.com": keep only'
 
   # The operator lowercases the scheme and the host and accepts a port.
   - it: renders an endpoint with an uppercase scheme and a port

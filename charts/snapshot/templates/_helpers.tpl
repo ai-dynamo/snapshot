@@ -323,7 +323,9 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 {{- end -}}
 {{- $endpoint := $s3.endpoint | default "" | toString -}}
 {{- if and $endpoint (not (regexMatch "^[hH][tT][tT][pP][sS]?://[^/?#@:][^/?#@]*[?]?#?$" $endpoint)) -}}
-{{- fail (printf "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, but Helm read it as %q: keep only the scheme, the host and an optional port, as in https://s3.example.com" $endpoint) -}}
+{{- /* The userinfo can hold a password, and this message ends up in CI logs. */ -}}
+{{- $shown := regexReplaceAll "^(.*?//)?[^/?#]*@" $endpoint "${1}<userinfo>@" -}}
+{{- fail (printf "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, but Helm read it as %q: keep only the scheme, the host and an optional port, as in https://s3.example.com" $shown) -}}
 {{- end -}}
 {{- $prefix := $s3.prefix | default "" -}}
 {{- if hasPrefix "/" $prefix -}}
