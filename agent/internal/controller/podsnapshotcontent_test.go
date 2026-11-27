@@ -669,7 +669,7 @@ func TestReconcileCapture_OlderWorkOrderOwnsTheSourcePod(t *testing.T) {
 
 // TestReconcileCapture_RunningCaptureKeepsItsSourcePod pins one capture per pod while a dump runs.
 // The oldest-first order can change under it, and the work order that then sorts first must wait:
-// a second dump of a source that is being dumped fails both and ends the workload.
+// only one work order may act on a source pod at a time.
 func TestReconcileCapture_RunningCaptureKeepsItsSourcePod(t *testing.T) {
 	for _, tc := range []struct {
 		name string
