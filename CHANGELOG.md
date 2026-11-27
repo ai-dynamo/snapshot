@@ -200,6 +200,11 @@ commit-level history for each release is on its
   requires before the operator can create the source Job (#1002). Before, the
   SnapshotJob kept an empty status and repeated a `SourceJobCreateFailed`
   event.
+- Checkpoint and restore work on SELinux nodes, such as OpenShift (#1221). The
+  node agent Pod runs at SELinux level `s0`, and CRIU now sees SELinux, so a
+  snapshot records each process's label. Snapshots taken on SELinux nodes by
+  earlier agent versions have no labels, and a restore refuses them under
+  `lsm-labels`: take them again.
 
 ### Deprecated
 

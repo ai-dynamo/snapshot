@@ -60,6 +60,12 @@ spec:
       hostPID: true
       hostIPC: true
       hostNetwork: true
+      # Labels the agent's volumes s0 rather than with this Pod's own MCS
+      # categories. CRIU hands its log on them to the process it checkpoints,
+      # and SELinux lets that process write it only at s0.
+      securityContext:
+        seLinuxOptions:
+          level: s0
       {{- with .Values.daemonset.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

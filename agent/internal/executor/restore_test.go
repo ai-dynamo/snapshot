@@ -2149,6 +2149,19 @@ func TestMountSecurityFSForCRIUMountsOnlyWhenNeeded(t *testing.T) {
 	}
 }
 
+// Only an SELinux profile needs SELinux made visible to CRIU.
+func TestExposeSELinuxForCRIUSkipsOtherProfiles(t *testing.T) {
+	for _, profile := range []string{"", criu.LSMProfileNone, "apparmor:cri-containerd.apparmor.d"} {
+		hide, err := exposeSELinuxForCRIU(profile, testr.New(t))
+		if err != nil {
+			t.Fatalf("exposeSELinuxForCRIU(%q): %v", profile, err)
+		}
+		if err := hide(); err != nil {
+			t.Fatalf("hide(%q): %v", profile, err)
+		}
+	}
+}
+
 // within bounds the securityfs unmount: a call that blocks gives an error in
 // time, and a call that returns passes its result through.
 func TestWithin(t *testing.T) {
