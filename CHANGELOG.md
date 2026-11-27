@@ -189,6 +189,12 @@ commit-level history for each release is on its
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 
+- The operator Deployment now sets the release namespace, as the other
+  namespaced objects of the chart do. `kubectl apply` of `helm template` output
+  put the Deployment in the namespace of the `kubectl` context. The operator
+  did not start there, for lack of its service account. `helm install` and
+  `helm upgrade` are not affected.
+
 ### Deprecated
 
 - `SNAPSHOT_RESTORE_STANDBY` (`podcontract.RestoreStandbyModeEnv`): restore

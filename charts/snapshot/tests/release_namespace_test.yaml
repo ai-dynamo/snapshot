@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: release namespace on namespaced objects
+templates:
+  - templates/configmap.yaml
+  - templates/daemonset.yaml
+  - templates/operator-deployment.yaml
+  - templates/pvc.yaml
+  - templates/seccomp-configmap.yaml
+  - templates/serviceaccount.yaml
+release:
+  name: snapshot
+  namespace: snapshot-ns
+tests:
+  # `helm template | kubectl apply` puts an object without a namespace in the
+  # namespace of the kubectl context, away from the objects that name theirs.
+  - it: names the release namespace on every namespaced object
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: snapshot-ns
