@@ -68,16 +68,17 @@ func ExposeSELinux(fsPath, configDir string, log logr.Logger) (func() error, err
 	}, nil
 }
 
-// mountSELinuxFS mounts selinuxfs read-only at path unless it is already there.
+// mountSELinuxFS mounts selinuxfs at path unless it is already there
+// read-write. libselinux treats a read-only selinuxfs as SELinux disabled.
 func mountSELinuxFS(path string, log logr.Logger) (func() error, error) {
 	var st unix.Statfs_t
 	if err := unix.Statfs(path, &st); err != nil {
 		return nil, fmt.Errorf("stat %s: %w", path, err)
 	}
-	if st.Type == unix.SELINUX_MAGIC {
+	if st.Type == unix.SELINUX_MAGIC && st.Flags&unix.ST_RDONLY == 0 {
 		return func() error { return nil }, nil
 	}
-	if err := unix.Mount("selinuxfs", path, "selinuxfs", unix.MS_RDONLY|unix.MS_NOSUID|unix.MS_NOEXEC, ""); err != nil {
+	if err := unix.Mount("selinuxfs", path, "selinuxfs", unix.MS_NOSUID|unix.MS_NOEXEC, ""); err != nil {
 		return nil, fmt.Errorf("mount selinuxfs at %s: %w", path, err)
 	}
 	log.V(1).Info("Mounted selinuxfs for CRIU", "path", path)
