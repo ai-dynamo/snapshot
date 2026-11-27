@@ -152,8 +152,12 @@ oc adm policy add-scc-to-user snapshot-workload \
   --serviceaccount default --namespace "${WORKLOAD_NAMESPACE}"
 ```
 
-A restore Pod that sets the same profile needs the same SCC. The
-`openshift.io/scc` annotation on a Pod names the SCC it runs under.
+The [restore Pod examples](../reference/restore-pod-contract.md) set the same
+profile, but Snapshot does not require it on a restore Pod. On RHCOS 9.6 or
+newer, leave `seccompProfile` out, and the restore Pod runs under
+`restricted-v2`. A restore Pod that keeps the profile
+needs the same SCC. The `openshift.io/scc` annotation on a Pod names the SCC it
+runs under.
 
 ## Install on RKE2 and k3s
 
