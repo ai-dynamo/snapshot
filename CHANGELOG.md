@@ -191,9 +191,10 @@ commit-level history for each release is on its
 - A `helm upgrade` that changes only `storage.pvc.create`, `storage.pvc.size`,
   or `storage.pvc.storageClass` no longer restarts the agent and operator Pods.
   Before, a storage class change that Kubernetes refuses on a bound claim still
-  restarted the agent on every node, with the checkpoints and restores in
-  flight there. The rollout checksum changes once with this chart version, so
-  the first upgrade restarts both workloads, as a new image tag does.
+  restarted the agent on every node. An agent restart ends the checkpoints and
+  restores in flight on its node. The rollout checksum changes once with this
+  chart version, so the first upgrade restarts both workloads, as a new image
+  tag does.
 
 ### Deprecated
 
