@@ -165,6 +165,12 @@ Fail fast on unsupported runtime.type values. Called once from daemonset.yaml.
 {{- if and .Values.runtime.storageDir (not (hasPrefix "/" .Values.runtime.storageDir)) }}
 {{- fail (printf "runtime.storageDir must be an absolute path, got %q" .Values.runtime.storageDir) }}
 {{- end }}
+{{- /* The socket's directory is mounted from the node, so the value is a path
+       there, not the unix:// form that crictl and the kubelet take. */ -}}
+{{- $socketPath := .Values.runtime.socketPath | default "" | toString }}
+{{- if and $socketPath (not (hasPrefix "/" $socketPath)) }}
+{{- fail (printf "runtime.socketPath must be an absolute path on the node, but Helm read it as %q: give the path alone, without a scheme such as unix://, as in /run/containerd/containerd.sock" $socketPath) }}
+{{- end }}
 {{- end }}
 
 {{/*
