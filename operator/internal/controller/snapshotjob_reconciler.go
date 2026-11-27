@@ -288,7 +288,9 @@ func (r *SnapshotJobReconciler) reconcilePodSnapshotResources(ctx context.Contex
 
 // captureResolutionBackstop re-checks a capture whose resolution depends on a
 // watch event (a pending capture with a terminal Job, or a Ready capture with
-// a still-running Job), in case that event is missed.
+// a still-running Job), in case that event is missed. It is also how long after
+// the source Job's deadline a failed capture waits for the Job to report that
+// deadline; see awaitedSourceJobDeadlineVerdict.
 const captureResolutionBackstop = 30 * time.Second
 
 // reconcileCapturedSourceJob applies the second stage of the completion gate.
