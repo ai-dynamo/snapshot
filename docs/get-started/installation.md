@@ -171,8 +171,9 @@ kubectl rollout status daemonset/snapshot-agent --namespace snapshot
 
 The operator and the `snapshot-agent` DaemonSet become ready once the node agent
 and its PageBroker sidecar are running on each GPU node. Each agent pod reports
-`2/2` containers ready. The snapshot volume claim reports `Bound`. If the claim
-stays `Pending`, see
+`2/2` containers ready. The snapshot volume claim reports `Bound`.
+
+If the claim stays `Pending`, see
 [The Snapshot Volume Claim Stays Pending](../troubleshooting/agent.md#the-snapshot-volume-claim-stays-pending).
 
 ## Uninstall
