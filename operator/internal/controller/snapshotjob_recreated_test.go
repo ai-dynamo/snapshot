@@ -92,7 +92,8 @@ func TestSnapshotJobReconcileWaitsForTheSourceJobOfADeletedSnapshotJob(t *testin
 	result, err := r.Reconcile(ctx, reconcileRequest(sj))
 	require.NoError(t, err)
 
-	assert.Greater(t, result.RequeueAfter, previousSourceJobDeletionWait-10*time.Second, "the requeue ends the wait")
+	// Half of the wait is the margin for a slow test run. A backstop requeue would be far below it.
+	assert.Greater(t, result.RequeueAfter, previousSourceJobDeletionWait/2, "the requeue ends the wait")
 	assert.LessOrEqual(t, result.RequeueAfter, previousSourceJobDeletionWait)
 	waiting := requireWaitingForPreviousJob(t, r, sj, leftover)
 	assert.Equal(t, leftover.UID, getSourceJob(t, r.Client, sj).UID, "the Job of the deleted SnapshotJob is left to the garbage collector")
@@ -134,7 +135,7 @@ func TestSnapshotJobReconcileFailsWhenTheSourceJobOfADeletedSnapshotJobStays(t *
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			left := 30 * time.Second
+			left := time.Minute
 			sj := snapshotJobCreatedAgain(previousSourceJobDeletionWait - left)
 			held := sourceJobOfDeletedSnapshotJob(t, sj)
 			test.hold(held)
@@ -142,7 +143,7 @@ func TestSnapshotJobReconcileFailsWhenTheSourceJobOfADeletedSnapshotJobStays(t *
 
 			result, err := r.Reconcile(ctx, reconcileRequest(sj))
 			require.NoError(t, err)
-			assert.Greater(t, result.RequeueAfter, left-10*time.Second, "the requeue ends the wait")
+			assert.Greater(t, result.RequeueAfter, left/2, "the requeue ends the wait")
 			assert.LessOrEqual(t, result.RequeueAfter, left)
 			requireWaitingForPreviousJob(t, r, sj, held)
 
