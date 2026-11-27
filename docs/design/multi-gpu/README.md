@@ -926,7 +926,7 @@ Workloads that make many small direct allocations can still waste substantial me
 
 ### Dependencies
 
-- Linux/amd64 with compatible GPUs and drivers providing the VMM and multicast APIs the workload uses.
+- Linux on x86_64 or arm64 with compatible GPUs and drivers providing the VMM and multicast APIs the workload uses.
 - glibc 2.34 or newer for the preload libraries.
 - CUDA Runtime 12.0 or newer when an application looks up driver entry points through a CUDA runtime library.
 - Existing Snapshot and CRIU compatibility and privilege requirements.
