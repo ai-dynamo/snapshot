@@ -117,6 +117,27 @@ Credentials come from one of two places:
 See [Helm Chart Values](../reference/helm-values.md#storage) for all S3 values,
 including the key prefix and the credentials key.
 
+### Set Bucket Lifecycle Rules
+
+When you delete a snapshot, the operator deletes its objects from the bucket.
+The operator does not delete the data in the following table. That data uses
+storage until a lifecycle rule of the bucket removes it.
+
+| Data | When it appears | Lifecycle rule |
+|------|-----------------|----------------|
+| Incomplete multipart uploads | PageBroker stops during an upload, for example when its container restarts | Abort incomplete multipart uploads |
+| Noncurrent object versions and delete markers | You delete a snapshot from a bucket that has versioning | Expire noncurrent versions and remove expired delete markers |
+
+Add the first rule to every bucket. Add the second rule to a bucket that has
+versioning. A period of one day is sufficient for both rules. PageBroker ends
+an upload within `pageBroker.s3.limits.transactionSeconds`, which is 7200
+seconds at most, and Snapshot reads only current versions.
+
+For Amazon S3, see
+[Configuring a bucket lifecycle configuration to delete incomplete multipart uploads](https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpu-abort-incomplete-mpu-lifecycle-config.html)
+and
+[Examples of S3 Lifecycle configurations](https://docs.aws.amazon.com/AmazonS3/latest/userguide/lifecycle-configuration-examples.html).
+
 ### Optional S3 Settings
 
 These settings apply only to `storage.type: s3`. PageBroker, the node agent
