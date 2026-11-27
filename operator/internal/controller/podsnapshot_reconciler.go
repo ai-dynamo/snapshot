@@ -647,7 +647,9 @@ func sourcePodCapturePredicate() predicate.Predicate {
 			if !oldOK || !newOK {
 				return false
 			}
-			return oldPod.Spec.NodeName != newPod.Spec.NodeName ||
+			// An informer relist delivers a same-name recreation as one update, not a delete and an add.
+			return oldPod.UID != newPod.UID ||
+				oldPod.Spec.NodeName != newPod.Spec.NodeName ||
 				oldPod.Status.Phase != newPod.Status.Phase ||
 				(oldPod.DeletionTimestamp == nil) != (newPod.DeletionTimestamp == nil)
 		},
