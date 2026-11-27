@@ -129,9 +129,10 @@ storage until a lifecycle rule of the bucket removes it.
 | Noncurrent object versions and delete markers | You delete a snapshot from a bucket that has versioning | Expire noncurrent versions and remove expired delete markers |
 
 Add the first rule to every bucket. Add the second rule to a bucket that has
-versioning. A period of one day is sufficient for both rules. PageBroker ends
-an upload within `pageBroker.s3.limits.transactionSeconds`, which is 7200
-seconds at most, and Snapshot reads only current versions.
+versioning. A period of one day is sufficient for both rules. PageBroker
+starts no upload request later than `pageBroker.s3.limits.transactionSeconds`
+into a checkpoint, and that limit is 7200 seconds at most. Snapshot reads only
+current versions.
 
 For Amazon S3, see
 [Configuring a bucket lifecycle configuration to delete incomplete multipart uploads](https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpu-abort-incomplete-mpu-lifecycle-config.html)
