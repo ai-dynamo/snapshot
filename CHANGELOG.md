@@ -186,9 +186,10 @@ commit-level history for each release is on its
 ### Fixed
 
 - A pending `PodSnapshot` that sets `source.podRef.uid`, or is already bound,
-  now fails with `StalePodReference` whenever a Pod of the same name replaces
-  its source Pod. Before, it kept waiting when the operator's Pod watch listed
-  again and found the new Pod in the same state as the old one.
+  no longer waits for a source Pod that a Pod of the same name replaced.
+  Before, it kept waiting when the operator's Pod watch listed again and found
+  the new Pod in the same state as the old one. It now fails with
+  `StalePodReference`.
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
