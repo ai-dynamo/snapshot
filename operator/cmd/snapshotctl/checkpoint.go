@@ -98,7 +98,9 @@ func checkpointPod(ctx context.Context, clientset kubernetes.Interface, crClient
 	if err != nil {
 		return nil, err
 	}
-	if ctx.Err() != nil {
+	// From here on an interrupt names the Job. A command that was interrupted before creates none.
+	interrupts := interruptWatchFrom(ctx)
+	if !interrupts.jobRequested(namespace, checkpointJobName) || ctx.Err() != nil {
 		return nil, fmt.Errorf("checkpoint interrupted: %w", context.Cause(ctx))
 	}
 	// An interrupt does not cancel the create: the command must learn whether the Job exists
@@ -111,6 +113,7 @@ func checkpointPod(ctx context.Context, clientset kubernetes.Interface, crClient
 	if err != nil {
 		return nil, err
 	}
+	interrupts.jobCreated()
 
 	// Clean up the Job and its source Pod on any error after this point, and when the command
 	// is interrupted. The PodSnapshot is left in place to aid debugging when the flow fails.
@@ -121,10 +124,17 @@ func checkpointPod(ctx context.Context, clientset kubernetes.Interface, crClient
 		}
 		if ctx.Err() != nil {
 			retErr = fmt.Errorf("checkpoint interrupted: %w", context.Cause(ctx))
-			snapshotctlLog.Info("Checkpoint interrupted, deleting its Job and source Pod; interrupt again to stop at once", "job", namespace+"/"+checkpointJobName)
+		} else {
+			interrupts.cleaningUp(retErr)
 		}
 		if cleanupErr := cleanUpCheckpointJob(context.WithoutCancel(ctx), clientset, namespace, checkpointJobName, jobCleanupInterval, jobCleanupTimeout); cleanupErr != nil {
 			retErr = fmt.Errorf("%w; %w", retErr, cleanupErr)
+			return
+		}
+		interrupts.jobDeleted()
+		// An interrupted command said that it deletes the Job, so it also says when that is done.
+		if ctx.Err() != nil {
+			snapshotctlLog.Info("Deleted the checkpoint Job and its source Pod", "job", namespace+"/"+checkpointJobName)
 		}
 	}()
 
@@ -144,6 +154,11 @@ func checkpointPod(ctx context.Context, clientset kubernetes.Interface, crClient
 	snap, err = waitForPodSnapshot(waitCtx, crClient, namespace, snap.Name)
 	if err != nil {
 		return nil, err
+	}
+	// The checkpoint completed. An interrupt that the command acknowledged before this point
+	// still ends it as interrupted. A later one changes nothing.
+	if !interrupts.finish() {
+		return nil, context.Cause(ctx)
 	}
 
 	res := &result{

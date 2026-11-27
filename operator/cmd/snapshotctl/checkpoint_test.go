@@ -11,7 +11,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -28,7 +31,10 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 	clienttesting "k8s.io/client-go/testing"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
@@ -169,6 +175,7 @@ type checkpointAPI struct {
 	job         *batchv1.Job
 	lateJob     *batchv1.Job // a create whose request was canceled: the Job appears after the next delete
 	deletes     []metav1.DeleteOptions
+	scheduled   bool // the Job's source Pod has a node
 	onPodList   func()
 	onJobCreate func() // called while the Job create is in flight
 }
@@ -206,7 +213,17 @@ func (a *checkpointAPI) RoundTrip(req *http.Request) (*http.Response, error) {
 		if a.onPodList != nil {
 			a.onPodList()
 		}
-		return answer(http.StatusOK, &corev1.PodList{TypeMeta: metav1.TypeMeta{Kind: "PodList", APIVersion: "v1"}})
+		pods := &corev1.PodList{TypeMeta: metav1.TypeMeta{Kind: "PodList", APIVersion: "v1"}}
+		if a.scheduled {
+			pods.Items = []corev1.Pod{{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "source-pod", Namespace: "default", UID: "pod-uid",
+					OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: "job", UID: "job-uid", Controller: ptr.To(true)}},
+				},
+				Spec: corev1.PodSpec{NodeName: "node-a"},
+			}}
+		}
+		return answer(http.StatusOK, pods)
 	case req.Method == http.MethodDelete && a.job != nil && strings.HasSuffix(req.URL.Path, "/jobs/"+a.job.Name):
 		opts := metav1.DeleteOptions{}
 		require.NoError(a.t, json.NewDecoder(req.Body).Decode(&opts))
@@ -303,6 +320,37 @@ func TestCheckpointPodKeepsFailureWhenNotInterrupted(t *testing.T) {
 	assert.NotContains(t, err.Error(), "interrupted")
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Len(t, api.deletes, 1, "the Job of a checkpoint that timed out must be deleted")
+}
+
+// TestCheckpointPodEndsInterruptedWhenAcknowledgedBeforeCompletion verifies that a signal that the
+// command acknowledged ends it as interrupted, also when the checkpoint completed in the same
+// moment. The command said that it deletes the Job, so it must not report a success after that.
+func TestCheckpointPodEndsInterruptedWhenAcknowledgedBeforeCompletion(t *testing.T) {
+	ctx, interrupts := watchInterrupts(context.Background())
+	defer func() { _ = interrupts.stop(nil) }()
+	api := &checkpointAPI{t: t, scheduled: true}
+	crClient := crfake.NewClientBuilder().WithScheme(snapshotScheme(t)).WithInterceptorFuncs(interceptor.Funcs{
+		// The read is answered with a PodSnapshot that is Ready, and the signal arrives before the
+		// command has looked at the answer.
+		Get: func(getCtx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := c.Get(getCtx, key, obj, opts...); err != nil {
+				return err
+			}
+			meta.SetStatusCondition(&obj.(*nvidiacomv1alpha1.PodSnapshot).Status.Conditions, metav1.Condition{
+				Type: nvidiacomv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue, Reason: "Captured",
+			})
+			require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
+			require.Eventually(t, func() bool { return ctx.Err() != nil }, 5*time.Second, time.Millisecond, "the command must acknowledge the signal")
+			return nil
+		},
+	}).Build()
+
+	_, err := checkpointPod(ctx, api.clientset(), crClient, workerPod(), "default", "my-snapshot", "main", checkpointOptions{Timeout: time.Minute})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "checkpoint interrupted: terminated signal received")
+	require.Len(t, api.deletes, 1, "the Job of a checkpoint that was interrupted must be deleted")
+	assert.Nil(t, api.job, "the Job must be gone")
 }
 
 // TestPodSnapshotNameUIDPinned verifies that createPodSnapshot stamps the source pod's UID
