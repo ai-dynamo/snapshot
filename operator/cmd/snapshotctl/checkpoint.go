@@ -98,14 +98,17 @@ func checkpointPod(ctx context.Context, clientset kubernetes.Interface, crClient
 	if err != nil {
 		return nil, err
 	}
-	createdJob, err := clientset.BatchV1().Jobs(namespace).Create(ctx, job, metav1.CreateOptions{})
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("checkpoint interrupted: %w", context.Cause(ctx))
+	}
+	// An interrupt does not cancel the create: the command must learn whether the Job exists
+	// before it can delete it. A canceled create can still reach the API server, and a delete
+	// that follows at once can find no Job yet. The request ends by itself after 30 seconds.
+	createdJob, err := clientset.BatchV1().Jobs(namespace).Create(context.WithoutCancel(ctx), job, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
 		return nil, fmt.Errorf("checkpoint job %s/%s already exists", namespace, checkpointJobName)
 	}
-	// An interrupt that arrives while the create is in flight cancels the request, but the
-	// create can still reach the API server. The Job is then cleaned up like one that exists.
-	interruptedCreate := err != nil && ctx.Err() != nil && canSucceedLater(err)
-	if err != nil && !interruptedCreate {
+	if err != nil {
 		return nil, err
 	}
 
@@ -124,9 +127,6 @@ func checkpointPod(ctx context.Context, clientset kubernetes.Interface, crClient
 			retErr = fmt.Errorf("%w; %w", retErr, cleanupErr)
 		}
 	}()
-	if interruptedCreate {
-		return nil, err
-	}
 
 	waitCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()

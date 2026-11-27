@@ -163,13 +163,14 @@ func TestCleanUpCheckpointJobAcceptsMissingJob(t *testing.T) {
 
 // checkpointAPI stands in for the Kubernetes API behind a real clientset. The fake clientset does
 // not see the context of a request, and these tests are about requests whose context was canceled.
-// It keeps the Job that the command creates, and counts the Job deletes that reach it.
+// It keeps the Job that the command creates, and records the Job deletes that find it.
 type checkpointAPI struct {
-	t          *testing.T
-	job        *batchv1.Job
-	deletes    []metav1.DeleteOptions
-	onPodList  func()
-	loseCreate func() // called once the Job is created, in place of the answer
+	t           *testing.T
+	job         *batchv1.Job
+	lateJob     *batchv1.Job // a create whose request was canceled: the Job appears after the next delete
+	deletes     []metav1.DeleteOptions
+	onPodList   func()
+	onJobCreate func() // called while the Job create is in flight
 }
 
 func (a *checkpointAPI) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -191,11 +192,15 @@ func (a *checkpointAPI) RoundTrip(req *http.Request) (*http.Response, error) {
 		job := &batchv1.Job{}
 		require.NoError(a.t, json.NewDecoder(req.Body).Decode(job))
 		job.UID = "job-uid"
-		a.job = job
-		if a.loseCreate != nil {
-			a.loseCreate()
-			return nil, req.Context().Err()
+		if a.onJobCreate != nil {
+			a.onJobCreate()
 		}
+		if err := req.Context().Err(); err != nil {
+			// The client gave up, and the API server still completes the create, a moment later.
+			a.lateJob = job
+			return nil, err
+		}
+		a.job = job
 		return answer(http.StatusCreated, job)
 	case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/pods"):
 		if a.onPodList != nil {
@@ -208,6 +213,9 @@ func (a *checkpointAPI) RoundTrip(req *http.Request) (*http.Response, error) {
 		a.deletes = append(a.deletes, opts)
 		a.job = nil
 		return answer(http.StatusOK, &metav1.Status{TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"}, Status: metav1.StatusSuccess})
+	case req.Method == http.MethodDelete && a.lateJob != nil:
+		// The delete overtakes the create that the client canceled: no Job yet, and then there is one.
+		a.job, a.lateJob = a.lateJob, nil
 	}
 	return answer(http.StatusNotFound, &metav1.Status{
 		TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"}, Status: metav1.StatusFailure,
@@ -251,11 +259,12 @@ func TestCheckpointPodDeletesJobWhenInterrupted(t *testing.T) {
 }
 
 // TestCheckpointPodDeletesJobWhenInterruptedDuringCreate verifies that an interrupt that arrives
-// while the Job create is in flight still deletes the Job. The create can reach the API server
-// although the command never sees its answer.
+// while the Job create is in flight leaves no Job. A create that the command cancels can still
+// reach the API server, after the delete that the cleanup sends, so the command must wait for
+// the create's answer.
 func TestCheckpointPodDeletesJobWhenInterruptedDuringCreate(t *testing.T) {
 	ctx, interrupt := context.WithCancelCause(context.Background())
-	api := &checkpointAPI{t: t, loseCreate: func() { interrupt(errors.New("terminated signal received")) }}
+	api := &checkpointAPI{t: t, onJobCreate: func() { interrupt(errors.New("terminated signal received")) }}
 	crClient := crfake.NewClientBuilder().WithScheme(snapshotScheme(t)).Build()
 
 	_, err := checkpointPod(ctx, api.clientset(), crClient, workerPod(), "default", "my-snapshot", "main", checkpointOptions{Timeout: time.Minute})
@@ -264,6 +273,22 @@ func TestCheckpointPodDeletesJobWhenInterruptedDuringCreate(t *testing.T) {
 	assert.Contains(t, err.Error(), "checkpoint interrupted: terminated signal received")
 	require.Len(t, api.deletes, 1, "a Job whose create was interrupted must be deleted")
 	assert.Nil(t, api.job, "the Job must be gone")
+	assert.Nil(t, api.lateJob, "the create must not be canceled")
+}
+
+// TestCheckpointPodCreatesNoJobAfterInterrupt verifies that a command that is interrupted before
+// it sends the Job create does not send it.
+func TestCheckpointPodCreatesNoJobAfterInterrupt(t *testing.T) {
+	ctx, interrupt := context.WithCancelCause(context.Background())
+	interrupt(errors.New("interrupt signal received"))
+	api := &checkpointAPI{t: t, onJobCreate: func() { t.Error("the Job create must not be sent") }}
+	crClient := crfake.NewClientBuilder().WithScheme(snapshotScheme(t)).Build()
+
+	_, err := checkpointPod(ctx, api.clientset(), crClient, workerPod(), "default", "my-snapshot", "main", checkpointOptions{Timeout: time.Minute})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "checkpoint interrupted: interrupt signal received")
+	assert.Nil(t, api.job)
 }
 
 // TestCheckpointPodKeepsFailureWhenNotInterrupted verifies that a checkpoint that fails by itself
