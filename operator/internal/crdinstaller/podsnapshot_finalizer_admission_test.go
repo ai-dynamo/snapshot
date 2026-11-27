@@ -34,9 +34,10 @@ import (
 // but the Go types leave it out, so the reconciler must never send the spec
 // back: the API server would read the missing field as a spec change.
 func TestPodSnapshotWithEmptyOptionalFieldsReconciles(t *testing.T) {
-	var crd apiextensionsv1.CustomResourceDefinition
+	var crd, contentCRD apiextensionsv1.CustomResourceDefinition
 	require.NoError(t, yaml.Unmarshal([]byte(crds.PodSnapshotCRD()), &crd))
-	env := &envtest.Environment{CRDs: []*apiextensionsv1.CustomResourceDefinition{&crd}}
+	require.NoError(t, yaml.Unmarshal([]byte(crds.PodSnapshotContentCRD()), &contentCRD))
+	env := &envtest.Environment{CRDs: []*apiextensionsv1.CustomResourceDefinition{&crd, &contentCRD}}
 	t.Cleanup(func() { assert.NoError(t, env.Stop()) })
 	cfg, err := env.Start()
 	require.NoError(t, err)
