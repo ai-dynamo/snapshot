@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
 
@@ -21,6 +23,9 @@ import (
 	snapshotprotocol "github.com/ai-dynamo/snapshot/operator/internal/protocol"
 )
 
+// A failed checkpoint's cleanup retries the Job delete every jobCleanupInterval, for at most
+// jobCleanupTimeout. The limit is longer than one request can take (30 seconds), so a request
+// that hangs is still followed by more attempts.
 const (
 	jobCleanupTimeout  = 2 * time.Minute
 	jobCleanupInterval = 3 * time.Second
@@ -98,8 +103,11 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 	// Clean up the Job and its source Pod on any error after this point. The PodSnapshot
 	// is left in place to aid debugging when the flow fails.
 	defer func() {
-		if retErr != nil {
-			_ = cleanUpCheckpointJob(ctx, clientset, namespace, checkpointJobName, jobCleanupInterval, jobCleanupTimeout)
+		if retErr == nil {
+			return
+		}
+		if cleanupErr := cleanUpCheckpointJob(ctx, clientset, namespace, checkpointJobName, jobCleanupInterval, jobCleanupTimeout); cleanupErr != nil {
+			retErr = fmt.Errorf("%w; %w", retErr, cleanupErr)
 		}
 	}()
 
@@ -135,9 +143,46 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 }
 
 // cleanUpCheckpointJob removes what a checkpoint that failed leaves running: the Job and its
-// source Pod.
-func cleanUpCheckpointJob(ctx context.Context, clientset kubernetes.Interface, namespace, name string, _, _ time.Duration) error {
-	return deleteCheckpointJob(ctx, clientset, namespace, name)
+// source Pod. The API server that made the checkpoint fail can also fail the delete, so the delete
+// is retried while a later attempt can succeed. A Job that is already gone counts as deleted.
+// The error of a cleanup that gives up names the Job: its name ends in a random suffix that
+// nothing else prints, and its source Pod holds a GPU until someone deletes the Job.
+func cleanUpCheckpointJob(ctx context.Context, clientset kubernetes.Interface, namespace, name string, interval, timeout time.Duration) error {
+	var deleteErr error
+	_ = wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+		err := deleteCheckpointJob(ctx, clientset, namespace, name)
+		if err == nil || apierrors.IsNotFound(err) {
+			deleteErr = nil
+			return true, nil
+		}
+		if deleteErr != nil && ctx.Err() != nil {
+			return false, nil // cut off by the cleanup timeout: keep the API server's last answer
+		}
+		if deleteErr == nil && canSucceedLater(err) {
+			snapshotctlLog.Info("Deleting the checkpoint Job failed, retrying", "job", namespace+"/"+name, "timeout", timeout.String(), "error", err.Error())
+		}
+		deleteErr = err
+		if !canSucceedLater(err) {
+			return false, err
+		}
+		return false, nil
+	})
+	if deleteErr == nil {
+		return nil
+	}
+	return fmt.Errorf("checkpoint Job %s/%s was not deleted, and its source Pod can still hold a GPU: %w; to delete both, run: kubectl delete job %s --namespace %s",
+		namespace, name, deleteErr, name, namespace)
+}
+
+// canSucceedLater reports whether a request that failed is worth another attempt: it got no
+// answer from the API server, or an answer that says to try again.
+func canSucceedLater(err error) bool {
+	var status apierrors.APIStatus
+	if !errors.As(err, &status) {
+		return true
+	}
+	return apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) ||
+		apierrors.IsInternalError(err) || apierrors.IsServiceUnavailable(err)
 }
 
 // deleteCheckpointJob removes the Job of a checkpoint that failed, and its source Pod with it.

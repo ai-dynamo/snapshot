@@ -189,7 +189,9 @@ commit-level history for each release is on its
 
 - `snapshotctl checkpoint` deletes the source Pod when the checkpoint fails or
   times out. It deleted only the Job, which left the source Pod running and
-  holding its GPU. See [`snapshotctl` CLI](docs/reference/cli.md).
+  holding its GPU. It retries the delete for two minutes when the Kubernetes
+  API does not accept it, and the error names a Job that it could not delete.
+  See [`snapshotctl` CLI](docs/reference/cli.md).
 
 ### Deprecated
 
