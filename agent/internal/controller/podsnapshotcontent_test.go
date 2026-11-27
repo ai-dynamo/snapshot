@@ -747,6 +747,73 @@ func TestReconcileCapture_RunningCaptureKeepsItsSourcePod(t *testing.T) {
 	}
 }
 
+// TestReconcileCapture_EndedCaptureFreesItsSourcePod pins the release of the source pod when a
+// capture ends without a recorded checkpoint. The claim is in memory, so a pod that stayed
+// claimed would keep every later work order of that pod waiting until the agent restarts.
+func TestReconcileCapture_EndedCaptureFreesItsSourcePod(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// dump is how the dump of the first work order ends.
+		dump func() (*pagebroker.PublishedArtifact, error)
+		// rejectStatus fails the status writes of the first work order.
+		rejectStatus bool
+	}{
+		{
+			name: "the dump fails",
+			dump: func() (*pagebroker.PublishedArtifact, error) { return nil, errors.New("criu boom") },
+		},
+		{
+			name: "the dump panics",
+			dump: func() (*pagebroker.PublishedArtifact, error) { panic("boom") },
+		},
+		{
+			name:         "the result is not recorded",
+			dump:         func() (*pagebroker.PublishedArtifact, error) { return nil, nil },
+			rejectStatus: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first := makeWorkOrder("podsnapshotcontent-b", "node-a", "b")
+			first.CreationTimestamp = metav1.Unix(1000, 0)
+			funcs := interceptor.Funcs{
+				SubResourcePatch: func(ctx context.Context, c client.Client, _ string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+					if tc.rejectStatus && obj.GetName() == first.Name {
+						return errors.New("apiserver unavailable")
+					}
+					return c.Status().Patch(ctx, obj, patch, opts...)
+				},
+			}
+			w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, first, makeSourcePod())
+			w.runtime = &fakeRuntime{resolveContainerPID: 7}
+			var dumped []string
+			w.checkpointFn = func(_ context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+				dumped = append(dumped, params.ContentUID)
+				if params.ContentUID == string(first.UID) {
+					return tc.dump()
+				}
+				return nil, nil
+			}
+
+			// Through the queue worker, which is what recovers a panic.
+			w.captureQueue.Add(first.Name)
+			name, _ := w.captureQueue.Get()
+			w.processCaptureQueueItem(context.Background(), name)
+			require.Equal(t, []string{string(first.UID)}, dumped)
+
+			// Created in the same second with a name that sorts first, so the order gives it
+			// the pod whatever state the first work order is in. Only a claim could stop it.
+			next := makeWorkOrder("podsnapshotcontent-a", "node-a", "a")
+			next.CreationTimestamp = first.CreationTimestamp
+			require.NoError(t, w.client.Create(context.Background(), next))
+			require.NoError(t, w.contentIndexer.Add(mustUnstructured(t, next)))
+
+			require.NoError(t, w.reconcileCapture(context.Background(), next.Name))
+			assert.Equal(t, []string{string(first.UID), string(next.UID)}, dumped,
+				"a capture that ended must not keep its source pod claimed")
+		})
+	}
+}
+
 func TestReconcileCapture_ReadyContentIsNoOp(t *testing.T) {
 	ready := makeWorkOrder("podsnapshotcontent-ready", "node-a", "abc")
 	meta.SetStatusCondition(&ready.Status.Conditions, metav1.Condition{
