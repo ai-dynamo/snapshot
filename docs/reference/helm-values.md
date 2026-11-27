@@ -63,13 +63,15 @@ values, see [values.yaml](../../charts/snapshot/values.yaml).
 | `pageBroker.transferEngine.modelStreamer.restoreBatchBytes` | `10000000000`             | S3 restore batch and shared admission budget in bytes; an oversized file runs alone. Does not cap total staging memory. |
 | `pageBroker.transferEngine.modelStreamer.restorePreparationSlots` | `3`                       | Retained batches per S3 restore, including preparation in progress; 1–20. Does not increase native download admission limits. |
 
-The operator refuses some forms of these values at startup. The chart refuses
-them at install, and the error names the value. The chart refuses an endpoint
-with a path, and a trailing slash is a path. Helm reads an unquoted bucket or
-prefix that contains only digits, such as `20261127`, as a number, and the
-chart refuses a number. In a values file, put such a value in quotes:
-`prefix: "20261127"`. On the command line, use `--set-string` instead of
-`--set`.
+The chart refuses these S3 values, and the error names the value:
+
+- An endpoint with a path, a query, or a user name, or without `http://` or
+  `https://`. A trailing slash is a path.
+- A prefix with a leading slash.
+- A bucket or prefix that is not a string. Helm reads an unquoted value that
+  contains only digits, such as `20261127`, as a number. In a values file, put
+  such a value in quotes: `prefix: "20261127"`. On the command line, use
+  `--set-string` instead of `--set`.
 
 ## S3 Transfer Limits
 
