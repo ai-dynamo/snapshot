@@ -93,6 +93,25 @@ record after the checkpoint completes. It is not deleted automatically. A
 `--cleanup` flag to remove it after a successful capture is planned as future
 work.
 
+When a checkpoint fails or times out, `snapshotctl checkpoint` deletes the
+source Pod and the Job that ran it. It leaves the `PodSnapshot` CR in place for
+debugging.
+
+The command does the same when it receives `SIGINT` (Ctrl+C) or `SIGTERM`
+before the checkpoint completes. It logs that it received the signal, deletes
+the Job and the source Pod, and logs the result. The signal then ends the
+command, as it ends a command that does not handle signals. A shell reports
+exit status 130 for `SIGINT` and 143 for `SIGTERM`, and stops a script after
+Ctrl+C.
+
+A second signal ends the command at once. The command first logs the Job that
+may remain and the command that deletes it. A signal that arrives within 250
+milliseconds of the first signal counts as the same signal.
+
+If the Kubernetes API is not available for the delete, the command retries it
+for up to two minutes. If the delete fails, the error names the Job and gives
+the command that deletes it.
+
 ## Restore
 
 `snapshotctl restore` creates a new pod from a manifest and restores it from a

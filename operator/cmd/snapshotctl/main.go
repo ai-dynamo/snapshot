@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -18,6 +19,12 @@ var snapshotctlLog = logging.ConfigureLogger("stderr").WithName("snapshotctl")
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		snapshotctlLog.Error(err, "snapshotctl failed")
+		// A command that SIGINT or SIGTERM interrupted ends by that signal, as it did before it
+		// cleaned up after itself. An exit status of its own would let a shell script go on.
+		var interrupt *interruptError
+		if errors.As(err, &interrupt) {
+			endBySignal(interrupt.signal)
+		}
 		os.Exit(1)
 	}
 }
@@ -66,8 +73,11 @@ func runCheckpoint(args []string) error {
 		return fmt.Errorf("--snapshot is required")
 	}
 
+	// SIGINT and SIGTERM cancel the checkpoint, and the command then deletes the Job and the
+	// source Pod it created. A second signal ends the command at once.
+	ctx, interrupts := watchInterrupts(context.Background())
 	snapshotctlLog.Info("Running checkpoint", "manifest", *manifest, "namespace", *namespace)
-	result, err := runCheckpointFlow(context.Background(), checkpointOptions{
+	result, err := runCheckpointFlow(ctx, checkpointOptions{
 		ManifestPath:       *manifest,
 		Namespace:          *namespace,
 		KubeContext:        *kubeContext,
@@ -77,8 +87,9 @@ func runCheckpoint(args []string) error {
 		Timeout:            *timeout,
 	})
 	if err != nil {
-		return err
+		return interrupts.stop(err)
 	}
+	// The watch stays in place: a signal that arrives now must not cut off the result.
 	snapshotctlLog.Info("Checkpoint completed", "job", result.CheckpointJob, "pod_snapshot", result.PodSnapshot)
 
 	fmt.Printf("status=%s\n", result.Status)
