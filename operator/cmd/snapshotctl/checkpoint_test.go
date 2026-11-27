@@ -7,7 +7,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -21,7 +24,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 	clienttesting "k8s.io/client-go/testing"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -154,6 +159,125 @@ func TestCleanUpCheckpointJobAcceptsMissingJob(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, jobDeletes(clientset))
+}
+
+// checkpointAPI stands in for the Kubernetes API behind a real clientset. The fake clientset does
+// not see the context of a request, and these tests are about requests whose context was canceled.
+// It keeps the Job that the command creates, and counts the Job deletes that reach it.
+type checkpointAPI struct {
+	t          *testing.T
+	job        *batchv1.Job
+	deletes    []metav1.DeleteOptions
+	onPodList  func()
+	loseCreate func() // called once the Job is created, in place of the answer
+}
+
+func (a *checkpointAPI) RoundTrip(req *http.Request) (*http.Response, error) {
+	if err := req.Context().Err(); err != nil {
+		return nil, err
+	}
+	answer := func(code int, obj any) (*http.Response, error) {
+		body, err := json.Marshal(obj)
+		require.NoError(a.t, err)
+		return &http.Response{
+			StatusCode: code,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(string(body))),
+			Request:    req,
+		}, nil
+	}
+	switch {
+	case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/jobs"):
+		job := &batchv1.Job{}
+		require.NoError(a.t, json.NewDecoder(req.Body).Decode(job))
+		job.UID = "job-uid"
+		a.job = job
+		if a.loseCreate != nil {
+			a.loseCreate()
+			return nil, req.Context().Err()
+		}
+		return answer(http.StatusCreated, job)
+	case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/pods"):
+		if a.onPodList != nil {
+			a.onPodList()
+		}
+		return answer(http.StatusOK, &corev1.PodList{TypeMeta: metav1.TypeMeta{Kind: "PodList", APIVersion: "v1"}})
+	case req.Method == http.MethodDelete && a.job != nil && strings.HasSuffix(req.URL.Path, "/jobs/"+a.job.Name):
+		opts := metav1.DeleteOptions{}
+		require.NoError(a.t, json.NewDecoder(req.Body).Decode(&opts))
+		a.deletes = append(a.deletes, opts)
+		a.job = nil
+		return answer(http.StatusOK, &metav1.Status{TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"}, Status: metav1.StatusSuccess})
+	}
+	return answer(http.StatusNotFound, &metav1.Status{
+		TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"}, Status: metav1.StatusFailure,
+		Reason: metav1.StatusReasonNotFound, Code: http.StatusNotFound, Message: req.Method + " " + req.URL.Path + " not found",
+	})
+}
+
+func (a *checkpointAPI) clientset() kubernetes.Interface {
+	clientset, err := kubernetes.NewForConfig(&rest.Config{
+		Host:          "https://kubernetes.example",
+		Transport:     a,
+		ContentConfig: rest.ContentConfig{ContentType: runtime.ContentTypeJSON},
+	})
+	require.NoError(a.t, err)
+	return clientset
+}
+
+func workerPod() *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "registry.example/worker:1"}}},
+	}
+}
+
+// TestCheckpointPodDeletesJobWhenInterrupted verifies that a checkpoint that is interrupted while
+// it waits deletes its Job, and with it the source Pod. The context that the interrupt cancels
+// cannot carry that delete.
+func TestCheckpointPodDeletesJobWhenInterrupted(t *testing.T) {
+	ctx, interrupt := context.WithCancelCause(context.Background())
+	api := &checkpointAPI{t: t, onPodList: func() { interrupt(errors.New("interrupt signal received")) }}
+	crClient := crfake.NewClientBuilder().WithScheme(snapshotScheme(t)).Build()
+
+	_, err := checkpointPod(ctx, api.clientset(), crClient, workerPod(), "default", "my-snapshot", "main", checkpointOptions{Timeout: time.Minute})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "checkpoint interrupted: interrupt signal received")
+	require.Len(t, api.deletes, 1, "the Job of an interrupted checkpoint must be deleted")
+	require.NotNil(t, api.deletes[0].PropagationPolicy)
+	assert.Equal(t, metav1.DeletePropagationBackground, *api.deletes[0].PropagationPolicy)
+	assert.Nil(t, api.job, "the Job must be gone")
+}
+
+// TestCheckpointPodDeletesJobWhenInterruptedDuringCreate verifies that an interrupt that arrives
+// while the Job create is in flight still deletes the Job. The create can reach the API server
+// although the command never sees its answer.
+func TestCheckpointPodDeletesJobWhenInterruptedDuringCreate(t *testing.T) {
+	ctx, interrupt := context.WithCancelCause(context.Background())
+	api := &checkpointAPI{t: t, loseCreate: func() { interrupt(errors.New("terminated signal received")) }}
+	crClient := crfake.NewClientBuilder().WithScheme(snapshotScheme(t)).Build()
+
+	_, err := checkpointPod(ctx, api.clientset(), crClient, workerPod(), "default", "my-snapshot", "main", checkpointOptions{Timeout: time.Minute})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "checkpoint interrupted: terminated signal received")
+	require.Len(t, api.deletes, 1, "a Job whose create was interrupted must be deleted")
+	assert.Nil(t, api.job, "the Job must be gone")
+}
+
+// TestCheckpointPodKeepsFailureWhenNotInterrupted verifies that a checkpoint that fails by itself
+// reports its own error and still deletes its Job.
+func TestCheckpointPodKeepsFailureWhenNotInterrupted(t *testing.T) {
+	api := &checkpointAPI{t: t}
+	crClient := crfake.NewClientBuilder().WithScheme(snapshotScheme(t)).Build()
+
+	_, err := checkpointPod(context.Background(), api.clientset(), crClient, workerPod(), "default", "my-snapshot", "main", checkpointOptions{Timeout: 50 * time.Millisecond})
+
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "interrupted")
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Len(t, api.deletes, 1, "the Job of a checkpoint that timed out must be deleted")
 }
 
 // TestPodSnapshotNameUIDPinned verifies that createPodSnapshot stamps the source pod's UID

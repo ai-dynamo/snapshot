@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotprotocol "github.com/ai-dynamo/snapshot/operator/internal/protocol"
@@ -51,7 +52,7 @@ type result struct {
 	Status        string
 }
 
-func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, retErr error) {
+func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, error) {
 	if strings.TrimSpace(opts.ManifestPath) == "" {
 		return nil, fmt.Errorf("missing required flags: --manifest")
 	}
@@ -74,7 +75,12 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 	if err != nil {
 		return nil, err
 	}
+	return checkpointPod(ctx, clientset, crClient, pod, namespace, snapshotName, containerName, opts)
+}
 
+// checkpointPod runs the manifest's Pod as a Job, asks for a PodSnapshot of that source Pod, and
+// waits until the PodSnapshot is Ready or Failed.
+func checkpointPod(ctx context.Context, clientset kubernetes.Interface, crClient client.Client, pod *corev1.Pod, namespace, snapshotName, containerName string, opts checkpointOptions) (_ *result, retErr error) {
 	checkpointJobName := captureJobName(snapshotName)
 	job, err := snapshotprotocol.NewSourceJob(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
