@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator
@@ -15,6 +16,7 @@ from kubernetes import watch
 from kubernetes.client import ApiException
 from kubernetes.stream import stream
 from urllib3.exceptions import ReadTimeoutError
+from websocket import WebSocketBadStatusException
 
 from snapshot_e2e.infra.preflight import load_config
 
@@ -330,17 +332,39 @@ def exec_command(
     *,
     container: str | None = None,
 ) -> str:
-    return stream(
-        client.CoreV1Api().connect_get_namespaced_pod_exec,
-        pod,
-        namespace,
-        command=["/bin/bash", "-lc", command],
-        container=container,
-        stderr=True,
-        stdin=False,
-        stdout=True,
-        tty=False,
-    )
+    """Run a command in a Pod and return what it wrote to stdout and stderr.
+
+    An exec that the API server could not pass on to the node is asked for
+    again, EXEC_DIAL_ATTEMPTS times in all. No other failure is repeated,
+    because only that one shows that the command did not start.
+    """
+    # An exec can run while an earlier failure is handled. That failure is
+    # then the context of a new one and says nothing about this exec.
+    earlier = sys.exception()
+    for attempt in range(1, EXEC_DIAL_ATTEMPTS + 1):
+        try:
+            return stream(
+                client.CoreV1Api().connect_get_namespaced_pod_exec,
+                pod,
+                namespace,
+                command=["/bin/bash", "-lc", command],
+                container=container,
+                stderr=True,
+                stdin=False,
+                stdout=True,
+                tty=False,
+            )
+        except Exception as exc:
+            dial_error = exec_dial_failure(exc, earlier=earlier)
+            if dial_error is None or attempt == EXEC_DIAL_ATTEMPTS:
+                raise
+            print(
+                f"[{time.strftime('%H:%M:%S')}] exec in {namespace}/{pod} did not reach "
+                f"the node (attempt {attempt} of {EXEC_DIAL_ATTEMPTS}): {dial_error}",
+                flush=True,
+            )
+            time.sleep(EXEC_DIAL_RETRY_SECONDS)
+    raise AssertionError("unreachable")
 
 
 PAYLOAD_MARKER = "e2e-payload-follows"
@@ -366,6 +390,44 @@ def exec_payload(
     if not marker:
         raise AssertionError(f"exec output carried no payload marker: {output!r}")
     return payload.lstrip("\n")
+
+
+# How many times in all exec_command asks for an exec that did not reach the
+# node, and how long it waits before it asks again.
+EXEC_DIAL_ATTEMPTS = 3
+EXEC_DIAL_RETRY_SECONDS = 2.0
+
+
+def exec_dial_failure(
+    exc: BaseException, *, earlier: BaseException | None = None
+) -> str | None:
+    """The API server's dial error, if an exec failed before its command was sent.
+
+    An exec is a connection upgrade that the API server proxies towards the
+    node. The proxy answers the handshake with "error dialing backend" when it
+    could not open its own connection, and it sends the request only on an open
+    connection. So this answer shows that the command did not start, and a
+    second exec cannot run it twice.
+
+    Returns None for every other failure: its command may have run. Also None
+    when the failure is `earlier`, one that was already being handled before
+    this exec started.
+    """
+    # The client raises a failed exec as an ApiException with status 0. It
+    # then fails with an AttributeError while it decodes the body that this
+    # exception does not have.
+    error = exc.__context__ if isinstance(exc, AttributeError) else exc
+    if error is earlier or not isinstance(error, ApiException) or error.status != 0:
+        return None
+    # The client raises that ApiException while it handles the websocket error
+    # of the handshake, which has the status and the body of the answer.
+    handshake = error.__cause__ or error.__context__
+    if not isinstance(handshake, WebSocketBadStatusException) or handshake.status_code != 500:
+        return None
+    body = handshake.resp_body
+    if not isinstance(body, bytes) or not body.startswith(b"error dialing backend: "):
+        return None
+    return body.decode(errors="replace").strip()
 
 
 def snapshot_custom_resource_api_is_accessible(namespace: str) -> None:
