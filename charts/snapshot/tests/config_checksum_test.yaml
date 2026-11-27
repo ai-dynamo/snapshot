@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # checksum/config restarts the agent and the operator when a value behind
-# storage.yaml or pagebroker-s3.yaml changes. The literal below is its value
-# for the chart defaults. It changes with every value the checksum covers,
-# and such a change restarts both workloads of every installation on upgrade:
-# update the literal only when that is intended.
+# storage.yaml or pagebroker-s3.yaml changes. A test renders one set of values
+# and cannot compare two renders, so the literal below is the checksum of the
+# chart defaults. A new or changed default under storage, pageBroker.s3 or
+# pageBroker.transferEngine.modelStreamer changes it, and so does a default
+# that moves the staging size limit. The first two tests then fail: replace
+# every copy of the literal with the value that the first test prints as
+# actual. Such a change also restarts both workloads on the next upgrade.
 suite: rollout checksum of the storage configuration
 templates:
   - templates/daemonset.yaml
