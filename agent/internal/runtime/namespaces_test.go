@@ -101,7 +101,7 @@ func TestCommandInNamespacesCancellationKillsForkedChild(t *testing.T) {
 set -eu
 while [ "$1" != -- ]; do shift; done
 shift
-"$@" &
+sleep 300 &
 echo "$!" > "$TEST_CHILD_PID"
 wait
 `
