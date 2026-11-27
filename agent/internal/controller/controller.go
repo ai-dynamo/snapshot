@@ -1456,7 +1456,7 @@ func (w *NodeController) addRestoreFinalizer(ctx context.Context, pod *corev1.Po
 		return nil
 	}
 	finalizers := append(append([]string{}, pod.Finalizers...), restorePodFinalizer)
-	if err := w.patchRestoreFinalizers(ctx, pod, finalizers); err != nil {
+	if err := w.patchRestoreFinalizer(ctx, pod, "finalizers"); err != nil {
 		return fmt.Errorf("add restore protection finalizer: %w", err)
 	}
 	pod.Finalizers = finalizers
@@ -1473,7 +1473,7 @@ func (w *NodeController) removeRestoreFinalizer(ctx context.Context, pod *corev1
 			finalizers = append(finalizers, finalizer)
 		}
 	}
-	if err := w.patchRestoreFinalizers(ctx, pod, finalizers); err != nil {
+	if err := w.patchRestoreFinalizer(ctx, pod, "$deleteFromPrimitiveList/finalizers"); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
@@ -1483,14 +1483,20 @@ func (w *NodeController) removeRestoreFinalizer(ctx context.Context, pod *corev1
 	return nil
 }
 
-// patchRestoreFinalizers names the Pod's UID, as applyRestoredCondition does: the
-// API server refuses the patch for a Pod that replaced this one under its name.
-func (w *NodeController) patchRestoreFinalizers(ctx context.Context, pod *corev1.Pod, finalizers []string) error {
-	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"uid": pod.UID, "finalizers": finalizers}})
+// patchRestoreFinalizer adds the agent's finalizer (key "finalizers", which a strategic merge
+// patch merges into the list) or removes it (key "$deleteFromPrimitiveList/finalizers"), and
+// leaves every other entry as the API server has it. The agent's copy of the list is as old as
+// the pass, and a pass lasts for the whole restore, so a patch that carried the list would undo
+// what another controller did to its own finalizer in that time.
+//
+// The patch names the Pod's UID, as applyRestoredCondition does: the API server refuses it for a
+// Pod that replaced this one under its name.
+func (w *NodeController) patchRestoreFinalizer(ctx context.Context, pod *corev1.Pod, key string) error {
+	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"uid": pod.UID, key: []string{restorePodFinalizer}}})
 	if err != nil {
 		return err
 	}
-	_, err = w.clientset.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, ktypes.MergePatchType, patch, metav1.PatchOptions{})
+	_, err = w.clientset.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, ktypes.StrategicMergePatchType, patch, metav1.PatchOptions{})
 	return err
 }
 
