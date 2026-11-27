@@ -34,7 +34,7 @@ func snapshotJobAPIReader(s *runtime.Scheme, reads *int, objs ...client.Object) 
 		}).Build()
 }
 
-func sourceJobCount(t *testing.T, cl client.Client) int {
+func countSourceJobs(t *testing.T, cl client.Client) int {
 	t.Helper()
 	var jobs batchv1.JobList
 	require.NoError(t, cl.List(context.Background(), &jobs))
@@ -89,11 +89,11 @@ func TestSnapshotJobReconcileCreatesTheSourceJobOnlyFromACurrentSnapshotJob(t *t
 			cached := &snapshotv1alpha1.SnapshotJob{}
 			require.NoError(t, r.Get(ctx, reconcileRequest(sj).NamespacedName, cached))
 			if test.wantCreate {
-				assert.Equal(t, 1, sourceJobCount(t, r.Client))
+				assert.Equal(t, 1, countSourceJobs(t, r.Client))
 				assert.NotEmpty(t, cached.Status.Conditions)
 				return
 			}
-			assert.Zero(t, sourceJobCount(t, r.Client), "a stale SnapshotJob must not start the workload")
+			assert.Zero(t, countSourceJobs(t, r.Client), "a stale SnapshotJob must not start the workload")
 			assert.Empty(t, cached.Status.Conditions, "nothing is written from a stale SnapshotJob")
 			assert.Equal(t, snapshotJobCacheBehindRequeue, result.RequeueAfter)
 		})
@@ -112,5 +112,5 @@ func TestSnapshotJobReconcileRetriesWhenTheSnapshotJobCannotBeConfirmed(t *testi
 
 	_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
 	require.Error(t, err)
-	assert.Zero(t, sourceJobCount(t, r.Client), "an unconfirmed SnapshotJob must not start the workload")
+	assert.Zero(t, countSourceJobs(t, r.Client), "an unconfirmed SnapshotJob must not start the workload")
 }
