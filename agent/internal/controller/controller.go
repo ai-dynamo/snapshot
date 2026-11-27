@@ -86,9 +86,14 @@ type NodeController struct {
 	compareFn            func(compat.Gate, compat.Environment, compat.Environment) []compat.Mismatch
 	withoutProxy         bool
 
-	// captureQueue holds PodSnapshotContent names. Its per-key exclusion is the capture path's only
-	// lock, which is enough because exactly one agent runs per node.
+	// captureQueue holds PodSnapshotContent names. Its per-key exclusion keeps one reconcile per
+	// work order, which is enough across agents because exactly one agent runs per node.
 	captureQueue workqueue.TypedRateLimitingInterface[string]
+
+	// capturingContainers holds, per container of a source pod (pod UID and container name), the
+	// work order whose reconcile is acting on it. Several work orders can name one container, and
+	// the queue excludes only per work order.
+	capturingContainers sync.Map
 
 	// checkpointGates holds a *checkpointGate per work order, while the agent waits for its
 	// source container to be ready for the checkpoint.

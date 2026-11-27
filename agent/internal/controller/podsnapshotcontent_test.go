@@ -667,6 +667,359 @@ func TestReconcileCapture_OlderWorkOrderOwnsTheSourcePod(t *testing.T) {
 	assert.Empty(t, getContent(t, w, newer.Name).Status.Conditions)
 }
 
+// TestReconcileCapture_RunningCaptureKeepsItsSourceContainer pins one dump per source container
+// while a dump runs. The oldest-first order can change under it, and the work order that then
+// sorts first for the same container must wait: only one work order may dump a container at a time.
+func TestReconcileCapture_RunningCaptureKeepsItsSourceContainer(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// arrive changes the cached work orders while the first capture runs.
+		arrive func(t *testing.T, w *NodeController, capturing, newcomer *snapshotv1alpha1.PodSnapshotContent)
+	}{
+		{
+			// Creation times have one-second resolution, so the tie falls to the name.
+			name: "a work order created later in the same second sorts first",
+			arrive: func(*testing.T, *NodeController, *snapshotv1alpha1.PodSnapshotContent, *snapshotv1alpha1.PodSnapshotContent) {
+			},
+		},
+		{
+			name: "the capturing work order is deleted",
+			arrive: func(t *testing.T, w *NodeController, capturing, newcomer *snapshotv1alpha1.PodSnapshotContent) {
+				newcomer.CreationTimestamp = metav1.Unix(2000, 0)
+				deleting := capturing.DeepCopy()
+				deleting.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
+				deleting.Finalizers = []string{"test"}
+				require.NoError(t, w.contentIndexer.Update(mustUnstructured(t, deleting)))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capturing := makeWorkOrder("podsnapshotcontent-b", "node-a", "b")
+			capturing.CreationTimestamp = metav1.Unix(1000, 0)
+			pod := makeSourcePod()
+			w := makeNodeController(t, &fakeCheckpointer{}, capturing, pod)
+			w.runtime = &fakeRuntime{resolveContainerPID: 7}
+
+			var mu sync.Mutex
+			var dumped []string
+			dumping := make(chan struct{})
+			finish := make(chan struct{})
+			w.checkpointFn = func(_ context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+				mu.Lock()
+				dumped = append(dumped, params.ContentUID)
+				first := len(dumped) == 1
+				mu.Unlock()
+				if first {
+					close(dumping)
+					<-finish
+				}
+				return nil, nil
+			}
+			dumps := func() []string {
+				mu.Lock()
+				defer mu.Unlock()
+				return append([]string(nil), dumped...)
+			}
+
+			done := make(chan error, 1)
+			go func() { done <- w.reconcileCapture(context.Background(), capturing.Name) }()
+			<-dumping
+
+			newcomer := makeWorkOrder("podsnapshotcontent-a", "node-a", "a")
+			newcomer.CreationTimestamp = capturing.CreationTimestamp
+			tc.arrive(t, w, capturing, newcomer)
+			require.NoError(t, w.client.Create(context.Background(), newcomer))
+			require.NoError(t, w.contentIndexer.Add(mustUnstructured(t, newcomer)))
+
+			require.NoError(t, w.reconcileCapture(context.Background(), newcomer.Name))
+
+			assert.Equal(t, []string{string(capturing.UID)}, dumps(),
+				"a work order must not dump a container that another work order is dumping")
+			assert.Empty(t, getContent(t, w, newcomer.Name).Status.Conditions)
+
+			close(finish)
+			require.NoError(t, <-done)
+
+			// The container is free again once the capture that held it has ended.
+			require.NoError(t, w.reconcileCapture(context.Background(), newcomer.Name))
+			assert.Equal(t, []string{string(capturing.UID), string(newcomer.UID)}, dumps())
+		})
+	}
+}
+
+// TestReconcileCapture_DumpPastItsDeadlineKeepsItsSourceContainer pins how long the claim lasts.
+// The checkpoint deadline cancels the capture's context, but a CRIU dump takes no context and
+// runs on. The claim ends with the reconcile, not with the deadline, so no second dump starts on
+// a process tree that the first dump still holds.
+func TestReconcileCapture_DumpPastItsDeadlineKeepsItsSourceContainer(t *testing.T) {
+	overrun := makeWorkOrder("podsnapshotcontent-b", "node-a", "b")
+	overrun.CreationTimestamp = metav1.Unix(1000, 0)
+	w := makeNodeController(t, &fakeCheckpointer{}, overrun, makeSourcePod())
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
+	w.config.Checkpoint = snapshottypes.CheckpointSpec{TimeoutSeconds: ptr.To(1)}
+
+	var mu sync.Mutex
+	var dumped []string
+	deadlinePassed := make(chan struct{})
+	finish := make(chan struct{})
+	w.checkpointFn = func(ctx context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		mu.Lock()
+		dumped = append(dumped, params.ContentUID)
+		first := len(dumped) == 1
+		mu.Unlock()
+		if first {
+			<-ctx.Done()
+			close(deadlinePassed)
+			<-finish
+		}
+		return nil, nil
+	}
+	dumps := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), dumped...)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- w.reconcileCapture(context.Background(), overrun.Name) }()
+	<-deadlinePassed
+
+	// Created in the same second with a name that sorts first, so the order gives it the pod.
+	waiting := makeWorkOrder("podsnapshotcontent-a", "node-a", "a")
+	waiting.CreationTimestamp = overrun.CreationTimestamp
+	require.NoError(t, w.client.Create(context.Background(), waiting))
+	require.NoError(t, w.contentIndexer.Add(mustUnstructured(t, waiting)))
+
+	// Every redelivery finds the claim held, for as long as the dump runs.
+	for range 3 {
+		w.captureQueue.Add(waiting.Name)
+		name, _ := w.captureQueue.Get()
+		w.processCaptureQueueItem(context.Background(), name)
+	}
+	assert.Equal(t, []string{string(overrun.UID)}, dumps(),
+		"a work order must not dump a container whose dump outlived its deadline and still runs")
+	assert.Empty(t, getContent(t, w, waiting.Name).Status.Conditions)
+
+	close(finish)
+	require.NoError(t, <-done)
+
+	require.NoError(t, w.reconcileCapture(context.Background(), waiting.Name))
+	assert.Equal(t, []string{string(overrun.UID), string(waiting.UID)}, dumps())
+}
+
+// TestReconcileCapture_RunningCaptureKeepsItsSourceContainerFromTheSweep pins where the claim is
+// taken: above the unstick sweep. A non-target container fails while the dump runs, and the work
+// order that then sorts first for the same container would SIGKILL every running container of the
+// pod, the one that is being dumped included.
+func TestReconcileCapture_RunningCaptureKeepsItsSourceContainerFromTheSweep(t *testing.T) {
+	capturing := makeWorkOrder("podsnapshotcontent-b", "node-a", "b")
+	capturing.CreationTimestamp = metav1.Unix(1000, 0)
+	pod := makeSourcePod()
+	pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, corev1.ContainerStatus{
+		Name: "helper", ContainerID: "containerd://helper-id",
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	})
+	rt := &fakeRuntime{resolveContainerPID: 7}
+	w := makeNodeController(t, &fakeCheckpointer{}, capturing, pod)
+	w.runtime = rt
+
+	var once sync.Once
+	dumping := make(chan struct{})
+	finish := make(chan struct{})
+	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		once.Do(func() {
+			close(dumping)
+			<-finish
+		})
+		return nil, nil
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- w.reconcileCapture(context.Background(), capturing.Name) }()
+	<-dumping
+
+	failed := getPod(t, w, pod.Namespace, pod.Name)
+	failed.Status.ContainerStatuses[1].State = corev1.ContainerState{
+		Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"},
+	}
+	require.NoError(t, w.client.Status().Update(context.Background(), failed))
+	// PID 0 → ResolveContainer errors → a sweep that runs records its containers and sends no
+	// real signal.
+	rt.mu.Lock()
+	rt.resolveContainerPID = 0
+	resolvedByTheCapture := len(rt.resolvedContainerIDs)
+	rt.mu.Unlock()
+
+	// Created in the same second with a name that sorts first, so the order gives it the pod.
+	waiting := makeWorkOrder("podsnapshotcontent-a", "node-a", "a")
+	waiting.CreationTimestamp = capturing.CreationTimestamp
+	require.NoError(t, w.client.Create(context.Background(), waiting))
+	require.NoError(t, w.contentIndexer.Add(mustUnstructured(t, waiting)))
+
+	require.NoError(t, w.reconcileCapture(context.Background(), waiting.Name))
+
+	rt.mu.Lock()
+	swept := append([]string(nil), rt.resolvedContainerIDs[resolvedByTheCapture:]...)
+	rt.mu.Unlock()
+	assert.Empty(t, swept,
+		"a work order must not resolve or signal containers of a pod while its target container is being dumped")
+	assert.False(t, sawEventReason(w.clientset.(*k8sfake.Clientset), "CheckpointFailed"),
+		"a waiting work order must not announce a failure for a pod that is being dumped")
+	assert.Empty(t, getContent(t, w, waiting.Name).Status.Conditions)
+
+	close(finish)
+	require.NoError(t, <-done)
+}
+
+// TestReconcileCapture_RunningCaptureHoldsOnlyItsSourceContainer pins the scope of the claim: one
+// container of one pod. A work order that the order lets through for another container starts its
+// dump while the first one runs. Two work orders for two containers of one pod are not a supported
+// pair: the test promises nothing about them, it keeps the claim from changing what they do.
+func TestReconcileCapture_RunningCaptureHoldsOnlyItsSourceContainer(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// retarget points the newcomer at a container other than the one being dumped.
+		retarget func(newcomer *snapshotv1alpha1.PodSnapshotContent)
+	}{
+		{
+			name: "another container of the same pod",
+			retarget: func(newcomer *snapshotv1alpha1.PodSnapshotContent) {
+				newcomer.Spec.Source.PodRef.Containers = []string{"sidecar"}
+			},
+		},
+		{
+			name: "a container of the same name in another pod",
+			retarget: func(newcomer *snapshotv1alpha1.PodSnapshotContent) {
+				newcomer.Spec.Source.PodRef.Name = "worker-1"
+				newcomer.Spec.Source.PodRef.UID = types.UID("other-pod-uid")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capturing := makeWorkOrder("podsnapshotcontent-b", "node-a", "b")
+			capturing.CreationTimestamp = metav1.Unix(1000, 0)
+			pod := makeSourcePod()
+			pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{Name: "sidecar"})
+			pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, corev1.ContainerStatus{
+				Name: "sidecar", Ready: true, ContainerID: "containerd://def456",
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			})
+			otherPod := makeSourcePod()
+			otherPod.Name = "worker-1"
+			otherPod.UID = types.UID("other-pod-uid")
+			w := makeNodeController(t, &fakeCheckpointer{}, capturing, pod, otherPod)
+			w.runtime = &fakeRuntime{resolveContainerPID: 7}
+
+			var mu sync.Mutex
+			var dumped []string
+			dumping := make(chan struct{})
+			finish := make(chan struct{})
+			w.checkpointFn = func(_ context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+				mu.Lock()
+				dumped = append(dumped, params.ContentUID)
+				first := len(dumped) == 1
+				mu.Unlock()
+				if first {
+					close(dumping)
+					<-finish
+				}
+				return nil, nil
+			}
+
+			done := make(chan error, 1)
+			go func() { done <- w.reconcileCapture(context.Background(), capturing.Name) }()
+			<-dumping
+
+			// Created in the same second with a name that sorts first, so the order lets it through.
+			newcomer := makeWorkOrder("podsnapshotcontent-a", "node-a", "a")
+			newcomer.CreationTimestamp = capturing.CreationTimestamp
+			tc.retarget(newcomer)
+			require.NoError(t, w.client.Create(context.Background(), newcomer))
+			require.NoError(t, w.contentIndexer.Add(mustUnstructured(t, newcomer)))
+
+			require.NoError(t, w.reconcileCapture(context.Background(), newcomer.Name))
+
+			mu.Lock()
+			got := append([]string(nil), dumped...)
+			mu.Unlock()
+			assert.Equal(t, []string{string(capturing.UID), string(newcomer.UID)}, got,
+				"the claim on one container must not hold back a dump of another container")
+
+			close(finish)
+			require.NoError(t, <-done)
+		})
+	}
+}
+
+// TestReconcileCapture_EndedCaptureFreesItsSourceContainer pins the release of the source
+// container when a capture ends without a recorded checkpoint. The claim is in memory, so a
+// container that stayed claimed would keep every later work order that names it waiting until the
+// agent restarts.
+func TestReconcileCapture_EndedCaptureFreesItsSourceContainer(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// dump is how the dump of the first work order ends.
+		dump func() (*pagebroker.PublishedArtifact, error)
+		// rejectResult fails the status write that follows the dump of the first work order.
+		rejectResult bool
+	}{
+		{
+			name: "the dump fails",
+			dump: func() (*pagebroker.PublishedArtifact, error) { return nil, errors.New("criu boom") },
+		},
+		{
+			name: "the dump panics",
+			dump: func() (*pagebroker.PublishedArtifact, error) { panic("boom") },
+		},
+		{
+			name:         "the result is not recorded",
+			dump:         func() (*pagebroker.PublishedArtifact, error) { return nil, nil },
+			rejectResult: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first := makeWorkOrder("podsnapshotcontent-b", "node-a", "b")
+			first.CreationTimestamp = metav1.Unix(1000, 0)
+			var dumped []string
+			funcs := interceptor.Funcs{
+				SubResourcePatch: func(ctx context.Context, c client.Client, _ string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+					// Only a write after the dump is the result: a write before it must land.
+					if tc.rejectResult && obj.GetName() == first.Name && len(dumped) > 0 {
+						return errors.New("apiserver unavailable")
+					}
+					return c.Status().Patch(ctx, obj, patch, opts...)
+				},
+			}
+			w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, first, makeSourcePod())
+			w.runtime = &fakeRuntime{resolveContainerPID: 7}
+			w.checkpointFn = func(_ context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+				dumped = append(dumped, params.ContentUID)
+				if params.ContentUID == string(first.UID) {
+					return tc.dump()
+				}
+				return nil, nil
+			}
+
+			// Through the queue worker, which is what recovers a panic.
+			w.captureQueue.Add(first.Name)
+			name, _ := w.captureQueue.Get()
+			w.processCaptureQueueItem(context.Background(), name)
+			require.Equal(t, []string{string(first.UID)}, dumped)
+
+			// Created in the same second with a name that sorts first, so the order gives it
+			// the pod whatever state the first work order is in. Only a claim could stop it.
+			next := makeWorkOrder("podsnapshotcontent-a", "node-a", "a")
+			next.CreationTimestamp = first.CreationTimestamp
+			require.NoError(t, w.client.Create(context.Background(), next))
+			require.NoError(t, w.contentIndexer.Add(mustUnstructured(t, next)))
+
+			require.NoError(t, w.reconcileCapture(context.Background(), next.Name))
+			assert.Equal(t, []string{string(first.UID), string(next.UID)}, dumped,
+				"a capture that ended must not keep its source container claimed")
+		})
+	}
+}
+
 func TestReconcileCapture_ReadyContentIsNoOp(t *testing.T) {
 	ready := makeWorkOrder("podsnapshotcontent-ready", "node-a", "abc")
 	meta.SetStatusCondition(&ready.Status.Conditions, metav1.Condition{
