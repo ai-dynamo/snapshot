@@ -137,7 +137,8 @@ commit-level history for each release is on its
   Action on upgrade: quote such a tag in your values file, or pass it with
   `--set-string`, also with `--reset-then-reuse-values`. An operator tag that
   rendered correctly before, such as `--set image.operator.tag=1234567`, is
-  refused too. See
+  refused too. A tag of `0` or `false`, which gave the chart's default tag, is
+  refused too. For the default tag, leave the tag empty. See
   [Helm Chart Values](docs/reference/helm-values.md#images-and-rollout).
 
 - Checkpoint and restore failure messages open with the step they came from,
