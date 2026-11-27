@@ -99,9 +99,9 @@ debugging. The command does the same when it receives `SIGINT` (Ctrl+C) or
 `SIGTERM` before the checkpoint completes. A second signal ends the command at
 once, and the Job and the source Pod may stay.
 
-If the Kubernetes API does not accept the delete, the command retries it for
-two minutes. If the delete still fails, the error names the Job and gives the
-command that deletes it.
+If the Kubernetes API is not available for the delete, the command retries it
+for up to two minutes. If the delete fails, the error names the Job and gives
+the command that deletes it.
 
 ## Restore
 
