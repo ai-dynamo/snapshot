@@ -191,7 +191,8 @@ commit-level history for each release is on its
 
 - A restore Pod that replaces a deleted Pod of the same name no longer gets the
   restore result of the deleted Pod. With that result on it, the node agent
-  treated the new Pod as a restore that had ended, and did not restore it.
+  treated the new Pod as a restore that had ended, and did not restore it. The
+  agent also no longer replaces the finalizers of the new Pod.
 
 ### Deprecated
 

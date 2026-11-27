@@ -1483,8 +1483,10 @@ func (w *NodeController) removeRestoreFinalizer(ctx context.Context, pod *corev1
 	return nil
 }
 
+// patchRestoreFinalizers names the Pod's UID, as applyRestoredCondition does: the
+// API server refuses the patch for a Pod that replaced this one under its name.
 func (w *NodeController) patchRestoreFinalizers(ctx context.Context, pod *corev1.Pod, finalizers []string) error {
-	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"finalizers": finalizers}})
+	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"uid": pod.UID, "finalizers": finalizers}})
 	if err != nil {
 		return err
 	}
