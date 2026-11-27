@@ -234,6 +234,22 @@ func TestSnapshotJobReconcileReportsAPodSnapshotDeletedBeforeItsRecordReachedThe
 	assert.Zero(t, countPodSnapshots(t, r.Client))
 }
 
+// The API read belongs to the create. A reconcile that still waits for the source Pod has
+// nothing to create, so it reads the SnapshotJob from the cache only.
+func TestSnapshotJobReconcileWaitsForTheSourcePodWithoutAnAPIRead(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj, job, _ := staleCachePodSnapshotFixture(t, s)
+	r := makeSnapshotJobReconciler(s, sj, job)
+	reads := 0
+	r.NonCacheReadClient = snapshotJobAPIReader(s, &reads, sj.DeepCopy(), job.DeepCopy())
+
+	result, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+	assert.Zero(t, reads, "no API read of the SnapshotJob while there is no Pod to capture")
+	assert.Zero(t, countPodSnapshots(t, r.Client))
+	assert.Equal(t, sourcePodRequeueBackstop, result.RequeueAfter)
+}
+
 func TestSnapshotJobReconcileRetriesWhenTheSnapshotJobCannotBeConfirmedForItsPodSnapshot(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj, job, pod := staleCachePodSnapshotFixture(t, s)
