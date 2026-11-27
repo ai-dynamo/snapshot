@@ -190,10 +190,10 @@ commit-level history for each release is on its
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 
 - A checkpoint no longer starts on a source Pod while another checkpoint of that
-  Pod runs. Two `PodSnapshot` objects of one Pod that were created in the same
-  second could dump the Pod together. The same occurred when the first
-  `PodSnapshot` was deleted during its dump. Both checkpoints failed and the
-  workload ended.
+  Pod runs. The node agent could start a second dump of the Pod when two
+  `PodSnapshot` objects of the Pod were created in the same second. It could
+  also do so when a `PodSnapshot` was deleted during its dump and another one
+  was pending.
 
 ### Deprecated
 
