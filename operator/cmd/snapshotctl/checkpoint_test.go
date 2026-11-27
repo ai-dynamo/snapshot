@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
@@ -66,6 +68,92 @@ func TestDeleteCheckpointJobDeletesSourcePod(t *testing.T) {
 	policy := deletes[0].DeleteOptions.PropagationPolicy
 	require.NotNil(t, policy, "a Job delete without a propagation policy orphans the source Pod")
 	assert.Equal(t, metav1.DeletePropagationBackground, *policy)
+}
+
+// checkpointJobClientset returns a clientset that holds the Job of a checkpoint, and that answers
+// the first Job deletes with the given errors, one per delete, before it deletes the Job.
+func checkpointJobClientset(deleteErrs ...error) *k8sfake.Clientset {
+	clientset := k8sfake.NewClientset(&batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-snapshot-capture-abcde", Namespace: "default"},
+	})
+	clientset.PrependReactor("delete", "jobs", func(clienttesting.Action) (bool, runtime.Object, error) {
+		if len(deleteErrs) == 0 {
+			return false, nil, nil
+		}
+		err := deleteErrs[0]
+		deleteErrs = deleteErrs[1:]
+		return true, nil, err
+	})
+	return clientset
+}
+
+func jobDeletes(clientset *k8sfake.Clientset) int {
+	deletes := 0
+	for _, action := range clientset.Actions() {
+		if action.Matches("delete", "jobs") {
+			deletes++
+		}
+	}
+	return deletes
+}
+
+// TestCleanUpCheckpointJobOutlastsUnansweredDelete verifies that the cleanup of a failed
+// checkpoint deletes the Job when the first deletes get no answer or a "try again" answer. The
+// API server that made the checkpoint fail is the one that must accept the delete.
+func TestCleanUpCheckpointJobOutlastsUnansweredDelete(t *testing.T) {
+	clientset := checkpointJobClientset(
+		errors.New(`Delete "https://kubernetes.example/apis/batch/v1/namespaces/default/jobs/my-snapshot-capture-abcde": connection refused`),
+		apierrors.NewServiceUnavailable("apiserver starting"),
+	)
+
+	err := cleanUpCheckpointJob(context.Background(), clientset, "default", "my-snapshot-capture-abcde", time.Millisecond, 5*time.Second)
+
+	require.NoError(t, err)
+	assert.Equal(t, 3, jobDeletes(clientset), "two failed deletes, then the one that succeeds")
+	_, getErr := clientset.BatchV1().Jobs("default").Get(context.Background(), "my-snapshot-capture-abcde", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(getErr), "the Job must be gone, got %v", getErr)
+}
+
+// TestCleanUpCheckpointJobNamesJobLeftBehind verifies that a cleanup that gives up says which Job
+// it left and how to delete it. The Job's name ends in a random suffix that nothing else prints,
+// and its source Pod holds a GPU until the Job is deleted.
+func TestCleanUpCheckpointJobNamesJobLeftBehind(t *testing.T) {
+	unavailable := apierrors.NewServiceUnavailable("apiserver starting")
+	clientset := checkpointJobClientset(unavailable, unavailable, unavailable, unavailable, unavailable,
+		unavailable, unavailable, unavailable, unavailable, unavailable, unavailable, unavailable)
+
+	err := cleanUpCheckpointJob(context.Background(), clientset, "default", "my-snapshot-capture-abcde", 20*time.Millisecond, 100*time.Millisecond)
+
+	require.Error(t, err)
+	assert.Greater(t, jobDeletes(clientset), 1, "the delete must be retried until the cleanup timeout")
+	assert.Contains(t, err.Error(), "default/my-snapshot-capture-abcde")
+	assert.Contains(t, err.Error(), "kubectl delete job my-snapshot-capture-abcde --namespace default")
+	assert.Contains(t, err.Error(), "apiserver starting", "the error must carry the API server's last answer")
+}
+
+// TestCleanUpCheckpointJobStopsOnRefusal verifies that a delete the API server refuses is not
+// retried, because a later attempt gets the same answer, and that the error still names the Job.
+func TestCleanUpCheckpointJobStopsOnRefusal(t *testing.T) {
+	forbidden := apierrors.NewForbidden(schema.GroupResource{Group: "batch", Resource: "jobs"}, "my-snapshot-capture-abcde", errors.New("no access"))
+	clientset := checkpointJobClientset(forbidden, forbidden)
+
+	err := cleanUpCheckpointJob(context.Background(), clientset, "default", "my-snapshot-capture-abcde", time.Millisecond, 5*time.Second)
+
+	require.Error(t, err)
+	assert.Equal(t, 1, jobDeletes(clientset), "a refused delete must not be retried")
+	assert.True(t, apierrors.IsForbidden(err), "the refusal must stay in the error chain, got %v", err)
+	assert.Contains(t, err.Error(), "kubectl delete job my-snapshot-capture-abcde --namespace default")
+}
+
+// TestCleanUpCheckpointJobAcceptsMissingJob verifies that a Job that is already gone counts as
+// cleaned up. A delete whose answer was lost succeeded, and the retry then finds no Job.
+func TestCleanUpCheckpointJobAcceptsMissingJob(t *testing.T) {
+	clientset := k8sfake.NewClientset()
+
+	err := cleanUpCheckpointJob(context.Background(), clientset, "default", "my-snapshot-capture-abcde", time.Millisecond, 5*time.Second)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, jobDeletes(clientset))
 }
 
 // TestPodSnapshotNameUIDPinned verifies that createPodSnapshot stamps the source pod's UID

@@ -21,6 +21,11 @@ import (
 	snapshotprotocol "github.com/ai-dynamo/snapshot/operator/internal/protocol"
 )
 
+const (
+	jobCleanupTimeout  = 2 * time.Minute
+	jobCleanupInterval = 3 * time.Second
+)
+
 type checkpointOptions struct {
 	ManifestPath       string
 	Namespace          string
@@ -94,7 +99,7 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 	// is left in place to aid debugging when the flow fails.
 	defer func() {
 		if retErr != nil {
-			_ = deleteCheckpointJob(ctx, clientset, namespace, checkpointJobName)
+			_ = cleanUpCheckpointJob(ctx, clientset, namespace, checkpointJobName, jobCleanupInterval, jobCleanupTimeout)
 		}
 	}()
 
@@ -127,6 +132,12 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 		res.BoundContent = strings.TrimSpace(*snap.Status.BoundPodSnapshotContentName)
 	}
 	return res, nil
+}
+
+// cleanUpCheckpointJob removes what a checkpoint that failed leaves running: the Job and its
+// source Pod.
+func cleanUpCheckpointJob(ctx context.Context, clientset kubernetes.Interface, namespace, name string, _, _ time.Duration) error {
+	return deleteCheckpointJob(ctx, clientset, namespace, name)
 }
 
 // deleteCheckpointJob removes the Job of a checkpoint that failed, and its source Pod with it.
