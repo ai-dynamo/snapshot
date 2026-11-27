@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -313,7 +314,14 @@ func startInterruptChild(t *testing.T, name string, prepare ...func(c *interrupt
 	require.NoError(t, err)
 	c.errOut, err = c.cmd.StderrPipe()
 	require.NoError(t, err)
-	require.NoError(t, c.cmd.Start())
+	// The child must start with the default action for SIGINT, also when this test binary was
+	// started with SIGINT ignored. A signal that this process handles is at its default action
+	// in a process that it starts.
+	handled := make(chan os.Signal, 1)
+	signal.Notify(handled, syscall.SIGINT)
+	err = c.cmd.Start()
+	signal.Stop(handled)
+	require.NoError(t, err)
 
 	var readers sync.WaitGroup
 	read := func(from io.Reader, into *[]string) {
