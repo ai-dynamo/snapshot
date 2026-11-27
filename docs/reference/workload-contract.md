@@ -103,6 +103,33 @@ workload useful and operable.
 11. **SHOULD** write the `<framework>-restore-ready` sentinel only after the API
     socket is actually listening, so readiness reflects true serving capacity.
 
+### Identity After a Restore
+
+A restore Pod has its own name and IP address. The restored process continues
+from the snapshot, and it keeps the values that it read in the source Pod.
+Each replica that restores from the same snapshot starts with the same values.
+The table shows what the restored process gets after a restore.
+
+| The restored process reads | It gets |
+|----------------------------|---------|
+| Its hostname, for example with `gethostname()` | The hostname of the source Pod |
+| An environment variable, also one that a `fieldRef` supplies | The value in the source Pod |
+| A file in a `downwardAPI` volume | The value for the restore Pod |
+| `/etc/hosts` | The hostname and the IP address of the restore Pod |
+
+A command that you run with `kubectl exec` is not part of the restored process.
+It shows the hostname and the environment variables of the restore Pod.
+
+These rules apply to a workload that reports its name or address to another
+service, such as a router or a metrics system:
+
+- **SHOULD** read its Pod name again after the restore, from a file in a
+  `downwardAPI` volume.
+- **SHOULD NOT** use its hostname or a `fieldRef` environment variable as its
+  identity after a restore.
+- **SHOULD NOT** resolve its hostname after a restore. `/etc/hosts` names the
+  restore Pod, and the hostname is that of the source Pod.
+
 ### Matching Configuration, Per-Engine Calls
 
 **MUST** keep the checkpointed and restored processes configured identically.
