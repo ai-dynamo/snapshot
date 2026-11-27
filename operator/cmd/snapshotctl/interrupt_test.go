@@ -495,7 +495,12 @@ func TestCheckpointInterrupt(t *testing.T) {
 	t.Run("two signals that arrive together count as one", func(t *testing.T) {
 		// GNU timeout signals the command and then the command's process group.
 		c := startInterruptChild(t, "two-signals-one-action")
-		requireEndedBy(t, c.end(), syscall.SIGINT)
+		status := c.end()
+		// The child sends itself SIGINT and then SIGTERM with no gap. Which of the two ends the
+		// command is not fixed. Linux can deliver them on two threads, in either order. A signal
+		// that is delivered only after the cleanup finds the default action back in place.
+		require.True(t, status.Signaled(), "the command must end by a signal; it exited with status %d", status.ExitStatus())
+		assert.Contains(t, []syscall.Signal{syscall.SIGINT, syscall.SIGTERM}, status.Signal())
 
 		assert.Contains(t, c.output(&c.stderr), logDeleted, "the second signal must not end the cleanup")
 		assert.NotContains(t, c.output(&c.stderr), "Stopped by a second signal")
