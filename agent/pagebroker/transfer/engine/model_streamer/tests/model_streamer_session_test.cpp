@@ -2522,7 +2522,12 @@ TEST_F(ModelStreamerSessionTest, PipelinePendingFrontCancellationReleasesTailsDu
     state.hold_allocation = 0;
     state.changed.notify_all();
   }
-  EXPECT_EQ(pending.wait_for(5s), std::future_status::ready);
+  const bool returned = pending.wait_for(5s) == std::future_status::ready;
+  EXPECT_TRUE(returned) << "the queued restore must return while the active restore still drains";
+  // A queued restore that is still running ends only with the active drain, so
+  // release the end barrier before get() waits for it.
+  if (!returned)
+    ReleaseEnd();
   ExpectCancellation(pending, CancellationError::Reason::CANCELLED);
   EXPECT_EQ(ModelStreamerRestoreTestPeer::PendingCount(restore), 2U);
   EXPECT_TRUE(ModelStreamerRestoreTestPeer::AllPendingWithdrawn(restore));
