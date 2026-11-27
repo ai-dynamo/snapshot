@@ -1,0 +1,139 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: runtime socket path
+templates:
+  - templates/daemonset.yaml
+tests:
+  - it: mounts the directory of the default containerd socket and passes the socket to the agent
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "agent")].args
+          value:
+            - --runtime
+            - containerd
+            - --runtime-socket
+            - /run/containerd/containerd.sock
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
+          content:
+            name: runtime-run
+            mountPath: /run/containerd
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: runtime-run
+            hostPath:
+              path: /run/containerd
+              type: Directory
+
+  - it: mounts the directory of an overridden runtime.socketPath at the identical path
+    set:
+      runtime.socketPath: /run/k3s/containerd/containerd.sock
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "agent")].args
+          content: /run/k3s/containerd/containerd.sock
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
+          content:
+            name: runtime-run
+            mountPath: /run/k3s/containerd
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: runtime-run
+            hostPath:
+              path: /run/k3s/containerd
+              type: Directory
+
+  # crictl and the kubelet take the socket as unix:///run/.... The chart mounts
+  # the socket's directory from the node, and from that form it derived
+  # "unix:/run/containerd", which no node has: the agent Pod stayed in
+  # ContainerCreating with FailedMount, after helm install had succeeded. The
+  # chart removes the scheme, so this form renders what the path renders.
+  - it: accepts a runtime.socketPath with the unix scheme and renders the path
+    set:
+      runtime.socketPath: unix:///run/k3s/containerd/containerd.sock
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "agent")].args
+          value:
+            - --runtime
+            - containerd
+            - --runtime-socket
+            - /run/k3s/containerd/containerd.sock
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
+          content:
+            name: runtime-run
+            mountPath: /run/k3s/containerd
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: runtime-run
+            hostPath:
+              path: /run/k3s/containerd
+              type: Directory
+
+  # The agent's containerd client dials a path only. Its CRI client, the one
+  # client of the crio runtime type, dials a path too.
+  - it: accepts the unix scheme for the crio runtime type and renders the path
+    set:
+      runtime.type: crio
+      runtime.socketPath: unix:///var/run/crio/crio.sock
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "agent")].args
+          value:
+            - --runtime
+            - crio
+            - --runtime-socket
+            - /var/run/crio/crio.sock
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
+          content:
+            name: runtime-run
+            mountPath: /var/run/crio
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: runtime-run
+            hostPath:
+              path: /var/run/crio
+              type: Directory
+
+  - it: rejects a relative runtime.socketPath
+    set:
+      runtime.socketPath: run/containerd/containerd.sock
+    asserts:
+      - failedTemplate:
+          errorMessage: 'runtime.socketPath must be an absolute path on the node, with or without a leading unix://, but Helm read it as "run/containerd/containerd.sock": give the socket as in /run/containerd/containerd.sock or unix:///run/containerd/containerd.sock'
+
+  - it: rejects a relative path after the unix scheme
+    set:
+      runtime.socketPath: unix://run/containerd/containerd.sock
+    asserts:
+      - failedTemplate:
+          errorPattern: 'runtime.socketPath must be an absolute path on the node, with or without a leading unix://, but Helm read it as "unix://run/containerd/containerd.sock"'
+
+  - it: rejects the unix scheme with one slash
+    set:
+      runtime.socketPath: unix:/run/containerd/containerd.sock
+    asserts:
+      - failedTemplate:
+          errorPattern: 'runtime.socketPath must be an absolute path on the node, with or without a leading unix://, but Helm read it as "unix:/run/containerd/containerd.sock"'
+
+  - it: rejects the unix scheme with no path
+    set:
+      runtime.socketPath: unix://
+    asserts:
+      - failedTemplate:
+          errorPattern: 'runtime.socketPath must be an absolute path on the node, with or without a leading unix://, but Helm read it as "unix://"'
+
+  - it: rejects a tcp endpoint
+    set:
+      runtime.socketPath: tcp://127.0.0.1:2375
+    asserts:
+      - failedTemplate:
+          errorPattern: 'runtime.socketPath must be an absolute path on the node, with or without a leading unix://, but Helm read it as "tcp://127.0.0.1:2375"'

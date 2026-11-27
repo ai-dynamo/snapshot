@@ -84,6 +84,7 @@ crdUpgrade:
 # conventional paths for the chosen type.
 runtime:
   type: containerd  # containerd | crio
+  # Absolute path of the socket on the node. A leading unix:// is accepted.
   socketPath: ""
   # Host per-container storage, mounted into the agent at the same absolute path.
   # Defaults: /var/lib/containerd (containerd), /var/lib/containers (crio).

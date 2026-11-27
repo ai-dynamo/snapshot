@@ -188,6 +188,12 @@ commit-level history for each release is on its
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
+- The chart accepts a `runtime.socketPath` in the `unix://` form that `crictl`
+  and the kubelet use, such as `unix:///run/containerd/containerd.sock`.
+  Before, `helm install` succeeded and the agent Pod stayed in
+  `ContainerCreating` with a `FailedMount` event. The chart now refuses a
+  socket path that is not absolute after the scheme, such as a relative path.
+  See [Helm Chart Values](docs/reference/helm-values.md#images-and-rollout).
 
 ### Deprecated
 
