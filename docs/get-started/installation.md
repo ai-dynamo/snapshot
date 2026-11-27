@@ -49,7 +49,8 @@ For every value you can set, see [Helm Chart Values](../reference/helm-values.md
 
 - By default, the chart creates a `ReadWriteMany` snapshot volume that every
   snapshot shares.
-- If your cluster has no default storage class, add
+- If your cluster has no default storage class that can provision
+  `ReadWriteMany` volumes, add
   `--set storage.pvc.storageClass=<storage-class>`.
 - To reuse an existing `ReadWriteMany` claim, add
   `--set storage.pvc.create=false --set storage.pvc.name=<pvc-name>`. The chart
@@ -171,6 +172,9 @@ kubectl rollout status daemonset/snapshot-agent --namespace snapshot
 The operator and the `snapshot-agent` DaemonSet become ready once the node agent
 and its PageBroker sidecar are running on each GPU node. Each agent pod reports
 `2/2` containers ready. The snapshot volume claim reports `Bound`.
+
+If the claim stays `Pending`, see
+[The Snapshot Volume Claim Stays Pending](../troubleshooting/agent.md#the-snapshot-volume-claim-stays-pending).
 
 ## Uninstall
 

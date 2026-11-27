@@ -21,6 +21,59 @@ system ID and has mount targets reachable from every GPU node. A placeholder
 such as `fs-xxxx` can bind a PVC but the snapshot agent will not start because
 the node cannot mount it.
 
+### The Snapshot Volume Claim Stays Pending
+
+The snapshot volume claim, `snapshot-pvc`, stays `Pending` when its storage
+class cannot provision `ReadWriteMany` volumes, or when the claim has no
+storage class. The agent and operator pods mount the claim, and they stay
+`Pending` too. Kubernetes does not let a claim change its storage class. A
+`helm upgrade` that sets another `storage.pvc.storageClass` fails with
+`spec is immutable after creation`.
+
+Check the claim before you change it:
+
+```bash
+kubectl get pvc snapshot-pvc --namespace snapshot
+```
+
+The `STATUS` and `VOLUME` columns show which steps apply:
+
+| `STATUS`  | `VOLUME`      | What to do                                                           |
+|-----------|---------------|----------------------------------------------------------------------|
+| `Pending` | Empty         | The claim has no volume and holds no snapshots. Use the steps below. |
+| `Bound`   | A volume name | The volume holds your snapshots. Do not use the steps below.         |
+
+> [!WARNING]
+> Do not delete a `Bound` claim. You cannot undo the deletion, and the upgrade
+> still fails. New agent and operator pods stay `Pending`. When the last pod
+> that mounts the claim stops, Kubernetes deletes the claim. With the `Delete`
+> reclaim policy, Kubernetes also deletes the volume and all snapshots on it.
+
+You cannot change the storage class of a `Bound` claim. To use another storage
+class, see
+[Use an Existing PVC](../operate/configure-storage.md#use-an-existing-pvc).
+
+For a `Pending` claim, read the events of the claim for the cause:
+
+```bash
+kubectl describe pvc snapshot-pvc --namespace snapshot
+```
+
+Delete the `Pending` claim. Then upgrade with a storage class that can
+provision `ReadWriteMany` volumes. Helm creates the claim again. In these
+commands, replace `<version>` with the chart version that you installed:
+
+```bash
+kubectl delete pvc snapshot-pvc --namespace snapshot
+helm upgrade snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
+  --version <version> \
+  --namespace snapshot \
+  --reset-then-reuse-values \
+  --set storage.pvc.storageClass=<storage-class>
+```
+
+The claim then reports `Bound`, and Kubernetes schedules the pods.
+
 ## A GPU Checkpoint or Restore Fails with `target GPU is unavailable`
 
 When the driver supports CustomStorage, PageBroker sets up every GPU on the

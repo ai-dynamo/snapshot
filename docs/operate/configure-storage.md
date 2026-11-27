@@ -53,6 +53,10 @@ helm install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
   --set storage.pvc.storageClass=<rwx-storage-class>
 ```
 
+A `helm upgrade` cannot change the storage class of an existing claim. If the
+claim stays `Pending` after the install, see
+[The Snapshot Volume Claim Stays Pending](../troubleshooting/agent.md#the-snapshot-volume-claim-stays-pending).
+
 ### Use an Existing PVC
 
 Point the chart at an existing RWX claim instead of creating one:
