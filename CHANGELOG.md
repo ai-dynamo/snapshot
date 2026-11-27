@@ -189,6 +189,12 @@ commit-level history for each release is on its
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 
+- An image tag made only of digits now renders as written.
+  `--set image.agent.tag=1234567` rendered the agent image as
+  `agent:%!s(int64=1234567)`. A number of a million or more in a values file
+  rendered every Snapshot image with an exponent, such as
+  `operator:2.0261127e+07`. A pod with such an image does not start.
+
 ### Deprecated
 
 - `SNAPSHOT_RESTORE_STANDBY` (`podcontract.RestoreStandbyModeEnv`): restore

@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: image tags given as numbers
+templates:
+  - templates/daemonset.yaml
+  - templates/operator-deployment.yaml
+tests:
+  # A number reaches the templates as a float, and Go prints a float of a
+  # million or more with an exponent.
+  - it: renders a tag made only of digits as written
+    set:
+      image.agent.tag: 1234567
+      image.operator.tag: 20261127
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "agent")].image
+          value: ghcr.io/ai-dynamo/snapshot/agent:1234567
+        template: templates/daemonset.yaml
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].image
+          value: ghcr.io/ai-dynamo/snapshot/pagebroker:1234567
+        template: templates/daemonset.yaml
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/ai-dynamo/snapshot/operator:20261127
+        template: templates/operator-deployment.yaml
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: ghcr.io/ai-dynamo/snapshot/operator:20261127
+        template: templates/operator-deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "--cuinterpose-image=ghcr.io/ai-dynamo/snapshot/agent:1234567"
+        template: templates/operator-deployment.yaml
+
+  # Below a million only the agent image, built with printf "%s", was wrong.
+  - it: renders a short number as the agent tag
+    set:
+      image.agent.tag: 2026
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "agent")].image
+          value: ghcr.io/ai-dynamo/snapshot/agent:2026
+        template: templates/daemonset.yaml
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].image
+          value: ghcr.io/ai-dynamo/snapshot/pagebroker:2026
+        template: templates/daemonset.yaml
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "--cuinterpose-image=ghcr.io/ai-dynamo/snapshot/agent:2026"
+        template: templates/operator-deployment.yaml
+
+  - it: keeps a text tag as written
+    set:
+      image.agent.tag: "0.30"
+      image.operator.tag: v1.2.3@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "agent")].image
+          value: ghcr.io/ai-dynamo/snapshot/agent:0.30
+        template: templates/daemonset.yaml
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/ai-dynamo/snapshot/operator:v1.2.3@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+        template: templates/operator-deployment.yaml

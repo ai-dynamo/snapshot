@@ -72,10 +72,26 @@ Name of the operator service account.
 {{- end }}
 
 {{/*
+An image tag as text. A tag made only of digits reaches the chart as a number:
+an integer from --set, a float from a values file. "%s" prints a number as a
+format error, and Go prints a float of a million or more with an exponent, so
+a whole number is printed as an integer. Other values print as before.
+*/}}
+{{- define "snapshot.imageTag" -}}
+{{- $tag := . -}}
+{{- if kindIs "float64" $tag -}}
+{{- if and (eq $tag (floor $tag)) (lt $tag 9007199254740992.0) -}}
+{{- $tag = int64 $tag -}}
+{{- end -}}
+{{- end -}}
+{{- $tag | toString -}}
+{{- end }}
+
+{{/*
 Use the same agent image for the DaemonSet and cuinterpose installer.
 */}}
 {{- define "snapshot.agentImage" -}}
-{{- printf "%s:%s" .Values.image.agent.repository (.Values.image.agent.tag | default .Chart.AppVersion) -}}
+{{- printf "%s:%s" .Values.image.agent.repository (include "snapshot.imageTag" (.Values.image.agent.tag | default .Chart.AppVersion)) -}}
 {{- end }}
 
 {{/*
