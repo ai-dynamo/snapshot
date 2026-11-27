@@ -152,9 +152,11 @@ the data depends on the store:
   incomplete multipart uploads and for versioning
 
 The rules apply only to keys below `<prefix>/artifacts/`, where Snapshot keeps
-all its objects. Replace `<prefix>` with the value of `storage.s3.prefix`. For
-an empty prefix, use `artifacts/`. Without this filter, a rule also applies to
-the data of other applications in the bucket.
+all its objects. Replace `<prefix>` with the value of `storage.s3.prefix`.
+Write it without a slash at its end and without repeated slashes, because
+Snapshot removes them from its keys. For an empty prefix, use `artifacts/`.
+Without this filter, a rule also applies to the data of other applications in
+the bucket.
 
 For Amazon S3, first print the lifecycle configuration that the bucket has. The
 command reports `NoSuchLifecycleConfiguration` for a bucket that has none:
