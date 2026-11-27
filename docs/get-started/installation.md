@@ -49,8 +49,11 @@ For every value you can set, see [Helm Chart Values](../reference/helm-values.md
 
 - By default, the chart creates a `ReadWriteMany` snapshot volume that every
   snapshot shares.
-- If your cluster has no default storage class, add
-  `--set storage.pvc.storageClass=<storage-class>`.
+- If your cluster has no default storage class that can provision
+  `ReadWriteMany` volumes, add
+  `--set storage.pvc.storageClass=<storage-class>`. To set it after you
+  install, see
+  [Configure Storage](../operate/configure-storage.md#use-an-rwx-storage-class).
 - To reuse an existing `ReadWriteMany` claim, add
   `--set storage.pvc.create=false --set storage.pvc.name=<pvc-name>`. The chart
   does not check the claim's access mode, so verify that it is `ReadWriteMany`

@@ -53,6 +53,21 @@ helm install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
   --set storage.pvc.storageClass=<rwx-storage-class>
 ```
 
+Set the storage class when you install. A claim whose storage class cannot
+provision RWX stays `Pending`, and Kubernetes does not let a claim change its
+storage class. A `helm upgrade` that sets another `storage.pvc.storageClass`
+fails with `spec is immutable after creation`. A `Pending` claim cannot change
+its `storage.pvc.size` either.
+
+A `Pending` claim holds no snapshots. To change its storage class or size,
+delete the claim, then upgrade. Helm creates the claim again:
+
+```bash
+kubectl delete pvc snapshot-pvc --namespace snapshot
+helm upgrade snapshot ... \
+  --set storage.pvc.storageClass=<rwx-storage-class>
+```
+
 ### Use an Existing PVC
 
 Point the chart at an existing RWX claim instead of creating one:
