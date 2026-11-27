@@ -304,7 +304,9 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
      follow that code and refuse nothing it accepts; the operator enforces the
      rest. A bucket or prefix that Helm read as a number fails too: 0123 in a
      values file arrives as 83, a long number is printed with an exponent, and
-     a prefix changed that way names another store. */}}
+     a prefix changed that way names another store. No message prints the
+     endpoint: a URL can hold a credential, and this text goes to terminals,
+     CI logs and the status of GitOps controllers. */}}
 {{- define "snapshot.validateS3Store" -}}
 {{- $s3 := .Values.storage.s3 -}}
 {{- range $name := list "bucket" "prefix" -}}
@@ -323,9 +325,7 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 {{- end -}}
 {{- $endpoint := $s3.endpoint | default "" | toString -}}
 {{- if and $endpoint (not (regexMatch "^[hH][tT][tT][pP][sS]?://[^/?#@:][^/?#@]*[?]?#?$" $endpoint)) -}}
-{{- /* The userinfo can hold a password, and this message ends up in CI logs. */ -}}
-{{- $shown := regexReplaceAll "^(.*?//)?[^/?#]*@" $endpoint "${1}<userinfo>@" -}}
-{{- fail (printf "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, but Helm read it as %q: keep only the scheme, the host and an optional port, as in https://s3.example.com" $shown) -}}
+{{- fail "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential" -}}
 {{- end -}}
 {{- $prefix := $s3.prefix | default "" -}}
 {{- if hasPrefix "/" $prefix -}}

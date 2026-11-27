@@ -13,42 +13,95 @@ set:
   storage.s3.bucket: snapshot-bucket
   operator.bindNewContents: true
 tests:
+  # The endpoint tests match the whole message. It is the same for every
+  # endpoint, so it cannot hold a part of one.
   - it: rejects an endpoint with a trailing slash
     set:
       storage.s3.endpoint: https://s3.example.com/
     asserts:
       - failedTemplate:
-          errorPattern: 'storage.s3.endpoint must be an absolute .* URL with no path, .* but Helm read it as "https://s3.example.com/": keep only the scheme, the host and an optional port'
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
 
   - it: rejects an endpoint with a path
     set:
       storage.s3.endpoint: https://s3.example.com/snapshots
     asserts:
       - failedTemplate:
-          errorPattern: 'storage.s3.endpoint must be an absolute .* but Helm read it as "https://s3.example.com/snapshots"'
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
 
   - it: rejects an endpoint without a scheme
     set:
       storage.s3.endpoint: s3.example.com
     asserts:
       - failedTemplate:
-          errorPattern: 'storage.s3.endpoint must be an absolute .* but Helm read it as "s3.example.com"'
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
 
-  - it: rejects an endpoint with a query
-    set:
-      storage.s3.endpoint: https://s3.example.com?region=us-east-1
-    asserts:
-      - failedTemplate:
-          errorPattern: "storage.s3.endpoint must be an absolute .* URL with no path, query, fragment or userinfo"
-
-  # The message goes to the terminal and to CI logs, so it does not repeat
-  # what stands before the "@".
+  # The message goes to terminals, CI logs and the status of GitOps
+  # controllers, so it repeats no part of an endpoint. The credentials below
+  # are placeholders in the places where a URL can hold one.
   - it: rejects an endpoint with a user name and a password, and does not print them
     set:
-      storage.s3.endpoint: https://backup:hunter2@s3.example.com
+      storage.s3.endpoint: https://backup:not-a-real-password@s3.example.com
     asserts:
       - failedTemplate:
-          errorPattern: 'storage.s3.endpoint must be an absolute .* but Helm read it as "https://<userinfo>@s3.example.com": keep only'
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
+
+  - it: rejects an endpoint whose password has a slash, and does not print it
+    set:
+      storage.s3.endpoint: https://backup:not/a/real/password@s3.example.com
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
+
+  - it: rejects an endpoint whose password has a question mark and a hash, and does not print it
+    set:
+      storage.s3.endpoint: https://backup:not?a#real-password@s3.example.com
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
+
+  - it: rejects an endpoint with one slash after the scheme, and does not print its password
+    set:
+      storage.s3.endpoint: https:/backup:not-a-real-password@s3.example.com
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
+
+  - it: rejects an endpoint after a line break, and does not print its password
+    set:
+      storage.s3.endpoint: "\nhttps://backup:not-a-real-password@s3.example.com"
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
+
+  - it: rejects a presigned URL as the endpoint, and does not print its signature
+    set:
+      storage.s3.endpoint: https://s3.example.com/snapshot-bucket/key?X-Amz-Credential=not-a-real-key&X-Amz-Signature=not-a-real-signature
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
+
+  - it: rejects an endpoint with a query on the host, and does not print it
+    set:
+      storage.s3.endpoint: https://s3.example.com?secret_key=not-a-real-secret
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
+
+  - it: rejects an endpoint with a fragment, and does not print it
+    set:
+      storage.s3.endpoint: https://s3.example.com#access_token=not-a-real-token
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
+
+  - it: rejects an endpoint that is a list, and does not print its content
+    set:
+      storage.s3.endpoint:
+        - https://backup:not-a-real-password@s3.example.com
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
 
   # The operator lowercases the scheme and the host and accepts a port.
   - it: renders an endpoint with an uppercase scheme and a port

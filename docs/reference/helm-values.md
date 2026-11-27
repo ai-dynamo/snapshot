@@ -65,8 +65,9 @@ values, see [values.yaml](../../charts/snapshot/values.yaml).
 
 The chart refuses these S3 values, and the error names the value:
 
-- An endpoint with a path, a query, or a user name, or without `http://` or
-  `https://`. A trailing slash is a path.
+- An endpoint with a path, a query, a fragment, or a user name, or without
+  `http://` or `https://`. A trailing slash is a path. The error does not show
+  the endpoint.
 - A prefix with a leading slash.
 - A bucket or prefix that is not a string. Helm reads an unquoted value that
   contains only digits, such as `20261127`, as a number. In a values file, put
