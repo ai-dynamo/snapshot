@@ -75,7 +75,10 @@ type snapshotJobObservation struct {
 	// reached a terminal state with every non-target container exited 0 — the
 	// second stage of the completion gate.
 	sourceJobFinished bool
-	failure           *snapshotJobFailure
+	// awaitingDeadlineVerdict is true while a failed capture waits for the
+	// source Job to report an expired deadline, which would be its root cause.
+	awaitingDeadlineVerdict bool
+	failure                 *snapshotJobFailure
 }
 
 // PodSnapshot failure reasons consumed by SnapshotJob. These values are part
@@ -258,6 +261,13 @@ func (r *SnapshotJobReconciler) reconcilePodSnapshotResources(ctx context.Contex
 	}
 
 	observed.podSnapshot = snap
+	if snapshotv1alpha1.IsPodSnapshotFailed(snap) {
+		if wait := awaitedSourceJobDeadlineVerdict(observed.job, time.Now()); wait > 0 {
+			// The owned-Job watch is the normal wake-up; the requeue ends the wait.
+			observed.awaitingDeadlineVerdict = true
+			return observed, ctrl.Result{RequeueAfter: wait}, nil
+		}
+	}
 	observed.failure = snapshotJobTerminalFailure(observed.job, snap)
 	if observed.failure != nil {
 		return observed, ctrl.Result{}, nil
@@ -535,7 +545,7 @@ func deriveCapturedStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJ
 		reason, message := captureFailureReason(observed.podSnapshot)
 		setCondition(next, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionFalse, reconciliationTime,
 			reason, message)
-		if failure == nil {
+		if failure == nil && !observed.awaitingDeadlineVerdict {
 			failure = &snapshotJobFailure{reason: reason, cause: errors.New(message)}
 		}
 	case snapshotv1alpha1.IsPodSnapshotSucceeded(observed.podSnapshot):

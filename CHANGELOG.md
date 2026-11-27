@@ -189,6 +189,13 @@ commit-level history for each release is on its
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 
+- A `SnapshotJob` that ran out of time could fail with reason `CaptureFailed`,
+  not `DeadlineExceeded`. When `activeDeadlineSeconds` ends, Kubernetes deletes
+  the source Pod before the Job reports the deadline, and the deletion fails
+  the checkpoint. The operator now waits for the Job's report, for at most 30
+  seconds after the deadline, before it sets `Failed=True`. No action on
+  upgrade.
+
 ### Deprecated
 
 - `SNAPSHOT_RESTORE_STANDBY` (`podcontract.RestoreStandbyModeEnv`): restore

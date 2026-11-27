@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -217,6 +218,30 @@ func snapshotJobTerminalFailure(job *batchv1.Job, snap *snapshotv1alpha1.PodSnap
 		return nil
 	}
 	return classifySourceJobTerminal(job).failure
+}
+
+// sourceJobDeadlineClockSkew is how far the operator's clock may be behind the
+// Job controller's when the operator decides that a source Job's deadline is due.
+const sourceJobDeadlineClockSkew = 5 * time.Second
+
+// awaitedSourceJobDeadlineVerdict returns how long a failed capture still waits
+// for the source Job to report an expired deadline. The Job controller deletes
+// the source pod first and writes the DeadlineExceeded condition second, so the
+// capture failure that the deletion causes can arrive before the condition. The
+// wait ends captureResolutionBackstop after the deadline; the capture's own
+// reason is reported then.
+func awaitedSourceJobDeadlineVerdict(job *batchv1.Job, now time.Time) time.Duration {
+	if job.Spec.ActiveDeadlineSeconds == nil || job.Status.StartTime == nil {
+		return 0
+	}
+	if classifySourceJobTerminal(job).state != sourceJobActive {
+		return 0
+	}
+	deadline := job.Status.StartTime.Add(time.Duration(*job.Spec.ActiveDeadlineSeconds) * time.Second)
+	if now.Before(deadline.Add(-sourceJobDeadlineClockSkew)) {
+		return 0
+	}
+	return max(deadline.Add(captureResolutionBackstop).Sub(now), 0)
 }
 
 // ensureJobDeleted deletes the owned source Job after successful completion.
