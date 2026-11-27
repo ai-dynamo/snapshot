@@ -97,9 +97,9 @@ When a checkpoint fails or times out, `snapshotctl checkpoint` deletes the
 source Pod and the Job that ran it. It leaves the `PodSnapshot` CR in place for
 debugging.
 
-If the Kubernetes API does not accept the delete, the command retries it for
-two minutes. If the delete still fails, the error names the Job and gives the
-command that deletes it.
+If the Kubernetes API is not available for the delete, the command retries it
+for up to two minutes. If the delete fails, the error names the Job and gives
+the command that deletes it.
 
 ## Restore
 
