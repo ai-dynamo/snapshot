@@ -35,6 +35,10 @@ Snapshot currently focuses on inference cold-start; further use cases are on the
   supports a platform token service behind a private CA for uploads and
   cleanup only. Restores cannot reach such a service. A credential endpoint
   set with `storage.s3.credentialEndpoint` is not affected.
+- With the snapshot store on Amazon FSx for Lustre, mounted with Lustre client
+  2.15, a snapshot taken with the default `config.criu.imageIoMode: direct`
+  does not restore. Set `writeback` before you checkpoint. See
+  [Troubleshoot Restores](../troubleshooting/restores.md#a-restore-fails-with-vdso-invalid-elf-magic).
 
 ## GPU Device Selection and Restore Paths
 
