@@ -7,10 +7,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -217,6 +219,52 @@ func snapshotJobTerminalFailure(job *batchv1.Job, snap *snapshotv1alpha1.PodSnap
 		return nil
 	}
 	return classifySourceJobTerminal(job).failure
+}
+
+// sourceJobDeadlineClockSkew is how far the operator's clock may be behind the
+// Job controller's when the operator decides that a source Job's deadline is due.
+const sourceJobDeadlineClockSkew = 5 * time.Second
+
+// awaitedSourceJobDeadlineVerdict returns how long a failed capture still waits
+// for the source Job to report an expired deadline. The Job controller deletes
+// the source pod first and writes the DeadlineExceeded condition second, so the
+// capture failure that the deletion causes can arrive before the condition.
+//
+// The Job controller can act on the deadline late: after a restart, or behind
+// other Jobs at its client rate limit. The capture then fails that much after
+// the deadline, and the condition still follows the pod's deletion at once. So
+// the wait ends captureResolutionBackstop after the deadline or after
+// captureFailedAt, whichever is later; the capture's own reason is reported
+// then. captureFailedAt is a fixed time, so no event can extend the wait.
+func awaitedSourceJobDeadlineVerdict(job *batchv1.Job, captureFailedAt, now time.Time) time.Duration {
+	if job.Spec.ActiveDeadlineSeconds == nil || job.Status.StartTime == nil {
+		return 0
+	}
+	if classifySourceJobTerminal(job).state != sourceJobActive {
+		return 0
+	}
+	deadline := job.Status.StartTime.Add(time.Duration(*job.Spec.ActiveDeadlineSeconds) * time.Second)
+	if now.Before(deadline.Add(-sourceJobDeadlineClockSkew)) {
+		return 0
+	}
+	waitFrom := deadline
+	// A failure time ahead of the operator's clock would make the wait longer
+	// than captureResolutionBackstop by that difference, so only a past one
+	// counts.
+	if captureFailedAt.After(deadline) && !captureFailedAt.After(now) {
+		waitFrom = captureFailedAt
+	}
+	return max(waitFrom.Add(captureResolutionBackstop).Sub(now), 0)
+}
+
+// podSnapshotFailedAt returns when the PodSnapshot's Failed condition turned
+// True, or the zero time when it has none.
+func podSnapshotFailedAt(snap *snapshotv1alpha1.PodSnapshot) time.Time {
+	failed := meta.FindStatusCondition(snap.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	if failed == nil || failed.Status != metav1.ConditionTrue {
+		return time.Time{}
+	}
+	return failed.LastTransitionTime.Time
 }
 
 // ensureJobDeleted deletes the owned source Job after successful completion.
