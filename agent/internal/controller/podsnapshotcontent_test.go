@@ -807,6 +807,70 @@ func TestReconcileCapture_DumpPastItsDeadlineKeepsItsSourceContainer(t *testing.
 	assert.Equal(t, []string{string(overrun.UID), string(waiting.UID)}, dumps())
 }
 
+// TestReconcileCapture_RunningCaptureKeepsItsSourceContainerFromTheSweep pins where the claim is
+// taken: above the unstick sweep. A non-target container fails while the dump runs, and the work
+// order that then sorts first for the same container would SIGKILL every running container of the
+// pod, the one that is being dumped included.
+func TestReconcileCapture_RunningCaptureKeepsItsSourceContainerFromTheSweep(t *testing.T) {
+	capturing := makeWorkOrder("podsnapshotcontent-b", "node-a", "b")
+	capturing.CreationTimestamp = metav1.Unix(1000, 0)
+	pod := makeSourcePod()
+	pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, corev1.ContainerStatus{
+		Name: "helper", ContainerID: "containerd://helper-id",
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	})
+	rt := &fakeRuntime{resolveContainerPID: 7}
+	w := makeNodeController(t, &fakeCheckpointer{}, capturing, pod)
+	w.runtime = rt
+
+	var once sync.Once
+	dumping := make(chan struct{})
+	finish := make(chan struct{})
+	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		once.Do(func() {
+			close(dumping)
+			<-finish
+		})
+		return nil, nil
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- w.reconcileCapture(context.Background(), capturing.Name) }()
+	<-dumping
+
+	failed := getPod(t, w, pod.Namespace, pod.Name)
+	failed.Status.ContainerStatuses[1].State = corev1.ContainerState{
+		Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"},
+	}
+	require.NoError(t, w.client.Status().Update(context.Background(), failed))
+	// PID 0 → ResolveContainer errors → a sweep that runs records its containers and sends no
+	// real signal.
+	rt.mu.Lock()
+	rt.resolveContainerPID = 0
+	resolvedByTheCapture := len(rt.resolvedContainerIDs)
+	rt.mu.Unlock()
+
+	// Created in the same second with a name that sorts first, so the order gives it the pod.
+	waiting := makeWorkOrder("podsnapshotcontent-a", "node-a", "a")
+	waiting.CreationTimestamp = capturing.CreationTimestamp
+	require.NoError(t, w.client.Create(context.Background(), waiting))
+	require.NoError(t, w.contentIndexer.Add(mustUnstructured(t, waiting)))
+
+	require.NoError(t, w.reconcileCapture(context.Background(), waiting.Name))
+
+	rt.mu.Lock()
+	swept := append([]string(nil), rt.resolvedContainerIDs[resolvedByTheCapture:]...)
+	rt.mu.Unlock()
+	assert.Empty(t, swept,
+		"a work order must not resolve or signal containers of a pod while its target container is being dumped")
+	assert.False(t, sawEventReason(w.clientset.(*k8sfake.Clientset), "CheckpointFailed"),
+		"a waiting work order must not announce a failure for a pod that is being dumped")
+	assert.Empty(t, getContent(t, w, waiting.Name).Status.Conditions)
+
+	close(finish)
+	require.NoError(t, <-done)
+}
+
 // TestReconcileCapture_RunningCaptureHoldsOnlyItsSourceContainer pins the scope of the claim: one
 // container of one pod. A work order that the order lets through for another container starts its
 // dump while the first one runs. Two work orders for two containers of one pod are not a supported
