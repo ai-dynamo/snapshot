@@ -71,6 +71,9 @@ type snapshotJobObservation struct {
 	job              *batchv1.Job
 	podSnapshot      *snapshotv1alpha1.PodSnapshot
 	sourcePodMissing bool
+	// previousSourceJob is the source Job of a previous SnapshotJob with this
+	// name, set while this SnapshotJob waits for Kubernetes to delete it.
+	previousSourceJob *batchv1.Job
 	// sourceJobFinished is true once the capture is Ready AND the source Job
 	// reached a terminal state with every non-target container exited 0 — the
 	// second stage of the completion gate.
@@ -114,6 +117,11 @@ func (r *SnapshotJobReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	observed, result, err := r.reconcileResources(ctx, sj)
+	if errors.Is(err, errSnapshotJobCacheBehind) {
+		// Nothing was created or written. The watch event that carries the newer
+		// SnapshotJob is the normal wake-up; the requeue is a backstop.
+		return ctrl.Result{RequeueAfter: snapshotJobCacheBehindRequeue}, nil
+	}
 	if err != nil {
 		return result, err
 	}
@@ -176,12 +184,43 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 				return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, err), ctrl.Result{}, nil
 			}
 		}
+		// The create cannot be undone, and the cached SnapshotJob can be older than
+		// its own first status write. A source Job that was accepted and then
+		// deleted would otherwise be created again and start the workload again.
+		behind, err := r.snapshotJobCacheBehind(ctx, sj)
+		if err != nil {
+			return snapshotJobObservation{}, ctrl.Result{}, err
+		}
+		if behind {
+			return snapshotJobObservation{}, ctrl.Result{}, errSnapshotJobCacheBehind
+		}
 		return r.createSourceJob(ctx, sj, desiredJob)
 	case err != nil:
 		return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("get source Job %q: %w", sj.Name, err)
 	default:
 		return r.reconcileExistingSourceJob(ctx, sj, job)
 	}
+}
+
+// errSnapshotJobCacheBehind ends a reconcile that would create the source Job
+// from a cached SnapshotJob that the API server has already replaced.
+var errSnapshotJobCacheBehind = errors.New("the cached SnapshotJob is older than the API server's")
+
+// snapshotJobCacheBehindRequeue re-checks a SnapshotJob whose cached copy was
+// behind, in case the watch event that carries the newer one is missed.
+const snapshotJobCacheBehindRequeue = time.Second
+
+// snapshotJobCacheBehind reads the SnapshotJob from the API server and reports
+// whether it is gone, was created again, or was written since the cached copy.
+func (r *SnapshotJobReconciler) snapshotJobCacheBehind(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob) (bool, error) {
+	current := &snapshotv1alpha1.SnapshotJob{}
+	if err := r.NonCacheReadClient.Get(ctx, client.ObjectKeyFromObject(sj), current); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("re-read SnapshotJob %q before creating its source Job: %w", sj.Name, err)
+	}
+	return current.UID != sj.UID || current.ResourceVersion != sj.ResourceVersion, nil
 }
 
 // reconcilePodSnapshotResources implements the capture-boundary flow: look up
@@ -468,6 +507,14 @@ func deriveRunningStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJo
 		if observed.failure != nil {
 			setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
 				observed.failure.reason, "source pod is unavailable: "+observed.failure.cause.Error())
+		}
+		if previous := observed.previousSourceJob; previous != nil {
+			// The message names the end of the wait and not the time left, so
+			// that every reconcile of the wait derives the same status.
+			setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
+				snapshotv1alpha1.ReasonWaitingForPreviousJobDeletion, fmt.Sprintf(
+					"waiting until %s for Kubernetes to delete source Job %q (uid %q) of a previous SnapshotJob with this name",
+					previousSourceJobDeletionWaitEnd(next), previous.Name, previous.UID))
 		}
 		return
 	}

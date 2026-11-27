@@ -114,6 +114,30 @@ when it could not be stopped.
 kubectl get events -n <ns> --field-selector involvedObject.name=<source-pod>
 ```
 
+## A `SnapshotJob` Fails with `JobNameConflict`
+
+A `SnapshotJob` runs its source Pod in a Job that has the name of the
+`SnapshotJob`. The `SnapshotJob` fails with `JobNameConflict` when a Job that it
+did not create has that name. The operator does not change or delete that Job.
+
+Kubernetes deletes the source Job a moment after its `SnapshotJob`. A
+`SnapshotJob` that you create again under the same name can find the previous
+source Job. The new `SnapshotJob` then waits until Kubernetes deletes that Job,
+for at most two minutes after its creation. During the wait, its `Running`
+condition is `False` with reason `WaitingForPreviousJobDeletion`. If the
+previous Job is still there after the wait, the new `SnapshotJob` fails with
+`JobNameConflict`.
+
+To see what keeps the Job, read its owner references and its finalizers:
+
+```bash
+kubectl get job <name> -n <ns> -o jsonpath='{.metadata.ownerReferences}{"\n"}{.metadata.finalizers}{"\n"}'
+```
+
+Delete the Job, or remove what keeps it, such as a finalizer. Then delete the
+failed `SnapshotJob` and create it again. A failed `SnapshotJob` does not start
+again.
+
 ## Checkpoint Fails at a Step
 
 ### resolving checkpoint artifact path

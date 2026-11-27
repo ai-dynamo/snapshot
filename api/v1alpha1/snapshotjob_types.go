@@ -36,6 +36,12 @@ const (
 	// Running
 	ReasonPodPending = "PodPending"
 	ReasonPodReady   = "PodReady"
+	// ReasonWaitingForPreviousJobDeletion means the SnapshotJob was created
+	// again under the name of a deleted SnapshotJob, and Kubernetes has not yet
+	// deleted the previous source Job, which has the same name. The SnapshotJob
+	// creates its own source Job when the previous one is gone. If the previous
+	// Job stays, the wait ends in JobNameConflict.
+	ReasonWaitingForPreviousJobDeletion = "WaitingForPreviousJobDeletion"
 
 	// Captured
 	ReasonCaptureInProgress = "CaptureInProgress"
@@ -73,6 +79,8 @@ const (
 	ReasonPodSnapshotDeleted = "PodSnapshotDeleted"
 	// ReasonJobNameConflict means the deterministic Job name is held by a
 	// foreign object or by a different Job UID than the one already recorded.
+	// The source Job of a previous SnapshotJob with the same name is a foreign
+	// object only when Kubernetes does not delete it in time.
 	ReasonJobNameConflict = "JobNameConflict"
 	ReasonJobDeleted      = "JobDeleted"
 	// ReasonInvalidSpec covers spec-level validation failures caught before

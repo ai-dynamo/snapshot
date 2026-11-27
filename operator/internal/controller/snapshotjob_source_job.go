@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -14,7 +15,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
@@ -49,10 +52,73 @@ func (r *SnapshotJobReconciler) observeExistingSourceJob(ctx context.Context, sj
 // reconcileExistingSourceJob applies the one-shot Job identity gate shared by
 // steady-state reconciliation and Create-AlreadyExists recovery.
 func (r *SnapshotJobReconciler) reconcileExistingSourceJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (snapshotJobObservation, ctrl.Result, error) {
+	if r.isSourceJobOfDeletedSnapshotJob(sj, job) {
+		wait := previousSourceJobDeletionWaitLeft(sj, time.Now())
+		if wait <= 0 {
+			return snapshotJobObservation{failure: previousSourceJobNotDeletedFailure(job)}, ctrl.Result{}, nil
+		}
+		log.FromContext(ctx).Info("Waiting for Kubernetes to delete the source Job of a previous SnapshotJob with this name",
+			"jobUID", job.UID, "until", previousSourceJobDeletionWaitEnd(sj))
+		// The delete of that Job is the normal wake-up; the requeue ends the wait.
+		return snapshotJobObservation{previousSourceJob: job}, ctrl.Result{RequeueAfter: wait}, nil
+	}
 	if failure := classifyExistingSourceJob(sj, job); failure != nil {
 		return snapshotJobObservation{failure: failure}, ctrl.Result{}, nil
 	}
 	return r.reconcileAcceptedSourceJob(ctx, sj, job)
+}
+
+// previousSourceJobDeletionWait is how long a SnapshotJob that was created again
+// under the name of a deleted SnapshotJob waits for Kubernetes to delete the
+// previous source Job. The garbage collector needs milliseconds on an idle
+// cluster. It deletes about 20 objects a second at the default client limits of
+// the kube-controller-manager, and the Job waits behind the deletes that were
+// queued before it, so two minutes cover a queue of about 2,400 objects. A Job
+// that is still there after this time is held by something, such as a
+// finalizer or an admission policy, and the name conflict is then the true
+// answer.
+//
+// The wait is not part of spec.activeDeadlineSeconds. That deadline is applied
+// verbatim to this SnapshotJob's own source Job, which does not exist yet, and
+// the Job controller counts it from the start of that Job.
+const previousSourceJobDeletionWait = 2 * time.Minute
+
+// previousSourceJobDeletionWaitLeft returns how much of the wait sj has left.
+// The wait counts from the creation of sj: that needs no status write, holds
+// across an operator restart, and no later event can extend it.
+func previousSourceJobDeletionWaitLeft(sj *snapshotv1alpha1.SnapshotJob, now time.Time) time.Duration {
+	return max(sj.CreationTimestamp.Add(previousSourceJobDeletionWait).Sub(now), 0)
+}
+
+// previousSourceJobDeletionWaitEnd is the time at which the wait of sj ends, as
+// the status and the log show it.
+func previousSourceJobDeletionWaitEnd(sj *snapshotv1alpha1.SnapshotJob) string {
+	return sj.CreationTimestamp.Add(previousSourceJobDeletionWait).UTC().Format(time.RFC3339)
+}
+
+// previousSourceJobNotDeletedFailure is the name conflict of a SnapshotJob whose
+// wait ended with the previous source Job still there.
+func previousSourceJobNotDeletedFailure(job *batchv1.Job) *snapshotJobFailure {
+	return &snapshotJobFailure{
+		reason: snapshotv1alpha1.ReasonJobNameConflict,
+		cause: fmt.Errorf("source Job %q (uid %q) of a previous SnapshotJob with this name was not deleted within %s",
+			job.Name, job.UID, previousSourceJobDeletionWait),
+	}
+}
+
+// isSourceJobOfDeletedSnapshotJob reports whether job is controlled by a
+// previous SnapshotJob of sj's name. A name is unique in its namespace, so that
+// SnapshotJob no longer exists and the garbage collector removes its Job: the
+// name is being freed, which is not a conflict while the wait lasts. A delete
+// that orphans the Job removes the owner reference before the name is free, so
+// an orphan has no controller and is a JobNameConflict at once.
+func (r *SnapshotJobReconciler) isSourceJobOfDeletedSnapshotJob(sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) bool {
+	owner := metav1.GetControllerOf(job)
+	if owner == nil || sj.Status.SourceJobUID != "" || owner.UID == sj.UID || owner.Name != sj.Name {
+		return false
+	}
+	gvk, err := apiutil.GVKForObject(sj, r.Scheme())
+	return err == nil && owner.Kind == gvk.Kind && owner.APIVersion == gvk.GroupVersion().String()
 }
 
 // reconcileAcceptedSourceJob continues after validating the source Job.
