@@ -117,6 +117,102 @@ Credentials come from one of two places:
 See [Helm Chart Values](../reference/helm-values.md#storage) for all S3 values,
 including the key prefix and the credentials key.
 
+### Set Bucket Lifecycle Rules
+
+When you delete a snapshot, the operator deletes the current objects of that
+snapshot. The operator does not abort multipart uploads, and it does not delete
+object versions. The following table shows the data that this cleanup leaves in
+the bucket:
+
+| Data | When it appears |
+|------|-----------------|
+| Incomplete multipart uploads | An upload stops before it completes, for example when the PageBroker container restarts |
+| Noncurrent object versions and delete markers | You delete a snapshot from a bucket that has versioning |
+
+On MinIO, the S3-compatible server that the Snapshot end-to-end tests use, this
+data stayed in the bucket after the operator deleted a snapshot. What removes
+the data depends on the store:
+
+- **Amazon S3.** Amazon documents that S3 keeps the parts of an incomplete
+  multipart upload until the upload completes or stops. It also documents
+  that, on a bucket that has versioning, a delete request without a version ID
+  adds a delete marker and keeps the object. See
+  [Uploading and copying objects using multipart upload in Amazon S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpuoverview.html)
+  and
+  [Working with delete markers](https://docs.aws.amazon.com/AmazonS3/latest/userguide/DeleteMarker.html).
+  Add both lifecycle rules of this section to the bucket
+- **MinIO.** MinIO documents that the server removes an incomplete multipart
+  upload by itself. It removes an upload that is older than the server setting
+  `api stale_uploads_expiry`, which is 24 hours by default. See
+  [Lifecycle rule patterns](https://docs.min.io/aistor/administration/object-lifecycle-management/lifecycle-rule-patterns/#abort-incomplete-multipart-uploads).
+  The MinIO server of the end-to-end tests refuses a configuration that
+  contains the first rule of this section. For a bucket that has versioning,
+  add only the second rule
+- **Another S3-compatible store.** Read the documentation of that store for
+  incomplete multipart uploads and for versioning
+
+The rules apply only to keys below `<prefix>/artifacts/`, where Snapshot keeps
+all its objects. Replace `<prefix>` with the value of `storage.s3.prefix`.
+Write it without a slash at its end and without repeated slashes, because
+Snapshot removes them from its keys. For an empty prefix, use `artifacts/`.
+Without this filter, a rule also applies to the data of other applications in
+the bucket.
+
+For Amazon S3, first print the lifecycle configuration that the bucket has. The
+command reports `NoSuchLifecycleConfiguration` for a bucket that has none:
+
+```bash
+aws s3api get-bucket-lifecycle-configuration --bucket <bucket>
+```
+
+Applying a configuration replaces the configuration that the bucket has. To
+keep the rules that the first command printed, add them to `Rules` in the file
+below. To keep a `TransitionDefaultMinimumObjectSize` value that it printed, see
+[Setting an S3 Lifecycle configuration on a bucket](https://docs.aws.amazon.com/AmazonS3/latest/userguide/how-to-set-lifecycle-configuration-intro.html).
+Save the following configuration as `lifecycle.json`:
+
+```json
+{
+  "Rules": [
+    {
+      "ID": "snapshot-incomplete-uploads",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "<prefix>/artifacts/" },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
+    },
+    {
+      "ID": "snapshot-noncurrent-versions",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "<prefix>/artifacts/" },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 1 },
+      "Expiration": { "ExpiredObjectDeleteMarker": true }
+    }
+  ]
+}
+```
+
+Apply the file with the following command. The command removes every rule that
+is not in the file:
+
+```bash
+aws s3api put-bucket-lifecycle-configuration --bucket <bucket> \
+  --lifecycle-configuration file://lifecycle.json
+```
+
+To check the result, print the configuration again. Amazon describes the two
+rules in
+[Configuring a bucket lifecycle configuration to delete incomplete multipart uploads](https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpu-abort-incomplete-mpu-lifecycle-config.html)
+and
+[Examples of S3 Lifecycle configurations](https://docs.aws.amazon.com/AmazonS3/latest/userguide/lifecycle-configuration-examples.html).
+
+For MinIO, add `--endpoint-url <endpoint>` to both commands, and remove the
+first rule from the file.
+
+The second rule has an effect only on a bucket that has versioning. Both rules
+use a period of one day. PageBroker starts no upload request later than
+`pageBroker.s3.limits.transactionSeconds` into a checkpoint, and that limit is
+7200 seconds at most. Snapshot reads only current versions.
+
 ### Optional S3 Settings
 
 These settings apply only to `storage.type: s3`. PageBroker, the node agent
