@@ -90,9 +90,10 @@ type NodeController struct {
 	// work order, which is enough across agents because exactly one agent runs per node.
 	captureQueue workqueue.TypedRateLimitingInterface[string]
 
-	// capturingPods holds, per source Pod UID, the work order whose reconcile is acting on that
-	// pod. Several work orders can name one pod, and the queue excludes only per work order.
-	capturingPods sync.Map
+	// capturingContainers holds, per container of a source pod (pod UID and container name), the
+	// work order whose reconcile is acting on it. Several work orders can name one container, and
+	// the queue excludes only per work order.
+	capturingContainers sync.Map
 
 	// checkpointGates holds a *checkpointGate per work order, while the agent waits for its
 	// source container to be ready for the checkpoint.

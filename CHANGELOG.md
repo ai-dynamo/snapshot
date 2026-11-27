@@ -189,11 +189,12 @@ commit-level history for each release is on its
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 
-- A checkpoint no longer starts on a source Pod while another checkpoint of that
-  Pod runs. The node agent could start a second dump of the Pod when two
-  `PodSnapshot` objects of the Pod were created in the same second. It could
-  also do so when a `PodSnapshot` was deleted during its dump and another one
-  was pending.
+- A checkpoint no longer starts on a target container while another checkpoint
+  of that container runs. The node agent could start a second checkpoint of the
+  container when two `PodSnapshot` objects that name it were created in the same
+  second. It could also do so when a `PodSnapshot` was deleted during its
+  checkpoint and another one for that container was pending. Both checkpoints
+  could then fail with `CheckpointFailed`, and no snapshot was stored.
 
 ### Deprecated
 
