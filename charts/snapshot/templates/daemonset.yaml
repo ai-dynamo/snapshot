@@ -191,7 +191,7 @@ spec:
           resources:
             {{- toYaml .Values.daemonset.resources | nindent 12 }}
         - name: pagebroker
-          image: "{{ .Values.image.pageBroker.repository }}:{{ .Values.image.agent.tag | default .Chart.AppVersion }}"
+          image: "{{ .Values.image.pageBroker.repository }}:{{ include "snapshot.imageTag" (dict "root" . "component" "agent") }}"
           imagePullPolicy: {{ .Values.image.pageBroker.pullPolicy }}
           # CustomStorage operates on the workload's CUDA processes and device mappings.
           securityContext:

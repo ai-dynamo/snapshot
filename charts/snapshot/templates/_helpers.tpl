@@ -72,10 +72,30 @@ Name of the operator service account.
 {{- end }}
 
 {{/*
+The tag of the "agent" or "operator" image: image.<component>.tag, or the
+chart's appVersion when the tag is empty. Helm reads an unquoted tag made only
+of digits as a number, and the number is not always the tag that was written:
+0123 in a values file arrives as 83, 1e5 as 100000, and a long number gets an
+exponent. A tag that is not a string therefore fails the render, so that the
+chart never selects an image the user did not name.
+*/}}
+{{- define "snapshot.imageTag" -}}
+{{- $tag := index .root.Values.image .component "tag" -}}
+{{- if not (or (kindIs "string" $tag) (kindIs "invalid" $tag)) -}}
+{{- $read := toJson $tag -}}
+{{- if or (kindIs "float64" $tag) (kindIs "int64" $tag) -}}
+{{- $read = printf "the number %s" $read -}}
+{{- end -}}
+{{- fail (printf "image.%s.tag must be a string, but Helm read it as %s: quote the tag in a values file, or pass it with --set-string" .component $read) -}}
+{{- end -}}
+{{- $tag | default .root.Chart.AppVersion -}}
+{{- end }}
+
+{{/*
 Use the same agent image for the DaemonSet and cuinterpose installer.
 */}}
 {{- define "snapshot.agentImage" -}}
-{{- printf "%s:%s" .Values.image.agent.repository (.Values.image.agent.tag | default .Chart.AppVersion) -}}
+{{- printf "%s:%s" .Values.image.agent.repository (include "snapshot.imageTag" (dict "root" . "component" "agent")) -}}
 {{- end }}
 
 {{/*

@@ -206,6 +206,17 @@ tests:
       - failedTemplate:
           errorMessage: "image.pageBroker.tag is unsupported: set image.agent.tag to select matching agent and PageBroker images"
 
+  # Helm reads an unquoted tag made only of digits as a number, and the number
+  # is not always the tag that was written. image_tag_test.yaml has the other
+  # forms of a tag.
+  - it: refuses an agent tag that Helm read as a number
+    set:
+      image.agent.tag: 1234567
+    template: templates/daemonset.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: "image.agent.tag must be a string, but Helm read it as the number 1234567: quote the tag in a values file, or pass it with --set-string"
+
   # Helm drops an unknown value silently, so without these an upgrade from
   # v0.3.0 would replace a tuned staging budget with the default.
   - it: refuses the removed transferBufferCount

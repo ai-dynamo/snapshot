@@ -1,0 +1,157 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: image tags
+templates:
+  - templates/daemonset.yaml
+  - templates/operator-deployment.yaml
+tests:
+  - it: defaults an empty tag to the chart appVersion at every image reference
+    chart:
+      appVersion: v1.2.3
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "agent")].image
+          value: ghcr.io/ai-dynamo/snapshot/agent:v1.2.3
+        template: templates/daemonset.yaml
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].image
+          value: ghcr.io/ai-dynamo/snapshot/pagebroker:v1.2.3
+        template: templates/daemonset.yaml
+      - equal:
+          path: spec.template.spec.initContainers[?(@.name == "crd-installer")].image
+          value: ghcr.io/ai-dynamo/snapshot/operator:v1.2.3
+        template: templates/operator-deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "manager")].image
+          value: ghcr.io/ai-dynamo/snapshot/operator:v1.2.3
+        template: templates/operator-deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "manager")].args
+          content: "--cuinterpose-image=ghcr.io/ai-dynamo/snapshot/agent:v1.2.3"
+        template: templates/operator-deployment.yaml
+
+  # Helm removes a value that is set to null, so the tag is absent.
+  - it: defaults a null tag to the chart appVersion
+    chart:
+      appVersion: v1.2.3
+    set:
+      image.agent.tag: null
+      image.operator.tag: null
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "agent")].image
+          value: ghcr.io/ai-dynamo/snapshot/agent:v1.2.3
+        template: templates/daemonset.yaml
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "manager")].image
+          value: ghcr.io/ai-dynamo/snapshot/operator:v1.2.3
+        template: templates/operator-deployment.yaml
+
+  - it: renders a string tag made only of digits as written
+    set:
+      image.agent.tag: "1234567"
+      image.operator.tag: "20261127"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "agent")].image
+          value: ghcr.io/ai-dynamo/snapshot/agent:1234567
+        template: templates/daemonset.yaml
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].image
+          value: ghcr.io/ai-dynamo/snapshot/pagebroker:1234567
+        template: templates/daemonset.yaml
+      - equal:
+          path: spec.template.spec.initContainers[?(@.name == "crd-installer")].image
+          value: ghcr.io/ai-dynamo/snapshot/operator:20261127
+        template: templates/operator-deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "manager")].image
+          value: ghcr.io/ai-dynamo/snapshot/operator:20261127
+        template: templates/operator-deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "manager")].args
+          content: "--cuinterpose-image=ghcr.io/ai-dynamo/snapshot/agent:1234567"
+        template: templates/operator-deployment.yaml
+
+  # Unquoted, Helm reads these as 83 and as 1.1.
+  - it: keeps a string tag that Helm would read as another number
+    set:
+      image.agent.tag: "0123"
+      image.operator.tag: "1.10"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "agent")].image
+          value: ghcr.io/ai-dynamo/snapshot/agent:0123
+        template: templates/daemonset.yaml
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].image
+          value: ghcr.io/ai-dynamo/snapshot/pagebroker:0123
+        template: templates/daemonset.yaml
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "manager")].image
+          value: ghcr.io/ai-dynamo/snapshot/operator:1.10
+        template: templates/operator-deployment.yaml
+
+  - it: renders a tag that carries a digest
+    set:
+      image.agent.tag: v1.2.3@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+      image.operator.tag: v1.2.3@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "agent")].image
+          value: ghcr.io/ai-dynamo/snapshot/agent:v1.2.3@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+        template: templates/daemonset.yaml
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "manager")].image
+          value: ghcr.io/ai-dynamo/snapshot/operator:v1.2.3@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+        template: templates/operator-deployment.yaml
+
+  # A number here is what Helm hands the chart for an unquoted tag made only of
+  # digits. The number is not always the tag that was written, so the chart
+  # refuses it instead of rendering a reference to another image. Helm reports
+  # the first template that fails: pagebroker_test.yaml has the DaemonSet's
+  # refusal, and the operator Deployment's refusals are here.
+  - it: refuses an operator tag that Helm read as a number
+    set:
+      image.operator.tag: 20261127
+    template: templates/operator-deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: "image.operator.tag must be a string, but Helm read it as the number 20261127: quote the tag in a values file, or pass it with --set-string"
+
+  # Without the init container the manager image is the first reference.
+  - it: refuses an operator tag that Helm read as a number for the manager image
+    set:
+      image.operator.tag: 20261127
+      crdUpgrade.enabled: false
+    template: templates/operator-deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: "image.operator.tag must be a string, but Helm read it as the number 20261127: quote the tag in a values file, or pass it with --set-string"
+
+  # The operator passes the agent image to the cuinterpose installer.
+  - it: refuses an agent tag that Helm read as a number for the installer flag
+    set:
+      image.agent.tag: 1234567
+    template: templates/operator-deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: "image.agent.tag must be a string, but Helm read it as the number 1234567: quote the tag in a values file, or pass it with --set-string"
+
+  # Without the refusal this renders the chart's default tag, not a tag named 0.
+  - it: refuses a tag of zero instead of rendering the default tag
+    set:
+      image.operator.tag: 0
+    template: templates/operator-deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: "image.operator.tag must be a string, but Helm read it as the number 0: quote the tag in a values file, or pass it with --set-string"
+
+  - it: refuses a tag that Helm read as a boolean
+    set:
+      image.operator.tag: true
+    template: templates/operator-deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: "image.operator.tag must be a string, but Helm read it as true: quote the tag in a values file, or pass it with --set-string"
