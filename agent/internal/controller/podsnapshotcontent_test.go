@@ -899,6 +899,7 @@ func TestReconcileCapture_RunningCaptureHoldsOnlyItsSourceContainer(t *testing.T
 			capturing := makeWorkOrder("podsnapshotcontent-b", "node-a", "b")
 			capturing.CreationTimestamp = metav1.Unix(1000, 0)
 			pod := makeSourcePod()
+			pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{Name: "sidecar"})
 			pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, corev1.ContainerStatus{
 				Name: "sidecar", Ready: true, ContainerID: "containerd://def456",
 				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
