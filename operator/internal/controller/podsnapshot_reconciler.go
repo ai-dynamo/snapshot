@@ -293,10 +293,47 @@ func pendingCaptureSourceFailure(snap *snapshotv1alpha1.PodSnapshot, content *sn
 	}
 }
 
+// sourcePodCacheBackstop re-checks an unbound PodSnapshot whose source pod is in the API server
+// and not in the cache. The pod's add event is the normal wake-up, but no pod event is certain:
+// when the pod watch lists again after a gap, a pod that was created and deleted in the gap never
+// reaches the cache. This requeue is what ends the wait then.
+const sourcePodCacheBackstop = 30 * time.Second
+
+// sourcePodForBinding returns the source pod from the cache. A cached answer that would fail the
+// PodSnapshot for good (no pod, or a pod with another UID than the pinned one) is confirmed with
+// the API server first: Failed is sticky, and the cache can be behind for a pod that was created,
+// or deleted and created again, a moment ago. The API server's pod is returned only when it
+// confirms the failure. A pod that is there and not in the cache yet sets awaitCache instead, and
+// binding waits for the cache. The waits that have no requeue, before and after binding, rely on
+// pod events, and those are certain only for a pod the cache holds.
+func (sr *PodSnapshotReconciler) sourcePodForBinding(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot) (pod *corev1.Pod, awaitCache bool, err error) {
+	pod, err = sr.getSourcePod(ctx, snap)
+	if err == nil && !pinsAnotherPod(snap, pod) {
+		return pod, false, nil
+	}
+	if err != nil && !apierrors.IsNotFound(err) {
+		return nil, false, err
+	}
+	pod, err = sr.readAuthoritativeSourcePod(ctx, snap)
+	if err != nil || pinsAnotherPod(snap, pod) {
+		return pod, false, err
+	}
+	return nil, true, nil
+}
+
+// pinsAnotherPod reports whether the PodSnapshot pins a source pod UID that is not this pod's.
+func pinsAnotherPod(snap *snapshotv1alpha1.PodSnapshot, pod *corev1.Pod) bool {
+	uid := snap.Spec.Source.PodRef.UID
+	return uid != "" && pod.UID != uid
+}
+
 // captureFromSourcePod is the no-content path: it resolves and validates the live source pod, then
 // creates the PodSnapshotContent and records the binding.
 func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot) (ctrl.Result, error) {
-	pod, err := sr.getSourcePod(ctx, snap)
+	pod, awaitCache, err := sr.sourcePodForBinding(ctx, snap)
+	if awaitCache {
+		return ctrl.Result{RequeueAfter: sourcePodCacheBackstop}, nil
+	}
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return sr.failPodSnapshot(ctx, snap, "SourcePodNotFound",

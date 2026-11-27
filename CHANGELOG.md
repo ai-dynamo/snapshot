@@ -188,6 +188,11 @@ commit-level history for each release is on its
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
+- A `PodSnapshot` created right after its source Pod no longer fails with
+  `SourcePodNotFound` or `StalePodReference` while the Pod exists. The operator
+  now confirms either failure with the API server, and waits for a Pod that its
+  cache does not hold yet. A `PodSnapshot` that already failed this way stays
+  failed: delete it and create it again.
 
 ### Deprecated
 
