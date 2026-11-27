@@ -299,10 +299,46 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
           audience: {{ .Values.storage.s3.credentialEndpoint.tokenAudience | quote }}
 {{- end -}}
 
-{{/* Fails the render on S3 settings PageBroker would refuse at startup. */}}
+{{/* Fails the render on S3 store settings the operator refuses at startup
+     (api/storage.S3), after helm install has reported success. The checks
+     follow that code and refuse nothing it accepts; the operator enforces the
+     rest. A bucket or prefix that Helm read as a number fails too: 0123 in a
+     values file arrives as 83, a long number is printed with an exponent, and
+     a prefix changed that way names another store. */}}
+{{- define "snapshot.validateS3Store" -}}
+{{- $s3 := .Values.storage.s3 -}}
+{{- range $name := list "bucket" "prefix" -}}
+{{- $value := index $s3 $name -}}
+{{- if not (or (kindIs "string" $value) (kindIs "invalid" $value)) -}}
+{{- $read := toJson $value -}}
+{{- if or (kindIs "float64" $value) (kindIs "int64" $value) -}}
+{{- $read = printf "the number %s" $read -}}
+{{- end -}}
+{{- $remedy := printf "quote the %s in a values file, or pass it with --set-string" $name -}}
+{{- if eq $name "prefix" -}}
+{{- $remedy = printf "%s. To keep the snapshots of an installed release, give the prefix that storage.yaml in ConfigMap %s-config has" $remedy (include "snapshot.fullname" $) -}}
+{{- end -}}
+{{- fail (printf "storage.s3.%s must be a string, but Helm read it as %s: %s" $name $read $remedy) -}}
+{{- end -}}
+{{- end -}}
+{{- $endpoint := $s3.endpoint | default "" | toString -}}
+{{- if and $endpoint (not (regexMatch "^[hH][tT][tT][pP][sS]?://[^/?#@:][^/?#@]*[?]?#?$" $endpoint)) -}}
+{{- fail (printf "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, but Helm read it as %q: keep only the scheme, the host and an optional port, as in https://s3.example.com" $endpoint) -}}
+{{- end -}}
+{{- $prefix := $s3.prefix | default "" -}}
+{{- if hasPrefix "/" $prefix -}}
+{{- fail (printf "storage.s3.prefix must be a relative key prefix, but Helm read it as %q: remove the leading slash" $prefix) -}}
+{{- end -}}
+{{- if or (contains "\\" $prefix) (has ".." (splitList "/" $prefix)) (ne (trim $prefix) $prefix) (regexMatch "\\p{Cc}" $prefix) (gt (len $prefix) 1024) -}}
+{{- fail (printf "storage.s3.prefix must be a relative key prefix of at most 1024 bytes, with no backslash, control character, \"..\" component or surrounding space, but Helm read it as %q: remove what is not allowed" $prefix) -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Fails the render on S3 settings PageBroker or the operator would refuse at startup. */}}
 {{- define "snapshot.validateS3Settings" -}}
 {{- if eq .Values.storage.type "s3" -}}
 {{- $s3 := .Values.storage.s3 -}}
+{{- include "snapshot.validateS3Store" . -}}
 {{- if $s3.credentialEndpoint.url -}}
 {{- if $s3.credentialsSecretRef -}}
 {{- fail "storage.s3.credentialEndpoint.url and storage.s3.credentialsSecretRef are two credential sources; set one" -}}

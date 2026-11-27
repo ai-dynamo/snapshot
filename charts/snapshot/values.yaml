@@ -125,8 +125,12 @@ storage:
     # userinfo, e.g. "https://s3.example.com".
     endpoint: ""
     region: ""
+    # A string: quote a bucket name made only of digits, or pass it with
+    # --set-string.
     bucket: ""
-    # Key prefix inside the bucket. Empty identifies the bucket root.
+    # Relative key prefix inside the bucket, with no leading slash. Empty
+    # identifies the bucket root. A string: quote a prefix made only of digits,
+    # or pass it with --set-string.
     prefix: ""
     # Secret holding a shared credentials file (the common S3-SDK INI format:
     # a [default] profile with aws_access_key_id/aws_secret_access_key, the

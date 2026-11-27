@@ -1,0 +1,137 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The operator refuses these store settings at startup (api/storage.S3), after
+# helm install has reported success. The chart refuses them at render time.
+suite: S3 store settings the operator refuses
+templates:
+  - templates/configmap.yaml
+set:
+  storage.type: s3
+  storage.s3.endpoint: https://s3.example.com
+  storage.s3.region: us-east-1
+  storage.s3.bucket: snapshot-bucket
+  operator.bindNewContents: true
+tests:
+  - it: rejects an endpoint with a trailing slash
+    set:
+      storage.s3.endpoint: https://s3.example.com/
+    asserts:
+      - failedTemplate:
+          errorPattern: 'storage.s3.endpoint must be an absolute .* URL with no path, .* but Helm read it as "https://s3.example.com/": keep only the scheme, the host and an optional port'
+
+  - it: rejects an endpoint with a path
+    set:
+      storage.s3.endpoint: https://s3.example.com/snapshots
+    asserts:
+      - failedTemplate:
+          errorPattern: 'storage.s3.endpoint must be an absolute .* but Helm read it as "https://s3.example.com/snapshots"'
+
+  - it: rejects an endpoint without a scheme
+    set:
+      storage.s3.endpoint: s3.example.com
+    asserts:
+      - failedTemplate:
+          errorPattern: 'storage.s3.endpoint must be an absolute .* but Helm read it as "s3.example.com"'
+
+  - it: rejects an endpoint with a query
+    set:
+      storage.s3.endpoint: https://s3.example.com?region=us-east-1
+    asserts:
+      - failedTemplate:
+          errorPattern: "storage.s3.endpoint must be an absolute .* URL with no path, query, fragment or userinfo"
+
+  - it: rejects an endpoint with a user name
+    set:
+      storage.s3.endpoint: https://backup@s3.example.com
+    asserts:
+      - failedTemplate:
+          errorPattern: "storage.s3.endpoint must be an absolute .* URL with no path, query, fragment or userinfo"
+
+  # The operator lowercases the scheme and the host and accepts a port.
+  - it: renders an endpoint with an uppercase scheme and a port
+    set:
+      storage.s3.endpoint: HTTPS://S3.Example.com:9000
+    asserts:
+      - matchRegex:
+          path: data["storage.yaml"]
+          pattern: 'endpoint: "HTTPS://S3.Example.com:9000"'
+
+  - it: rejects a prefix that starts with a slash
+    set:
+      storage.s3.prefix: /snapshots/prod
+    asserts:
+      - failedTemplate:
+          errorPattern: 'storage.s3.prefix must be a relative key prefix, but Helm read it as "/snapshots/prod": remove the leading slash'
+
+  - it: rejects a prefix with a parent component
+    set:
+      storage.s3.prefix: snapshots/../prod
+    asserts:
+      - failedTemplate:
+          errorPattern: 'storage.s3.prefix must be a relative key prefix of at most 1024 bytes, .* but Helm read it as "snapshots/../prod"'
+
+  - it: rejects a prefix with a backslash
+    set:
+      storage.s3.prefix: snapshots\prod
+    asserts:
+      - failedTemplate:
+          errorPattern: "storage.s3.prefix must be a relative key prefix of at most 1024 bytes, with no backslash"
+
+  # The operator removes a trailing slash and a doubled slash by itself.
+  - it: renders a prefix that the operator normalizes
+    set:
+      storage.s3.prefix: snapshots//prod/
+    asserts:
+      - matchRegex:
+          path: data["storage.yaml"]
+          pattern: 'prefix: "snapshots//prod/"'
+
+  # Helm reads an unquoted value made only of digits as a number. The chart
+  # printed 123456789012 as 1.23456789012e+11, which the operator refuses.
+  - it: rejects a bucket that Helm read as a number
+    set:
+      storage.s3.bucket: 123456789012
+    asserts:
+      - failedTemplate:
+          errorPattern: "storage.s3.bucket must be a string, but Helm read it as the number 123456789012: quote the bucket in a values file, or pass it with --set-string"
+
+  # The chart printed 20261127 as 2.0261127e+07 and the operator accepted it:
+  # another store than the text 20261127 names.
+  - it: rejects a prefix that Helm read as a number and says how to keep the snapshots
+    release:
+      name: snapshot
+    set:
+      storage.s3.prefix: 20261127
+    asserts:
+      - failedTemplate:
+          errorPattern: "storage.s3.prefix must be a string, but Helm read it as the number 20261127: quote the prefix in a values file, or pass it with --set-string. To keep the snapshots of an installed release, give the prefix that storage.yaml in ConfigMap snapshot-config has"
+
+  # A prefix of 0 or false rendered as the empty prefix, the bucket root.
+  - it: rejects a prefix that Helm read as false
+    set:
+      storage.s3.prefix: false
+    asserts:
+      - failedTemplate:
+          errorPattern: "storage.s3.prefix must be a string, but Helm read it as false"
+
+  - it: renders a quoted bucket and prefix made only of digits
+    set:
+      storage.s3.bucket: "123456789012"
+      storage.s3.prefix: "20261127"
+    asserts:
+      - matchRegex:
+          path: data["storage.yaml"]
+          pattern: 'bucket: "123456789012"\s+prefix: "20261127"'
+
+  - it: leaves the S3 values of a PVC installation alone
+    set:
+      storage.type: pvc
+      operator.bindNewContents: false
+      storage.s3.endpoint: s3.example.com/
+      storage.s3.bucket: 123456789012
+      storage.s3.prefix: /snapshots
+    asserts:
+      - matchRegex:
+          path: data["storage.yaml"]
+          pattern: 'claimName: "snapshot-pvc"'

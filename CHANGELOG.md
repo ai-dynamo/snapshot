@@ -182,6 +182,16 @@ commit-level history for each release is on its
   namespace rather than the restore container's (#593), so lookups by PID,
   such as UCX shared-memory endpoints (#802), work after a restore. Only
   checkpoints taken after the upgrade get it; take older ones again.
+- The chart refuses S3 store settings that the operator refuses at startup.
+  Before, `helm install` succeeded and the operator Pod did not start. The
+  chart refuses a `storage.s3.endpoint` with a path, a trailing slash, or no
+  scheme, and a `storage.s3.prefix` with a leading slash. It also refuses a
+  `storage.s3.bucket` or `storage.s3.prefix` that is not a string. Helm reads
+  an unquoted value made only of digits as a number, and the chart rendered
+  prefix `20261127` as `2.0261127e+07`, which names another store. Action on
+  upgrade: quote such a bucket or prefix, or pass it with `--set-string`. To
+  keep the snapshots, set the prefix that the error message tells you to read.
+  See [Helm Chart Values](docs/reference/helm-values.md#storage).
 
 ### Fixed
 
