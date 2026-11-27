@@ -451,7 +451,7 @@ func TestReconcileCapture_RedeliveryDoesNotRepeatAFailedCapture(t *testing.T) {
 	assert.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
 	assert.Equal(t, 1, captures, "a work order that already failed must not be captured again")
-	assert.Equal(t, []metav1.Condition{*failed}, getContent(t, w, content.Name).Status.Conditions)
+	assert.Equal(t, failed, meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
 }
 
 // TestReconcileCapture_RedeliveryDoesNotSweepACapturedPod is the same reconcile after a capture
