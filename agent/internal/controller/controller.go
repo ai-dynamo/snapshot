@@ -1422,6 +1422,11 @@ func (op *restoreOperation) killPlaceholder(placeholderHostPID int, reason strin
 // applyRestoredCondition uses server-side apply against the status subresource.
 // Pod conditions are an associative list keyed by type, so this field manager
 // owns only nvidia.com/Restored and does not replace kubelet-owned conditions.
+//
+// The apply names the Pod's UID. The pod in hand comes from the informer cache,
+// and a Pod that was deleted and created again under the same name must not get
+// the outcome of the one before it: the API server refuses a UID that is not the
+// live Pod's.
 func (w *NodeController) applyRestoredCondition(ctx context.Context, pod *corev1.Pod, status corev1.ConditionStatus, reason, message string) error {
 	setPodCondition(&pod.Status, corev1.PodCondition{
 		Type:    corev1.PodConditionType(podcontract.RestoredCondition),
@@ -1437,6 +1442,7 @@ func (w *NodeController) applyRestoredCondition(ctx context.Context, pod *corev1
 		WithMessage(restored.Message).
 		WithLastTransitionTime(restored.LastTransitionTime)
 	configuration := corev1apply.Pod(pod.Name, pod.Namespace).
+		WithUID(pod.UID).
 		WithStatus(corev1apply.PodStatus().WithConditions(condition))
 	_, err := w.clientset.CoreV1().Pods(pod.Namespace).ApplyStatus(ctx, configuration, metav1.ApplyOptions{
 		FieldManager: restoreStatusFieldManager,

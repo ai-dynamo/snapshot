@@ -189,6 +189,10 @@ commit-level history for each release is on its
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 
+- A restore Pod that replaces a deleted Pod of the same name no longer gets the
+  restore result of the deleted Pod. With that result on it, the node agent
+  treated the new Pod as a restore that had ended, and did not restore it.
+
 ### Deprecated
 
 - `SNAPSHOT_RESTORE_STANDBY` (`podcontract.RestoreStandbyModeEnv`): restore
