@@ -189,6 +189,11 @@ commit-level history for each release is on its
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 
+- A `SnapshotJob` that is deleted and created again under the same name no
+  longer fails with `JobNameConflict`. The operator found the source Job of the
+  deleted `SnapshotJob`, which Kubernetes had not removed yet. It now waits
+  until that Job is gone.
+
 ### Deprecated
 
 - `SNAPSHOT_RESTORE_STANDBY` (`podcontract.RestoreStandbyModeEnv`): restore

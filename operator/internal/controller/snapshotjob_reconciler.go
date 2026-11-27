@@ -114,9 +114,10 @@ func (r *SnapshotJobReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	observed, result, err := r.reconcileResources(ctx, sj)
-	if errors.Is(err, errSnapshotJobCacheBehind) {
+	if errors.Is(err, errSnapshotJobCacheBehind) || errors.Is(err, errSourceJobOfDeletedSnapshotJob) {
 		// Nothing was created or written. The watch event that carries the newer
-		// SnapshotJob is the normal wake-up; the requeue is a backstop.
+		// SnapshotJob, or the delete of the earlier SnapshotJob's Job, is the
+		// normal wake-up; the requeue is a backstop.
 		return ctrl.Result{RequeueAfter: snapshotJobCacheBehindRequeue}, nil
 	}
 	if err != nil {

@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -49,10 +50,34 @@ func (r *SnapshotJobReconciler) observeExistingSourceJob(ctx context.Context, sj
 // reconcileExistingSourceJob applies the one-shot Job identity gate shared by
 // steady-state reconciliation and Create-AlreadyExists recovery.
 func (r *SnapshotJobReconciler) reconcileExistingSourceJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (snapshotJobObservation, ctrl.Result, error) {
+	if r.isSourceJobOfDeletedSnapshotJob(sj, job) {
+		return snapshotJobObservation{}, ctrl.Result{}, errSourceJobOfDeletedSnapshotJob
+	}
 	if failure := classifyExistingSourceJob(sj, job); failure != nil {
 		return snapshotJobObservation{failure: failure}, ctrl.Result{}, nil
 	}
 	return r.reconcileAcceptedSourceJob(ctx, sj, job)
+}
+
+// errSourceJobOfDeletedSnapshotJob ends a reconcile that found, under the source
+// Job's name, the Job of an earlier SnapshotJob of the same name. Nothing is
+// created or written: Kubernetes deletes that Job, and its delete event wakes
+// this SnapshotJob.
+var errSourceJobOfDeletedSnapshotJob = errors.New("the source Job of a deleted SnapshotJob still holds the name")
+
+// isSourceJobOfDeletedSnapshotJob reports whether job is controlled by an
+// earlier SnapshotJob of sj's name. A name is unique in its namespace, so that
+// SnapshotJob no longer exists and the garbage collector removes its Job: the
+// name is being freed, which is not a conflict. A delete that orphans the Job
+// removes the owner reference before the name is free, so an orphan has no
+// controller and stays a JobNameConflict.
+func (r *SnapshotJobReconciler) isSourceJobOfDeletedSnapshotJob(sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) bool {
+	owner := metav1.GetControllerOf(job)
+	if owner == nil || sj.Status.SourceJobUID != "" || owner.UID == sj.UID || owner.Name != sj.Name {
+		return false
+	}
+	gvk, err := apiutil.GVKForObject(sj, r.Scheme())
+	return err == nil && owner.Kind == gvk.Kind && owner.APIVersion == gvk.GroupVersion().String()
 }
 
 // reconcileAcceptedSourceJob continues after validating the source Job.
