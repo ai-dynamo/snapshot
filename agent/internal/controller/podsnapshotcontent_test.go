@@ -809,7 +809,8 @@ func TestReconcileCapture_DumpPastItsDeadlineKeepsItsSourceContainer(t *testing.
 
 // TestReconcileCapture_RunningCaptureHoldsOnlyItsSourceContainer pins the scope of the claim: one
 // container of one pod. A work order that the order lets through for another container starts its
-// dump while the first one runs.
+// dump while the first one runs. Two work orders for two containers of one pod are not a supported
+// pair: the test promises nothing about them, it keeps the claim from changing what they do.
 func TestReconcileCapture_RunningCaptureHoldsOnlyItsSourceContainer(t *testing.T) {
 	for _, tc := range []struct {
 		name string
