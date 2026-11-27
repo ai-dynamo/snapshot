@@ -193,6 +193,11 @@ commit-level history for each release is on its
   API does not accept it, and the error names a Job that it could not delete.
   See [`snapshotctl` CLI](docs/reference/cli.md).
 
+- `snapshotctl checkpoint` deletes the Job and the source Pod when `SIGINT`
+  (Ctrl+C) or `SIGTERM` interrupts it. It ended at once and left the source
+  Pod running and holding its GPU. A second signal ends the command at once.
+  See [`snapshotctl` CLI](docs/reference/cli.md).
+
 ### Deprecated
 
 - `SNAPSHOT_RESTORE_STANDBY` (`podcontract.RestoreStandbyModeEnv`): restore

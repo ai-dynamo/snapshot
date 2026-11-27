@@ -102,20 +102,31 @@ func checkpointPod(ctx context.Context, clientset kubernetes.Interface, crClient
 	if apierrors.IsAlreadyExists(err) {
 		return nil, fmt.Errorf("checkpoint job %s/%s already exists", namespace, checkpointJobName)
 	}
-	if err != nil {
+	// An interrupt that arrives while the create is in flight cancels the request, but the
+	// create can still reach the API server. The Job is then cleaned up like one that exists.
+	interruptedCreate := err != nil && ctx.Err() != nil && canSucceedLater(err)
+	if err != nil && !interruptedCreate {
 		return nil, err
 	}
 
-	// Clean up the Job and its source Pod on any error after this point. The PodSnapshot
-	// is left in place to aid debugging when the flow fails.
+	// Clean up the Job and its source Pod on any error after this point, and when the command
+	// is interrupted. The PodSnapshot is left in place to aid debugging when the flow fails.
+	// The interrupt cancels ctx, so the cleanup runs on a context that outlives it.
 	defer func() {
 		if retErr == nil {
 			return
 		}
-		if cleanupErr := cleanUpCheckpointJob(ctx, clientset, namespace, checkpointJobName, jobCleanupInterval, jobCleanupTimeout); cleanupErr != nil {
+		if ctx.Err() != nil {
+			retErr = fmt.Errorf("checkpoint interrupted: %w", context.Cause(ctx))
+			snapshotctlLog.Info("Checkpoint interrupted, deleting its Job and source Pod; interrupt again to stop at once", "job", namespace+"/"+checkpointJobName)
+		}
+		if cleanupErr := cleanUpCheckpointJob(context.WithoutCancel(ctx), clientset, namespace, checkpointJobName, jobCleanupInterval, jobCleanupTimeout); cleanupErr != nil {
 			retErr = fmt.Errorf("%w; %w", retErr, cleanupErr)
 		}
 	}()
+	if interruptedCreate {
+		return nil, err
+	}
 
 	waitCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()

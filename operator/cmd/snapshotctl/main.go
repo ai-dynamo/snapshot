@@ -8,6 +8,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/ai-dynamo/snapshot/operator/internal/logging"
@@ -67,7 +69,13 @@ func runCheckpoint(args []string) error {
 	}
 
 	snapshotctlLog.Info("Running checkpoint", "manifest", *manifest, "namespace", *namespace)
-	result, err := runCheckpointFlow(context.Background(), checkpointOptions{
+	// SIGINT and SIGTERM cancel the checkpoint, and the command then deletes the Job and the
+	// source Pod it created. After the first signal the default action is back in place, so a
+	// second signal ends the command at once.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	context.AfterFunc(ctx, stop)
+	result, err := runCheckpointFlow(ctx, checkpointOptions{
 		ManifestPath:       *manifest,
 		Namespace:          *namespace,
 		KubeContext:        *kubeContext,

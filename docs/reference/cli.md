@@ -95,7 +95,9 @@ work.
 
 When a checkpoint fails or times out, `snapshotctl checkpoint` deletes the
 source Pod and the Job that ran it. It leaves the `PodSnapshot` CR in place for
-debugging.
+debugging. The command does the same when it receives `SIGINT` (Ctrl+C) or
+`SIGTERM` before the checkpoint completes. A second signal ends the command at
+once, and the Job and the source Pod may stay.
 
 If the Kubernetes API does not accept the delete, the command retries it for
 two minutes. If the delete still fails, the error names the Job and gives the
