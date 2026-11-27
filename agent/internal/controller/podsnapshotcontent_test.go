@@ -747,6 +747,66 @@ func TestReconcileCapture_RunningCaptureKeepsItsSourceContainer(t *testing.T) {
 	}
 }
 
+// TestReconcileCapture_DumpPastItsDeadlineKeepsItsSourceContainer pins how long the claim lasts.
+// The checkpoint deadline cancels the capture's context, but a CRIU dump takes no context and
+// runs on. The claim ends with the reconcile, not with the deadline, so no second dump starts on
+// a process tree that the first dump still holds.
+func TestReconcileCapture_DumpPastItsDeadlineKeepsItsSourceContainer(t *testing.T) {
+	overrun := makeWorkOrder("podsnapshotcontent-b", "node-a", "b")
+	overrun.CreationTimestamp = metav1.Unix(1000, 0)
+	w := makeNodeController(t, &fakeCheckpointer{}, overrun, makeSourcePod())
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
+	w.config.Checkpoint = snapshottypes.CheckpointSpec{TimeoutSeconds: ptr.To(1)}
+
+	var mu sync.Mutex
+	var dumped []string
+	deadlinePassed := make(chan struct{})
+	finish := make(chan struct{})
+	w.checkpointFn = func(ctx context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		mu.Lock()
+		dumped = append(dumped, params.ContentUID)
+		first := len(dumped) == 1
+		mu.Unlock()
+		if first {
+			<-ctx.Done()
+			close(deadlinePassed)
+			<-finish
+		}
+		return nil, nil
+	}
+	dumps := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), dumped...)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- w.reconcileCapture(context.Background(), overrun.Name) }()
+	<-deadlinePassed
+
+	// Created in the same second with a name that sorts first, so the order gives it the pod.
+	waiting := makeWorkOrder("podsnapshotcontent-a", "node-a", "a")
+	waiting.CreationTimestamp = overrun.CreationTimestamp
+	require.NoError(t, w.client.Create(context.Background(), waiting))
+	require.NoError(t, w.contentIndexer.Add(mustUnstructured(t, waiting)))
+
+	// Every redelivery finds the claim held, for as long as the dump runs.
+	for range 3 {
+		w.captureQueue.Add(waiting.Name)
+		name, _ := w.captureQueue.Get()
+		w.processCaptureQueueItem(context.Background(), name)
+	}
+	assert.Equal(t, []string{string(overrun.UID)}, dumps(),
+		"a work order must not dump a container whose dump outlived its deadline and still runs")
+	assert.Empty(t, getContent(t, w, waiting.Name).Status.Conditions)
+
+	close(finish)
+	require.NoError(t, <-done)
+
+	require.NoError(t, w.reconcileCapture(context.Background(), waiting.Name))
+	assert.Equal(t, []string{string(overrun.UID), string(waiting.UID)}, dumps())
+}
+
 // TestReconcileCapture_RunningCaptureHoldsOnlyItsSourceContainer pins the scope of the claim: one
 // container of one pod. A work order that the order lets through for another container starts its
 // dump while the first one runs.
