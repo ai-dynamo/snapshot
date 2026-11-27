@@ -189,6 +189,17 @@ commit-level history for each release is on its
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 
+- A restore Pod that replaces a deleted Pod of the same name no longer gets the
+  restore result of the deleted Pod. With that result on it, the node agent
+  treated the new Pod as a restore that had ended, and did not restore it. The
+  agent also no longer replaces the finalizers of the new Pod.
+
+- The node agent adds and removes only its own finalizer on a restore Pod. It
+  wrote the whole finalizer list from a copy as old as the restore. That removed
+  a finalizer that another controller added during the restore, and brought back
+  one that its owner removed. A Job could then count one failed restore Pod
+  twice.
+
 ### Deprecated
 
 - `SNAPSHOT_RESTORE_STANDBY` (`podcontract.RestoreStandbyModeEnv`): restore

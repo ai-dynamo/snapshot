@@ -1422,6 +1422,11 @@ func (op *restoreOperation) killPlaceholder(placeholderHostPID int, reason strin
 // applyRestoredCondition uses server-side apply against the status subresource.
 // Pod conditions are an associative list keyed by type, so this field manager
 // owns only nvidia.com/Restored and does not replace kubelet-owned conditions.
+//
+// The apply names the Pod's UID. The pod in hand comes from the informer cache,
+// and a Pod that was deleted and created again under the same name must not get
+// the outcome of the one before it: the API server refuses a UID that is not the
+// live Pod's.
 func (w *NodeController) applyRestoredCondition(ctx context.Context, pod *corev1.Pod, status corev1.ConditionStatus, reason, message string) error {
 	setPodCondition(&pod.Status, corev1.PodCondition{
 		Type:    corev1.PodConditionType(podcontract.RestoredCondition),
@@ -1437,6 +1442,7 @@ func (w *NodeController) applyRestoredCondition(ctx context.Context, pod *corev1
 		WithMessage(restored.Message).
 		WithLastTransitionTime(restored.LastTransitionTime)
 	configuration := corev1apply.Pod(pod.Name, pod.Namespace).
+		WithUID(pod.UID).
 		WithStatus(corev1apply.PodStatus().WithConditions(condition))
 	_, err := w.clientset.CoreV1().Pods(pod.Namespace).ApplyStatus(ctx, configuration, metav1.ApplyOptions{
 		FieldManager: restoreStatusFieldManager,
@@ -1450,7 +1456,7 @@ func (w *NodeController) addRestoreFinalizer(ctx context.Context, pod *corev1.Po
 		return nil
 	}
 	finalizers := append(append([]string{}, pod.Finalizers...), restorePodFinalizer)
-	if err := w.patchRestoreFinalizers(ctx, pod, finalizers); err != nil {
+	if err := w.patchRestoreFinalizer(ctx, pod, "finalizers"); err != nil {
 		return fmt.Errorf("add restore protection finalizer: %w", err)
 	}
 	pod.Finalizers = finalizers
@@ -1467,7 +1473,7 @@ func (w *NodeController) removeRestoreFinalizer(ctx context.Context, pod *corev1
 			finalizers = append(finalizers, finalizer)
 		}
 	}
-	if err := w.patchRestoreFinalizers(ctx, pod, finalizers); err != nil {
+	if err := w.patchRestoreFinalizer(ctx, pod, "$deleteFromPrimitiveList/finalizers"); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
@@ -1477,12 +1483,20 @@ func (w *NodeController) removeRestoreFinalizer(ctx context.Context, pod *corev1
 	return nil
 }
 
-func (w *NodeController) patchRestoreFinalizers(ctx context.Context, pod *corev1.Pod, finalizers []string) error {
-	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"finalizers": finalizers}})
+// patchRestoreFinalizer adds the agent's finalizer (key "finalizers", which a strategic merge
+// patch merges into the list) or removes it (key "$deleteFromPrimitiveList/finalizers"), and
+// leaves every other entry as the API server has it. The agent's copy of the list is as old as
+// the pass, and a pass lasts for the whole restore, so a patch that carried the list would undo
+// what another controller did to its own finalizer in that time.
+//
+// The patch names the Pod's UID, as applyRestoredCondition does: the API server refuses it for a
+// Pod that replaced this one under its name.
+func (w *NodeController) patchRestoreFinalizer(ctx context.Context, pod *corev1.Pod, key string) error {
+	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"uid": pod.UID, key: []string{restorePodFinalizer}}})
 	if err != nil {
 		return err
 	}
-	_, err = w.clientset.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, ktypes.MergePatchType, patch, metav1.PatchOptions{})
+	_, err = w.clientset.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, ktypes.StrategicMergePatchType, patch, metav1.PatchOptions{})
 	return err
 }
 
