@@ -57,8 +57,8 @@ func (r *SnapshotJobReconciler) reconcileExistingSourceJob(ctx context.Context, 
 		if wait <= 0 {
 			return snapshotJobObservation{failure: previousSourceJobNotDeletedFailure(job)}, ctrl.Result{}, nil
 		}
-		log.FromContext(ctx).Info("Waiting for Kubernetes to delete the source Job of an earlier SnapshotJob with this name",
-			"jobUID", job.UID, "remaining", wait.Round(time.Second).String())
+		log.FromContext(ctx).Info("Waiting for Kubernetes to delete the source Job of a previous SnapshotJob with this name",
+			"jobUID", job.UID, "until", previousSourceJobDeletionWaitEnd(sj))
 		// The delete of that Job is the normal wake-up; the requeue ends the wait.
 		return snapshotJobObservation{previousSourceJob: job}, ctrl.Result{RequeueAfter: wait}, nil
 	}
@@ -70,7 +70,7 @@ func (r *SnapshotJobReconciler) reconcileExistingSourceJob(ctx context.Context, 
 
 // previousSourceJobDeletionWait is how long a SnapshotJob that was created again
 // under the name of a deleted SnapshotJob waits for Kubernetes to delete the
-// earlier source Job. The garbage collector needs milliseconds on an idle
+// previous source Job. The garbage collector needs milliseconds on an idle
 // cluster. It deletes about 20 objects a second at the default client limits of
 // the kube-controller-manager, and the Job waits behind the deletes that were
 // queued before it, so two minutes cover a queue of about 2,400 objects. A Job
@@ -90,18 +90,24 @@ func previousSourceJobDeletionWaitLeft(sj *snapshotv1alpha1.SnapshotJob, now tim
 	return max(sj.CreationTimestamp.Add(previousSourceJobDeletionWait).Sub(now), 0)
 }
 
+// previousSourceJobDeletionWaitEnd is the time at which the wait of sj ends, as
+// the status and the log show it.
+func previousSourceJobDeletionWaitEnd(sj *snapshotv1alpha1.SnapshotJob) string {
+	return sj.CreationTimestamp.Add(previousSourceJobDeletionWait).UTC().Format(time.RFC3339)
+}
+
 // previousSourceJobNotDeletedFailure is the name conflict of a SnapshotJob whose
-// wait ended with the earlier source Job still there.
+// wait ended with the previous source Job still there.
 func previousSourceJobNotDeletedFailure(job *batchv1.Job) *snapshotJobFailure {
 	return &snapshotJobFailure{
 		reason: snapshotv1alpha1.ReasonJobNameConflict,
-		cause: fmt.Errorf("source Job %q (uid %q) of an earlier SnapshotJob with this name was not deleted within %s",
+		cause: fmt.Errorf("source Job %q (uid %q) of a previous SnapshotJob with this name was not deleted within %s",
 			job.Name, job.UID, previousSourceJobDeletionWait),
 	}
 }
 
-// isSourceJobOfDeletedSnapshotJob reports whether job is controlled by an
-// earlier SnapshotJob of sj's name. A name is unique in its namespace, so that
+// isSourceJobOfDeletedSnapshotJob reports whether job is controlled by a
+// previous SnapshotJob of sj's name. A name is unique in its namespace, so that
 // SnapshotJob no longer exists and the garbage collector removes its Job: the
 // name is being freed, which is not a conflict while the wait lasts. A delete
 // that orphans the Job removes the owner reference before the name is free, so

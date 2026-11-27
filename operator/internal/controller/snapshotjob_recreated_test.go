@@ -73,6 +73,7 @@ func requireWaitingForPreviousJob(t *testing.T, r *SnapshotJobReconciler, sj *sn
 	assert.Equal(t, metav1.ConditionFalse, running.Status)
 	assert.Equal(t, snapshotv1alpha1.ReasonWaitingForPreviousJobDeletion, running.Reason)
 	assert.Contains(t, running.Message, string(previous.UID))
+	assert.Contains(t, running.Message, previousSourceJobDeletionWaitEnd(waiting), "the status says when the wait ends")
 	assert.Empty(t, waiting.Status.SourceJobUID, "the Job of the deleted SnapshotJob is never recorded")
 	assert.Empty(t, recordedEvents(t, r), "a wait is not a failure")
 	return waiting
@@ -235,7 +236,7 @@ func TestSnapshotJobReconcileStartsAfterTheWaitOnlyFromACurrentSnapshotJob(t *te
 	assert.Equal(t, created.UID, readSnapshotJob(t, r, sj).Status.SourceJobUID)
 }
 
-// Only the Job of an earlier SnapshotJob of this name is waited for. Every other Job at the name
+// Only the Job of a previous SnapshotJob of this name is waited for. Every other Job at the name
 // is a conflict at once, as before, also for a SnapshotJob that was created a moment ago.
 func TestSnapshotJobReconcileKeepsTheNameConflictForOtherJobs(t *testing.T) {
 	s := snapshotJobReconcilerScheme()

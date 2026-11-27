@@ -71,7 +71,7 @@ type snapshotJobObservation struct {
 	job              *batchv1.Job
 	podSnapshot      *snapshotv1alpha1.PodSnapshot
 	sourcePodMissing bool
-	// previousSourceJob is the source Job of an earlier SnapshotJob with this
+	// previousSourceJob is the source Job of a previous SnapshotJob with this
 	// name, set while this SnapshotJob waits for Kubernetes to delete it.
 	previousSourceJob *batchv1.Job
 	// sourceJobFinished is true once the capture is Ready AND the source Job
@@ -513,8 +513,8 @@ func deriveRunningStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJo
 			// that every reconcile of the wait derives the same status.
 			setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
 				snapshotv1alpha1.ReasonWaitingForPreviousJobDeletion, fmt.Sprintf(
-					"waiting until %s for Kubernetes to delete source Job %q (uid %q) of an earlier SnapshotJob with this name",
-					next.CreationTimestamp.Add(previousSourceJobDeletionWait).UTC().Format(time.RFC3339), previous.Name, previous.UID))
+					"waiting until %s for Kubernetes to delete source Job %q (uid %q) of a previous SnapshotJob with this name",
+					previousSourceJobDeletionWaitEnd(next), previous.Name, previous.UID))
 		}
 		return
 	}

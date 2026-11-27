@@ -121,11 +121,12 @@ A `SnapshotJob` runs its source Pod in a Job that has the name of the
 did not create has that name. The operator does not change or delete that Job.
 
 Kubernetes deletes the source Job a moment after its `SnapshotJob`. A
-`SnapshotJob` that you create again under the same name can find that earlier
-Job. The new `SnapshotJob` then waits until Kubernetes deletes the Job, for at
-most two minutes after its creation. During the wait, its `Running` condition
-is `False` with reason `WaitingForPreviousJobDeletion`. If the earlier Job is
-still there after the wait, the new `SnapshotJob` fails with `JobNameConflict`.
+`SnapshotJob` that you create again under the same name can find the previous
+source Job. The new `SnapshotJob` then waits until Kubernetes deletes that Job,
+for at most two minutes after its creation. During the wait, its `Running`
+condition is `False` with reason `WaitingForPreviousJobDeletion`. If the
+previous Job is still there after the wait, the new `SnapshotJob` fails with
+`JobNameConflict`.
 
 To see what keeps the Job, read its owner references and its finalizers:
 
