@@ -6,11 +6,11 @@ name: CuInterpose GPU tests
 # GPU infrastructure accepts trusted mirror pushes, not pull_request events.
 on:
   push:
+    # No paths filter here. GitHub evaluates a filter on the commits a push
+    # carries. copy-pr-bot creates pull-request/<number> at a commit the
+    # repository already has, so that push carries none and a filtered workflow
+    # does not start. The changes job below decides instead.
     branches: ['pull-request/[0-9]+']
-    paths:
-      - 'agent/cmd/cuinterpose/**'
-      - 'agent/Dockerfile'
-      - '.github/workflows/cuinterpose-gpu.yaml'
   schedule:
     - cron: '0 11 * * *'
   workflow_dispatch:
@@ -22,8 +22,39 @@ concurrency:
   cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/pull-request/') }}
 
 jobs:
+  # Runs for every event and has no job-level condition: a skipped job would
+  # skip the jobs that need it, and the nightly run with them. Only its steps
+  # are limited to the mirror push. The nightly and manual runs always test.
+  changes:
+    name: Detect cuInterpose changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      cuinterpose: ${{ steps.filter.outputs.cuinterpose }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ github.event_name == 'push' }}
+        with:
+          persist-credentials: false
+      # No base, as in e2e-pr.yaml: the filter compares against the merge-base
+      # with the default branch. That is the whole pull request. The previous
+      # mirror push would be only the latest commits, and after a merge of main
+      # it would count what main changed.
+      - name: Filter paths
+        id: filter
+        if: ${{ github.event_name == 'push' }}
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            cuinterpose:
+              - 'agent/cmd/cuinterpose/**'
+              - 'agent/Dockerfile'
+              - '.github/workflows/cuinterpose-gpu.yaml'
+
   check:
     name: Validate repository
+    needs: changes
+    if: ${{ github.event_name != 'push' || needs.changes.outputs.cuinterpose == 'true' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
