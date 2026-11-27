@@ -25,9 +25,7 @@ func sourceJobOfDeletedSnapshotJob(t *testing.T, sj *snapshotv1alpha1.SnapshotJo
 	t.Helper()
 	deleted := sj.DeepCopy()
 	deleted.UID = types.UID("deleted-sj-uid")
-	job, err := buildSourceJob(deleted)
-	require.NoError(t, err)
-	job.UID = types.UID("deleted-sj-job-uid")
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: sj.Name, Namespace: sj.Namespace, UID: types.UID("deleted-sj-job-uid")}}
 	require.NoError(t, controllerutil.SetControllerReference(deleted, job, snapshotJobReconcilerScheme()))
 	return job
 }
