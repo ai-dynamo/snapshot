@@ -210,6 +210,7 @@ ARG CRIU_REPO
 ARG CRIU_REF
 ARG BUILD_JOBS=4
 
+# CRIU records and applies SELinux labels only when pkg-config finds libselinux.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ca-certificates \
@@ -220,6 +221,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnet1-dev \
     libnl-3-dev \
     libnl-route-3-dev \
+    libselinux1-dev \
     libprotobuf-dev \
     libprotobuf-c-dev \
     protobuf-c-compiler \
@@ -270,6 +272,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnet1 \
     libnl-3-200 \
     libnl-route-3-200 \
+    libselinux1 \
     libprotobuf32t64 \
     libprotobuf-c1 \
     libgnutls30t64 \

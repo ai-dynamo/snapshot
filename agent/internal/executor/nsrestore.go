@@ -247,7 +247,17 @@ func executeRestore(
 			log.Error(err, "failed to unmount securityfs")
 		}
 	}()
-	criuPID, cleanup, prepare, restore, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.BundleDir, unmountSecurityFS, log)
+	hideSELinux, err := exposeSELinuxForCRIU(opts.LSMProfile, log)
+	if err != nil {
+		return nil, 0, nil, failStep(StepRestoreCRIU, err)
+	}
+	defer func() {
+		if err := hideSELinux(); err != nil {
+			log.Error(err, "failed to remove the SELinux mounts for CRIU")
+		}
+	}()
+	preRestore := func() error { return errors.Join(unmountSecurityFS(), hideSELinux()) }
+	criuPID, cleanup, prepare, restore, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.BundleDir, preRestore, log)
 	if err != nil {
 		return nil, 0, nil, failStep(StepRestoreCRIU, err)
 	}
@@ -412,6 +422,20 @@ func mountSecurityFSForCRIU(path, lsmProfile string, log logr.Logger) (unmount f
 		})
 		return unmountErr
 	}, nil
+}
+
+// exposeSELinuxForCRIU makes SELinux visible to CRIU for an SELinux
+// lsm_profile, which CRIU refuses when the restore target hides SELinux. The
+// returned func removes what it mounted, and is safe to call more than once.
+func exposeSELinuxForCRIU(lsmProfile string, log logr.Logger) (func() error, error) {
+	if !strings.HasPrefix(lsmProfile, "selinux:") {
+		return func() error { return nil }, nil
+	}
+	hide, err := criu.ExposeSELinux(criu.SELinuxFSPath, criu.SELinuxConfigDir, log)
+	if err != nil {
+		return nil, fmt.Errorf("make SELinux visible to CRIU for lsm_profile %q: %w", lsmProfile, err)
+	}
+	return hide, nil
 }
 
 // within runs fn, and returns an error if it takes longer than timeout. fn

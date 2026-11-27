@@ -56,6 +56,12 @@ func main() {
 	} else {
 		cfg.HostCPUFeatures = cpuFeatures
 	}
+	// Before CRIU first runs, which caches whether it found an LSM.
+	if criu.RunsUnderSELinux() {
+		if _, err := criu.ExposeSELinux(criu.SELinuxFSPath, criu.SELinuxConfigDir, agentLog); err != nil {
+			agentLog.Error(err, "Failed to make SELinux visible to CRIU; checkpoints taken here will not record SELinux labels")
+		}
+	}
 
 	rt, err := snapshotruntime.New(*runtimeType, *runtimeSocket)
 	if err != nil {

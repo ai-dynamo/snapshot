@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: snapshot agent SELinux level
+templates:
+  - templates/daemonset.yaml
+tests:
+  - it: runs the agent Pod at level s0 so a checkpointed process can write CRIU's log
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.seLinuxOptions
+          value:
+            level: s0
