@@ -189,6 +189,12 @@ commit-level history for each release is on its
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
 
+- `snapshotctl checkpoint` deletes the source Pod when the checkpoint fails or
+  times out. It deleted only the Job, which left the source Pod running and
+  holding its GPU. It retries the delete for up to two minutes when the
+  Kubernetes API is not available. The error names a Job that it could not
+  delete. See [`snapshotctl` CLI](docs/reference/cli.md).
+
 ### Deprecated
 
 - `SNAPSHOT_RESTORE_STANDBY` (`podcontract.RestoreStandbyModeEnv`): restore

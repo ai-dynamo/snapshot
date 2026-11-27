@@ -93,6 +93,14 @@ record after the checkpoint completes. It is not deleted automatically. A
 `--cleanup` flag to remove it after a successful capture is planned as future
 work.
 
+When a checkpoint fails or times out, `snapshotctl checkpoint` deletes the
+source Pod and the Job that ran it. It leaves the `PodSnapshot` CR in place for
+debugging.
+
+If the Kubernetes API is not available for the delete, the command retries it
+for up to two minutes. If the delete fails, the error names the Job and gives
+the command that deletes it.
+
 ## Restore
 
 `snapshotctl restore` creates a new pod from a manifest and restores it from a
