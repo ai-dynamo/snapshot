@@ -125,12 +125,14 @@ storage:
     # userinfo, e.g. "https://s3.example.com".
     endpoint: ""
     region: ""
-    # A string: quote a bucket name made only of digits, or pass it with
-    # --set-string.
+    # A string: for a new installation, quote a bucket name made only of
+    # digits, or pass it with --set-string. A release that already uses the
+    # store keeps the bucket and the prefix in use, which can differ from the
+    # digits: see "Keep the Store of a Numeric Bucket or Prefix" in
+    # docs/operate/configure-storage.md.
     bucket: ""
     # Relative key prefix inside the bucket, with no leading slash. Empty
-    # identifies the bucket root. A string: quote a prefix made only of digits,
-    # or pass it with --set-string.
+    # identifies the bucket root. A string, like the bucket.
     prefix: ""
     # Secret holding a shared credentials file (the common S3-SDK INI format:
     # a [default] profile with aws_access_key_id/aws_secret_access_key, the

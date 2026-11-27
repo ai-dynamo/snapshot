@@ -248,12 +248,12 @@ chart rendered `prefix: 20261127` from a values file as `2.0261127e+07`, and
 from `--set` as `20261127`. Each text names a different store.
 
 If the release already uses the S3 store, keep the text that the operator uses
-now. To read it, run this command with the ConfigMap name from the error
-message:
+now. To read it, run this command:
 
 ```bash
-kubectl get configmap <configmap-name> --namespace <namespace> \
-  --output jsonpath='{.data.pagebroker-s3-config\.json}'
+kubectl get configmap --namespace <namespace> \
+  --selector app.kubernetes.io/managed-by=snapshot-operator \
+  --output jsonpath='{.items[*].data.pagebroker-s3-config\.json}'
 ```
 
 Set `storage.s3.bucket` and `storage.s3.prefix` to the `bucket` and the `prefix`
