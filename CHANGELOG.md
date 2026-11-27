@@ -188,6 +188,14 @@ commit-level history for each release is on its
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
+- A `PodSnapshot` deleted before the operator recorded its
+  `PodSnapshotContent` no longer leaves that content behind. This happened
+  when the delete came milliseconds after the create, or when the operator
+  stopped between creating the content and recording it. The node agent still
+  treats such a content as a checkpoint to take, and nothing deleted the
+  content or its snapshot. The upgrade does not remove a content that was
+  already left behind. To find one, list the `PodSnapshotContent` objects and
+  delete each one whose `PodSnapshot` no longer exists.
 
 ### Deprecated
 
