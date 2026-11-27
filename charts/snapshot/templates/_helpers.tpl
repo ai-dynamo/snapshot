@@ -165,21 +165,25 @@ Fail fast on unsupported runtime.type values. Called once from daemonset.yaml.
 {{- if and .Values.runtime.storageDir (not (hasPrefix "/" .Values.runtime.storageDir)) }}
 {{- fail (printf "runtime.storageDir must be an absolute path, got %q" .Values.runtime.storageDir) }}
 {{- end }}
-{{- /* The socket's directory is mounted from the node, so the value is a path
-       there, not the unix:// form that crictl and the kubelet take. */ -}}
+{{- /* The socket's directory is mounted from the node, so what is left of
+       the value after snapshot.runtimeSocket removes a leading unix:// must be
+       a path there. */ -}}
 {{- $socketPath := .Values.runtime.socketPath | default "" | toString }}
-{{- if and $socketPath (not (hasPrefix "/" $socketPath)) }}
-{{- fail (printf "runtime.socketPath must be an absolute path on the node, but Helm read it as %q: give the path alone, without a scheme such as unix://, as in /run/containerd/containerd.sock" $socketPath) }}
+{{- if and $socketPath (not (hasPrefix "/" (trimPrefix "unix://" $socketPath))) }}
+{{- fail (printf "runtime.socketPath must be an absolute path on the node, with or without a leading unix://, but Helm read it as %q: give the socket as in /run/containerd/containerd.sock or unix:///run/containerd/containerd.sock" $socketPath) }}
 {{- end }}
 {{- end }}
 
 {{/*
 Resolve the runtime socket path. Uses .Values.runtime.socketPath when set,
-otherwise falls back to the per-runtime default.
+otherwise falls back to the per-runtime default. crictl and the kubelet take
+the socket as a unix:// URL, so that form is accepted and the scheme removed:
+the agent's containerd client dials only a path, and its CRI client dials
+both forms, so the path is the one form that both runtime types accept.
 */}}
 {{- define "snapshot.runtimeSocket" -}}
 {{- if .Values.runtime.socketPath }}
-{{- .Values.runtime.socketPath }}
+{{- .Values.runtime.socketPath | toString | trimPrefix "unix://" }}
 {{- else if eq .Values.runtime.type "crio" }}
 {{- "/var/run/crio/crio.sock" }}
 {{- else }}

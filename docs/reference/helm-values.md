@@ -25,7 +25,7 @@ values, see [values.yaml](../../charts/snapshot/values.yaml).
 | `crdUpgrade.enabled`          | `true`                                  | Re-apply the CRDs on every rollout via an init container.                        |
 | `crdUpgrade.logLevel` | `info` | Init container log level. |
 | `runtime.type`                | `containerd`                            | Container runtime: `containerd` or `crio`.                                       |
-| `runtime.socketPath` | `""` | Runtime socket as an absolute path on the node, not a `unix://` URL; empty uses the conventional path for the type. |
+| `runtime.socketPath` | `""` | Runtime socket: an absolute path on the node, with or without a leading `unix://`; empty uses the conventional path for the type. |
 | `runtime.storageDir` | `""` | Host per-container storage dir, mounted at the identical path in the agent (empty = default for `runtime.type`). |
 | `openshift.enabled`           | `false`                                 | Enable OpenShift RBAC/SCC pieces. Keep `false` on vanilla Kubernetes.            |
 
