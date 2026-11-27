@@ -115,7 +115,9 @@ func requireRestoredOnce(t *testing.T, w *NodeController, restores *[]executor.R
 	condition := restoredPodCondition(live)
 	require.NotNil(t, condition)
 	assert.Equal(t, corev1.ConditionTrue, condition.Status)
-	assert.Empty(t, eventsForReason(w.clientset.(*fake.Clientset), restoreAlreadyFailedReason))
+	for _, event := range eventsForReason(w.clientset.(*fake.Clientset), restoreAlreadyFailedReason) {
+		assert.NotEqual(t, replacement.UID, event.InvolvedObject.UID, "the replacement must not read as a restore that already ended")
+	}
 	return live
 }
 
@@ -194,11 +196,17 @@ func TestFinishedRestoreOfAReplacedPodKeepsTheFinalizersOfItsReplacement(t *test
 	})
 	replacement := replacementRestorePod(annotations)
 	replacement.Finalizers = []string{"example.com/other", restorePodFinalizer}
-	w, _ := replacedPodController(t, replacement)
+	w, restores := replacedPodController(t, replacement)
 
 	processQueuedRestorePod(t, w, finished)
 
 	live := liveRestorePod(t, w, replacement)
 	assert.Equal(t, []string{"example.com/other", restorePodFinalizer}, live.Finalizers, "the replacement must keep its finalizers")
 	requireRefusedOnce(t, w, restoreFinalizerUpdateFailedReason, finished)
+
+	// The cache then delivers the replacement, and its restore runs to the end.
+	processQueuedRestorePod(t, w, live)
+
+	live = requireRestoredOnce(t, w, restores, replacement)
+	assert.Equal(t, []string{"example.com/other"}, live.Finalizers, "the replacement's restore must leave its other finalizer")
 }
