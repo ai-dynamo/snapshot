@@ -91,6 +91,14 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	if content == nil || content.Spec.Source.NodeName != w.config.NodeName ||
 		!content.DeletionTimestamp.IsZero() || isContentTerminal(content) {
 		w.checkpointGates.Delete(name)
+		w.settledCaptures.Delete(name)
+		return nil
+	}
+	// The cache trails this agent's own status writes, and a trigger that arrived during the
+	// capture redelivers the key the moment it is released. Acting on that copy would treat a
+	// work order that just ended as pending: sweep its pod, or capture its source again.
+	if uid, settled := w.settledCaptures.Load(name); settled && uid == content.UID {
+		logger.V(1).Info("Work order already has its terminal condition; waiting for the informer to deliver it")
 		return nil
 	}
 
@@ -698,7 +706,17 @@ func (w *NodeController) setSnapshotContentSucceeded(
 			content.Status.Storage.Artifacts = append(content.Status.Storage.Artifacts, recorded)
 		}
 	}
-	return w.client.Status().Patch(ctx, content, patch)
+	return w.patchTerminalStatus(ctx, content, patch)
+}
+
+// patchTerminalStatus writes a terminal condition and remembers that it landed, so a reconcile
+// that still reads the work order as pending from the informer cache leaves it alone.
+func (w *NodeController) patchTerminalStatus(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, patch client.Patch) error {
+	if err := w.client.Status().Patch(ctx, content, patch); err != nil {
+		return err
+	}
+	w.settledCaptures.Store(content.Name, content.UID)
+	return nil
 }
 
 // readyStatusConflictLimit caps Ready-patch retries after optimistic-lock conflicts so a
@@ -793,7 +811,7 @@ func (w *NodeController) setSnapshotContentFailed(ctx context.Context, content *
 		Reason:  reason,
 		Message: cause.Error(),
 	})
-	return w.client.Status().Patch(ctx, content, patch)
+	return w.patchTerminalStatus(ctx, content, patch)
 }
 
 // executorCheckpoint is the production checkpointFn. The reconciler has already resolved the

@@ -93,6 +93,9 @@ type NodeController struct {
 	// checkpointGates holds a *checkpointGate per work order, while the agent waits for its
 	// source container to be ready for the checkpoint.
 	checkpointGates sync.Map
+	// settledCaptures holds, per work order name, the UID of a PodSnapshotContent this agent
+	// gave a terminal condition that the content informer has not delivered yet.
+	settledCaptures sync.Map
 	// hookExec runs a lifecycle hook's file action in its container, and
 	// hookHTTP sends its HTTP requests. Tests replace them.
 	hookExec lifecyclehooks.Execer
