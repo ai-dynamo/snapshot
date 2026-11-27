@@ -49,6 +49,18 @@ func (r *SnapshotJobReconciler) createPodSnapshotForSourceJob(ctx context.Contex
 		return observed, ctrl.Result{RequeueAfter: sourcePodRequeueBackstop}, nil
 	}
 
+	// The create cannot be undone, and the cached SnapshotJob can be older than
+	// the status write that recorded its PodSnapshot. A PodSnapshot that was
+	// recorded and then deleted would otherwise be created again, and the
+	// workload would be captured after its capture was deleted.
+	behind, err := r.snapshotJobCacheBehind(ctx, sj)
+	if err != nil {
+		return snapshotJobObservation{}, ctrl.Result{}, err
+	}
+	if behind {
+		return snapshotJobObservation{}, ctrl.Result{}, errSnapshotJobCacheBehind
+	}
+
 	snap, err := r.createPodSnapshot(ctx, sj, pod)
 	if errors.Is(err, errPodSnapshotNameConflict) {
 		observed.failure = &snapshotJobFailure{reason: snapshotv1alpha1.ReasonPodSnapshotNameConflict, cause: err}
