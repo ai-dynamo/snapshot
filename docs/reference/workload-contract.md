@@ -115,7 +115,7 @@ The table shows what the restored process gets after a restore.
 | Its hostname, for example with `gethostname()` | The hostname of the source Pod |
 | An environment variable, also one that a `fieldRef` supplies | The value in the source Pod |
 | A file in a `downwardAPI` volume | The value for the restore Pod |
-| `/etc/hosts` | The name and the IP address of the restore Pod |
+| `/etc/hosts` | The hostname and the IP address of the restore Pod |
 
 A command that you run with `kubectl exec` is not part of the restored process.
 It shows the hostname and the environment variables of the restore Pod.

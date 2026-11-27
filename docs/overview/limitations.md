@@ -24,13 +24,13 @@ Snapshot currently focuses on inference cold-start; further use cases are on the
   under `restartPolicy: Always` after the restored process exits, it ends in
   `CrashLoopBackOff`. Delete the Pod to restore again. Retrying a restore in
   the same Pod is on the [roadmap](../roadmap.md).
-- A restored process keeps the hostname and the environment variables of the
-  source Pod. It does not get those of the restore Pod. See
-  [Identity After a Restore](../reference/workload-contract.md#identity-after-a-restore).
 - Several Snapshot installations whose clusters share nodes, such as vCluster
   tenants, work only when each sets `daemonset.nriHostNamespace` to its own host
   namespace. An installation with it empty acts on every restore Pod on its
   nodes.
+- A restored process keeps the hostname and the environment variables of the
+  source Pod. It does not get those of the restore Pod. See
+  [Identity After a Restore](../reference/workload-contract.md#identity-after-a-restore).
 - [Lifecycle Hooks](../reference/workload-contract.md#lifecycle-hooks) support a
   file or plain HTTP, without authentication or redirects. File hooks need
   a shell in the image.
