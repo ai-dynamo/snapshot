@@ -188,6 +188,12 @@ commit-level history for each release is on its
 - GPU discovery no longer rejects marker-directory `NVIDIA_VISIBLE_DEVICES`
   values used by the NVIDIA device plugin's `volume-mounts` strategy. See
   [Checkpoint troubleshooting](docs/troubleshooting/checkpoints.md#inspecting-source-container).
+- A `helm upgrade` that changes only `storage.pvc.create`, `storage.pvc.size`,
+  or `storage.pvc.storageClass` no longer restarts the agent and operator Pods.
+  Before, a storage class change that Kubernetes refuses on a bound claim still
+  restarted the agent on every node, with the checkpoints and restores in
+  flight there. The rollout checksum changes once with this chart version, so
+  the first upgrade restarts both workloads, as a new image tag does.
 
 ### Deprecated
 

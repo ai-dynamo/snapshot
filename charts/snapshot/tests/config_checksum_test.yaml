@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# checksum/config restarts the agent and the operator when a value behind
+# storage.yaml or pagebroker-s3.yaml changes. The literal below is its value
+# for the chart defaults. It changes with every value the checksum covers,
+# and such a change restarts both workloads of every installation on upgrade:
+# update the literal only when that is intended.
+suite: rollout checksum of the storage configuration
+templates:
+  - templates/daemonset.yaml
+  - templates/operator-deployment.yaml
+tests:
+  - it: stamps the agent and the operator with one checksum
+    asserts:
+      - equal:
+          path: spec.template.metadata.annotations["checksum/config"]
+          value: f2d61b4eeaad558f50ab063af3e0c3b1fba42e1b6a752cc9c78307ca68cc8292
+
+  # create, size and storageClass shape only the claim object. A storage class
+  # change on a bound claim is refused by the API server, and with these values
+  # in the checksum the refused upgrade still restarted every agent.
+  - it: keeps the checksum when only the provisioning of the claim changes
+    set:
+      storage.pvc.create: false
+      storage.pvc.size: 2Ti
+      storage.pvc.storageClass: rwx-shared
+    asserts:
+      - equal:
+          path: spec.template.metadata.annotations["checksum/config"]
+          value: f2d61b4eeaad558f50ab063af3e0c3b1fba42e1b6a752cc9c78307ca68cc8292
+
+  - it: changes the checksum with the claim that holds the store
+    set:
+      storage.pvc.name: other-pvc
+    asserts:
+      - notEqual:
+          path: spec.template.metadata.annotations["checksum/config"]
+          value: f2d61b4eeaad558f50ab063af3e0c3b1fba42e1b6a752cc9c78307ca68cc8292
+
+  - it: changes the checksum with an S3 store setting
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      operator.bindNewContents: true
+    asserts:
+      - notEqual:
+          path: spec.template.metadata.annotations["checksum/config"]
+          value: f2d61b4eeaad558f50ab063af3e0c3b1fba42e1b6a752cc9c78307ca68cc8292
