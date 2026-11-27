@@ -72,26 +72,30 @@ Name of the operator service account.
 {{- end }}
 
 {{/*
-An image tag as text. A tag made only of digits reaches the chart as a number:
-an integer from --set, a float from a values file. "%s" prints a number as a
-format error, and Go prints a float of a million or more with an exponent, so
-a whole number is printed as an integer. Other values print as before.
+The tag of the "agent" or "operator" image: image.<component>.tag, or the
+chart's appVersion when the tag is empty. Helm reads an unquoted tag made only
+of digits as a number, and the number is not always the tag that was written:
+0123 in a values file arrives as 83, 1e5 as 100000, and a long number gets an
+exponent. A tag that is not a string therefore fails the render, so that the
+chart never selects an image the user did not name.
 */}}
 {{- define "snapshot.imageTag" -}}
-{{- $tag := . -}}
-{{- if kindIs "float64" $tag -}}
-{{- if and (eq $tag (floor $tag)) (lt $tag 9007199254740992.0) -}}
-{{- $tag = int64 $tag -}}
+{{- $tag := index .root.Values.image .component "tag" -}}
+{{- if not (or (kindIs "string" $tag) (kindIs "invalid" $tag)) -}}
+{{- $read := toJson $tag -}}
+{{- if or (kindIs "float64" $tag) (kindIs "int64" $tag) -}}
+{{- $read = printf "the number %s" $read -}}
 {{- end -}}
+{{- fail (printf "image.%s.tag must be a string, but Helm read it as %s: quote the tag in a values file, or pass it with --set-string" .component $read) -}}
 {{- end -}}
-{{- $tag | toString -}}
+{{- $tag | default .root.Chart.AppVersion -}}
 {{- end }}
 
 {{/*
 Use the same agent image for the DaemonSet and cuinterpose installer.
 */}}
 {{- define "snapshot.agentImage" -}}
-{{- printf "%s:%s" .Values.image.agent.repository (include "snapshot.imageTag" (.Values.image.agent.tag | default .Chart.AppVersion)) -}}
+{{- printf "%s:%s" .Values.image.agent.repository (include "snapshot.imageTag" (dict "root" . "component" "agent")) -}}
 {{- end }}
 
 {{/*

@@ -59,11 +59,14 @@ Install the chart from the checkout, pointing the images at the built ones:
 helm install snapshot ./charts/snapshot \
   --namespace snapshot --create-namespace \
   --set image.operator.repository=<registry>/operator \
-  --set image.operator.tag=<tag> \
+  --set-string image.operator.tag=<tag> \
   --set image.agent.repository=<registry>/agent \
-  --set image.agent.tag=<tag> \
+  --set-string image.agent.tag=<tag> \
   --set image.pageBroker.repository=<registry>/pagebroker
 ```
+
+The tags use `--set-string`: the chart refuses a tag that Helm reads as a
+number. See [Helm Chart Values](../reference/helm-values.md#images-and-rollout).
 
 See [Installation](../get-started/installation.md) for storage and uninstall options.
 

@@ -50,7 +50,7 @@ spec:
         # Failing here is intentional: it stops the manager rather than let it
         # run against outdated definitions.
         - name: crd-installer
-          image: "{{ .Values.image.operator.repository }}:{{ include "snapshot.imageTag" (.Values.image.operator.tag | default .Chart.AppVersion) }}"
+          image: "{{ .Values.image.operator.repository }}:{{ include "snapshot.imageTag" (dict "root" . "component" "operator") }}"
           imagePullPolicy: {{ .Values.image.operator.pullPolicy }}
           command: ["/crd-installer"]
           env:
@@ -63,7 +63,7 @@ spec:
       {{- end }}
       containers:
         - name: manager
-          image: "{{ .Values.image.operator.repository }}:{{ include "snapshot.imageTag" (.Values.image.operator.tag | default .Chart.AppVersion) }}"
+          image: "{{ .Values.image.operator.repository }}:{{ include "snapshot.imageTag" (dict "root" . "component" "operator") }}"
           imagePullPolicy: {{ .Values.image.operator.pullPolicy }}
           # Artifact cleanup removes CRIU files created as root on the shared PVC.
           securityContext:

@@ -20,14 +20,19 @@ values, see [values.yaml](../../charts/snapshot/values.yaml).
 | `image.operator.repository`   | `ghcr.io/ai-dynamo/snapshot/operator`   | Operator image.                                                                  |
 | `image.agent.repository`      | `ghcr.io/ai-dynamo/snapshot/agent`      | Agent image.                                                                     |
 | `image.pageBroker.repository` | `ghcr.io/ai-dynamo/snapshot/pagebroker` | PageBroker sidecar image, pulled at `image.agent.tag`.                           |
-| `image.operator.tag`          | chart `appVersion`                      | Operator image tag; defaults to the chart's `appVersion` when empty.             |
-| `image.agent.tag`             | chart `appVersion`                      | Agent and PageBroker image tag; defaults to the chart's `appVersion` when empty. |
+| `image.operator.tag`          | chart `appVersion`                      | Operator image tag, a string; the chart's `appVersion` when empty.               |
+| `image.agent.tag`             | chart `appVersion`                      | Agent and PageBroker image tag, a string; the chart's `appVersion` when empty.   |
 | `crdUpgrade.enabled`          | `true`                                  | Re-apply the CRDs on every rollout via an init container.                        |
 | `crdUpgrade.logLevel` | `info` | Init container log level. |
 | `runtime.type`                | `containerd`                            | Container runtime: `containerd` or `crio`.                                       |
 | `runtime.socketPath`          | `""`                                    | Runtime socket path; empty uses the conventional path for the type.              |
 | `runtime.storageDir` | `""` | Host per-container storage dir, mounted at the identical path in the agent (empty = default for `runtime.type`). |
 | `openshift.enabled`           | `false`                                 | Enable OpenShift RBAC/SCC pieces. Keep `false` on vanilla Kubernetes.            |
+
+An image tag must be a string. Helm reads an unquoted tag that contains only
+digits, such as `20261127`, as a number, and the chart refuses it. In a values
+file, put the tag in quotes: `tag: "20261127"`. On the command line, use
+`--set-string` instead of `--set`.
 
 ## Storage
 
