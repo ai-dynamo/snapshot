@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 import sys
 import time
@@ -419,14 +420,26 @@ def exec_dial_failure(
     if error is earlier or not isinstance(error, ApiException) or error.status != 0:
         return None
     # The reason is the text of the websocket error: the handshake status, the
-    # response headers and the response body, with " -+-+- " between them.
-    reason = str(error.reason)
-    body = reason.rpartition(" -+-+- ")[2]
-    if reason.startswith("Handshake status 500 ") and body.startswith(
-        ("b'error dialing backend: ", 'b"error dialing backend: ')
-    ):
-        return body
-    return None
+    # response headers and the response body, with " -+-+- " between them. A
+    # reason with more parts is not read, because its body cannot be told from
+    # the rest.
+    parts = str(error.reason).split(" -+-+- ")
+    if len(parts) != 3 or not parts[0].startswith("Handshake status 500 "):
+        return None
+    try:
+        length = int(ast.literal_eval(parts[1])["content-length"])
+    except (KeyError, SyntaxError, TypeError, ValueError):
+        return None
+    # websocket-client 1.9.0 writes the body as bytes, b'...', and that text is
+    # longer than the body. Later releases write the body as text, which is
+    # never longer. So the length shows which writing this is, also for a body
+    # that is itself the text b'...'.
+    body = parts[2]
+    if len(body) > length:
+        starts = ("b'error dialing backend: ", 'b"error dialing backend: ')
+    else:
+        starts = ("error dialing backend: ",)
+    return body.strip() if body.startswith(starts) else None
 
 
 def snapshot_custom_resource_api_is_accessible(namespace: str) -> None:

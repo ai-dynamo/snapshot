@@ -3,7 +3,12 @@
 
 """Cluster-free checks for Kubernetes E2E helpers."""
 
+import base64
+import hashlib
+import http.server
 import socket
+import socketserver
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -123,11 +128,15 @@ EXEC_DIAL_FAILURE = (
 )
 
 
-def refused_exec(body: bytes) -> RuntimeError:
-    """The websocket error for an exec handshake that is answered with a 500."""
+def refused_exec(body: bytes, written=repr) -> RuntimeError:
+    """The websocket error for an exec handshake that is answered with a 500.
+
+    websocket-client 1.9.0 writes the body into its error as bytes, which is
+    repr. Later releases write it as text, which is bytes.decode.
+    """
     headers = {"content-type": "text/plain; charset=utf-8", "content-length": str(len(body))}
     return RuntimeError(
-        f"Handshake status 500 Internal Server Error -+-+- {headers} -+-+- {body}"
+        f"Handshake status 500 Internal Server Error -+-+- {headers} -+-+- {written(body)}"
     )
 
 
@@ -251,6 +260,154 @@ def test_exec_command_does_not_repeat_an_exec_for_an_earlier_failure(monkeypatch
             k8s.exec_command("namespace", "pod", "true", container="app")
 
     assert len(execs) == 1
+
+
+# The two ways in which releases of websocket-client write the body of a
+# refused handshake into their error.
+BODY_WRITINGS = [pytest.param(repr, id="as-bytes"), pytest.param(bytes.decode, id="as-text")]
+# The second dial error has an apostrophe. Python then writes its bytes in
+# double quotes.
+EXEC_DIAL_FAILURES = [
+    pytest.param(EXEC_DIAL_FAILURE, id="reset"),
+    pytest.param(
+        b"error dialing backend: tls: failed to verify certificate: x509: cannot validate "
+        b"certificate for 192.0.2.20 because it doesn't contain any IP SANs\n",
+        id="apostrophe",
+    ),
+]
+# Refusals that do not show that the command did not start.
+OTHER_REFUSALS = [
+    pytest.param(b'container not found ("app")', id="container-not-started"),
+    # The answer when the connection is reset after the request was sent. The
+    # command may have started.
+    pytest.param(
+        b"read tcp 192.0.2.10:50000->192.0.2.20:50001: read: connection reset by peer\n",
+        id="reset-after-the-request",
+    ),
+    pytest.param(b"upgrade failed: " + EXEC_DIAL_FAILURE, id="dial-error-not-first"),
+    # A sender that passes on the handshake error of its own websocket-client.
+    pytest.param(
+        str(refused_exec(EXEC_DIAL_FAILURE, bytes.decode)).encode(),
+        id="dial-error-in-a-passed-on-error",
+    ),
+    pytest.param(repr(EXEC_DIAL_FAILURE).encode(), id="dial-error-as-the-text-of-bytes"),
+]
+
+
+@pytest.mark.parametrize("written", BODY_WRITINGS)
+@pytest.mark.parametrize("body", EXEC_DIAL_FAILURES)
+def test_exec_dial_failure_reads_a_dial_error_in_each_writing(body, written) -> None:
+    failure = ApiException(status=0, reason=str(refused_exec(body, written)))
+
+    assert k8s.exec_dial_failure(failure) == written(body).strip()
+
+
+@pytest.mark.parametrize("written", BODY_WRITINGS)
+@pytest.mark.parametrize("body", OTHER_REFUSALS)
+def test_exec_dial_failure_reads_no_other_refusal_as_a_dial_error(body, written) -> None:
+    failure = ApiException(status=0, reason=str(refused_exec(body, written)))
+
+    assert k8s.exec_dial_failure(failure) is None
+
+
+class ExecAnswers(http.server.BaseHTTPRequestHandler):
+    """Answers each exec handshake on a local socket with the next answer.
+
+    An answer is a status and bytes. The bytes are the body of a refusal, sent
+    the way Go's http.Error sends one, or with 101 the stdout of an exec that
+    runs.
+    """
+
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self) -> None:
+        self.server.handshakes.append(self.path)
+        status, data = self.server.answers.pop(0)
+        self.close_connection = True
+        self.send_response(status)
+        if status != 101:
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        key = self.headers["Sec-WebSocket-Key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        accept = base64.b64encode(hashlib.sha1(key.encode()).digest()).decode()
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
+        self.send_header("Sec-WebSocket-Protocol", StartedExec.subprotocol)
+        self.end_headers()
+        # One binary frame with the stdout of the command, then a close frame.
+        stdout = bytes([ws_client.STDOUT_CHANNEL]) + data
+        self.wfile.write(bytes([0x82, len(stdout)]) + stdout + bytes([0x88, 0]))
+
+    def log_message(self, *_args) -> None:
+        pass
+
+
+@pytest.fixture
+def exec_server(monkeypatch):
+    """A local server that the installed client makes its exec handshakes with.
+
+    The tests above write the error of the client by hand. Here the installed
+    kubernetes and websocket-client read an answer from a socket and word the
+    error themselves, so a release that words it in a new way fails a test.
+    """
+    server = socketserver.TCPServer(("127.0.0.1", 0), ExecAnswers)
+    server.answers, server.handshakes, server.waits = [], [], []
+    # The client must not take a proxy from the environment to reach it.
+    for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    host = f"http://127.0.0.1:{server.server_address[1]}"
+    api = k8s.client.CoreV1Api(k8s.client.ApiClient(k8s.client.Configuration(host=host)))
+    monkeypatch.setattr(k8s.client, "CoreV1Api", lambda: api)
+    monkeypatch.setattr(k8s.time, "sleep", server.waits.append)
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    )
+    thread.start()
+    yield server
+    server.shutdown()
+    thread.join()
+    server.server_close()
+
+
+@pytest.mark.parametrize("body", EXEC_DIAL_FAILURES)
+def test_exec_command_repeats_a_dial_error_that_the_installed_client_reads(
+    exec_server, body
+) -> None:
+    exec_server.answers = [(500, body), (101, b"ran\n")]
+
+    assert k8s.exec_command("namespace", "pod", "true", container="app") == "ran\n"
+    assert len(exec_server.handshakes) == 2
+    assert exec_server.waits == [k8s.EXEC_DIAL_RETRY_SECONDS]
+
+
+@pytest.mark.parametrize("body", OTHER_REFUSALS)
+def test_exec_command_does_not_repeat_a_refusal_that_the_installed_client_reads(
+    exec_server, body
+) -> None:
+    exec_server.answers = [(500, body), (101, b"ran\n")]
+
+    with pytest.raises((AttributeError, ApiException)):
+        k8s.exec_command("namespace", "pod", "true", container="app")
+
+    assert len(exec_server.handshakes) == 1
+    assert exec_server.waits == []
+
+
+def test_exec_command_does_not_repeat_a_dial_error_with_another_status(exec_server) -> None:
+    # The API server answers a dial that failed with 500. Another status shows
+    # another sender, which may have passed the request on.
+    exec_server.answers = [(503, EXEC_DIAL_FAILURE), (101, b"ran\n")]
+
+    with pytest.raises((AttributeError, ApiException)):
+        k8s.exec_command("namespace", "pod", "true", container="app")
+
+    assert len(exec_server.handshakes) == 1
+    assert exec_server.waits == []
 
 
 def test_snapshot_operator_hook_uses_configured_input(monkeypatch) -> None:
