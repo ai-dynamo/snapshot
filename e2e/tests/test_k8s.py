@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 from kubernetes.client import ApiException
 from kubernetes.stream import ws_client
+from websocket import WebSocketBadStatusException
 
 from snapshot_e2e import k8s
 from snapshot_e2e import lifecycle
@@ -128,16 +129,9 @@ EXEC_DIAL_FAILURE = (
 )
 
 
-def refused_exec(body: bytes, written=repr) -> RuntimeError:
-    """The websocket error for an exec handshake that is answered with a 500.
-
-    websocket-client 1.9.0 writes the body into its error as bytes, which is
-    repr. Later releases write it as text, which is bytes.decode.
-    """
-    headers = {"content-type": "text/plain; charset=utf-8", "content-length": str(len(body))}
-    return RuntimeError(
-        f"Handshake status 500 Internal Server Error -+-+- {headers} -+-+- {written(body)}"
-    )
+def refused_exec(body: bytes, status: int = 500) -> WebSocketBadStatusException:
+    """The websocket error for an exec handshake that is answered with a refusal."""
+    return WebSocketBadStatusException(f"Handshake status {status}", status, resp_body=body)
 
 
 class StartedExec:
@@ -210,15 +204,30 @@ def test_exec_command_gives_up_on_a_node_it_cannot_reach(monkeypatch) -> None:
     assert len(handshakes) == k8s.EXEC_DIAL_ATTEMPTS
     assert waits == [k8s.EXEC_DIAL_RETRY_SECONDS] * (k8s.EXEC_DIAL_ATTEMPTS - 1)
     # The failure of the last attempt is raised as it is.
-    assert k8s.exec_dial_failure(raised.value) == repr(EXEC_DIAL_FAILURE)
+    assert k8s.exec_dial_failure(raised.value) == EXEC_DIAL_FAILURE.decode().strip()
 
 
-def test_exec_command_does_not_repeat_a_refused_exec(monkeypatch) -> None:
-    # A container that has not started is refused in the handshake too, with
-    # the same status. A second exec does not start it.
-    handshakes, waits = answer_exec_handshakes(
-        monkeypatch, refused_exec(b'container not found ("app")')
-    )
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        # A container that has not started is refused in the handshake too,
+        # with the same status. A second exec does not start it.
+        pytest.param(500, b'container not found ("app")', id="container-not-started"),
+        # The answer when the connection is reset after the request was sent.
+        # The command may have started.
+        pytest.param(
+            500,
+            b"read tcp 192.0.2.10:50000->192.0.2.20:50001: read: connection reset by peer\n",
+            id="reset-after-the-request",
+        ),
+        pytest.param(500, b"upgrade failed: " + EXEC_DIAL_FAILURE, id="dial-error-not-first"),
+        # The API server answers a dial that failed with 500. Another status
+        # shows another sender, which may have passed the request on.
+        pytest.param(503, EXEC_DIAL_FAILURE, id="another-status"),
+    ],
+)
+def test_exec_command_does_not_repeat_a_refused_exec(monkeypatch, status, body) -> None:
+    handshakes, waits = answer_exec_handshakes(monkeypatch, refused_exec(body, status))
 
     with pytest.raises((AttributeError, ApiException)):
         k8s.exec_command("namespace", "pod", "true", container="app")
@@ -254,60 +263,12 @@ def test_exec_command_does_not_repeat_an_exec_for_an_earlier_failure(monkeypatch
     # A debug dump runs its execs while the failure of the test is handled, so
     # that failure is the context of every error they raise.
     try:
-        raise ApiException(status=0, reason=str(refused_exec(EXEC_DIAL_FAILURE)))
+        raise ApiException(status=0) from refused_exec(EXEC_DIAL_FAILURE)
     except ApiException:
         with pytest.raises((AttributeError, ApiException)):
             k8s.exec_command("namespace", "pod", "true", container="app")
 
     assert len(execs) == 1
-
-
-# The two ways in which releases of websocket-client write the body of a
-# refused handshake into their error.
-BODY_WRITINGS = [pytest.param(repr, id="as-bytes"), pytest.param(bytes.decode, id="as-text")]
-# The second dial error has an apostrophe. Python then writes its bytes in
-# double quotes.
-EXEC_DIAL_FAILURES = [
-    pytest.param(EXEC_DIAL_FAILURE, id="reset"),
-    pytest.param(
-        b"error dialing backend: tls: failed to verify certificate: x509: cannot validate "
-        b"certificate for 192.0.2.20 because it doesn't contain any IP SANs\n",
-        id="apostrophe",
-    ),
-]
-# Refusals that do not show that the command did not start.
-OTHER_REFUSALS = [
-    pytest.param(b'container not found ("app")', id="container-not-started"),
-    # The answer when the connection is reset after the request was sent. The
-    # command may have started.
-    pytest.param(
-        b"read tcp 192.0.2.10:50000->192.0.2.20:50001: read: connection reset by peer\n",
-        id="reset-after-the-request",
-    ),
-    pytest.param(b"upgrade failed: " + EXEC_DIAL_FAILURE, id="dial-error-not-first"),
-    # A sender that passes on the handshake error of its own websocket-client.
-    pytest.param(
-        str(refused_exec(EXEC_DIAL_FAILURE, bytes.decode)).encode(),
-        id="dial-error-in-a-passed-on-error",
-    ),
-    pytest.param(repr(EXEC_DIAL_FAILURE).encode(), id="dial-error-as-the-text-of-bytes"),
-]
-
-
-@pytest.mark.parametrize("written", BODY_WRITINGS)
-@pytest.mark.parametrize("body", EXEC_DIAL_FAILURES)
-def test_exec_dial_failure_reads_a_dial_error_in_each_writing(body, written) -> None:
-    failure = ApiException(status=0, reason=str(refused_exec(body, written)))
-
-    assert k8s.exec_dial_failure(failure) == written(body).strip()
-
-
-@pytest.mark.parametrize("written", BODY_WRITINGS)
-@pytest.mark.parametrize("body", OTHER_REFUSALS)
-def test_exec_dial_failure_reads_no_other_refusal_as_a_dial_error(body, written) -> None:
-    failure = ApiException(status=0, reason=str(refused_exec(body, written)))
-
-    assert k8s.exec_dial_failure(failure) is None
 
 
 class ExecAnswers(http.server.BaseHTTPRequestHandler):
@@ -351,9 +312,9 @@ class ExecAnswers(http.server.BaseHTTPRequestHandler):
 def exec_server(monkeypatch):
     """A local server that the installed client makes its exec handshakes with.
 
-    The tests above write the error of the client by hand. Here the installed
-    kubernetes and websocket-client read an answer from a socket and word the
-    error themselves, so a release that words it in a new way fails a test.
+    The tests above raise the websocket error by hand. Here the installed
+    kubernetes and websocket-client read an answer from a socket and raise the
+    error themselves, so a release that raises it in another way fails a test.
     """
     server = socketserver.TCPServer(("127.0.0.1", 0), ExecAnswers)
     server.answers, server.handshakes, server.waits = [], [], []
@@ -374,40 +335,12 @@ def exec_server(monkeypatch):
     server.server_close()
 
 
-@pytest.mark.parametrize("body", EXEC_DIAL_FAILURES)
-def test_exec_command_repeats_a_dial_error_that_the_installed_client_reads(
-    exec_server, body
-) -> None:
-    exec_server.answers = [(500, body), (101, b"ran\n")]
+def test_exec_command_repeats_a_dial_error_that_the_installed_client_reads(exec_server) -> None:
+    exec_server.answers = [(500, EXEC_DIAL_FAILURE), (101, b"ran\n")]
 
     assert k8s.exec_command("namespace", "pod", "true", container="app") == "ran\n"
     assert len(exec_server.handshakes) == 2
     assert exec_server.waits == [k8s.EXEC_DIAL_RETRY_SECONDS]
-
-
-@pytest.mark.parametrize("body", OTHER_REFUSALS)
-def test_exec_command_does_not_repeat_a_refusal_that_the_installed_client_reads(
-    exec_server, body
-) -> None:
-    exec_server.answers = [(500, body), (101, b"ran\n")]
-
-    with pytest.raises((AttributeError, ApiException)):
-        k8s.exec_command("namespace", "pod", "true", container="app")
-
-    assert len(exec_server.handshakes) == 1
-    assert exec_server.waits == []
-
-
-def test_exec_command_does_not_repeat_a_dial_error_with_another_status(exec_server) -> None:
-    # The API server answers a dial that failed with 500. Another status shows
-    # another sender, which may have passed the request on.
-    exec_server.answers = [(503, EXEC_DIAL_FAILURE), (101, b"ran\n")]
-
-    with pytest.raises((AttributeError, ApiException)):
-        k8s.exec_command("namespace", "pod", "true", container="app")
-
-    assert len(exec_server.handshakes) == 1
-    assert exec_server.waits == []
 
 
 def test_snapshot_operator_hook_uses_configured_input(monkeypatch) -> None:

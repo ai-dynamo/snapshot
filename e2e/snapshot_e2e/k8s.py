@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import ast
 import os
 import sys
 import time
@@ -17,6 +16,7 @@ from kubernetes import watch
 from kubernetes.client import ApiException
 from kubernetes.stream import stream
 from urllib3.exceptions import ReadTimeoutError
+from websocket import WebSocketBadStatusException
 
 from snapshot_e2e.infra.preflight import load_config
 
@@ -419,27 +419,15 @@ def exec_dial_failure(
     error = exc.__context__ if isinstance(exc, AttributeError) else exc
     if error is earlier or not isinstance(error, ApiException) or error.status != 0:
         return None
-    # The reason is the text of the websocket error: the handshake status, the
-    # response headers and the response body, with " -+-+- " between them. A
-    # reason with more parts is not read, because its body cannot be told from
-    # the rest.
-    parts = str(error.reason).split(" -+-+- ")
-    if len(parts) != 3 or not parts[0].startswith("Handshake status 500 "):
+    # The client raises that ApiException while it handles the websocket error
+    # of the handshake, which has the status and the body of the answer.
+    handshake = error.__cause__ or error.__context__
+    if not isinstance(handshake, WebSocketBadStatusException) or handshake.status_code != 500:
         return None
-    try:
-        length = int(ast.literal_eval(parts[1])["content-length"])
-    except (KeyError, SyntaxError, TypeError, ValueError):
+    body = handshake.resp_body
+    if not isinstance(body, bytes) or not body.startswith(b"error dialing backend: "):
         return None
-    # websocket-client 1.9.0 writes the body as bytes, b'...', and that text is
-    # longer than the body. Later releases write the body as text, which is
-    # never longer. So the length shows which writing this is, also for a body
-    # that is itself the text b'...'.
-    body = parts[2]
-    if len(body) > length:
-        starts = ("b'error dialing backend: ", 'b"error dialing backend: ')
-    else:
-        starts = ("error dialing backend: ",)
-    return body.strip() if body.startswith(starts) else None
+    return body.decode(errors="replace").strip()
 
 
 def snapshot_custom_resource_api_is_accessible(namespace: str) -> None:
