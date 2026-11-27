@@ -200,7 +200,8 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 }
 
 // errSnapshotJobCacheBehind ends a reconcile that would create the source Job
-// from a cached SnapshotJob that the API server has already replaced.
+// or the PodSnapshot from a cached SnapshotJob that the API server has already
+// replaced.
 var errSnapshotJobCacheBehind = errors.New("the cached SnapshotJob is older than the API server's")
 
 // snapshotJobCacheBehindRequeue re-checks a SnapshotJob whose cached copy was
@@ -215,7 +216,7 @@ func (r *SnapshotJobReconciler) snapshotJobCacheBehind(ctx context.Context, sj *
 		if apierrors.IsNotFound(err) {
 			return true, nil
 		}
-		return false, fmt.Errorf("re-read SnapshotJob %q before creating its source Job: %w", sj.Name, err)
+		return false, fmt.Errorf("re-read SnapshotJob %q before creating its source Job or PodSnapshot: %w", sj.Name, err)
 	}
 	return current.UID != sj.UID || current.ResourceVersion != sj.ResourceVersion, nil
 }
