@@ -228,6 +228,21 @@ func TestRestoreVerificationWaitsForSnapshotJobAuxiliaryCompletion(t *testing.T)
 	require.Len(t, got.Status.RestoreVerifyInfo.Containers, 1)
 }
 
+func TestRestoreVerificationUsesRetainedProducerCompletion(t *testing.T) {
+	s, c, p := verificationFixture()
+	s.Status.Phase = v1.PodSnapshotPhaseCheckpointSucceeded
+	s.Labels = map[string]string{v1.SnapshotJobOwnerLabel: "producer", v1.SnapshotJobOwnerUIDLabel: "producer-uid"}
+	s.Status.CompletedSnapshotJobUID = "producer-uid"
+	// The SnapshotJob was cleaned up before this controller observed it.
+	r := makeSnapshotReconciler(snapshotReconcilerScheme(), s, c, p)
+	for range 2 {
+		reconcileSnapshot(t, r, s.Name)
+	}
+	got := readVerificationSnapshot(t, r, s)
+	require.Equal(t, v1.PodSnapshotPhaseRestoreVerifying, got.Status.Phase)
+	require.Len(t, got.Status.RestoreVerifyInfo.Containers, 1)
+}
+
 func TestRestoreVerificationZeroWindowStillRequiresRestoreAndReadiness(t *testing.T) {
 	s, c, p := verificationFixture()
 	s.Spec.RestoreVerification.ObservationWindowSeconds = 0

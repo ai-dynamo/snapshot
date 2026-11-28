@@ -43,6 +43,7 @@ The namespaced binding for one container's snapshot; consumed by restore.
 | `conditions`               | []Condition | `Ready` (checkpoint and binding complete) and `Failed` (checkpoint or binding failed terminally). Verification-enabled restores also require approval. |
 | `phase` | string | Lifecycle stage, listed below. The Operator owns transitions. |
 | `restoreVerifyInfo` | RestoreVerificationInfo | Observed canary result, retained after the canary Pod is deleted. |
+| `completedSnapshotJobUID` | string | Producer completion recorded before a verification-enabled SnapshotJob reports Completed; retained after job cleanup. |
 
 #### Restore verification
 

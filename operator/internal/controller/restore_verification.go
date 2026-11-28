@@ -81,6 +81,10 @@ func (sr *PodSnapshotReconciler) snapshotAuxiliaryWorkComplete(ctx context.Conte
 	if name == "" {
 		return true, nil
 	}
+	producerUID := s.Labels[v1.SnapshotJobOwnerUIDLabel]
+	if producerUID != "" && string(s.Status.CompletedSnapshotJobUID) == producerUID {
+		return true, nil
+	}
 	j := &v1.SnapshotJob{}
 	err := sr.NonCacheReadClient.Get(ctx, client.ObjectKey{Namespace: s.Namespace, Name: name}, j)
 	if err != nil && !apierrors.IsNotFound(err) {
@@ -97,7 +101,11 @@ func (sr *PodSnapshotReconciler) snapshotAuxiliaryWorkComplete(ctx context.Conte
 		sr.Recorder.Event(s, corev1.EventTypeWarning, "SnapshotJobFailed", "Required SnapshotJob work failed")
 		return false, nil
 	}
-	return v1.IsSnapshotJobCompleted(j), nil
+	if v1.IsSnapshotJobCompleted(j) {
+		s.Status.CompletedSnapshotJobUID = j.UID
+		return true, nil
+	}
+	return false, nil
 }
 
 func (sr *PodSnapshotReconciler) verifyRestore(ctx context.Context, s *v1.PodSnapshot, c *v1.PodSnapshotContent) (ctrl.Result, error) {

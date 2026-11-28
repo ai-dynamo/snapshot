@@ -13,6 +13,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -116,6 +117,33 @@ func TestRestoreVerificationRecordMismatchIsTerminal(t *testing.T) {
 	var failed *restoreVerificationError
 	require.True(t, errors.As(err, &failed))
 	require.Contains(t, err.Error(), "does not match")
+}
+
+func TestRestoreVerificationInvalidMappingDoesNotRetryForever(t *testing.T) {
+	p := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a", podcontract.RestoreContainerMapAnnotation: "not-json"})
+	s, c := readySnapshotObjects()
+	s.Spec.RestoreVerification = &v1.RestoreVerificationPolicy{PodRef: v1.RestoreVerificationPodReference{Name: "canary", UID: "canary-uid"}, TimeoutSeconds: 60}
+	s.Status.Phase = v1.PodSnapshotPhaseVerificationFailed
+	w := makeTestController(t, p, s, c)
+	require.False(t, w.reconcileRestorePod(context.Background(), p))
+	require.Contains(t, string(lastPodStatusApply(t, w).GetPatch()), "invalid restore destinations")
+	require.True(t, w.restoreHandled(p))
+}
+
+func TestRestoreVerificationCaptureFailureNotifiesProxy(t *testing.T) {
+	p := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	s, c := readySnapshotObjects()
+	s.Spec.RestoreVerification = &v1.RestoreVerificationPolicy{PodRef: v1.RestoreVerificationPodReference{Name: "canary", UID: "canary-uid"}, TimeoutSeconds: 60}
+	meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{Type: v1.PodSnapshotConditionFailed, Status: metav1.ConditionTrue, Reason: "CaptureFailed"})
+	w := makeTestController(t, p, s, c)
+	notified := false
+	w.writePodControlSentinelFn = func(_, _, name string, _ []byte) error {
+		notified = name == podcontract.RestoreFailedFile
+		return nil
+	}
+	require.False(t, w.reconcileRestorePod(context.Background(), p))
+	require.True(t, notified)
+	require.True(t, w.restoreHandled(p))
 }
 
 func TestRestoreVerificationRetriesProxyNotificationBeforeTerminalStatus(t *testing.T) {

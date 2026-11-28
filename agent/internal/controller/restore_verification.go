@@ -5,6 +5,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -48,8 +49,8 @@ func validateRestoreVerification(s *v1.PodSnapshot, c *v1.PodSnapshotContent, po
 	if s.Status.Phase == v1.PodSnapshotPhaseCompleted || i.Outcome != v1.RestoreVerificationInProgress {
 		return verificationError("PodSnapshot %s/%s has no matching successful verification", s.Namespace, s.Name)
 	}
-	// Independent of Operator availability: a stalled controller cannot strand
-	// proxies past the persisted deadline. Normal preflight failure handling
+	// Once the Operator has started verification, a stalled controller cannot
+	// strand proxies past that persisted deadline. Preflight failure handling
 	// writes restore-failed and the Pod condition; it never cold-starts the Pod.
 	if !now.Before(i.DeadlineAt.Time) {
 		return verificationError("PodSnapshot %s/%s restore verification timed out", s.Namespace, s.Name)
@@ -95,7 +96,11 @@ func validateRestoreVerification(s *v1.PodSnapshot, c *v1.PodSnapshotContent, po
 func (w *NodeController) failRestoreVerification(ctx context.Context, pod *corev1.Pod, cause error) bool {
 	destinations, err := w.RestoreDestinations(ctx, pod)
 	if err != nil {
-		return true
+		var pending *restorePendingError
+		if errors.As(err, &pending) {
+			return true
+		}
+		return w.failRestorePod(ctx, pod, fmt.Errorf("%w: invalid restore destinations: %v", cause, err))
 	}
 	for _, destination := range destinations {
 		var markErr error

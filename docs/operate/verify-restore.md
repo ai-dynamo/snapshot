@@ -28,6 +28,9 @@ version that supports verification before you enable it.
 3. Create the snapshot. The Operator waits for checkpoint completion and any
    required SnapshotJob work, then records the canary execution and deadline.
    Only this Pod can restore while the phase is `RestoreVerifying`.
+   The timeout starts when that record is persisted, not when a consumer Pod
+   is created. A SnapshotJob records completion on the snapshot before it
+   reports `Completed`, so deleting the completed job does not block verification.
 4. Check the snapshot:
 
    ```bash
@@ -38,6 +41,7 @@ version that supports verification before you enable it.
    `restoreVerifyInfo` for the current Content UID and policy. Other consumers
    are released only after actual restore and continuous application readiness
    pass the configured window. The record remains after the canary is deleted.
+   Waiting agents check again on Pod updates or their normal 30-second retry.
 
 ```mermaid
 flowchart LR

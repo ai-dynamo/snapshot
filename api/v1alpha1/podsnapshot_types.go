@@ -126,6 +126,12 @@ type PodSnapshotStatus struct {
 	// +optional
 	RestoreVerifyInfo *RestoreVerificationInfo `json:"restoreVerifyInfo,omitempty"`
 
+	// CompletedSnapshotJobUID records successful completion of required producer
+	// work before the SnapshotJob reports Completed. Verification can then start
+	// even if that job is cleaned up before this controller observes completion.
+	// +optional
+	CompletedSnapshotJobUID types.UID `json:"completedSnapshotJobUID,omitempty"`
+
 	// BoundPodSnapshotContentName is the name of the cluster-scoped PodSnapshotContent
 	// this PodSnapshot is bound to. It is nil until the agent has created the
 	// content and recorded the binding.
