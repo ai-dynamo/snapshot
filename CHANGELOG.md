@@ -34,6 +34,12 @@ commit-level history for each release is on its
 
 ### Added
 
+- Add the restore verification API and node-agent enforcement. With the policy
+  enabled, restore waits for the Operator to record and approve the canary.
+  Upgrade all node agents before enabling verification; older agents do not
+  enforce this policy. The verification controller is required to complete it.
+  See [Restore verification](docs/reference/api.md#restore-verification).
+
 - Node cache: with `storage.nodeCache.enabled`, a restore reads a checkpoint
   copy from a directory on its node's local disk, and reads the snapshot store
   when the node holds none. An administrator places and removes the copies.

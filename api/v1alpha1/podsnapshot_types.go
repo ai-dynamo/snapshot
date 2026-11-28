@@ -26,8 +26,9 @@ import (
 // PodSnapshot and PodSnapshotContent status condition types. Both objects share this
 // vocabulary; the operator and node agent set them via meta.SetStatusCondition.
 const (
-	// PodSnapshotConditionReady is True when the checkpoint and binding completed and
-	// the snapshot is usable for restore.
+	// PodSnapshotConditionReady is True when the checkpoint and binding completed.
+	// When restore verification is enabled, consumers must also wait for Completed
+	// and a matching successful restoreVerifyInfo before general reuse.
 	PodSnapshotConditionReady = "Ready"
 	// PodSnapshotConditionFailed is True when the checkpoint or binding failed terminally.
 	PodSnapshotConditionFailed = "Failed"
@@ -46,6 +47,12 @@ func IsPodSnapshotFailed(s *PodSnapshot) bool {
 // PodSnapshotSpec defines the desired state of PodSnapshot.
 // +kubebuilder:validation:XValidation:rule="!has(self.containers) || self.containers.all(c, c.name in self.source.podRef.containers)",message="containers must name containers in source.podRef.containers"
 type PodSnapshotSpec struct {
+	// RestoreVerification requires one caller-provided restore Pod to pass
+	// application readiness and an observation window before other Pods restore.
+	// Omission preserves restores without canary verification.
+	// +optional
+	RestoreVerification *RestoreVerificationPolicy `json:"restoreVerification,omitempty"`
+
 	// Source identifies the checkpointed workload. It is a struct (rather than an
 	// inlined reference) so future source variants can be added additively.
 	// +kubebuilder:validation:Required
@@ -109,6 +116,22 @@ type PodReference struct {
 
 // PodSnapshotStatus defines the observed state of PodSnapshot.
 type PodSnapshotStatus struct {
+	// Phase reports checkpoint progress and optional restore verification.
+	// Ready and Failed continue to describe checkpoint and binding results.
+	// +optional
+	Phase PodSnapshotPhase `json:"phase,omitempty"`
+
+	// RestoreVerifyInfo records the observed result for this artifact and policy.
+	// A successful record survives deletion of the verification Pod.
+	// +optional
+	RestoreVerifyInfo *RestoreVerificationInfo `json:"restoreVerifyInfo,omitempty"`
+
+	// CompletedSnapshotJobUID records successful completion of required producer
+	// work before the SnapshotJob reports Completed. Verification can then start
+	// even if that job is cleaned up before this controller observes completion.
+	// +optional
+	CompletedSnapshotJobUID types.UID `json:"completedSnapshotJobUID,omitempty"`
+
 	// BoundPodSnapshotContentName is the name of the cluster-scoped PodSnapshotContent
 	// this PodSnapshot is bound to. It is nil until the agent has created the
 	// content and recorded the binding.
@@ -126,6 +149,7 @@ type PodSnapshotStatus struct {
 // +kubebuilder:resource:scope=Namespaced,shortName=podsnap
 // +kubebuilder:printcolumn:name="Content",type="string",JSONPath=".status.boundSnapshotContentName",description="Bound PodSnapshotContent"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status",description="Ready condition"
+// +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase",description="Checkpoint and verification phase"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // PodSnapshot is the Schema for the snapshots API. It is the namespaced binding

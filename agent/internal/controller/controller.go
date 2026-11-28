@@ -620,11 +620,24 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 // preflightRestore validates the restore Pod, its referenced PodSnapshot and
 // bound PodSnapshotContent, and the node-local artifact. Restore execution is
 // entered only when this method returns a complete artifact.
-func (w *NodeController) preflightRestore(ctx context.Context, pod *corev1.Pod) (*restorePlan, error) {
+func (w *NodeController) preflightRestore(ctx context.Context, pod *corev1.Pod) (_ *restorePlan, resultErr error) {
 	snapshot, err := w.getPodSnapshotFromPod(ctx, pod)
 	if err != nil {
 		return nil, err
 	}
+	// A terminal preflight rejection during verification must also release the
+	// waiting proxy. Otherwise the canary is marked handled without ever starting
+	// the executor that normally writes its failure sentinel.
+	defer func() {
+		if snapshot.Spec.RestoreVerification == nil || snapshot.Status.Phase == snapshotv1alpha1.PodSnapshotPhaseCompleted || resultErr == nil {
+			return
+		}
+		var pending *restorePendingError
+		var verificationFailed *restoreVerificationError
+		if !errors.As(resultErr, &pending) && !errors.As(resultErr, &verificationFailed) {
+			resultErr = verificationError("restore verification preflight failed: %v", resultErr)
+		}
+	}()
 	if err := validatePodSnapshotForRestore(snapshot); err != nil {
 		return nil, err
 	}
@@ -633,6 +646,9 @@ func (w *NodeController) preflightRestore(ctx context.Context, pod *corev1.Pod) 
 		return nil, err
 	}
 	if err := validatePodSnapshotContentForRestore(content); err != nil {
+		return nil, err
+	}
+	if err := validateRestoreVerification(snapshot, content, pod, w.nowFn()); err != nil {
 		return nil, err
 	}
 	target, mappings, err := validateRestoreTarget(pod, snapshot, content)
@@ -1542,6 +1558,10 @@ func (w *NodeController) failRestorePod(ctx context.Context, pod *corev1.Pod, ca
 }
 
 func (w *NodeController) handleRestorePreflightError(ctx context.Context, pod *corev1.Pod, cause error) bool {
+	var verificationFailed *restoreVerificationError
+	if errors.As(cause, &verificationFailed) {
+		return w.failRestoreVerification(ctx, pod, cause)
+	}
 	var incompatible *compat.IncompatibleError
 	if errors.As(cause, &incompatible) {
 		return w.refuseRestore(ctx, pod, incompatible)

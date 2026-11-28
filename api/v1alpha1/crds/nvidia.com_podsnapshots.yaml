@@ -25,6 +25,10 @@ spec:
       jsonPath: .status.conditions[?(@.type=='Ready')].status
       name: Ready
       type: string
+    - description: Checkpoint and verification phase
+      jsonPath: .status.phase
+      name: Phase
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -277,6 +281,58 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
+              restoreVerification:
+                description: |-
+                  RestoreVerification requires one caller-provided restore Pod to pass
+                  application readiness and an observation window before other Pods restore.
+                  Omission preserves restores without canary verification.
+                properties:
+                  observationWindowSeconds:
+                    description: |-
+                      ObservationWindowSeconds requires continuous readiness after restore.
+                      Zero skips the timed window, but still requires restore and readiness.
+                    format: int32
+                    maximum: 86400
+                    minimum: 0
+                    type: integer
+                  podRef:
+                    description: |-
+                      RestoreVerificationPodReference pins a caller-created Pod in the snapshot's
+                      namespace. Create that Pod first, referencing the intended snapshot name.
+                    properties:
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      uid:
+                        description: |-
+                          UID is a type that holds unique ID values, including UUIDs.  Because we
+                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                          intent and helps make sure that UIDs and names do not get conflated.
+                        maxLength: 128
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    - uid
+                    type: object
+                  timeoutSeconds:
+                    description: |-
+                      TimeoutSeconds bounds verification, including waiting for the Pod and
+                      its destination containers. The clock starts after checkpoint and required
+                      SnapshotJob auxiliary work complete, and survives controller restarts.
+                    format: int32
+                    maximum: 86400
+                    minimum: 1
+                    type: integer
+                required:
+                - observationWindowSeconds
+                - podRef
+                - timeoutSeconds
+                type: object
+                x-kubernetes-validations:
+                - message: timeoutSeconds must exceed observationWindowSeconds
+                  rule: self.timeoutSeconds > self.observationWindowSeconds
               source:
                 description: |-
                   Source identifies the checkpointed workload. It is a struct (rather than an
@@ -337,6 +393,12 @@ spec:
                   this PodSnapshot is bound to. It is nil until the agent has created the
                   content and recorded the binding.
                 type: string
+              completedSnapshotJobUID:
+                description: |-
+                  CompletedSnapshotJobUID records successful completion of required producer
+                  work before the SnapshotJob reports Completed. Verification can then start
+                  even if that job is cleaned up before this controller observes completion.
+                type: string
               conditions:
                 description: |-
                   Conditions reflect the latest observations of the PodSnapshot's state.
@@ -396,6 +458,109 @@ spec:
                   - type
                   type: object
                 type: array
+              phase:
+                description: |-
+                  Phase reports checkpoint progress and optional restore verification.
+                  Ready and Failed continue to describe checkpoint and binding results.
+                enum:
+                - Pending
+                - Checkpointing
+                - CheckpointSucceeded
+                - RestoreVerifying
+                - Completed
+                - Failed
+                - VerificationFailed
+                type: string
+              restoreVerifyInfo:
+                description: |-
+                  RestoreVerifyInfo records the observed result for this artifact and policy.
+                  A successful record survives deletion of the verification Pod.
+                properties:
+                  completedAt:
+                    format: date-time
+                    type: string
+                  containers:
+                    items:
+                      description: |-
+                        RestoreVerificationContainer identifies the runtime execution approved to
+                        restore. A replacement execution cannot inherit its predecessor's result.
+                      properties:
+                        containerID:
+                          type: string
+                        name:
+                          type: string
+                        restartCount:
+                          format: int32
+                          type: integer
+                      required:
+                      - containerID
+                      - name
+                      - restartCount
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  contentUID:
+                    description: |-
+                      UID is a type that holds unique ID values, including UUIDs.  Because we
+                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                      intent and helps make sure that UIDs and names do not get conflated.
+                    type: string
+                  deadlineAt:
+                    format: date-time
+                    type: string
+                  healthySince:
+                    description: HealthySince is reset when readiness is lost during
+                      the window.
+                    format: date-time
+                    type: string
+                  message:
+                    type: string
+                  outcome:
+                    description: RestoreVerificationOutcome is the persisted canary
+                      outcome.
+                    enum:
+                    - InProgress
+                    - Succeeded
+                    - Failed
+                    type: string
+                  podRef:
+                    description: |-
+                      RestoreVerificationPodReference pins a caller-created Pod in the snapshot's
+                      namespace. Create that Pod first, referencing the intended snapshot name.
+                    properties:
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      uid:
+                        description: |-
+                          UID is a type that holds unique ID values, including UUIDs.  Because we
+                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                          intent and helps make sure that UIDs and names do not get conflated.
+                        maxLength: 128
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    - uid
+                    type: object
+                  policyHash:
+                    type: string
+                  reason:
+                    type: string
+                  startedAt:
+                    format: date-time
+                    type: string
+                required:
+                - contentUID
+                - deadlineAt
+                - outcome
+                - podRef
+                - policyHash
+                - startedAt
+                type: object
             type: object
         required:
         - spec
