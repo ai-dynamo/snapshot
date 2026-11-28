@@ -331,6 +331,42 @@ func TestReconcileCapture_PromotesPodAndCaptures(t *testing.T) {
 	))
 }
 
+func TestReconcileCapturePersistsStartBeforeCheckpoint(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	pod := makeSourcePod()
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
+	started := time.Now().UTC().Truncate(time.Second)
+	w.nowFn = func() time.Time { return started }
+	w.checkpointFn = func(ctx context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		live := getContent(t, w, content.Name)
+		require.NotNil(t, live.Status.CheckpointStartedAt, "start must be durable before the source can be suspended")
+		require.True(t, live.Status.CheckpointStartedAt.Time.Equal(started))
+		return fc.fn(ctx, params)
+	}
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
+	require.True(t, fc.wasCalled())
+	live := getContent(t, w, content.Name)
+	w.nowFn = func() time.Time { return started.Add(time.Minute) }
+	require.NoError(t, w.recordCheckpointStarted(context.Background(), live))
+	require.True(t, getContent(t, w, content.Name).Status.CheckpointStartedAt.Time.Equal(started))
+}
+
+func TestReconcileCaptureDoesNotStartWhenStartCannotBePersisted(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	pod := makeSourcePod()
+	fc := &fakeCheckpointer{}
+	w := makeNodeControllerWithInterceptor(t, fc, interceptor.Funcs{
+		SubResourcePatch: func(context.Context, client.Client, string, client.Object, client.Patch, ...client.SubResourcePatchOption) error {
+			return errors.New("API unavailable")
+		},
+	}, content, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
+	require.ErrorContains(t, w.reconcileCapture(context.Background(), content.Name), "record checkpoint start")
+	require.False(t, fc.wasCalled(), "status failure must not suspend the source")
+}
+
 func TestReconcileCapture_DeletingContentDoesNotLabelPod(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	now := metav1.Now()

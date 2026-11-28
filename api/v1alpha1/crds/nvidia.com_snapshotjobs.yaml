@@ -354,6 +354,55 @@ spec:
                     - message: metadata.annotations keys must be valid Kubernetes
                         qualified names
                       rule: '!has(self.annotations) || self.annotations.all(k, !format.qualifiedName().validate(k).hasValue())'
+                  restoreVerification:
+                    description: RestoreVerification is copied to the produced PodSnapshot.
+                    properties:
+                      observationWindowSeconds:
+                        description: |-
+                          ObservationWindowSeconds requires continuous readiness after restore.
+                          Zero skips the timed window, but still requires restore and readiness.
+                        format: int32
+                        maximum: 86400
+                        minimum: 0
+                        type: integer
+                      podRef:
+                        description: |-
+                          RestoreVerificationPodReference pins a caller-created Pod in the snapshot's
+                          namespace. Create that Pod first, referencing the intended snapshot name.
+                        properties:
+                          name:
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          uid:
+                            description: |-
+                              UID is a type that holds unique ID values, including UUIDs.  Because we
+                              don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                              intent and helps make sure that UIDs and names do not get conflated.
+                            maxLength: 128
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        - uid
+                        type: object
+                      timeoutSeconds:
+                        description: |-
+                          TimeoutSeconds bounds verification, including waiting for the Pod and
+                          its destination containers. The clock starts after checkpoint and required
+                          SnapshotJob auxiliary work complete, and survives controller restarts.
+                        format: int32
+                        maximum: 86400
+                        minimum: 1
+                        type: integer
+                    required:
+                    - observationWindowSeconds
+                    - podRef
+                    - timeoutSeconds
+                    type: object
+                    x-kubernetes-validations:
+                    - message: timeoutSeconds must exceed observationWindowSeconds
+                      rule: self.timeoutSeconds > self.observationWindowSeconds
                   targetContainers:
                     default:
                     - main

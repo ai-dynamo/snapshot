@@ -93,6 +93,11 @@ type PodSnapshotContentSource struct {
 
 // PodSnapshotContentStatus defines the observed state of PodSnapshotContent.
 type PodSnapshotContentStatus struct {
+	// CheckpointStartedAt is recorded before the first checkpoint attempt.
+	// It is preserved across retries and node-agent restarts.
+	// +optional
+	CheckpointStartedAt *metav1.Time `json:"checkpointStartedAt,omitempty"`
+
 	// Conditions reflect the latest observations of the PodSnapshotContent's state.
 	// Standard types are Ready and Failed.
 	// +optional
