@@ -309,9 +309,12 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
      the number reached Helm. The message therefore sends an installed release
      to the value in use, which the operator writes at each start into the
      ConfigMap that PageBroker reads; quoting the number as written could name
-     another store. No message prints the endpoint, or a bucket or prefix that
-     is a list or a map: a URL can hold a credential, and this text goes to
-     terminals, CI logs and the status of GitOps controllers. */}}
+     another store. No message prints the endpoint, a prefix that is a string,
+     or a bucket or prefix that is a list or a map: a URL can hold a
+     credential, any text set by mistake can hold one, and this text goes to
+     terminals, CI logs and the status of GitOps controllers. The message for
+     a prefix says what to remove instead. Only a number or a boolean that Helm
+     read in place of a string is printed. */}}
 {{- define "snapshot.validateS3Store" -}}
 {{- $s3 := .Values.storage.s3 -}}
 {{- range $name := list "bucket" "prefix" -}}
@@ -334,12 +337,25 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 {{- if and $endpoint (not (regexMatch "^[hH][tT][tT][pP][sS]?://[^/?#@:][^/?#@]*[?]?#?$" $endpoint)) -}}
 {{- fail "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential" -}}
 {{- end -}}
-{{- $prefix := $s3.prefix | default "" -}}
+{{- $prefix := $s3.prefix -}}
+{{- if kindIs "string" $prefix -}}
+{{- $remedy := "" -}}
 {{- if hasPrefix "/" $prefix -}}
-{{- fail (printf "storage.s3.prefix must be a relative key prefix, but Helm read it as %q: remove the leading slash" $prefix) -}}
+{{- $remedy = "remove the leading slash" -}}
+{{- else if contains "\\" $prefix -}}
+{{- $remedy = "remove the backslash" -}}
+{{- else if has ".." (splitList "/" $prefix) -}}
+{{- $remedy = "remove the \"..\" component" -}}
+{{- else if regexMatch "\\p{Cc}" $prefix -}}
+{{- $remedy = "remove the control character, such as a line break or a tab" -}}
+{{- else if ne (trim $prefix) $prefix -}}
+{{- $remedy = "remove the space at its start or end" -}}
+{{- else if gt (len $prefix) 1024 -}}
+{{- $remedy = "shorten it" -}}
 {{- end -}}
-{{- if or (contains "\\" $prefix) (has ".." (splitList "/" $prefix)) (ne (trim $prefix) $prefix) (regexMatch "\\p{Cc}" $prefix) (gt (len $prefix) 1024) -}}
-{{- fail (printf "storage.s3.prefix must be a relative key prefix of at most 1024 bytes, with no backslash, control character, \"..\" component or surrounding space, but Helm read it as %q: remove what is not allowed" $prefix) -}}
+{{- if $remedy -}}
+{{- fail (printf "storage.s3.prefix must be a relative key prefix of at most 1024 bytes, with no backslash, control character, \"..\" component or surrounding space, as in snapshots/prod: %s. The value is not shown, because a text set here by mistake can hold a credential" $remedy) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 

@@ -68,7 +68,7 @@ The chart refuses these S3 values, and the error names the value:
 - An endpoint with a path, a query, a fragment, or a user name, or without
   `http://` or `https://`. A trailing slash is a path. The error does not show
   the endpoint.
-- A prefix with a leading slash.
+- A prefix with a leading slash. The error does not show the prefix.
 - A bucket or prefix that is not a string. Helm reads an unquoted value that
   contains only digits, such as `20261127`, as a number. For a new
   installation, put such a value in quotes in a values file:

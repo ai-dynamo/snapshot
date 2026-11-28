@@ -112,26 +112,103 @@ tests:
           path: data["storage.yaml"]
           pattern: 'endpoint: "HTTPS://S3.Example.com:9000"'
 
+  # The prefix tests match the whole message too. It says what to remove and
+  # repeats no part of the prefix: a secret that is set as the prefix by
+  # mistake must not reach a terminal, a CI log or the status of a GitOps
+  # controller. The secrets below are placeholders.
   - it: rejects a prefix that starts with a slash
     set:
       storage.s3.prefix: /snapshots/prod
     asserts:
       - failedTemplate:
-          errorPattern: 'storage.s3.prefix must be a relative key prefix, but Helm read it as "/snapshots/prod": remove the leading slash'
+          errorMessage: 'storage.s3.prefix must be a relative key prefix of at most 1024 bytes, with no backslash, control character, ".." component or surrounding space, as in snapshots/prod: remove the leading slash. The value is not shown, because a text set here by mistake can hold a credential'
 
-  - it: rejects a prefix with a parent component
+  - it: rejects a secret with a leading slash as the prefix, and does not print it
     set:
-      storage.s3.prefix: snapshots/../prod
+      storage.s3.prefix: /not-a-real-secret
     asserts:
       - failedTemplate:
-          errorPattern: 'storage.s3.prefix must be a relative key prefix of at most 1024 bytes, .* but Helm read it as "snapshots/../prod"'
+          errorMessage: 'storage.s3.prefix must be a relative key prefix of at most 1024 bytes, with no backslash, control character, ".." component or surrounding space, as in snapshots/prod: remove the leading slash. The value is not shown, because a text set here by mistake can hold a credential'
 
   - it: rejects a prefix with a backslash
     set:
       storage.s3.prefix: snapshots\prod
     asserts:
       - failedTemplate:
-          errorPattern: "storage.s3.prefix must be a relative key prefix of at most 1024 bytes, with no backslash"
+          errorMessage: 'storage.s3.prefix must be a relative key prefix of at most 1024 bytes, with no backslash, control character, ".." component or surrounding space, as in snapshots/prod: remove the backslash. The value is not shown, because a text set here by mistake can hold a credential'
+
+  - it: rejects a prefix with a parent component
+    set:
+      storage.s3.prefix: snapshots/../prod
+    asserts:
+      - failedTemplate:
+          errorMessage: 'storage.s3.prefix must be a relative key prefix of at most 1024 bytes, with no backslash, control character, ".." component or surrounding space, as in snapshots/prod: remove the ".." component. The value is not shown, because a text set here by mistake can hold a credential'
+
+  # A YAML block scalar, or a value read from a file, ends with a line break.
+  - it: rejects a secret with a line break at its end as the prefix, and does not print it
+    set:
+      storage.s3.prefix: |
+        not-a-real-secret
+    asserts:
+      - failedTemplate:
+          errorMessage: 'storage.s3.prefix must be a relative key prefix of at most 1024 bytes, with no backslash, control character, ".." component or surrounding space, as in snapshots/prod: remove the control character, such as a line break or a tab. The value is not shown, because a text set here by mistake can hold a credential'
+
+  - it: rejects a secret with a space at its end as the prefix, and does not print it
+    set:
+      storage.s3.prefix: "not-a-real-secret "
+    asserts:
+      - failedTemplate:
+          errorMessage: 'storage.s3.prefix must be a relative key prefix of at most 1024 bytes, with no backslash, control character, ".." component or surrounding space, as in snapshots/prod: remove the space at its start or end. The value is not shown, because a text set here by mistake can hold a credential'
+
+  # 16 lines of 64 bytes and one more byte. A backslash at the end of a line
+  # joins the lines with nothing between them.
+  - it: rejects a prefix of 1025 bytes
+    set:
+      storage.s3.prefix: "\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        x"
+    asserts:
+      - failedTemplate:
+          errorMessage: 'storage.s3.prefix must be a relative key prefix of at most 1024 bytes, with no backslash, control character, ".." component or surrounding space, as in snapshots/prod: shorten it. The value is not shown, because a text set here by mistake can hold a credential'
+
+  - it: renders a prefix of 1024 bytes
+    set:
+      storage.s3.prefix: "\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789"
+    asserts:
+      - matchRegex:
+          path: data["storage.yaml"]
+          pattern: 'prefix: "(snapshots/0123456789/0123456789/0123456789/0123456789/0123456789){16}"'
 
   # The operator removes a trailing slash and a doubled slash by itself.
   - it: renders a prefix that the operator normalizes
