@@ -32,6 +32,7 @@ The namespaced binding for one container's snapshot; consumed by restore.
 | `source.podRef.uid`        | string   | no       | UID of the source pod, so the agent dumps that exact pod and not a same-named recreation.                           |
 | `source.podRef.containers` | []string | yes      | Container(s) to checkpoint. Exactly one in `v1alpha1`; each must be a DNS label.                                    |
 | `checkpointRetryLimit`     | int32    | no       | Times a failed checkpoint may be retried, over and above the first attempt, to a maximum of 10. Unset defers to `config.checkpoint.defaultRetryLimit`; an explicit `0` asks for no retry and is not the same as unset. |
+| `restoreVerification` | RestoreVerificationPolicy | no | Require one caller-provided Pod to pass restore verification before general reuse. Omission disables verification. See [Restore verification](#restore-verification). |
 | `containers`               | []ContainerSnapshotConfig | no       | Settings for a checkpointed container, by `name`. At most one entry. See [Container settings](#container-settings). |
 
 `status`:
@@ -39,7 +40,44 @@ The namespaced binding for one container's snapshot; consumed by restore.
 | Field                      | Type        | Description                                                                                                              |
 |----------------------------|-------------|--------------------------------------------------------------------------------------------------------------------------|
 | `boundSnapshotContentName` | string      | Name of the bound cluster-scoped `PodSnapshotContent`; unset until the agent binds it.                                   |
-| `conditions`               | []Condition | `Ready` (checkpoint and binding complete, snapshot usable for restore) and `Failed` (checkpoint or binding failed terminally). |
+| `conditions`               | []Condition | `Ready` (checkpoint and binding complete) and `Failed` (checkpoint or binding failed terminally). Verification-enabled restores also require approval. |
+| `phase` | string | Lifecycle stage, listed below. The Operator owns transitions. |
+| `restoreVerifyInfo` | RestoreVerificationInfo | Observed canary result, retained after the canary Pod is deleted. |
+
+#### Restore verification
+
+| Policy field | Type | Required | Description |
+|---|---|---|---|
+| `podRef.name` | string | yes | Existing restore Pod in the snapshot namespace. |
+| `podRef.uid` | string | yes | UID of that exact Pod. Create it before the immutable snapshot spec. |
+| `observationWindowSeconds` | int32 | yes | Continuous application readiness after restore, from 0 to 86400 seconds. Zero still requires actual restore and an application readiness probe. |
+| `timeoutSeconds` | int32 | yes | Total verification time, from 1 to 86400 seconds and greater than the observation window. Starts after checkpoint and required SnapshotJob work complete. |
+
+`SnapshotJob.spec.podSnapshotTemplate.restoreVerification` accepts the same
+policy and copies it to the produced `PodSnapshot`.
+
+| Phase | Meaning |
+|---|---|
+| `Pending` | Wait for binding, source scheduling, and checkpoint readiness. |
+| `Checkpointing` | Checkpoint started; retries remain in this phase. |
+| `CheckpointSucceeded` | Content is Ready; wait for required SnapshotJob work. |
+| `RestoreVerifying` | Only the recorded verification Pod may restore. |
+| `Completed` | Required work finished; verification passed if enabled. |
+| `Failed` | Binding, checkpoint, or required SnapshotJob work failed. |
+| `VerificationFailed` | Canary restore, application check, execution identity, or timeout failed. |
+
+`restoreVerifyInfo` records `contentUID`, `policyHash`, `podRef`, destination
+`containers` (name, container ID, restart count), `startedAt`, `deadlineAt`,
+`healthySince`, `completedAt`, `outcome`, `reason`, and `message`. The outcome
+is `InProgress`, `Succeeded`, or `Failed`.
+
+With verification enabled, general reuse requires Ready, `phase=Completed`,
+and a successful record for the current Content UID and policy. Ready alone
+is insufficient. With verification disabled, Completed has no verification
+record. Verification failure does not change the checkpoint conditions.
+Terminal phases do not start another checkpoint; create a new snapshot to
+retry. Later consumer failures do not invalidate a completed verification.
+See [Verify a Restore Before Reuse](../operate/verify-restore.md).
 
 ### PodSnapshotContent
 
@@ -67,6 +105,7 @@ when it binds a `PodSnapshot`; callers never create it.
 | `source`                                        | CheckpointSource             | Where the snapshot was taken, written with `Ready`. Informational only: the restore compatibility gates compare the snapshot's manifest, not this block. Every field below is optional and absent when the value could not be read. |
 | `source.node.name`                              | string                       | Node the source pod ran on.                                                                                                                                                                                                                |
 | `source.node.architecture`                      | string                       | Node CPU architecture, as `GOARCH` spells it.                                                                                                                                                                                              |
+| `checkpointStartedAt` | time | First checkpoint start, persisted by the node agent before it suspends the source. Retries keep this time. |
 | `source.node.kernelVersion`                     | string                       | Node kernel release.                                                                                                                                                                                                                       |
 | `source.node.cpuFeatures`                       | []string                     | Instruction-set flags from the node's `/proc/cpuinfo` that every processor reported, such as `avx512f` on x86_64 or `sve2` on arm64, sorted.                                                                                               |
 | `source.pod.image`                              | string                       | Container image reference the checkpoint ran.                                                                                                                                                                                                 |

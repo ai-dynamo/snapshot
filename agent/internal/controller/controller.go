@@ -635,6 +635,9 @@ func (w *NodeController) preflightRestore(ctx context.Context, pod *corev1.Pod) 
 	if err := validatePodSnapshotContentForRestore(content); err != nil {
 		return nil, err
 	}
+	if err := validateRestoreVerification(snapshot, content, pod, w.nowFn()); err != nil {
+		return nil, err
+	}
 	target, mappings, err := validateRestoreTarget(pod, snapshot, content)
 	if err != nil {
 		return nil, err
@@ -1542,6 +1545,10 @@ func (w *NodeController) failRestorePod(ctx context.Context, pod *corev1.Pod, ca
 }
 
 func (w *NodeController) handleRestorePreflightError(ctx context.Context, pod *corev1.Pod, cause error) bool {
+	var verificationFailed *restoreVerificationError
+	if errors.As(cause, &verificationFailed) {
+		return w.failRestoreVerification(ctx, pod, cause)
+	}
 	var incompatible *compat.IncompatibleError
 	if errors.As(cause, &incompatible) {
 		return w.refuseRestore(ctx, pod, incompatible)

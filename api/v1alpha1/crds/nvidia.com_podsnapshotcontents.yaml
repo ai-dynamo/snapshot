@@ -378,6 +378,12 @@ spec:
           status:
             description: PodSnapshotContentStatus defines the observed state of PodSnapshotContent.
             properties:
+              checkpointStartedAt:
+                description: |-
+                  CheckpointStartedAt is recorded before the first checkpoint attempt.
+                  It is preserved across retries and node-agent restarts.
+                format: date-time
+                type: string
               conditions:
                 description: |-
                   Conditions reflect the latest observations of the PodSnapshotContent's state.

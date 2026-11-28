@@ -8,6 +8,13 @@ SPDX-License-Identifier: Apache-2.0
 A Pod requests restore by naming a ready `PodSnapshot` in its namespace. The
 Snapshot node agent restores only Pods that implement this contract.
 
+When the snapshot enables [restore verification](api.md#restore-verification),
+only its recorded canary may restore until verification completes. The canary
+must have an application readiness probe on each destination container. A
+replacement Pod or container cannot inherit the verification result. Other
+Pods wait; verification failure or timeout signals their restore proxy to
+exit with failure. It does not select a cold-start command.
+
 Go integrations should use:
 
 ```go
