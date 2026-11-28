@@ -89,6 +89,7 @@ def create_podsnapshot(
     container: str = CONTAINER,
     *,
     containers: list[dict[str, Any]] | None = None,
+    restore_verification: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     body = {
         "apiVersion": f"{GROUP}/{VERSION}",
@@ -106,6 +107,8 @@ def create_podsnapshot(
     }
     if containers is not None:
         body["spec"]["containers"] = containers
+    if restore_verification is not None:
+        body["spec"]["restoreVerification"] = restore_verification
     return client.CustomObjectsApi().create_namespaced_custom_object(
         GROUP,
         VERSION,

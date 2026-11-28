@@ -739,6 +739,31 @@ func TestValidatePodSnapshotForAdoptionIgnoresMutableMetadata(t *testing.T) {
 
 // ---- findSourcePod ----
 
+func TestSnapshotJobPreservesVerificationPolicyDuringAdoption(t *testing.T) {
+	sj := minimalSnapshotJob()
+	sj.UID = "sj-uid"
+	sj.Spec.PodSnapshotTemplate.RestoreVerification = &snapshotv1alpha1.RestoreVerificationPolicy{
+		PodRef:                   snapshotv1alpha1.RestoreVerificationPodReference{Name: "canary", UID: "canary-uid"},
+		ObservationWindowSeconds: 30, TimeoutSeconds: 120,
+	}
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	job.UID = "job-uid"
+	pod := sourcePodForJob(job)
+	snap, err := buildPodSnapshot(sj, pod)
+	require.NoError(t, err)
+	require.Equal(t, sj.Spec.PodSnapshotTemplate.RestoreVerification, snap.Spec.RestoreVerification)
+	r := makeSnapshotJobReconciler(snapshotJobReconcilerScheme(), pod)
+	failure, err := r.validatePodSnapshotForAdoption(context.Background(), sj, job, snap)
+	require.NoError(t, err)
+	require.Nil(t, failure)
+	// Matching source and owner labels cannot silently remove the restore gate.
+	snap.Spec.RestoreVerification = nil
+	failure, err = r.validatePodSnapshotForAdoption(context.Background(), sj, job, snap)
+	require.NoError(t, err)
+	require.NotNil(t, failure)
+}
+
 func TestFindSourcePod(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()

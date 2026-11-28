@@ -175,6 +175,10 @@ type SnapshotJobSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-job-uid' in self.metadata.labels)",message="metadata.labels must not set controller-owned label nvidia.com/snapshot-job-uid"
 // +kubebuilder:validation:XValidation:rule="!has(self.containers) || self.containers.all(c, c.name in self.targetContainers)",message="containers must name containers in targetContainers"
 type PodSnapshotTemplate struct {
+	// RestoreVerification is copied to the produced PodSnapshot.
+	// +optional
+	RestoreVerification *RestoreVerificationPolicy `json:"restoreVerification,omitempty"`
+
 	// Metadata contains labels and annotations copied to the generated
 	// PodSnapshot. SnapshotJob ownership labels are reserved for the controller
 	// and cannot be supplied here.

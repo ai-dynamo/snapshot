@@ -217,6 +217,7 @@ func buildPodSnapshot(sj *snapshotv1alpha1.SnapshotJob, pod *corev1.Pod) (*snaps
 				},
 			},
 			CheckpointRetryLimit: sj.Spec.PodSnapshotTemplate.CheckpointRetryLimit,
+			RestoreVerification:  sj.Spec.PodSnapshotTemplate.RestoreVerification.DeepCopy(),
 			Containers:           copyContainerSettings(sj.Spec.PodSnapshotTemplate.Containers),
 		},
 	}, nil
@@ -308,6 +309,10 @@ func validatePodSnapshotOwnership(sj *snapshotv1alpha1.SnapshotJob, snap *snapsh
 }
 
 func podSnapshotHasExpectedIdentity(actual, desired *snapshotv1alpha1.PodSnapshot) bool {
+	if snapshotv1alpha1.RestoreVerificationPolicyHash(actual.Spec.RestoreVerification) !=
+		snapshotv1alpha1.RestoreVerificationPolicyHash(desired.Spec.RestoreVerification) {
+		return false
+	}
 	actualSource := actual.Spec.Source.PodRef
 	desiredSource := desired.Spec.Source.PodRef
 	if actualSource.Name != desiredSource.Name || actualSource.UID != desiredSource.UID ||

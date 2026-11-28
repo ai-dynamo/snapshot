@@ -207,7 +207,25 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	if err := w.checkStagingCapacity(ctx, containerPID); err != nil {
 		return w.setSnapshotContentFailed(ctx, content, reasonImageTooLarge, err)
 	}
+	if err := w.recordCheckpointStarted(ctx, content); err != nil {
+		return err
+	}
 	return w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, cuInterposeRequested, contentUID, artifactPath)
+}
+
+// Persist before suspending the source. A status conflict requeues without
+// starting a checkpoint; retries never reset the original start time.
+func (w *NodeController) recordCheckpointStarted(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent) error {
+	if content.Status.CheckpointStartedAt != nil {
+		return nil
+	}
+	patch := client.MergeFromWithOptions(content.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	now := metav1.NewTime(w.nowFn())
+	content.Status.CheckpointStartedAt = &now
+	if err := w.client.Status().Patch(ctx, content, patch); err != nil {
+		return fmt.Errorf("record checkpoint start: %w", err)
+	}
+	return nil
 }
 
 // recoverCommittedArtifact promotes a legacy capture that committed before this reconcile — the
