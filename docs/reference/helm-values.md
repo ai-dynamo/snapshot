@@ -43,10 +43,10 @@ values, see [values.yaml](../../charts/snapshot/values.yaml).
 | `storage.nodeCache.enabled`               | `false`                   | Restore from a checkpoint copy on the node's local disk when one is there. See [Node Cache](../operate/configure-storage.md#node-cache).                                                                  |
 | `storage.nodeCache.path`                  | `/var/lib/snapshot/cache` | Absolute, normalized path of the directory on the node, and not `/`. The same path is used on every node that runs the agent.                                                                  |
 | `storage.nodeCache.createIfMissing`       | `true`                    | Create the directory, empty, on a node that does not have it. With `false`, the agent Pod does not start on such a node.                                                                                  |
-| `storage.s3.endpoint`                     | `""`                      | Required with `storage.type: s3`. S3-compatible endpoint, an absolute http(s) URL.                                                                                                                        |
+| `storage.s3.endpoint`                     | `""`                      | Required with `storage.type: s3`. S3-compatible endpoint: an `http` or `https` URL with a host and an optional port only, such as `https://s3.example.com`.                                               |
 | `storage.s3.region`                       | `""`                      | Required with `storage.type: s3`. Bucket region.                                                                                                                                                          |
-| `storage.s3.bucket`                       | `""`                      | Required with `storage.type: s3`. Bucket holding the snapshots.                                                                                                                                         |
-| `storage.s3.prefix`                       | `""`                      | Key prefix inside the bucket; empty is the bucket root.                                                                                                                                                   |
+| `storage.s3.bucket`                       | `""`                      | Required with `storage.type: s3`. Bucket holding the snapshots, a string.                                                                                                                                 |
+| `storage.s3.prefix`                       | `""`                      | Relative key prefix inside the bucket, a string with no leading slash; empty is the bucket root.                                                                                                          |
 | `storage.s3.credentialsSecretRef`         | `""`                      | Secret holding a shared-credentials file, mounted into PageBroker and the operator. Empty selects [workload identity](../operate/configure-storage.md#use-workload-identity-for-s3). |
 | `storage.s3.credentialsSecretKey`         | `credentials`             | Key in that Secret holding the credentials file.                                                                                                                                                          |
 | `storage.s3.credentialEndpoint.url`       | `""`                      | `https` URL of an endpoint that exchanges a service-account token for temporary S3 credentials. The endpoint must implement the container-credentials protocol of the S3 clients. Empty disables it. Cannot be combined with `storage.s3.credentialsSecretRef`. See [workload identity](../operate/configure-storage.md#use-workload-identity-for-s3). |
@@ -62,6 +62,19 @@ values, see [values.yaml](../../charts/snapshot/values.yaml).
 | `pageBroker.transferEngine.modelStreamer` | `{}`                      | Tuning for the engine that reads S3 restores, written as given; keys are in [Model Streamer configuration](../../agent/pagebroker/MODEL_STREAMER.md).                                                |
 | `pageBroker.transferEngine.modelStreamer.restoreBatchBytes` | `10000000000`             | S3 restore batch and shared admission budget in bytes; an oversized file runs alone. Does not cap total staging memory. |
 | `pageBroker.transferEngine.modelStreamer.restorePreparationSlots` | `3`                       | Retained batches per S3 restore, including preparation in progress; 1–20. Does not increase native download admission limits. |
+
+The chart refuses these S3 values, and the error names the value:
+
+- An endpoint with a path, a query, a fragment, or a user name, or without
+  `http://` or `https://`. A trailing slash is a path. The error does not show
+  the endpoint.
+- A prefix with a leading slash. The error does not show the prefix.
+- A bucket or prefix that is not a string. Helm reads an unquoted value that
+  contains only digits, such as `20261127`, as a number. For a new
+  installation, put such a value in quotes in a values file:
+  `prefix: "20261127"`. On the command line, use `--set-string` instead of
+  `--set`. For a release that already uses the S3 store, see
+  [Keep the Store of a Numeric Bucket or Prefix](../operate/configure-storage.md#keep-the-store-of-a-numeric-bucket-or-prefix).
 
 ## S3 Transfer Limits
 

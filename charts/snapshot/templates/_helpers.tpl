@@ -299,10 +299,71 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
           audience: {{ .Values.storage.s3.credentialEndpoint.tokenAudience | quote }}
 {{- end -}}
 
-{{/* Fails the render on S3 settings PageBroker would refuse at startup. */}}
+{{/* Fails the render on S3 store settings the operator refuses at startup
+     (api/storage.S3), after helm install has reported success. The checks
+     follow that code and refuse nothing it accepts; the operator enforces the
+     rest. A bucket or prefix that Helm read as a number fails too: 0123 in a
+     values file arrives as 83, a long number is printed with an exponent, and
+     a prefix changed that way names another store. A release that is
+     installed can already run with such a text, and the text depends on how
+     the number reached Helm. The message therefore sends an installed release
+     to the value in use, which the operator writes at each start into the
+     ConfigMap that PageBroker reads; quoting the number as written could name
+     another store. No message prints the endpoint, a prefix that is a string,
+     or a bucket or prefix that is a list or a map: a URL can hold a
+     credential, any text set by mistake can hold one, and this text goes to
+     terminals, CI logs and the status of GitOps controllers. The message for
+     a prefix says what to remove instead. Only a number or a boolean that Helm
+     read in place of a string is printed. */}}
+{{- define "snapshot.validateS3Store" -}}
+{{- $s3 := .Values.storage.s3 -}}
+{{- range $name := list "bucket" "prefix" -}}
+{{- $value := index $s3 $name -}}
+{{- if not (or (kindIs "string" $value) (kindIs "invalid" $value)) -}}
+{{- $read := "a list or a map" -}}
+{{- if or (kindIs "float64" $value) (kindIs "int64" $value) -}}
+{{- $read = printf "the number %s" (toJson $value) -}}
+{{- else if kindIs "bool" $value -}}
+{{- $read = toJson $value -}}
+{{- end -}}
+{{- $inUse := printf "Read it from %q in key pagebroker-s3-config.json of ConfigMap %s" $name (include "snapshot.pageBrokerS3ConfigName" $) -}}
+{{- if eq $name "prefix" -}}
+{{- $inUse = printf "%s (no \"prefix\" there: set \"\")" $inUse -}}
+{{- end -}}
+{{- fail (printf "storage.s3.%s must be a string, but Helm read it as %s: if this release already uses the S3 store, set the %s that the operator uses now, which can differ from the value you wrote. %s. For a new installation, set the %s you want. Quote the value in a values file, or pass it with --set-string" $name $read $name $inUse $name) -}}
+{{- end -}}
+{{- end -}}
+{{- $endpoint := $s3.endpoint | default "" | toString -}}
+{{- if and $endpoint (not (regexMatch "^[hH][tT][tT][pP][sS]?://[^/?#@:][^/?#@]*[?]?#?$" $endpoint)) -}}
+{{- fail "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential" -}}
+{{- end -}}
+{{- $prefix := $s3.prefix -}}
+{{- if kindIs "string" $prefix -}}
+{{- $remedy := "" -}}
+{{- if hasPrefix "/" $prefix -}}
+{{- $remedy = "remove the leading slash" -}}
+{{- else if contains "\\" $prefix -}}
+{{- $remedy = "remove the backslash" -}}
+{{- else if has ".." (splitList "/" $prefix) -}}
+{{- $remedy = "remove the \"..\" component" -}}
+{{- else if regexMatch "\\p{Cc}" $prefix -}}
+{{- $remedy = "remove the control character, such as a line break or a tab" -}}
+{{- else if ne (trim $prefix) $prefix -}}
+{{- $remedy = "remove the space at its start or end" -}}
+{{- else if gt (len $prefix) 1024 -}}
+{{- $remedy = "shorten it" -}}
+{{- end -}}
+{{- if $remedy -}}
+{{- fail (printf "storage.s3.prefix must be a relative key prefix of at most 1024 bytes, with no backslash, control character, \"..\" component or surrounding space, as in snapshots/prod: %s. The value is not shown, because a text set here by mistake can hold a credential" $remedy) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Fails the render on S3 settings PageBroker or the operator would refuse at startup. */}}
 {{- define "snapshot.validateS3Settings" -}}
 {{- if eq .Values.storage.type "s3" -}}
 {{- $s3 := .Values.storage.s3 -}}
+{{- include "snapshot.validateS3Store" . -}}
 {{- if $s3.credentialEndpoint.url -}}
 {{- if $s3.credentialsSecretRef -}}
 {{- fail "storage.s3.credentialEndpoint.url and storage.s3.credentialsSecretRef are two credential sources; set one" -}}

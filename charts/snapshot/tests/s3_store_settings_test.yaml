@@ -1,0 +1,316 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The operator refuses these store settings at startup (api/storage.S3), after
+# helm install has reported success. The chart refuses them at render time.
+suite: S3 store settings the operator refuses
+templates:
+  - templates/configmap.yaml
+set:
+  storage.type: s3
+  storage.s3.endpoint: https://s3.example.com
+  storage.s3.region: us-east-1
+  storage.s3.bucket: snapshot-bucket
+  operator.bindNewContents: true
+tests:
+  # The endpoint tests match the whole message. It is the same for every
+  # endpoint, so it cannot hold a part of one.
+  - it: rejects an endpoint with a trailing slash
+    set:
+      storage.s3.endpoint: https://s3.example.com/
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
+
+  - it: rejects an endpoint with a path
+    set:
+      storage.s3.endpoint: https://s3.example.com/snapshots
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
+
+  - it: rejects an endpoint without a scheme
+    set:
+      storage.s3.endpoint: s3.example.com
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
+
+  # The message goes to terminals, CI logs and the status of GitOps
+  # controllers, so it repeats no part of an endpoint. The credentials below
+  # are placeholders in the places where a URL can hold one.
+  - it: rejects an endpoint with a user name and a password, and does not print them
+    set:
+      storage.s3.endpoint: https://backup:not-a-real-password@s3.example.com
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
+
+  - it: rejects an endpoint whose password has a slash, and does not print it
+    set:
+      storage.s3.endpoint: https://backup:not/a/real/password@s3.example.com
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
+
+  - it: rejects an endpoint whose password has a question mark and a hash, and does not print it
+    set:
+      storage.s3.endpoint: https://backup:not?a#real-password@s3.example.com
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
+
+  - it: rejects an endpoint with one slash after the scheme, and does not print its password
+    set:
+      storage.s3.endpoint: https:/backup:not-a-real-password@s3.example.com
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
+
+  - it: rejects an endpoint after a line break, and does not print its password
+    set:
+      storage.s3.endpoint: "\nhttps://backup:not-a-real-password@s3.example.com"
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
+
+  - it: rejects a presigned URL as the endpoint, and does not print its signature
+    set:
+      storage.s3.endpoint: https://s3.example.com/snapshot-bucket/key?X-Amz-Credential=not-a-real-key&X-Amz-Signature=not-a-real-signature
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
+
+  - it: rejects an endpoint with a query on the host, and does not print it
+    set:
+      storage.s3.endpoint: https://s3.example.com?secret_key=not-a-real-secret
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
+
+  - it: rejects an endpoint with a fragment, and does not print it
+    set:
+      storage.s3.endpoint: https://s3.example.com#access_token=not-a-real-token
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
+
+  - it: rejects an endpoint that is a list, and does not print its content
+    set:
+      storage.s3.endpoint:
+        - https://backup:not-a-real-password@s3.example.com
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.s3.endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo, as in https://s3.example.com: keep only the scheme, the host and an optional port. A trailing slash is a path. The value is not shown, because a URL can hold a credential"
+
+  # The operator lowercases the scheme and the host and accepts a port.
+  - it: renders an endpoint with an uppercase scheme and a port
+    set:
+      storage.s3.endpoint: HTTPS://S3.Example.com:9000
+    asserts:
+      - matchRegex:
+          path: data["storage.yaml"]
+          pattern: 'endpoint: "HTTPS://S3.Example.com:9000"'
+
+  # The prefix tests match the whole message too. It says what to remove and
+  # repeats no part of the prefix: a secret that is set as the prefix by
+  # mistake must not reach a terminal, a CI log or the status of a GitOps
+  # controller. The secrets below are placeholders.
+  - it: rejects a prefix that starts with a slash
+    set:
+      storage.s3.prefix: /snapshots/prod
+    asserts:
+      - failedTemplate:
+          errorMessage: 'storage.s3.prefix must be a relative key prefix of at most 1024 bytes, with no backslash, control character, ".." component or surrounding space, as in snapshots/prod: remove the leading slash. The value is not shown, because a text set here by mistake can hold a credential'
+
+  - it: rejects a secret with a leading slash as the prefix, and does not print it
+    set:
+      storage.s3.prefix: /not-a-real-secret
+    asserts:
+      - failedTemplate:
+          errorMessage: 'storage.s3.prefix must be a relative key prefix of at most 1024 bytes, with no backslash, control character, ".." component or surrounding space, as in snapshots/prod: remove the leading slash. The value is not shown, because a text set here by mistake can hold a credential'
+
+  - it: rejects a prefix with a backslash
+    set:
+      storage.s3.prefix: snapshots\prod
+    asserts:
+      - failedTemplate:
+          errorMessage: 'storage.s3.prefix must be a relative key prefix of at most 1024 bytes, with no backslash, control character, ".." component or surrounding space, as in snapshots/prod: remove the backslash. The value is not shown, because a text set here by mistake can hold a credential'
+
+  - it: rejects a prefix with a parent component
+    set:
+      storage.s3.prefix: snapshots/../prod
+    asserts:
+      - failedTemplate:
+          errorMessage: 'storage.s3.prefix must be a relative key prefix of at most 1024 bytes, with no backslash, control character, ".." component or surrounding space, as in snapshots/prod: remove the ".." component. The value is not shown, because a text set here by mistake can hold a credential'
+
+  # A YAML block scalar, or a value read from a file, ends with a line break.
+  - it: rejects a secret with a line break at its end as the prefix, and does not print it
+    set:
+      storage.s3.prefix: |
+        not-a-real-secret
+    asserts:
+      - failedTemplate:
+          errorMessage: 'storage.s3.prefix must be a relative key prefix of at most 1024 bytes, with no backslash, control character, ".." component or surrounding space, as in snapshots/prod: remove the control character, such as a line break or a tab. The value is not shown, because a text set here by mistake can hold a credential'
+
+  - it: rejects a secret with a space at its end as the prefix, and does not print it
+    set:
+      storage.s3.prefix: "not-a-real-secret "
+    asserts:
+      - failedTemplate:
+          errorMessage: 'storage.s3.prefix must be a relative key prefix of at most 1024 bytes, with no backslash, control character, ".." component or surrounding space, as in snapshots/prod: remove the space at its start or end. The value is not shown, because a text set here by mistake can hold a credential'
+
+  # 16 lines of 64 bytes and one more byte. A backslash at the end of a line
+  # joins the lines with nothing between them.
+  - it: rejects a prefix of 1025 bytes
+    set:
+      storage.s3.prefix: "\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        x"
+    asserts:
+      - failedTemplate:
+          errorMessage: 'storage.s3.prefix must be a relative key prefix of at most 1024 bytes, with no backslash, control character, ".." component or surrounding space, as in snapshots/prod: shorten it. The value is not shown, because a text set here by mistake can hold a credential'
+
+  - it: renders a prefix of 1024 bytes
+    set:
+      storage.s3.prefix: "\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789\
+        snapshots/0123456789/0123456789/0123456789/0123456789/0123456789"
+    asserts:
+      - matchRegex:
+          path: data["storage.yaml"]
+          pattern: 'prefix: "(snapshots/0123456789/0123456789/0123456789/0123456789/0123456789){16}"'
+
+  # The operator removes a trailing slash and a doubled slash by itself.
+  - it: renders a prefix that the operator normalizes
+    set:
+      storage.s3.prefix: snapshots//prod/
+    asserts:
+      - matchRegex:
+          path: data["storage.yaml"]
+          pattern: 'prefix: "snapshots//prod/"'
+
+  # Helm reads an unquoted value made only of digits as a number. The chart
+  # printed 123456789012 as 1.23456789012e+11, which the operator refuses.
+  # --set gave the digits, so a release can run with them: the message sends
+  # it to the bucket in use.
+  - it: rejects a bucket that Helm read as a number and says where the bucket in use is
+    release:
+      name: snapshot
+    set:
+      storage.s3.bucket: 123456789012
+    asserts:
+      - failedTemplate:
+          errorMessage: 'storage.s3.bucket must be a string, but Helm read it as the number 123456789012: if this release already uses the S3 store, set the bucket that the operator uses now, which can differ from the value you wrote. Read it from "bucket" in key pagebroker-s3-config.json of ConfigMap snapshot-pagebroker-storage-config. For a new installation, set the bucket you want. Quote the value in a values file, or pass it with --set-string'
+
+  # The chart printed 20261127 as 2.0261127e+07 from a values file and as
+  # 20261127 from --set, and the operator accepted both: two stores. Quoting
+  # the digits is right for one of them only, so the message does not say it.
+  - it: rejects a prefix that Helm read as a number and says where the prefix in use is
+    release:
+      name: snapshot
+    set:
+      storage.s3.prefix: 20261127
+    asserts:
+      - failedTemplate:
+          errorMessage: 'storage.s3.prefix must be a string, but Helm read it as the number 20261127: if this release already uses the S3 store, set the prefix that the operator uses now, which can differ from the value you wrote. Read it from "prefix" in key pagebroker-s3-config.json of ConfigMap snapshot-pagebroker-storage-config (no "prefix" there: set ""). For a new installation, set the prefix you want. Quote the value in a values file, or pass it with --set-string'
+
+  - it: names the ConfigMap of the release in the message
+    release:
+      name: acme
+    set:
+      storage.s3.prefix: 20261127
+    asserts:
+      - failedTemplate:
+          errorMessage: 'storage.s3.prefix must be a string, but Helm read it as the number 20261127: if this release already uses the S3 store, set the prefix that the operator uses now, which can differ from the value you wrote. Read it from "prefix" in key pagebroker-s3-config.json of ConfigMap acme-snapshot-pagebroker-storage-config (no "prefix" there: set ""). For a new installation, set the prefix you want. Quote the value in a values file, or pass it with --set-string'
+
+  # A prefix of 0 or false rendered as the empty prefix, the bucket root. The
+  # operator then writes no "prefix" for PageBroker, which the message covers.
+  - it: rejects a prefix that Helm read as false
+    release:
+      name: snapshot
+    set:
+      storage.s3.prefix: false
+    asserts:
+      - failedTemplate:
+          errorMessage: 'storage.s3.prefix must be a string, but Helm read it as false: if this release already uses the S3 store, set the prefix that the operator uses now, which can differ from the value you wrote. Read it from "prefix" in key pagebroker-s3-config.json of ConfigMap snapshot-pagebroker-storage-config (no "prefix" there: set ""). For a new installation, set the prefix you want. Quote the value in a values file, or pass it with --set-string'
+
+  - it: rejects a bucket that is a map and does not print its content
+    release:
+      name: snapshot
+    set:
+      storage.s3.bucket:
+        passphrase: not-a-real-secret
+    asserts:
+      - failedTemplate:
+          errorMessage: 'storage.s3.bucket must be a string, but Helm read it as a list or a map: if this release already uses the S3 store, set the bucket that the operator uses now, which can differ from the value you wrote. Read it from "bucket" in key pagebroker-s3-config.json of ConfigMap snapshot-pagebroker-storage-config. For a new installation, set the bucket you want. Quote the value in a values file, or pass it with --set-string'
+
+  - it: rejects a prefix that is a list and does not print its content
+    release:
+      name: snapshot
+    set:
+      storage.s3.prefix:
+        - https://backup:not-a-real-password@s3.example.com
+    asserts:
+      - failedTemplate:
+          errorMessage: 'storage.s3.prefix must be a string, but Helm read it as a list or a map: if this release already uses the S3 store, set the prefix that the operator uses now, which can differ from the value you wrote. Read it from "prefix" in key pagebroker-s3-config.json of ConfigMap snapshot-pagebroker-storage-config (no "prefix" there: set ""). For a new installation, set the prefix you want. Quote the value in a values file, or pass it with --set-string'
+
+  - it: renders a quoted bucket and prefix made only of digits
+    set:
+      storage.s3.bucket: "123456789012"
+      storage.s3.prefix: "20261127"
+    asserts:
+      - matchRegex:
+          path: data["storage.yaml"]
+          pattern: 'bucket: "123456789012"\s+prefix: "20261127"'
+
+  # The text that a release installed with prefix: 20261127 in a values file
+  # runs with. Given as a string, it renders as before and keeps the store.
+  - it: renders the text of a long number as the chart printed it before
+    set:
+      storage.s3.prefix: "2.0261127e+07"
+    asserts:
+      - matchRegex:
+          path: data["storage.yaml"]
+          pattern: 'prefix: "2.0261127e\+07"'
+
+  - it: leaves the S3 values of a PVC installation alone
+    set:
+      storage.type: pvc
+      operator.bindNewContents: false
+      storage.s3.endpoint: s3.example.com/
+      storage.s3.bucket: 123456789012
+      storage.s3.prefix: /snapshots
+    asserts:
+      - matchRegex:
+          path: data["storage.yaml"]
+          pattern: 'claimName: "snapshot-pvc"'
