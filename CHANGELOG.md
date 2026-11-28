@@ -39,7 +39,7 @@ commit-level history for each release is on its
   fields report the snapshot phase, verification result, and checkpoint start.
   Upgrade all node agents and the Operator before enabling this policy; older
   agents do not enforce it. Existing snapshots keep their restore behavior.
-  See [Restore verification](docs/reference/api.md#restore-verification).
+  See [Verify a Restore Before Reuse](docs/operate/verify-restore.md).
 
 - Node cache: with `storage.nodeCache.enabled`, a restore reads a checkpoint
   copy from a directory on its node's local disk, and reads the snapshot store

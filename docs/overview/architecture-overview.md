@@ -142,6 +142,10 @@ sequenceDiagram
 The same four stages the [benchmarks](performance.md) break
 restore time into:
 
+When optional [restore verification](../operate/verify-restore.md) is enabled,
+the Operator records and checks one caller-provided canary. The node agent
+admits only that canary until the Operator records a successful result.
+
 1. **Agent setup.** The agent's restore queue picks up a pod on its node
    carrying `restore-from`. It preflights the `PodSnapshot`, the bound content
    and the artifact, runs the [Compatibility Gates](#compatibility-gates),

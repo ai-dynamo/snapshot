@@ -78,6 +78,7 @@ is insufficient. With verification disabled, Completed has no verification
 record. Verification failure does not change the checkpoint conditions.
 Terminal phases do not start another checkpoint; create a new snapshot to
 retry. Later consumer failures do not invalidate a completed verification.
+See [Verify a Restore Before Reuse](../operate/verify-restore.md).
 
 ### PodSnapshotContent
 
