@@ -45,6 +45,9 @@ def test_restore_verification_controls_scale_out(config, run, outcome):
         observations = snap.wait_for_state_observations(
             config.namespace, run.source_pod, run.source_token, gpu=False, minimum=2
         )
+        # The hook server only returns 200 once this application marker exists.
+        # Capture it with the process so readiness checks a restored endpoint.
+        k8s.exec_command(config.namespace, run.source_pod, f"touch {snap.CHECKPOINT_READY}")
         canary = snap.restore_pod(
             config=config, run=replace(run, restore_pod=canary_name),
             gpu=False, source_node=source.spec.node_name,
