@@ -953,6 +953,7 @@ func TestSnapshotReconciler_PropagateStatusIsIdempotent(t *testing.T) {
 	t.Run("no-op when already mirrored", func(t *testing.T) {
 		s := snapshotReconcilerScheme()
 		snap := makeSnapshotForReconcile()
+		snap.Status.Phase = snapshotv1alpha1.PodSnapshotPhaseCompleted
 		snap.Status.BoundPodSnapshotContentName = ptr.To("podsnapshotcontent-snap-uid")
 		// Snapshot already carries the exact conditions markReady would write, so propagateStatus must
 		// detect no change and skip the status write entirely.

@@ -123,6 +123,11 @@ func (r *SnapshotJobReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	reconciliationTime := metav1.Now()
 	desiredStatus := deriveSnapshotJobStatus(sj, observed, reconciliationTime)
+	if meta.IsStatusConditionTrue(desiredStatus.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted) {
+		if err := r.recordVerificationProducerCompletion(ctx, sj, observed.podSnapshot); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	if err := r.patchSnapshotJobStatus(ctx, sj, desiredStatus); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -139,6 +144,24 @@ func (r *SnapshotJobReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 	r.acknowledgeE2EReconcile(sj)
 	return result, nil
+}
+
+// Persist on the retained artifact before advertising a completed producer.
+// Otherwise normal SnapshotJob cleanup can race the verification controller.
+func (r *SnapshotJobReconciler) recordVerificationProducerCompletion(ctx context.Context, job *snapshotv1alpha1.SnapshotJob, snapshot *snapshotv1alpha1.PodSnapshot) error {
+	if snapshot == nil || snapshot.Spec.RestoreVerification == nil {
+		return nil
+	}
+	if job.UID == "" || snapshot.Labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel] != string(job.UID) {
+		return errors.New("cannot record completion for a different snapshot producer")
+	}
+	if snapshot.Status.CompletedSnapshotJobUID == job.UID {
+		return nil
+	}
+	base := snapshot.DeepCopy()
+	snapshot = snapshot.DeepCopy()
+	snapshot.Status.CompletedSnapshotJobUID = job.UID
+	return r.Status().Patch(ctx, snapshot, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
 // reconcileResources observes an existing source Job or builds and creates it

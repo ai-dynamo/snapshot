@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -80,6 +81,8 @@ type PodSnapshotReconciler struct {
 	// StoreID binds every new PodSnapshotContent to the configured store. Empty
 	// keeps producing legacy, path-addressed content.
 	StoreID string
+	// now allows deterministic verification-window tests.
+	now func() time.Time
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;update;patch
@@ -442,6 +445,7 @@ func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *snapshotv1alpha1.
 // content's status is the bound path's job (mirrorBoundContent), driven by the content watch.
 func (sr *PodSnapshotReconciler) bindContent(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, contentName string) (ctrl.Result, error) {
 	snap.Status.BoundPodSnapshotContentName = ptr.To(contentName)
+	snap.Status.Phase = snapshotv1alpha1.PodSnapshotPhasePending
 	if err := sr.Status().Update(ctx, snap); err != nil {
 		return ctrl.Result{}, fmt.Errorf("record bound PodSnapshotContent %q: %w", contentName, err)
 	}
@@ -452,25 +456,28 @@ func (sr *PodSnapshotReconciler) bindContent(ctx context.Context, snap *snapshot
 // Pending condition until the agent writes a result. It receives the content resolved by the bound
 // path, so it never re-Gets it, and writes status only when a condition actually changed.
 func (sr *PodSnapshotReconciler) propagateStatus(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, content *snapshotv1alpha1.PodSnapshotContent) (ctrl.Result, error) {
-	var changed bool
+	before := snap.DeepCopy().Status
 	switch {
 	case snapshotv1alpha1.IsPodSnapshotContentSucceeded(content):
 		cond := meta.FindStatusCondition(content.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady)
-		changed = sr.markReady(snap, cond.Reason, cond.Message)
+		sr.markReady(snap, cond.Reason, cond.Message)
 	case snapshotv1alpha1.IsPodSnapshotContentFailed(content):
 		cond := meta.FindStatusCondition(content.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
-		changed = sr.markFailed(snap, cond.Reason, cond.Message)
+		sr.markFailed(snap, cond.Reason, cond.Message)
 	default:
-		changed = sr.markPending(snap, "Pending", "Waiting for the node agent to take the snapshot")
+		sr.markPending(snap, "Pending", "Waiting for the node agent to take the snapshot")
 	}
-
-	if !changed {
-		return ctrl.Result{}, nil
+	result, err := sr.advanceSnapshotLifecycle(ctx, snap, content)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if reflect.DeepEqual(before, snap.Status) {
+		return result, nil
 	}
 	if err := sr.Status().Update(ctx, snap); err != nil {
 		return ctrl.Result{}, fmt.Errorf("update snapshot status: %w", err)
 	}
-	return ctrl.Result{}, nil
+	return result, nil
 }
 
 // setCondition sets a status condition and reports whether it changed.
@@ -496,15 +503,21 @@ func (sr *PodSnapshotReconciler) markReady(snap *snapshotv1alpha1.PodSnapshot, r
 // markFailed records terminal failure: Failed=True, Ready=False. Failed is sticky (the reconcile
 // short-circuits on a terminal snapshot, so it never transitions back to Ready).
 func (sr *PodSnapshotReconciler) markFailed(snap *snapshotv1alpha1.PodSnapshot, reason, message string) bool {
+	phaseChanged := snap.Status.Phase != snapshotv1alpha1.PodSnapshotPhaseFailed
+	snap.Status.Phase = snapshotv1alpha1.PodSnapshotPhaseFailed
 	changed := sr.setCondition(snap, snapshotv1alpha1.PodSnapshotConditionFailed, metav1.ConditionTrue, reason, message)
-	return sr.setCondition(snap, snapshotv1alpha1.PodSnapshotConditionReady, metav1.ConditionFalse, reason, message) || changed
+	return sr.setCondition(snap, snapshotv1alpha1.PodSnapshotConditionReady, metav1.ConditionFalse, reason, message) || changed || phaseChanged
 }
 
 // markPending records the in-progress state: Ready=False, Failed left absent (both-False). It never
 // needs to clear Failed because Failed is terminal — isPodSnapshotTerminal short-circuits the reconcile
 // before reaching here once Failed is set, so this is only hit while Failed is absent or False.
 func (sr *PodSnapshotReconciler) markPending(snap *snapshotv1alpha1.PodSnapshot, reason, message string) bool {
-	return sr.setCondition(snap, snapshotv1alpha1.PodSnapshotConditionReady, metav1.ConditionFalse, reason, message)
+	phaseChanged := snap.Status.Phase == ""
+	if phaseChanged {
+		snap.Status.Phase = snapshotv1alpha1.PodSnapshotPhasePending
+	}
+	return sr.setCondition(snap, snapshotv1alpha1.PodSnapshotConditionReady, metav1.ConditionFalse, reason, message) || phaseChanged
 }
 
 // recordPendingReason persists a Pending reason, writing status only when it changed.
