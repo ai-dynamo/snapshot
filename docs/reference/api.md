@@ -41,15 +41,11 @@ The namespaced binding for one container's snapshot; consumed by restore.
 |----------------------------|-------------|--------------------------------------------------------------------------------------------------------------------------|
 | `boundSnapshotContentName` | string      | Name of the bound cluster-scoped `PodSnapshotContent`; unset until the agent binds it.                                   |
 | `conditions`               | []Condition | `Ready` (checkpoint and binding complete) and `Failed` (checkpoint or binding failed terminally). Verification-enabled restores also require approval. |
-| `phase` | string | Lifecycle stage, listed below. Requires the verification controller. |
+| `phase` | string | Lifecycle stage, listed below. The Operator owns transitions. |
 | `restoreVerifyInfo` | RestoreVerificationInfo | Observed canary result, retained after the canary Pod is deleted. |
 | `completedSnapshotJobUID` | string | Producer completion recorded before a verification-enabled SnapshotJob reports Completed; retained after job cleanup. |
 
 #### Restore verification
-
-The verification policy requires an Operator that records `restoreVerifyInfo`.
-Without that controller, node agents keep verification-enabled consumers waiting.
-Upgrade all node agents before you enable the policy; older agents do not enforce it.
 
 | Policy field | Type | Required | Description |
 |---|---|---|---|

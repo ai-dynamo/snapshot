@@ -395,6 +395,47 @@ func TestSnapshotJobReconcileCaptureSuccessOverridesJobFailure(t *testing.T) {
 	assert.Nil(t, getBatchJobByName(jobs, sj.Name), "the failed-but-successful source Job is cleaned up on completion")
 }
 
+func TestSnapshotJobPersistsVerificationPrerequisiteBeforeCompletion(t *testing.T) {
+	scheme := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.UID = "producer-uid"
+	sj.Spec.PodSnapshotTemplate.RestoreVerification = &snapshotv1alpha1.RestoreVerificationPolicy{
+		PodRef: snapshotv1alpha1.RestoreVerificationPodReference{Name: "canary", UID: "canary-uid"}, TimeoutSeconds: 60,
+	}
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, scheme))
+	job.Status.Ready = ptr.To(int32(1))
+	pod := sourcePodForJob(job)
+	snap := readySnapshot(t, sj, pod)
+	setJobFailureCondition(job, batchv1.JobFailureTarget, "BackoffLimitExceeded", "checkpoint terminated the source")
+	r := makeSnapshotJobReconciler(scheme, sj, job, pod, snap)
+	failProofWrite := true
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sj, job, pod, snap).
+		WithStatusSubresource(&snapshotv1alpha1.SnapshotJob{}, &snapshotv1alpha1.PodSnapshot{}).
+		WithInterceptorFuncs(interceptor.Funcs{SubResourcePatch: func(ctx context.Context, c client.Client, subresource string, obj client.Object, patch client.Patch, options ...client.SubResourcePatchOption) error {
+			if _, ok := obj.(*snapshotv1alpha1.PodSnapshot); ok && failProofWrite {
+				return errors.New("completion proof unavailable")
+			}
+			return c.SubResource(subresource).Patch(ctx, obj, patch, options...)
+		}}).Build()
+	r.Client, r.NonCacheReadClient = cl, cl
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.ErrorContains(t, err, "completion proof unavailable")
+	live := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(sj), live))
+	require.False(t, snapshotv1alpha1.IsSnapshotJobCompleted(live), "a completed producer must have a durable prerequisite record")
+	failProofWrite = false
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(sj), live))
+	require.True(t, snapshotv1alpha1.IsSnapshotJobCompleted(live))
+	require.NoError(t, r.Delete(context.Background(), live))
+	retained := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), retained))
+	require.Equal(t, sj.UID, retained.Status.CompletedSnapshotJobUID)
+}
+
 // helperSnapshotJob builds a SnapshotJob whose pod template carries a helper
 // container next to the target, plus the matching source pod with the target
 // already killed by the checkpoint (exit 137) and the helper in the given state.
