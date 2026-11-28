@@ -251,16 +251,28 @@ tests:
       storage.s3.prefix: 20261127
     asserts:
       - failedTemplate:
-          errorPattern: 'Read it from "prefix" in key pagebroker-s3-config.json of ConfigMap acme-snapshot-pagebroker-storage-config \(no "prefix" there: set ""\)'
+          errorMessage: 'storage.s3.prefix must be a string, but Helm read it as the number 20261127: if this release already uses the S3 store, set the prefix that the operator uses now, which can differ from the value you wrote. Read it from "prefix" in key pagebroker-s3-config.json of ConfigMap acme-snapshot-pagebroker-storage-config (no "prefix" there: set ""). For a new installation, set the prefix you want. Quote the value in a values file, or pass it with --set-string'
 
   # A prefix of 0 or false rendered as the empty prefix, the bucket root. The
   # operator then writes no "prefix" for PageBroker, which the message covers.
   - it: rejects a prefix that Helm read as false
+    release:
+      name: snapshot
     set:
       storage.s3.prefix: false
     asserts:
       - failedTemplate:
-          errorPattern: 'storage.s3.prefix must be a string, but Helm read it as false: if this release already uses the S3 store, .* \(no "prefix" there: set ""\)'
+          errorMessage: 'storage.s3.prefix must be a string, but Helm read it as false: if this release already uses the S3 store, set the prefix that the operator uses now, which can differ from the value you wrote. Read it from "prefix" in key pagebroker-s3-config.json of ConfigMap snapshot-pagebroker-storage-config (no "prefix" there: set ""). For a new installation, set the prefix you want. Quote the value in a values file, or pass it with --set-string'
+
+  - it: rejects a bucket that is a map and does not print its content
+    release:
+      name: snapshot
+    set:
+      storage.s3.bucket:
+        passphrase: not-a-real-secret
+    asserts:
+      - failedTemplate:
+          errorMessage: 'storage.s3.bucket must be a string, but Helm read it as a list or a map: if this release already uses the S3 store, set the bucket that the operator uses now, which can differ from the value you wrote. Read it from "bucket" in key pagebroker-s3-config.json of ConfigMap snapshot-pagebroker-storage-config. For a new installation, set the bucket you want. Quote the value in a values file, or pass it with --set-string'
 
   - it: rejects a prefix that is a list and does not print its content
     release:
